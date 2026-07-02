@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from vinted_monitor.db.models import ErrorLog, Run, SearchSource
 from vinted_monitor.providers.catalog import CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
+from vinted_monitor.services.items import persist_catalog_items
 
 RUNNING = "running"
 SUCCESS = "success"
@@ -52,33 +53,45 @@ def execute_manual_run(
     try:
         result = run_provider.search(source)
     except Exception as exc:
-        run.status = FAILED
+        return _record_failed_run(db, run, source, exc)
+
+    try:
+        persistence_result = persist_catalog_items(db, result.items)
+        run.status = SUCCESS
         run.finished_at = datetime.now(UTC)
-        run.error_message = str(exc)
-        db.add(
-            ErrorLog(
-                run_id=run.id,
-                source_id=source.id,
-                kind=exc.__class__.__name__,
-                message=str(exc),
-                details={},
-            )
-        )
+        run.items_found = persistence_result.found_count
+        run.items_new = persistence_result.inserted_count
+        run.opportunities_created = 0
+        run.error_message = None
         db.commit()
         db.refresh(run)
         return run
-
-    run.status = SUCCESS
-    run.finished_at = datetime.now(UTC)
-    run.items_found = len(result.items)
-    run.items_new = 0
-    run.opportunities_created = 0
-    run.error_message = None
-    db.commit()
-    db.refresh(run)
-    return run
+    except Exception as exc:
+        db.rollback()
+        run = db.get(Run, run.id)
+        if run is None:
+            raise
+        return _record_failed_run(db, run, source, exc)
 
 
 def list_runs(db: Session, limit: int = 50) -> list[Run]:
     statement = select(Run).order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
     return list(db.scalars(statement))
+
+
+def _record_failed_run(db: Session, run: Run, source: SearchSource, exc: Exception) -> Run:
+    run.status = FAILED
+    run.finished_at = datetime.now(UTC)
+    run.error_message = str(exc)
+    db.add(
+        ErrorLog(
+            run_id=run.id,
+            source_id=source.id,
+            kind=exc.__class__.__name__,
+            message=str(exc),
+            details={},
+        )
+    )
+    db.commit()
+    db.refresh(run)
+    return run

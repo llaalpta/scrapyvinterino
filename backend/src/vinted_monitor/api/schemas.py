@@ -50,6 +50,7 @@ class ItemRead(BaseModel):
     url: str
     image_url: str | None
     first_seen_at: datetime
+    last_seen_at: datetime
 
 
 class RunRead(BaseModel):

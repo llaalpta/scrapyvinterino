@@ -10,11 +10,16 @@ Persist public Vinted catalog items in a normalized format while preserving usef
 - Upsert by `vinted_item_id`.
 - Update `last_seen_at` when an existing item appears again.
 - Keep `first_seen_at` stable.
+- Persist items during manual runs.
+- Count `items_new` as globally new item rows inserted in `items`.
+- Refresh the PWA item table after a manual run.
 
 ## Out of Scope
 
 - Deduplication per source.
 - Opportunity creation.
+- Filters.
+- `source_seen_items`.
 - Checkout or authenticated item details.
 
 ## Interfaces
@@ -23,6 +28,9 @@ Persist public Vinted catalog items in a normalized format while preserving usef
   - normalized item candidate DTO.
 - Database:
   - `items`.
+- API/PWA:
+  - existing manual run endpoint persists items;
+  - existing items endpoint returns persisted items.
 
 ## Acceptance Criteria
 
@@ -31,9 +39,15 @@ Persist public Vinted catalog items in a normalized format while preserving usef
 - Missing optional fields do not fail persistence.
 - Raw payload is stored only if sanitized.
 - URLs are preserved for opening Vinted item pages.
+- Manual runs update `items_found` and `items_new`.
+- Running the same result twice does not duplicate items.
+- PWA displays persisted items after a run.
 
 ## Verification
 
 - Persist a fixture item.
 - Persist the same fixture twice and confirm a single item row.
 - Persist an item with missing optional fields.
+- Run a manual search and confirm items are stored.
+- Run the same search twice and confirm item rows are not duplicated.
+- Confirm `source_seen_items`, filters, and opportunities remain unchanged.

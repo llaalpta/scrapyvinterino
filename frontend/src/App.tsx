@@ -12,7 +12,7 @@ import {
 } from './api';
 
 const navItems = [
-  { id: 'opportunities', label: 'Oportunidades' },
+  { id: 'opportunities', label: 'Articulos' },
   { id: 'sources', label: 'Busquedas' },
   { id: 'filters', label: 'Filtros' },
   { id: 'runs', label: 'Runs' },
@@ -60,7 +60,9 @@ export function App() {
     setRunningSourceId(sourceId);
     try {
       const created = await runSource(sourceId);
+      const itemData = await fetchItems();
       setRuns((current) => [created, ...current.filter((run) => run.id !== created.id)].slice(0, 50));
+      setItems(itemData);
       setActiveSection('runs');
       document.getElementById('runs')?.scrollIntoView({ block: 'start' });
     } catch (caught) {
@@ -98,8 +100,8 @@ export function App() {
       <section className="content">
         <header className="topbar">
           <div>
-            <h2>Oportunidades nuevas</h2>
-            <p>{sources.length} fuentes configuradas</p>
+            <h2>Articulos guardados</h2>
+            <p>{items.length} articulos persistidos desde {sources.length} fuentes</p>
           </div>
           <button
             type="button"
@@ -187,7 +189,7 @@ export function App() {
               {items.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="empty">
-                    Todavia no hay articulos guardados.
+                    Todavia no hay articulos guardados. Ejecuta una fuente para persistir resultados.
                   </td>
                 </tr>
               ) : (

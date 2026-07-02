@@ -56,6 +56,35 @@ class FakeFailingProvider:
         raise RuntimeError("provider boom")
 
 
+class FakeInvalidItemProvider:
+    def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+        return CatalogSearchResult(
+            items=[
+                CatalogItemCandidate(
+                    vinted_item_id="pytest-run-item-invalid",
+                    title=None,  # type: ignore[arg-type]
+                    brand=None,
+                    price_amount=None,
+                    currency=None,
+                    size=None,
+                    status=None,
+                    seller_login=None,
+                    seller_country=None,
+                    favorite_count=None,
+                    url="https://www.vinted.es/items/pytest-run-item-invalid",
+                    image_url=None,
+                    raw={"id": "pytest-run-item-invalid"},
+                )
+            ],
+            page=1,
+            total_pages=1,
+            total_entries=1,
+            per_page=1,
+            next_page=None,
+            provider_metadata={"provider": "fake-invalid"},
+        )
+
+
 @pytest.fixture
 def source_id() -> int:
     with SessionLocal() as db:
@@ -84,6 +113,7 @@ def cleanup_source(source_id: int) -> None:
             db.query(ErrorLog).filter(ErrorLog.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(Run).filter(Run.id.in_(run_ids)).delete(synchronize_session=False)
         db.query(ErrorLog).filter(ErrorLog.source_id == source_id).delete(synchronize_session=False)
+        db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item-%")).delete(synchronize_session=False)
         source = db.get(SearchSource, source_id)
         if source is not None:
             db.delete(source)
@@ -95,7 +125,7 @@ def count_items() -> int:
         return db.scalar(select(func.count()).select_from(Item)) or 0
 
 
-def test_execute_manual_run_records_success_without_persisting_items(source_id: int) -> None:
+def test_execute_manual_run_records_success_and_persists_items(source_id: int) -> None:
     before_items = count_items()
 
     with SessionLocal() as db:
@@ -104,11 +134,23 @@ def test_execute_manual_run_records_success_without_persisting_items(source_id: 
         assert run.status == SUCCESS
         assert run.finished_at is not None
         assert run.items_found == 2
-        assert run.items_new == 0
+        assert run.items_new == 2
         assert run.opportunities_created == 0
         assert run.error_message is None
 
-    assert count_items() == before_items
+    assert count_items() == before_items + 2
+
+
+def test_execute_manual_run_updates_existing_items_without_counting_them_new(source_id: int) -> None:
+    with SessionLocal() as db:
+        first_run = execute_manual_run(db, source_id, provider=FakeSuccessProvider(item_count=2))
+        second_run = execute_manual_run(db, source_id, provider=FakeSuccessProvider(item_count=2))
+
+        assert first_run.items_found == 2
+        assert first_run.items_new == 2
+        assert second_run.items_found == 2
+        assert second_run.items_new == 0
+        assert db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item-%"))) == 2
 
 
 def test_execute_manual_run_records_provider_failure(source_id: int) -> None:
@@ -125,6 +167,20 @@ def test_execute_manual_run_records_provider_failure(source_id: int) -> None:
         assert error.source_id == source_id
         assert error.kind == "RuntimeError"
         assert error.message == "provider boom"
+
+
+def test_execute_manual_run_records_persistence_failure_without_partial_items(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_manual_run(db, source_id, provider=FakeInvalidItemProvider())
+
+        assert run.status == FAILED
+        assert run.finished_at is not None
+        assert run.error_message
+        assert db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id == "pytest-run-item-invalid")) == 0
+
+        error = db.scalar(select(ErrorLog).where(ErrorLog.run_id == run.id))
+        assert error is not None
+        assert error.kind == "IntegrityError"
 
 
 def test_execute_manual_run_rejects_missing_source() -> None:
@@ -166,11 +222,18 @@ def test_manual_run_api_creates_run_with_injected_provider(source_id: int) -> No
         assert body["source_id"] == source_id
         assert body["status"] == SUCCESS
         assert body["items_found"] == 3
-        assert body["items_new"] == 0
+        assert body["items_new"] == 3
 
         list_response = client.get("/api/runs?limit=1")
         assert list_response.status_code == 200
         assert list_response.json()[0]["id"] == body["id"]
+
+        items_response = client.get("/api/items")
+        assert items_response.status_code == 200
+        items = items_response.json()
+        persisted_item = next(item for item in items if item["vinted_item_id"] == "pytest-run-item-0")
+        assert persisted_item["title"] == "Pytest item 0"
+        assert persisted_item["last_seen_at"]
     finally:
         app.dependency_overrides.clear()
 

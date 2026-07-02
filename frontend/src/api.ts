@@ -23,6 +23,7 @@ export type Item = {
   url: string;
   image_url: string | null;
   first_seen_at: string;
+  last_seen_at: string;
 };
 
 export type Run = {
