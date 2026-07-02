@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "id": 1000000001,
+      "title": "Polo Ralph Lauren de prueba",
+      "price": {
+        "amount": "2.50",
+        "currency_code": "EUR"
+      },
+      "is_visible": true,
+      "brand_title": "Ralph Lauren",
+      "path": "/items/1000000001-polo-ralph-lauren-de-prueba",
+      "user": {
+        "login": "fixture_seller"
+      },
+      "photo": {
+        "url": "https://images.example.test/item-1000000001.webp"
+      },
+      "size_title": "M",
+      "status": "Satisfactorio",
+      "favourite_count": 2
+    },
+    {
+      "id": 1000000002,
+      "title": "Camisa sin campos opcionales",
+      "price": {
+        "amount": "5.00",
+        "currency_code": "EUR"
+      },
+      "path": "/items/1000000002-camisa-sin-campos-opcionales"
+    }
+  ],
+  "pagination": {
+    "current_page": 1,
+    "total_pages": 3,
+    "total_entries": 192,
+    "per_page": 96,
+    "time": 1783011661
+  }
+}

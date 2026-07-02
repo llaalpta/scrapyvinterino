@@ -1,0 +1,41 @@
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Any, Protocol
+
+
+class CatalogSource(Protocol):
+    url: str
+    normalized_query: dict[str, list[str]]
+
+
+@dataclass(frozen=True)
+class CatalogItemCandidate:
+    vinted_item_id: str
+    title: str
+    brand: str | None
+    price_amount: Decimal | None
+    currency: str | None
+    size: str | None
+    status: str | None
+    seller_login: str | None
+    seller_country: str | None
+    favorite_count: int | None
+    url: str
+    image_url: str | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CatalogSearchResult:
+    items: list[CatalogItemCandidate]
+    page: int | None
+    total_pages: int | None
+    total_entries: int | None
+    per_page: int | None
+    next_page: int | None
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class VintedCatalogProvider(Protocol):
+    def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+        """Return public catalog items for a configured Vinted source."""
