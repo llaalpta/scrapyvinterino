@@ -7,9 +7,43 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urljoin
 
+import httpx
+
+from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogSearchResult
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
+
+
+class VintedCatalogProviderError(RuntimeError):
+    pass
+
+
+class HttpVintedCatalogProvider:
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+
+    def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
+        url = _with_page(source.url, page)
+        headers = {
+            "User-Agent": self.settings.vinted_user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        }
+        proxies = self.settings.vinted_proxy_url if self.settings.vinted_proxy_enabled else None
+        timeout = self.settings.vinted_request_timeout_ms / 1000
+
+        try:
+            with httpx.Client(follow_redirects=True, headers=headers, proxy=proxies, timeout=timeout) as client:
+                response = client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise VintedCatalogProviderError(f"Vinted catalog request failed: {exc}") from exc
+
+        if not decode_next_flight_payload(response.text):
+            raise VintedCatalogProviderError("Vinted catalog response did not contain a readable catalog payload")
+
+        return parse_catalog_html(response.text, base_url=str(self.settings.vinted_base_url))
 
 
 def parse_catalog_html(html: str, base_url: str = "https://www.vinted.es") -> CatalogSearchResult:
@@ -29,6 +63,13 @@ def parse_catalog_html(html: str, base_url: str = "https://www.vinted.es") -> Ca
         next_page=next_page,
         provider_metadata={"source": "next_flight_html"},
     )
+
+
+def _with_page(url: str, page: int | None) -> str:
+    if page is None or page <= 1:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}page={page}"
 
 
 def decode_next_flight_payload(html: str) -> str:

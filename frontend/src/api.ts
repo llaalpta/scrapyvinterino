@@ -25,8 +25,34 @@ export type Item = {
   first_seen_at: string;
 };
 
+export type Run = {
+  id: number;
+  source_id: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  items_found: number;
+  items_new: number;
+  opportunities_created: number;
+  error_message: string | null;
+};
+
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`);
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(path: string, payload?: unknown): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload)
+  });
   if (!response.ok) {
     throw new Error(await getErrorMessage(response));
   }
@@ -68,19 +94,17 @@ export function fetchSources(): Promise<SearchSource[]> {
 }
 
 export async function createSource(payload: { name: string; url: string }): Promise<SearchSource> {
-  const response = await fetch(`${apiBaseUrl}/api/sources`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    throw new Error(await getErrorMessage(response));
-  }
-  return response.json() as Promise<SearchSource>;
+  return postJson<SearchSource>('/api/sources', payload);
 }
 
 export function fetchItems(): Promise<Item[]> {
   return getJson<Item[]>('/api/items');
+}
+
+export function fetchRuns(): Promise<Run[]> {
+  return getJson<Run[]>('/api/runs');
+}
+
+export function runSource(sourceId: number): Promise<Run> {
+  return postJson<Run>(`/api/sources/${sourceId}/runs`);
 }

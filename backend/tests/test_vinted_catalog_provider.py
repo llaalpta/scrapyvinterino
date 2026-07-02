@@ -44,6 +44,27 @@ def test_parse_catalog_html_maps_items_and_pagination() -> None:
     assert result.provider_metadata == {"source": "next_flight_html"}
 
 
+def test_parse_catalog_html_allows_empty_catalog_results() -> None:
+    result = parse_catalog_html(
+        build_next_flight_html(
+            {
+                "items": [],
+                "pagination": {
+                    "current_page": 1,
+                    "total_pages": 1,
+                    "total_entries": 0,
+                    "per_page": 96,
+                },
+            }
+        )
+    )
+
+    assert result.items == []
+    assert result.page == 1
+    assert result.total_entries == 0
+    assert result.next_page is None
+
+
 def test_decode_next_flight_payload_concatenates_multiple_chunks() -> None:
     html = f"<html><body>{build_next_flight_chunk('first')}{build_next_flight_chunk('second')}</body></html>"
 

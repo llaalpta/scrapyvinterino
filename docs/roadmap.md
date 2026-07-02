@@ -15,7 +15,7 @@ Status values:
 | --- | --- | --- | --- | --- |
 | 1 | done | Search sources | `docs/specs/001-search-sources.md` | Configure and list Vinted catalog URLs from API/PWA. |
 | 2 | done | Vinted catalog research | `docs/specs/002-vinted-catalog-research.md` | Discover how catalog data is delivered and define provider contract. |
-| 3 | not-started | Manual runs | `docs/specs/003-manual-run.md` | Trigger source execution manually and record run state. |
+| 3 | done | Manual runs | `docs/specs/003-manual-run.md` | Trigger source execution manually and record run state. |
 | 4 | not-started | Item persistence | `docs/specs/004-item-persistence.md` | Store normalized public catalog items. |
 | 5 | not-started | Deduplication and opportunities | `docs/specs/005-deduplication-and-opportunities.md` | Detect new items per source and create opportunities once. |
 | 6 | not-started | Local filters | `docs/specs/006-local-filters.md` | Apply application-owned filters after fetching results. |

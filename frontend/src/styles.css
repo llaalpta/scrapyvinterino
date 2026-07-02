@@ -199,7 +199,7 @@ section[id] {
 
 .source-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 14px;
   padding: 12px 14px;
@@ -230,6 +230,71 @@ section[id] {
 .status.active {
   color: #0f5132;
   background: #d1e7dd;
+}
+
+.runs-list {
+  display: grid;
+}
+
+.run-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(420px, auto);
+  gap: 18px;
+  padding: 14px;
+}
+
+.run-row + .run-row {
+  border-top: 1px solid #e5eaf0;
+}
+
+.run-row > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.run-row strong {
+  color: #1f2933;
+}
+
+.run-row span,
+.run-row p,
+.run-row dt {
+  color: #697586;
+  font-size: 13px;
+}
+
+.run-row p {
+  overflow-wrap: anywhere;
+}
+
+.run-row dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(86px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.run-row dl div {
+  display: grid;
+  gap: 5px;
+}
+
+.run-row dd {
+  margin: 0;
+  font-weight: 650;
+}
+
+.run-status {
+  text-transform: capitalize;
+}
+
+.run-status.success {
+  color: #0f5132;
+}
+
+.run-status.failed {
+  color: #842029;
 }
 
 .empty-inline {
@@ -331,5 +396,10 @@ th {
   .source-row {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .run-row,
+  .run-row dl {
+    grid-template-columns: 1fr;
   }
 }

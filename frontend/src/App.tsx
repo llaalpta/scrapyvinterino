@@ -1,6 +1,15 @@
 import { ExternalLink, Heart, Play, Settings, ShoppingCart } from 'lucide-react';
 import { FormEvent, useEffect, useState } from 'react';
-import { createSource, fetchItems, fetchSources, type Item, type SearchSource } from './api';
+import {
+  createSource,
+  fetchItems,
+  fetchRuns,
+  fetchSources,
+  runSource,
+  type Item,
+  type Run,
+  type SearchSource
+} from './api';
 
 const navItems = [
   { id: 'opportunities', label: 'Oportunidades' },
@@ -13,16 +22,20 @@ const navItems = [
 export function App() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [items, setItems] = useState<Item[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [runningSourceId, setRunningSourceId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
   const [activeSection, setActiveSection] = useState('opportunities');
+  const activeSource = sources.find((source) => source.is_active);
 
   useEffect(() => {
-    Promise.all([fetchSources(), fetchItems()])
-      .then(([sourceData, itemData]) => {
+    Promise.all([fetchSources(), fetchItems(), fetchRuns()])
+      .then(([sourceData, itemData, runData]) => {
         setSources(sourceData);
         setItems(itemData);
+        setRuns(runData);
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
@@ -40,6 +53,25 @@ export function App() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo crear la fuente');
     }
+  }
+
+  async function onRunSource(sourceId: number) {
+    setError(null);
+    setRunningSourceId(sourceId);
+    try {
+      const created = await runSource(sourceId);
+      setRuns((current) => [created, ...current.filter((run) => run.id !== created.id)].slice(0, 50));
+      setActiveSection('runs');
+      document.getElementById('runs')?.scrollIntoView({ block: 'start' });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar la busqueda');
+    } finally {
+      setRunningSourceId(null);
+    }
+  }
+
+  function getSourceName(sourceId: number): string {
+    return sources.find((source) => source.id === sourceId)?.name ?? `Fuente ${sourceId}`;
   }
 
   return (
@@ -69,9 +101,18 @@ export function App() {
             <h2>Oportunidades nuevas</h2>
             <p>{sources.length} fuentes configuradas</p>
           </div>
-          <button type="button" disabled title="Disponible cuando implementemos ejecuciones manuales">
+          <button
+            type="button"
+            disabled={!activeSource || runningSourceId !== null}
+            title={activeSource ? 'Ejecutar fuente activa' : 'Crea una fuente activa para ejecutar una busqueda'}
+            onClick={() => {
+              if (activeSource) {
+                void onRunSource(activeSource.id);
+              }
+            }}
+          >
             <Play size={18} />
-            Ejecutar busqueda
+            {runningSourceId ? 'Ejecutando...' : 'Ejecutar busqueda'}
           </button>
         </header>
 
@@ -107,6 +148,15 @@ export function App() {
                     <strong>{source.name}</strong>
                     <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>
                   </div>
+                  <button
+                    type="button"
+                    disabled={!source.is_active || runningSourceId !== null}
+                    title={source.is_active ? 'Ejecutar esta fuente' : 'La fuente esta pausada'}
+                    onClick={() => void onRunSource(source.id)}
+                  >
+                    <Play size={17} />
+                    {runningSourceId === source.id ? 'Ejecutando' : 'Ejecutar'}
+                  </button>
                   <span className={source.is_active ? 'status active' : 'status'}>{source.is_active ? 'Activa' : 'Pausada'}</span>
                 </article>
               ))}
@@ -185,9 +235,41 @@ export function App() {
         <section id="runs" className="section-panel">
           <div className="panel-heading">
             <h3>Runs</h3>
-            <span>0</span>
+            <span>{runs.length}</span>
           </div>
-          <p className="empty-inline">Sin ejecuciones registradas.</p>
+          {runs.length === 0 ? (
+            <p className="empty-inline">Sin ejecuciones registradas.</p>
+          ) : (
+            <div className="runs-list">
+              {runs.map((run) => (
+                <article className="run-row" key={run.id}>
+                  <div>
+                    <strong>{getSourceName(run.source_id)}</strong>
+                    <span>{formatDate(run.started_at)}</span>
+                    {run.error_message ? <p>{run.error_message}</p> : null}
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Estado</dt>
+                      <dd className={`run-status ${run.status}`}>{run.status}</dd>
+                    </div>
+                    <div>
+                      <dt>Encontrados</dt>
+                      <dd>{run.items_found}</dd>
+                    </div>
+                    <div>
+                      <dt>Nuevos</dt>
+                      <dd>{run.items_new}</dd>
+                    </div>
+                    <div>
+                      <dt>Oportunidades</dt>
+                      <dd>{run.opportunities_created}</dd>
+                    </div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          )}
         </section>
 
         <section id="settings" className="section-panel">
@@ -200,4 +282,11 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function formatDate(value: string): string {
+  return new Intl.DateTimeFormat('es-ES', {
+    dateStyle: 'short',
+    timeStyle: 'medium'
+  }).format(new Date(value));
 }
