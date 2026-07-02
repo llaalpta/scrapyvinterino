@@ -94,7 +94,8 @@ nav a:hover {
 }
 
 button,
-.row-actions a {
+.row-actions a,
+.button-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -143,7 +144,12 @@ button:disabled {
   background: #ffffff;
 }
 
-.sources-panel {
+section[id] {
+  scroll-margin-top: 20px;
+}
+
+.sources-panel,
+.section-panel {
   margin-bottom: 20px;
   border: 1px solid #d8e0e7;
   border-radius: 8px;
@@ -222,6 +228,7 @@ button:disabled {
 
 .table-wrap {
   overflow: auto;
+  margin-bottom: 20px;
   border: 1px solid #d8e0e7;
   border-radius: 8px;
   background: #ffffff;

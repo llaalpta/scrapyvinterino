@@ -2,12 +2,21 @@ import { ExternalLink, Heart, Play, Settings, ShoppingCart } from 'lucide-react'
 import { FormEvent, useEffect, useState } from 'react';
 import { createSource, fetchItems, fetchSources, type Item, type SearchSource } from './api';
 
+const navItems = [
+  { id: 'opportunities', label: 'Oportunidades' },
+  { id: 'sources', label: 'Busquedas' },
+  { id: 'filters', label: 'Filtros' },
+  { id: 'runs', label: 'Runs' },
+  { id: 'settings', label: 'Settings' }
+];
+
 export function App() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
+  const [activeSection, setActiveSection] = useState('opportunities');
 
   useEffect(() => {
     Promise.all([fetchSources(), fetchItems()])
@@ -41,11 +50,16 @@ export function App() {
           <h1>Vinted Monitor</h1>
         </div>
         <nav>
-          <a className="active" href="#opportunities">Oportunidades</a>
-          <a href="#sources">Busquedas</a>
-          <a href="#filters">Filtros</a>
-          <a href="#runs">Runs</a>
-          <a href="#settings">Settings</a>
+          {navItems.map((item) => (
+            <a
+              className={activeSection === item.id ? 'active' : ''}
+              href={`#${item.id}`}
+              key={item.id}
+              onClick={() => setActiveSection(item.id)}
+            >
+              {item.label}
+            </a>
+          ))}
         </nav>
       </aside>
 
@@ -55,7 +69,7 @@ export function App() {
             <h2>Oportunidades nuevas</h2>
             <p>{sources.length} fuentes configuradas</p>
           </div>
-          <button type="button">
+          <button type="button" disabled title="Disponible cuando implementemos ejecuciones manuales">
             <Play size={18} />
             Ejecutar busqueda
           </button>
@@ -102,12 +116,12 @@ export function App() {
         </section>
 
         <section className="toolbar" aria-label="Acciones principales">
-          <button type="button"><Settings size={18} /> Filtros</button>
-          <button type="button"><Heart size={18} /> Favoritos</button>
-          <button type="button"><ShoppingCart size={18} /> Compra manual</button>
+          <a className="button-link" href="#filters" onClick={() => setActiveSection('filters')}><Settings size={18} /> Filtros</a>
+          <button type="button" disabled title="Disponible cuando implementemos acciones autenticadas"><Heart size={18} /> Favoritos</button>
+          <button type="button" disabled title="Disponible cuando implementemos precompra"><ShoppingCart size={18} /> Compra manual</button>
         </section>
 
-        <section className="table-wrap">
+        <section id="opportunities" className="table-wrap">
           <table>
             <thead>
               <tr>
@@ -159,6 +173,30 @@ export function App() {
               )}
             </tbody>
           </table>
+        </section>
+
+        <section id="filters" className="section-panel">
+          <div className="panel-heading">
+            <h3>Filtros</h3>
+            <span>0</span>
+          </div>
+          <p className="empty-inline">Sin filtros configurados.</p>
+        </section>
+
+        <section id="runs" className="section-panel">
+          <div className="panel-heading">
+            <h3>Runs</h3>
+            <span>0</span>
+          </div>
+          <p className="empty-inline">Sin ejecuciones registradas.</p>
+        </section>
+
+        <section id="settings" className="section-panel">
+          <div className="panel-heading">
+            <h3>Settings</h3>
+            <span>Local</span>
+          </div>
+          <p className="empty-inline">Configuracion pendiente.</p>
         </section>
       </section>
     </main>
