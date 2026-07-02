@@ -12,4 +12,10 @@ Produccion se preparara en una fase posterior con `docker-compose.prod.yml`.
 
 ## Desarrollo vs Produccion
 
-Desarrollo usa puertos locales directos. Produccion usara labels de Traefik y red externa compartida con el proxy.
+Desarrollo usa puertos locales directos. Produccion usara labels de Traefik y red externa compartida con el reverse proxy.
+
+## Outbound Vinted Proxy
+
+El monitor debe funcionar sin proxy de salida por defecto. El uso de proxy residencial o de otro proveedor es optativo y se configura operativamente mediante `.env` o secretos locales ignorados.
+
+La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`; la spec runtime vive en `docs/specs/008-scheduler.md`.

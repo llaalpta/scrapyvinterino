@@ -11,9 +11,9 @@ Detect globally new public Vinted items as fast as possible, track which source 
 - Do not use catalog HTML parsing as a normal fallback for fast runs.
 - Request `newest_first`, `page=1`, and a small configurable `per_page` window, default `5`.
 - Force `newest_first` for the fast API request even if the saved catalog URL has another `order`.
-- Maintain a process-local cache of recently known global `vinted_item_id` values as a non-authoritative hint.
-- Maintain a process-local per-source cache only as a non-authoritative optimization for source traceability.
-- Never let process-local cache state skip committed item persistence or `source_seen_items` trace updates.
+- Maintain the first process-local global cache of recently known `vinted_item_id` values as the runtime base for scheduler cache in spec 008.
+- Maintain the first process-local per-source cache as the runtime base for scheduler traceability cache in spec 008.
+- Treat process-local cache as an accelerator over committed state, never as a replacement for PostgreSQL global identity.
 - Track item visibility per source.
 - Use `items.vinted_item_id` as global item identity and the source of truth for whether an item is new.
 - Use `source_seen_items` to record source traceability, not to decide whether an item is globally new.
@@ -40,8 +40,8 @@ Detect globally new public Vinted items as fast as possible, track which source 
   - anonymous session bootstrap/refresh;
   - item detail fetch by item URL.
 - In-memory runtime:
-  - global known-ID cache;
-  - per-source seen-ID cache.
+  - global known-ID cache, upgraded by spec 008 to `vinted_item_id -> item_id`;
+  - per-source seen-ID cache, upgraded by spec 008 for scheduled traceability acceleration.
 - Database:
   - `source_seen_items`;
   - `items`;
@@ -62,7 +62,8 @@ Detect globally new public Vinted items as fast as possible, track which source 
 - Details are fetched only for globally new candidates and are bounded by the configured per-run limit.
 - Detail failures are recorded without crashing the service.
 - Caches are updated only after the run transaction commits.
-- Cache misses or stale cache state cannot change `items_new`, source traceability, or detail-fetch decisions.
+- Cache misses or stale cache state cannot change `items_new`, source traceability, or detail-fetch correctness.
+- Spec 008 must extend these caches before scheduler-triggered alerting work continues.
 
 ## Verification
 

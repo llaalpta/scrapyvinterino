@@ -10,7 +10,8 @@ Construir una aplicacion personal para monitorizar catalogos publicos de Vinted,
 - Gestion de URLs de busqueda.
 - Ejecucion manual de busquedas.
 - Persistencia de articulos, ejecuciones y errores.
-- Deteccion de nuevos articulos por fuente.
+- Deteccion global de articulos nuevos con trazabilidad por fuente.
+- Scheduler concurrente acotado con cache runtime para velocidad de alertas.
 - Reglas de filtrado propias.
 - Tabla de oportunidades en la web.
 - Docker Compose local sin Traefik.
@@ -28,12 +29,12 @@ Specs MVP iniciales:
 - `docs/specs/003-manual-run.md`
 - `docs/specs/004-item-persistence.md`
 - `docs/specs/005-deduplication-and-opportunities.md`
+- `docs/specs/008-scheduler.md`
 - `docs/specs/006-local-filters.md`
 - `docs/specs/007-opportunities-table.md`
 
 ## Futuro
 
-- Scheduler configurable.
 - Favoritos autenticados.
 - Descubrimiento de checkout: envio, pago, domicilio y puntos pickup.
 - Precompra y compra explicita desde UI.
