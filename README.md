@@ -46,3 +46,14 @@ pnpm dev
 ## Estado
 
 Proyecto en fase inicial SDD. Ver `docs/` para especificacion, arquitectura y riesgos.
+
+## Trabajo con SDD y agentes
+
+Este proyecto mantiene el contexto de trabajo en el repositorio, no solo en conversaciones.
+
+- `AGENTS.md`: instrucciones operativas para Codex/agentes.
+- `docs/sdd-process.md`: flujo Spec Driven Development del proyecto.
+- `docs/product-decisions.md`: decisiones de producto vigentes.
+- `docs/adr/`: decisiones tecnicas y de arquitectura.
+
+La documentacion se revisa, actualiza y mantiene. No se deben crear documentos nuevos que se solapen con otros existentes; antes de crear un archivo nuevo, hay que actualizar el documento canonico que ya posea ese tema.
