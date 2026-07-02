@@ -19,11 +19,12 @@ Authenticated Vinted actions are future work. Do not implement favorites, checko
 Before implementing a non-trivial change:
 
 1. Read the relevant docs in `docs/`.
-2. Update the existing spec, research note, ADR, or product decision record if the change affects behavior or direction.
-3. Define acceptance criteria before coding.
-4. Implement the smallest vertical slice that satisfies the criteria.
-5. Run focused verification.
-6. Commit a coherent, small change.
+2. Check `docs/roadmap.md`; work on the first incomplete `Now` item unless the user explicitly changes priority.
+3. Update the existing spec, research note, ADR, or product decision record if the change affects behavior or direction.
+4. Define acceptance criteria before coding.
+5. Implement the smallest vertical slice that satisfies the criteria.
+6. Run focused verification.
+7. Commit a coherent, small change.
 
 Small mechanical fixes can skip a formal spec update, but they must not contradict existing docs.
 
@@ -33,7 +34,7 @@ Documentation is maintained, not accumulated.
 
 - Update existing documents before creating new ones.
 - Do not create overlapping files such as `spec-v2.md`, `architecture-new.md`, `final-notes.md`, or session-specific docs.
-- If a topic already belongs in `docs/spec.md`, `docs/architecture.md`, `docs/development.md`, `docs/deployment.md`, `docs/security.md`, `docs/risks.md`, `docs/data-model.md`, or `docs/research/`, update that file.
+- If a topic already belongs in `docs/spec.md`, `docs/roadmap.md`, `docs/specs/`, `docs/architecture.md`, `docs/development.md`, `docs/deployment.md`, `docs/security.md`, `docs/risks.md`, `docs/data-model.md`, or `docs/research/`, update that file.
 - Create a new document only when it has a clear, durable responsibility.
 - If an architecture decision changes, add or update an ADR and mark superseded decisions clearly.
 - Keep README as the entry point. Do not duplicate long docs inside it.

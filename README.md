@@ -53,6 +53,8 @@ Este proyecto mantiene el contexto de trabajo en el repositorio, no solo en conv
 
 - `AGENTS.md`: instrucciones operativas para Codex/agentes.
 - `docs/sdd-process.md`: flujo Spec Driven Development del proyecto.
+- `docs/roadmap.md`: orden canonico de trabajo.
+- `docs/specs/`: especificaciones concretas por feature.
 - `docs/product-decisions.md`: decisiones de producto vigentes.
 - `docs/adr/`: decisiones tecnicas y de arquitectura.
 

@@ -5,12 +5,13 @@ This project uses Spec Driven Development to keep product intent, architecture, 
 ## Default Flow
 
 1. Understand the requested change.
-2. Read the existing documentation that owns the affected area.
-3. Update the existing document if the change affects behavior, architecture, risk, security, deployment, or data.
-4. Define acceptance criteria.
-5. Implement the smallest useful vertical slice.
-6. Verify with focused checks.
-7. Commit the code and documentation together.
+2. Check `docs/roadmap.md` to identify the current priority.
+3. Read the existing documentation that owns the affected area.
+4. Update the existing document if the change affects behavior, architecture, risk, security, deployment, or data.
+5. Define acceptance criteria.
+6. Implement the smallest useful vertical slice.
+7. Verify with focused checks.
+8. Commit the code and documentation together.
 
 Documentation and implementation should move together. A feature is not done if the relevant docs are stale.
 
@@ -21,6 +22,8 @@ Before creating a new document, check whether an existing document already owns 
 Update existing docs when possible:
 
 - Product requirements: `docs/spec.md`
+- Roadmap and order of work: `docs/roadmap.md`
+- Feature specs: `docs/specs/`
 - System design: `docs/architecture.md`
 - Data model: `docs/data-model.md`
 - Local development: `docs/development.md`
