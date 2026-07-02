@@ -1,9 +1,21 @@
+FROM node:22-alpine AS dev
+
+WORKDIR /app
+RUN npm install -g pnpm@11.9.0
+
+COPY package.json pnpm-lock.yaml* ./
+COPY pnpm-workspace.yaml* ./
+RUN pnpm install --frozen-lockfile=false
+
+CMD ["pnpm", "dev"]
+
 FROM node:22-alpine AS build
 
 WORKDIR /app
-RUN corepack enable
+RUN npm install -g pnpm@11.9.0
 
 COPY package.json pnpm-lock.yaml* ./
+COPY pnpm-workspace.yaml* ./
 RUN pnpm install --frozen-lockfile=false
 
 COPY . .

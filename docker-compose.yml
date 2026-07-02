@@ -47,17 +47,20 @@ services:
         condition: service_healthy
 
   frontend:
-    image: node:22-alpine
-    working_dir: /app
-    command: sh -c "corepack enable && pnpm install && pnpm dev"
+    build:
+      context: ./frontend
+      target: dev
+    command: sh -c "pnpm install --frozen-lockfile=false && pnpm dev"
     environment:
       VITE_API_BASE_URL: ""
     ports:
       - "5173:5173"
     volumes:
       - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
     depends_on:
       - api
 
 volumes:
   postgres-data:
+  frontend-node-modules:
