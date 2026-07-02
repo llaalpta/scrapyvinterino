@@ -1,0 +1,155 @@
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+JsonDict = dict[str, Any]
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SearchSource(Base):
+    __tablename__ = "search_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    url: Mapped[str] = mapped_column(Text)
+    normalized_query: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    scheduler_config: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Item(Base):
+    __tablename__ = "items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vinted_item_id: Mapped[str] = mapped_column(String(64), unique=True)
+    title: Mapped[str] = mapped_column(Text)
+    brand: Mapped[str | None] = mapped_column(String(160))
+    price_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    currency: Mapped[str | None] = mapped_column(String(8))
+    size: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str | None] = mapped_column(String(120))
+    seller_login: Mapped[str | None] = mapped_column(String(160))
+    seller_country: Mapped[str | None] = mapped_column(String(80))
+    favorite_count: Mapped[int | None] = mapped_column(Integer)
+    url: Mapped[str] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Run(Base):
+    __tablename__ = "runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
+    status: Mapped[str] = mapped_column(String(40))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    items_found: Mapped[int] = mapped_column(Integer, default=0)
+    items_new: Mapped[int] = mapped_column(Integer, default=0)
+    opportunities_created: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class FilterRule(Base):
+    __tablename__ = "filter_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    definition: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceSeenItem(Base):
+    __tablename__ = "source_seen_items"
+
+    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"), primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), primary_key=True)
+    first_run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"))
+    last_run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Opportunity(Base):
+    __tablename__ = "opportunities"
+    __table_args__ = (
+        UniqueConstraint("source_id", "item_id", "rule_id", name="uq_opportunity_source_item_rule"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    rule_id: Mapped[int | None] = mapped_column(ForeignKey("filter_rules.id"))
+    status: Mapped[str] = mapped_column(String(40), default="new")
+    score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ActionRequest(Base):
+    __tablename__ = "action_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    action_type: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    requested_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    payload: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ActionExecution(Base):
+    __tablename__ = "action_executions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action_request_id: Mapped[int] = mapped_column(ForeignKey("action_requests.id"))
+    status: Mapped[str] = mapped_column(String(40))
+    redacted_request: Mapped[JsonDict | None] = mapped_column(JSONB)
+    redacted_response: Mapped[JsonDict | None] = mapped_column(JSONB)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CheckoutSnapshot(Base):
+    __tablename__ = "checkout_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    snapshot: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ErrorLog(Base):
+    __tablename__ = "errors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("runs.id"))
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("search_sources.id"))
+    kind: Mapped[str] = mapped_column(String(80))
+    message: Mapped[str] = mapped_column(Text)
+    details: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
