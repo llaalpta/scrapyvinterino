@@ -156,6 +156,12 @@ section[id] {
   background: #ffffff;
 }
 
+.sources-panel .source-form {
+  margin-bottom: 0;
+  border-bottom: 1px solid #e5eaf0;
+  padding: 14px;
+}
+
 .panel-heading {
   display: flex;
   align-items: center;

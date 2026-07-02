@@ -52,6 +52,9 @@ def get_items(limit: int = 100, db: Session = Depends(get_db)) -> list:
 
 @app.post("/api/actions", response_model=ActionRequestRead, status_code=201)
 def post_action(payload: ActionRequestCreate, db: Session = Depends(get_db)):
+    if not settings.action_requests_enabled:
+        raise HTTPException(status_code=404, detail="Action requests are disabled")
+
     try:
         return create_action_request(db, payload.item_id, payload.action_type, payload.payload)
     except ValueError as exc:

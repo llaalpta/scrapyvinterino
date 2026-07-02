@@ -36,10 +36,12 @@ Support future personal authenticated Vinted actions from the private app after 
   - `checkout_snapshots`.
 - Configuration:
   - feature flags and local secrets.
+  - `ACTION_REQUESTS_ENABLED=false` by default.
 
 ## Acceptance Criteria
 
 - Authenticated actions are disabled by default.
+- Action request endpoints do not accept requests while `ACTION_REQUESTS_ENABLED=false`.
 - Secrets are read only from ignored local config or future encrypted storage.
 - Every action has an audit trail with redacted request/response.
 - Purchase validates price, currency, availability, shipping, and payment choice immediately before submission.

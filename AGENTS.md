@@ -24,9 +24,30 @@ Before implementing a non-trivial change:
 4. Define acceptance criteria before coding.
 5. Implement the smallest vertical slice that satisfies the criteria.
 6. Run focused verification.
-7. Commit a coherent, small change.
+7. Run a post-implementation audit for non-trivial changes.
+8. Resolve audit findings or document why they are deferred.
+9. Commit a coherent, small change.
 
 Small mechanical fixes can skip a formal spec update, but they must not contradict existing docs.
+
+## Post-Implementation Audit Gate
+
+Non-trivial changes must be audited before a spec is marked `done` or a final implementation response is given.
+
+The audit should be performed by a separate agent when sub-agent tooling is available. If it is not available, perform an explicit second-pass review and say that no separate agent was available.
+
+The audit must check:
+
+- Spec alignment: implemented behavior matches the active spec and acceptance criteria.
+- UX honesty: visible controls, navigation, labels, and actions do not imply unavailable behavior.
+- End-to-end path: the user can exercise the promised flow through UI, API, and database where applicable.
+- Negative paths: invalid input and unavailable actions are handled clearly.
+- Documentation state: roadmap/spec/docs reflect the actual implementation state.
+- Verification evidence: tests, build, smoke checks, or manual checks cover the changed surface.
+
+Do not mark a roadmap item `done` until audit findings are fixed, downgraded with a clear reason, or moved into the owning spec/roadmap item.
+
+For frontend work, unavailable future behavior must be absent, visibly disabled, or represented as an empty state. Do not leave clickable placeholders that look complete.
 
 ## Documentation Hygiene
 
@@ -66,6 +87,7 @@ Prefer focused checks for the area changed:
 - Docker: `docker compose up -d --build` and `docker compose ps`
 - API smoke test: `GET http://localhost:8000/health`
 - Frontend smoke test: `GET http://localhost:5173`
+- UI promise audit: confirm every visible button/link either works, is disabled, or lands on a real empty state.
 
 If a check cannot run, document the reason in the final response.
 

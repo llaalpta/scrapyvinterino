@@ -77,27 +77,26 @@ export function App() {
 
         {error ? <div className="notice">{error}</div> : null}
 
-        <form className="source-form" onSubmit={onCreateSource}>
-          <input
-            value={sourceName}
-            onChange={(event) => setSourceName(event.target.value)}
-            placeholder="Nombre de busqueda"
-            required
-          />
-          <input
-            value={sourceUrl}
-            onChange={(event) => setSourceUrl(event.target.value)}
-            placeholder="URL de catalogo Vinted"
-            required
-          />
-          <button type="submit">Guardar URL</button>
-        </form>
-
         <section id="sources" className="sources-panel">
           <div className="panel-heading">
             <h3>Fuentes de busqueda</h3>
             <span>{sources.length}</span>
           </div>
+          <form className="source-form" onSubmit={onCreateSource}>
+            <input
+              value={sourceName}
+              onChange={(event) => setSourceName(event.target.value)}
+              placeholder="Nombre de busqueda"
+              required
+            />
+            <input
+              value={sourceUrl}
+              onChange={(event) => setSourceUrl(event.target.value)}
+              placeholder="URL de catalogo Vinted"
+              required
+            />
+            <button type="submit">Guardar URL</button>
+          </form>
           {sources.length === 0 ? (
             <p className="empty-inline">No hay fuentes configuradas.</p>
           ) : (

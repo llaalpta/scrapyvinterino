@@ -50,6 +50,14 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 
 ## Verification
 
-- API smoke test for create/list.
-- PWA manual check for saving a source.
+- Backend tests for URL validation, API create/list, invalid input, and database persistence.
+- PWA build check.
+- Live PWA smoke check against `http://localhost:5173`.
 - Confirm `search_sources` row includes `url` and `normalized_query`.
+
+## Audit
+
+- Navigation to `Busquedas` must land on the full source management flow, including form and list.
+- Visible source controls must either work or be clearly disabled.
+- Creating a source must be observable through the PWA, API, and database.
+- Future actions such as runs, favorites, and purchases must not appear enabled as part of this spec.

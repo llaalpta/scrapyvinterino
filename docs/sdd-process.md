@@ -11,9 +11,28 @@ This project uses Spec Driven Development to keep product intent, architecture, 
 5. Define acceptance criteria.
 6. Implement the smallest useful vertical slice.
 7. Verify with focused checks.
-8. Commit the code and documentation together.
+8. Run a post-implementation audit.
+9. Fix or explicitly defer audit findings.
+10. Commit the code and documentation together.
 
 Documentation and implementation should move together. A feature is not done if the relevant docs are stale.
+
+## Post-Implementation Audit
+
+Every non-trivial implementation needs a second pass before it is considered done.
+
+Use a separate agent for the audit when sub-agent tooling is available. The implementing agent should continue to own the final decision: fix valid findings, reject false positives with a reason, or move deferred work into the owning spec or roadmap.
+
+The audit must answer:
+
+- Does the implementation satisfy the active spec and acceptance criteria?
+- Can the user exercise the promised flow end to end?
+- Are API, UI, database, worker, and docs consistent with each other?
+- Are there visible buttons, links, labels, or states that imply behavior that does not exist?
+- Are invalid inputs and unavailable actions handled clearly?
+- Were the right checks run, and is the evidence recorded?
+
+For frontend work, a screen is not done just because it compiles. Navigation must land somewhere real, enabled buttons must perform their visible action, and future actions must be disabled, absent, or shown as an honest empty state.
 
 ## Documentation Maintenance Rule
 
@@ -68,6 +87,10 @@ API endpoints, worker jobs, UI flows, settings, or database entities affected.
 ### Verification
 
 Commands, tests, or manual checks required.
+
+### Audit
+
+Post-implementation audit focus areas for this spec.
 ```
 
 ## ADR Rules
@@ -99,5 +122,8 @@ Before considering work done:
 - Relevant docs are current.
 - No duplicate or contradictory docs were introduced.
 - Code matches the documented architecture.
+- UI/API/database behavior matches what the user can actually do.
+- Post-implementation audit completed or explicitly unavailable.
+- Audit findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
 - Checks were run or skipped with a clear reason.
 - Git status is clean after commit.

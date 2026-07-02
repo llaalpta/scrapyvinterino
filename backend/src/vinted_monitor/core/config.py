@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     vinted_auth_enabled: bool = False
     vinted_auth_cookie: str | None = Field(default=None, repr=False)
     vinted_auth_csrf_token: str | None = Field(default=None, repr=False)
+    action_requests_enabled: bool = False
 
     @property
     def cors_origins(self) -> list[str]:
