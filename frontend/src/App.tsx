@@ -79,6 +79,28 @@ export function App() {
           <button type="submit">Guardar URL</button>
         </form>
 
+        <section id="sources" className="sources-panel">
+          <div className="panel-heading">
+            <h3>Fuentes de busqueda</h3>
+            <span>{sources.length}</span>
+          </div>
+          {sources.length === 0 ? (
+            <p className="empty-inline">No hay fuentes configuradas.</p>
+          ) : (
+            <div className="sources-list">
+              {sources.map((source) => (
+                <article className="source-row" key={source.id}>
+                  <div>
+                    <strong>{source.name}</strong>
+                    <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>
+                  </div>
+                  <span className={source.is_active ? 'status active' : 'status'}>{source.is_active ? 'Activa' : 'Pausada'}</span>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
         <section className="toolbar" aria-label="Acciones principales">
           <button type="button"><Settings size={18} /> Filtros</button>
           <button type="button"><Heart size={18} /> Favoritos</button>

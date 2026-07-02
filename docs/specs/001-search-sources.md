@@ -10,6 +10,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - List configured sources through API and PWA.
 - Store a normalized representation of query parameters.
 - Keep sources active by default.
+- Validate that the URL is an anonymous public Vinted catalog URL before saving it.
 
 ## Out of Scope
 
@@ -25,15 +26,24 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
   - `POST /api/sources`
 - PWA:
   - source creation form;
-  - source count/list entry point.
+  - source count and visible source list.
 - Database:
   - `search_sources`.
+
+## URL Rules
+
+- Accepted schemes: `http` and `https`.
+- Accepted hosts for the MVP: `www.vinted.es` and `vinted.es`.
+- Accepted path: `/catalog` or `/catalog/`.
+- Surrounding whitespace is stripped before saving; the remaining URL string is preserved as entered.
+- Query parameters are parsed with blank values preserved and stored by sorted key.
+- URL validation must not call Vinted and must not trigger scraping.
 
 ## Acceptance Criteria
 
 - A valid Vinted catalog URL can be saved with a name.
 - Saved sources are visible after refresh.
-- The original URL is preserved unchanged.
+- The original URL is preserved unchanged except for surrounding whitespace trimming.
 - Query parameters are stored in normalized JSON.
 - Invalid URL input is rejected by the API.
 - Creating a source does not trigger scraping.

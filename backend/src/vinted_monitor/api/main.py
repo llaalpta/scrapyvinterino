@@ -42,7 +42,7 @@ def get_sources(db: Session = Depends(get_db)) -> list:
 
 @app.post("/api/sources", response_model=SearchSourceRead, status_code=201)
 def post_source(payload: SearchSourceCreate, db: Session = Depends(get_db)):
-    return create_source(db, payload.name, str(payload.url))
+    return create_source(db, payload.name, payload.url)
 
 
 @app.get("/api/items", response_model=list[ItemRead])

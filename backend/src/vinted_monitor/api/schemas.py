@@ -2,12 +2,24 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from vinted_monitor.services.search_sources import validate_search_source_name, validate_vinted_catalog_url
 
 
 class SearchSourceCreate(BaseModel):
     name: str
-    url: HttpUrl
+    url: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return validate_search_source_name(value)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return validate_vinted_catalog_url(value)
 
 
 class SearchSourceRead(BaseModel):
@@ -57,7 +69,7 @@ class RunRead(BaseModel):
 class ActionRequestCreate(BaseModel):
     item_id: int
     action_type: str
-    payload: dict[str, Any] = {}
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class ActionRequestRead(BaseModel):

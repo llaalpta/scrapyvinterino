@@ -9,6 +9,7 @@ COPY pyproject.toml ./
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
 COPY src ./src
+COPY tests ./tests
 RUN pip install --no-cache-dir -e ".[dev]"
 
 ENV PYTHONPATH=/app/src
