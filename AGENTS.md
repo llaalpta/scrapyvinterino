@@ -49,6 +49,34 @@ Do not mark a roadmap item `done` until audit findings are fixed, downgraded wit
 
 For frontend work, unavailable future behavior must be absent, visibly disabled, or represented as an empty state. Do not leave clickable placeholders that look complete.
 
+## Frontend QA Standard
+
+Frontend changes must be tested against the running app, not only against source code or a production build.
+
+Use Playwright MCP for browser-driven QA when the change affects UI, navigation, forms, visible data, or user actions. The QA pass must verify:
+
+- routes and sidebar/top navigation land on real sections;
+- enabled buttons perform their visible action;
+- future actions are disabled, absent, or represented as honest empty states;
+- required inputs can be filled and submitted;
+- invalid input shows a clear error and does not mutate persisted data;
+- successful input updates the UI and is observable through API and database when persistence is part of the feature.
+
+If the live app does not match the source code, restart the relevant dev service before claiming the feature works. A passing build does not prove the running PWA is current.
+
+## Vertical Slice Standard
+
+Each completed spec must be functional by itself for the behavior it claims to deliver. Do not mark a vertical `done` when only the backend, only the UI shell, or only the documentation is complete.
+
+When a feature touches persistence, verify the full chain:
+
+- user action or API request;
+- backend response;
+- database row or absence of row for rejected input;
+- UI refresh or visible state.
+
+After a feature exposes a quality gap, update the existing process or agent instructions with a generalized prevention rule. Do not add session-specific notes or duplicate documents.
+
 ## Documentation Hygiene
 
 Documentation is maintained, not accumulated.
@@ -87,6 +115,7 @@ Prefer focused checks for the area changed:
 - Docker: `docker compose up -d --build` and `docker compose ps`
 - API smoke test: `GET http://localhost:8000/health`
 - Frontend smoke test: `GET http://localhost:5173`
+- Playwright QA for frontend flows: route navigation, active/disabled controls, form success, form error, and UI/API/DB consistency.
 - UI promise audit: confirm every visible button/link either works, is disabled, or lands on a real empty state.
 
 If a check cannot run, document the reason in the final response.

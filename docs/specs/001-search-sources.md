@@ -52,7 +52,11 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 
 - Backend tests for URL validation, API create/list, invalid input, and database persistence.
 - PWA build check.
-- Live PWA smoke check against `http://localhost:5173`.
+- Live PWA Playwright check against `http://localhost:5173` or `http://127.0.0.1:5173`:
+  - navigation targets exist;
+  - future buttons are disabled;
+  - valid source form submission creates a visible source;
+  - invalid source form submission shows an error and does not persist.
 - Confirm `search_sources` row includes `url` and `normalized_query`.
 
 ## Audit

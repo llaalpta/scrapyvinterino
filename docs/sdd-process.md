@@ -34,6 +34,29 @@ The audit must answer:
 
 For frontend work, a screen is not done just because it compiles. Navigation must land somewhere real, enabled buttons must perform their visible action, and future actions must be disabled, absent, or shown as an honest empty state.
 
+## Browser QA Rule
+
+When a spec changes the PWA, run a browser-driven QA pass against the live development app.
+
+The QA pass should use Playwright MCP when available and cover the behavior claimed by the spec:
+
+- navigate through the routes or anchors that should work;
+- inspect which controls are enabled or disabled;
+- submit working forms through the UI;
+- submit at least one relevant invalid input;
+- verify that successful UI actions are visible after the action;
+- verify persistence through API and database when the feature saves data.
+
+If the live app differs from the source code or build output, restart the affected dev service and repeat the QA. Do not rely on `pnpm build` alone for UI acceptance.
+
+## Learning Rule
+
+After closing a feature, capture generalized lessons in the existing process docs or agent instructions when a preventable issue was found.
+
+Write these lessons as durable rules, not as session notes. Prefer guidance such as “after implementing a frontend flow, verify the running app with Playwright and persisted data with the database” over a detailed account of a specific bug.
+
+Do not create new documents for these lessons unless no existing document owns the topic.
+
 ## Documentation Maintenance Rule
 
 Before creating a new document, check whether an existing document already owns the topic.
@@ -123,7 +146,9 @@ Before considering work done:
 - No duplicate or contradictory docs were introduced.
 - Code matches the documented architecture.
 - UI/API/database behavior matches what the user can actually do.
+- For PWA changes, Playwright or equivalent browser QA covered the live app.
 - Post-implementation audit completed or explicitly unavailable.
 - Audit findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
+- Process docs were updated with generalized prevention rules if the work revealed a repeatable quality gap.
 - Checks were run or skipped with a clear reason.
 - Git status is clean after commit.
