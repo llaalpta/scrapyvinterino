@@ -54,6 +54,19 @@ class Item(Base):
     favorite_count: Mapped[int | None] = mapped_column(Integer)
     url: Mapped[str] = mapped_column(Text)
     image_url: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    color: Mapped[str | None] = mapped_column(String(120))
+    category: Mapped[str | None] = mapped_column(Text)
+    shipping_price_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    buyer_protection_fee_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    total_price_amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    photos: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    seller_rating: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    seller_badges: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    availability_flags: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    detail_raw: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    detail_last_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail_error: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -98,13 +111,13 @@ class SourceSeenItem(Base):
 class Opportunity(Base):
     __tablename__ = "opportunities"
     __table_args__ = (
-        UniqueConstraint("source_id", "item_id", "rule_id", name="uq_opportunity_source_item_rule"),
+        UniqueConstraint("item_id", "rule_id", name="uq_opportunity_item_rule"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
-    rule_id: Mapped[int | None] = mapped_column(ForeignKey("filter_rules.id"))
+    rule_id: Mapped[int] = mapped_column(ForeignKey("filter_rules.id"))
     status: Mapped[str] = mapped_column(String(40), default="new")
     score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

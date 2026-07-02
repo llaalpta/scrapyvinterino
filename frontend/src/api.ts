@@ -22,6 +22,18 @@ export type Item = {
   favorite_count: number | null;
   url: string;
   image_url: string | null;
+  description: string | null;
+  color: string | null;
+  category: string | null;
+  shipping_price_amount: string | null;
+  buyer_protection_fee_amount: string | null;
+  total_price_amount: string | null;
+  photos: string[];
+  seller_rating: string | null;
+  seller_badges: string[];
+  availability_flags: Record<string, unknown>;
+  detail_last_fetched_at: string | null;
+  detail_error: string | null;
   first_seen_at: string;
   last_seen_at: string;
 };

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     vinted_proxy_enabled: bool = False
     vinted_proxy_url: str | None = None
     vinted_request_timeout_ms: int = 15000
+    vinted_fast_catalog_per_page: int = 5
+    vinted_detail_max_candidates_per_run: int = 5
+    vinted_detail_concurrency: int = 2
     vinted_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"

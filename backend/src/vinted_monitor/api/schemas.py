@@ -49,6 +49,18 @@ class ItemRead(BaseModel):
     favorite_count: int | None
     url: str
     image_url: str | None
+    description: str | None
+    color: str | None
+    category: str | None
+    shipping_price_amount: Decimal | None
+    buyer_protection_fee_amount: Decimal | None
+    total_price_amount: Decimal | None
+    photos: list[str]
+    seller_rating: Decimal | None
+    seller_badges: list[str]
+    availability_flags: dict[str, Any]
+    detail_last_fetched_at: datetime | None
+    detail_error: str | None
     first_seen_at: datetime
     last_seen_at: datetime
 

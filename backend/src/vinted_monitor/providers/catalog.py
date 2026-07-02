@@ -36,6 +36,25 @@ class CatalogSearchResult:
     provider_metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CatalogItemDetail:
+    vinted_item_id: str
+    description: str | None = None
+    color: str | None = None
+    category: str | None = None
+    shipping_price_amount: Decimal | None = None
+    buyer_protection_fee_amount: Decimal | None = None
+    total_price_amount: Decimal | None = None
+    photos: list[str] = field(default_factory=list)
+    seller_rating: Decimal | None = None
+    seller_badges: list[str] = field(default_factory=list)
+    availability_flags: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class VintedCatalogProvider(Protocol):
     def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
         """Return public catalog items for a configured Vinted source."""
+
+    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+        """Return public detail data for a catalog item candidate."""

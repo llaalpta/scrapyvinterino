@@ -56,10 +56,15 @@ def test_persist_catalog_items_inserts_new_item() -> None:
             assert result.found_count == 1
             assert result.inserted_count == 1
             assert result.updated_count == 0
+            assert result.inserted_vinted_item_ids == ["pytest-item-persistence-1"]
             assert item is not None
             assert item.title == "Persisted pytest item"
             assert item.brand == "Pytest Brand"
             assert item.price_amount == Decimal("4.25")
+            assert item.photos == []
+            assert item.seller_badges == []
+            assert item.availability_flags == {}
+            assert item.detail_raw == {}
             assert item.raw == {"id": "pytest-item-persistence-1", "title": "Persisted pytest item", "safe": True}
     finally:
         cleanup_items()
@@ -93,6 +98,7 @@ def test_persist_catalog_items_updates_existing_item_without_changing_identity()
             assert first_result.inserted_count == 1
             assert second_result.inserted_count == 0
             assert second_result.updated_count == 1
+            assert second_result.inserted_vinted_item_ids == []
             assert updated is not None
             assert updated.id == original_id
             assert updated.first_seen_at == original_first_seen_at
@@ -129,6 +135,7 @@ def test_persist_catalog_items_allows_missing_optional_fields() -> None:
             item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-item-persistence-missing"))
 
             assert result.inserted_count == 1
+            assert result.inserted_vinted_item_ids == ["pytest-item-persistence-missing"]
             assert item is not None
             assert item.brand is None
             assert item.price_amount is None
@@ -154,6 +161,7 @@ def test_persist_catalog_items_deduplicates_candidates_in_one_batch() -> None:
             assert result.found_count == 2
             assert result.inserted_count == 1
             assert result.updated_count == 0
+            assert result.inserted_vinted_item_ids == ["pytest-item-persistence-duplicate"]
             assert len(items) == 1
             assert items[0].title == "Last title"
     finally:

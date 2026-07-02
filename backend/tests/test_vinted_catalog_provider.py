@@ -2,7 +2,21 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from vinted_monitor.providers.vinted_catalog import decode_next_flight_payload, map_catalog_item, parse_catalog_html, sanitize_catalog_item
+import httpx
+import pytest
+
+from vinted_monitor.core.config import Settings
+from vinted_monitor.providers.vinted_catalog import (
+    HttpVintedCatalogProvider,
+    VintedCatalogProviderError,
+    build_catalog_api_params,
+    decode_next_flight_payload,
+    map_catalog_item,
+    parse_catalog_api_payload,
+    parse_catalog_html,
+    parse_item_detail_html,
+    sanitize_catalog_item,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "vinted_catalog_payload.json"
 
@@ -42,6 +56,38 @@ def test_parse_catalog_html_maps_items_and_pagination() -> None:
     assert result.per_page == 96
     assert result.next_page == 2
     assert result.provider_metadata == {"source": "next_flight_html"}
+
+
+def test_build_catalog_api_params_translates_public_catalog_url_and_forces_newest_order() -> None:
+    params = build_catalog_api_params(
+        "https://www.vinted.es/catalog?catalog[]=76&brand_ids[]=88&brand_ids[]=364&size_ids[]=208&status_ids[]=1"
+        "&price_from=0.00&price_to=5.00&currency=EUR&order=relevance",
+        page=None,
+        per_page=5,
+    )
+
+    assert params == {
+        "page": 1,
+        "per_page": 5,
+        "order": "newest_first",
+        "price_from": "0.00",
+        "price_to": "5.00",
+        "currency": "EUR",
+        "catalog_ids": "76",
+        "brand_ids": "88,364",
+        "size_ids": "208",
+        "status_ids": "1",
+    }
+
+
+def test_parse_catalog_api_payload_maps_items_and_provider_metadata() -> None:
+    fixture = load_fixture()
+    result = parse_catalog_api_payload(fixture)
+
+    assert len(result.items) == 2
+    assert result.page == 1
+    assert result.per_page == 96
+    assert result.provider_metadata == {"source": "catalog_api_json"}
 
 
 def test_parse_catalog_html_allows_empty_catalog_results() -> None:
@@ -112,3 +158,145 @@ def test_sanitize_catalog_item_keeps_only_safe_public_fields() -> None:
     assert sanitized["user"] == {"login": "fixture_seller"}
     assert "search_tracking_params" not in sanitized
     assert "profile_url" not in sanitized["user"]
+
+
+def test_http_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
+    calls: list[str] = []
+    fixture = load_fixture()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path == "/catalog":
+            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=anon; Path=/;"})
+        if request.url.path == "/api/v2/catalog/items":
+            assert request.url.params["per_page"] == "5"
+            assert request.url.params["order"] == "newest_first"
+            assert request.headers["accept"] == "application/json, text/plain, */*"
+            assert request.headers.get("cookie")
+            return httpx.Response(200, json=fixture, headers={"content-type": "application/json"})
+        return httpx.Response(404)
+
+    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
+    result = provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76&order=newest_first"})())
+
+    assert len(result.items) == 2
+    assert [httpx.URL(call).path for call in calls] == ["/catalog", "/api/v2/catalog/items"]
+
+
+def test_http_provider_refreshes_anonymous_session_once_after_auth_failure() -> None:
+    api_calls = 0
+    bootstrap_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal api_calls, bootstrap_calls
+        if request.url.path == "/catalog":
+            bootstrap_calls += 1
+            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
+        if request.url.path == "/api/v2/catalog/items":
+            api_calls += 1
+            if api_calls == 1:
+                return httpx.Response(401, json={"error": "invalid_authentication_token"}, headers={"content-type": "application/json"})
+            return httpx.Response(200, json=load_fixture(), headers={"content-type": "application/json"})
+        return httpx.Response(404)
+
+    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
+    provider._cookies.set("access_token_web", "expired", domain="www.vinted.es")
+
+    result = provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+
+    assert len(result.items) == 2
+    assert api_calls == 2
+    assert bootstrap_calls == 1
+
+
+def test_http_provider_raises_after_second_session_failure() -> None:
+    api_calls = 0
+    bootstrap_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal api_calls, bootstrap_calls
+        if request.url.path == "/catalog":
+            bootstrap_calls += 1
+            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
+        if request.url.path == "/api/v2/catalog/items":
+            api_calls += 1
+            return httpx.Response(403, json={"error": "invalid_authentication_token"}, headers={"content-type": "application/json"})
+        return httpx.Response(404)
+
+    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(VintedCatalogProviderError):
+        provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+
+    assert api_calls == 2
+    assert bootstrap_calls == 2
+
+
+def test_http_provider_does_not_use_catalog_html_fallback_after_api_failure() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/catalog":
+            return httpx.Response(
+                200,
+                text=build_next_flight_html(load_fixture()),
+                headers={"set-cookie": "access_token_web=anon; Path=/;"},
+            )
+        if request.url.path == "/api/v2/catalog/items":
+            return httpx.Response(500, json={"error": "boom"}, headers={"content-type": "application/json"})
+        return httpx.Response(404)
+
+    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(VintedCatalogProviderError):
+        provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+
+    assert calls == ["/catalog", "/api/v2/catalog/items"]
+
+
+def test_parse_item_detail_html_extracts_sanitized_public_detail() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    product_json = {
+        "@type": "Product",
+        "description": "Tiene una mancha pequeña en la manga",
+        "color": "Azul",
+        "category": "Polos",
+        "image": ["https://images.example.test/full-1.webp", "https://images.example.test/full-2.webp"],
+        "offers": {"availability": "https://schema.org/InStock"},
+    }
+    embedded = {
+        "item": {
+            "shipping_price": {"amount": "2.99"},
+            "buyer_protection_fee": {"amount": "0.70"},
+            "total_price": {"amount": "6.19"},
+            "seller_rating": "4.8",
+            "seller_badges": [{"title": "Very responsive"}],
+            "is_visible": True,
+            "photos": [{"url": "https://images.example.test/full-3.webp"}],
+        }
+    }
+    html = (
+        '<script type="application/ld+json">'
+        f"{json.dumps(product_json)}"
+        "</script>"
+        f"<script>window.__detail={json.dumps(embedded)}</script>"
+    )
+
+    detail = parse_item_detail_html(html, candidate)
+
+    assert detail.description == "Tiene una mancha pequeña en la manga"
+    assert detail.color == "Azul"
+    assert detail.category == "Polos"
+    assert detail.shipping_price_amount == Decimal("2.99")
+    assert detail.buyer_protection_fee_amount == Decimal("0.70")
+    assert detail.total_price_amount == Decimal("6.19")
+    assert detail.seller_rating == Decimal("4.8")
+    assert detail.seller_badges == ["Very responsive"]
+    assert detail.availability_flags["is_visible"] is True
+    assert detail.photos == [
+        "https://images.example.test/full-1.webp",
+        "https://images.example.test/full-2.webp",
+        "https://images.example.test/full-3.webp",
+        "https://images.example.test/item-1000000001.webp",
+    ]
