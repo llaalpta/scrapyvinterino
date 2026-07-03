@@ -9,6 +9,49 @@ export type SearchSource = {
   scheduler_config: SourceSchedulerConfig;
 };
 
+export type FilterRule = {
+  id: number;
+  source_id: number | null;
+  name: string;
+  definition: {
+    blacklist_terms?: string[];
+  };
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProxyProfile = {
+  id: number;
+  name: string;
+  scheme: string;
+  host: string;
+  port: number;
+  username: string | null;
+  username_masked: string | null;
+  has_password: boolean;
+  password_fingerprint: string | null;
+  is_active: boolean;
+  last_test_status: string | null;
+  last_test_ip: string | null;
+  last_test_error: string | null;
+};
+
+export type MonitorSession = {
+  id: number;
+  source_id: number;
+  source_name: string | null;
+  proxy_profile_id: number | null;
+  proxy_name: string | null;
+  status: string;
+  filter_snapshot: Array<{ id: number; name: string; definition: Record<string, unknown> }>;
+  filter_hash: string;
+  cadence_snapshot: SourceSchedulerConfig;
+  runtime_metadata: Record<string, unknown>;
+  started_at: string;
+  stopped_at: string | null;
+};
+
 export type SourceSchedulerConfig = {
   interval_seconds?: number;
   jitter_percent?: number;
@@ -69,8 +112,11 @@ export type OpportunityResult = {
   item: Item;
   source_id: number;
   source_name: string;
-  rule_id: number;
+  session_id: number | null;
+  rule_id: number | null;
   status: string;
+  evaluation_status: string;
+  filter_snapshot: Array<{ id: number; name: string; definition: Record<string, unknown> }>;
   score: string | null;
   created_at: string;
 };
@@ -96,14 +142,38 @@ export type ItemQuery = {
 export type Run = {
   id: number;
   source_id: number;
+  session_id: number | null;
   status: string;
   trigger: string;
   started_at: string;
   finished_at: string | null;
   items_found: number;
   items_new: number;
+  items_filter_passed: number;
+  items_discarded_by_filters: number;
+  items_filter_pending: number;
   opportunities_created: number;
   error_message: string | null;
+  runtime_metadata: Record<string, unknown>;
+};
+
+export type RunEvent = {
+  id: number;
+  run_id: number | null;
+  session_id: number | null;
+  source_id: number | null;
+  phase: string;
+  method: string | null;
+  url: string | null;
+  status_code: number | null;
+  duration_ms: number | null;
+  proxy_profile_id: number | null;
+  egress_ip: string | null;
+  user_agent: string | null;
+  auth_mode: string | null;
+  message: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
 };
 
 async function getJson<T>(path: string): Promise<T> {
@@ -199,12 +269,71 @@ export function fetchItems(query: ItemQuery = {}): Promise<Page<ItemResult>> {
   return getJson<Page<ItemResult>>(`/api/items${toQueryString(query)}`);
 }
 
+export function fetchFilterRules(): Promise<FilterRule[]> {
+  return getJson<FilterRule[]>('/api/filter-rules');
+}
+
+export function createFilterRule(payload: { name: string; definition: { blacklist_terms: string[] }; is_active?: boolean }): Promise<FilterRule> {
+  return postJson<FilterRule>('/api/filter-rules', payload);
+}
+
+export function updateFilterRule(
+  ruleId: number,
+  payload: { name?: string; definition?: { blacklist_terms: string[] }; is_active?: boolean }
+): Promise<FilterRule> {
+  return patchJson<FilterRule>(`/api/filter-rules/${ruleId}`, payload);
+}
+
+export function fetchProxyProfiles(): Promise<ProxyProfile[]> {
+  return getJson<ProxyProfile[]>('/api/proxy-profiles');
+}
+
+export function createProxyProfile(payload: {
+  name: string;
+  scheme: string;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  is_active?: boolean;
+}): Promise<ProxyProfile> {
+  return postJson<ProxyProfile>('/api/proxy-profiles', payload);
+}
+
+export function testProxyProfile(profileId: number): Promise<ProxyProfile> {
+  return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/test`);
+}
+
+export function fetchMonitorSessions(): Promise<MonitorSession[]> {
+  return getJson<MonitorSession[]>('/api/monitor-sessions');
+}
+
+export function startMonitorSession(payload: {
+  source_id: number;
+  filter_rule_ids: number[];
+  proxy_profile_id?: number | null;
+}): Promise<MonitorSession> {
+  return postJson<MonitorSession>('/api/monitor-sessions', payload);
+}
+
+export function stopMonitorSession(sessionId: number): Promise<MonitorSession> {
+  return postJson<MonitorSession>(`/api/monitor-sessions/${sessionId}/stop`);
+}
+
+export function runMonitorSession(sessionId: number): Promise<Run> {
+  return postJson<Run>(`/api/monitor-sessions/${sessionId}/runs`);
+}
+
 export function fetchOpportunities(query: { page?: number; page_size?: number } = {}): Promise<Page<OpportunityResult>> {
   return getJson<Page<OpportunityResult>>(`/api/opportunities${toQueryString(query)}`);
 }
 
 export function fetchRuns(): Promise<Run[]> {
   return getJson<Run[]>('/api/runs');
+}
+
+export function fetchRunEvents(runId: number): Promise<RunEvent[]> {
+  return getJson<RunEvent[]>(`/api/runs/${runId}/events`);
 }
 
 export function runSource(sourceId: number): Promise<Run> {

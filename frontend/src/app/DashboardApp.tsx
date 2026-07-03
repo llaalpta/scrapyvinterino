@@ -1,4 +1,5 @@
 import { DashboardShell } from '../components/layout/DashboardShell';
+import { FiltersView } from '../features/filters/FiltersView';
 import { OpportunitiesView } from '../features/opportunities/OpportunitiesView';
 import { ResultsView } from '../features/results/ResultsView';
 import { RunsView } from '../features/runs/RunsView';
@@ -12,13 +13,13 @@ export function DashboardApp() {
   return (
     <DashboardShell
       activeSection={dashboard.activeSection}
-      activeSource={dashboard.activeSource}
+      activeSession={dashboard.activeSession}
       activeSubtitle={dashboard.activeSubtitle}
       activeTitle={dashboard.activeTitle}
       error={dashboard.error}
       navCollapsed={dashboard.navCollapsed}
-      runningSourceId={dashboard.runningSourceId}
-      onRunSource={(sourceId) => void dashboard.onRunSource(sourceId)}
+      runningSessionId={dashboard.runningSessionId}
+      onRunSession={(sessionId) => void dashboard.onRunSession(sessionId)}
       onSelectSection={dashboard.selectSection}
       onToggleNav={() => dashboard.setNavCollapsed((current) => !current)}
     >
@@ -48,39 +49,63 @@ export function DashboardApp() {
 
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
+          filterRules={dashboard.filterRules}
+          monitorSessions={dashboard.monitorSessions}
           onCreateSource={dashboard.onCreateSource}
-          onRunSource={(sourceId) => void dashboard.onRunSource(sourceId)}
+          onRunSession={(sessionId) => void dashboard.onRunSession(sessionId)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
+          onStartSession={(source) => void dashboard.onStartSession(source)}
+          onStopSession={(sessionId) => void dashboard.onStopSession(sessionId)}
           onToggleSource={(source) => void dashboard.onToggleSource(source)}
-          runningSourceId={dashboard.runningSourceId}
+          proxyProfiles={dashboard.proxyProfiles}
+          runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}
+          selectedFilterIdsBySource={dashboard.selectedFilterIdsBySource}
+          selectedProxyBySource={dashboard.selectedProxyBySource}
           sourceDrafts={dashboard.sourceDrafts}
           sourceName={dashboard.sourceName}
           sources={dashboard.sources}
           sourceUrl={dashboard.sourceUrl}
           setSourceName={dashboard.setSourceName}
           setSourceUrl={dashboard.setSourceUrl}
+          toggleSourceFilter={dashboard.toggleSourceFilter}
           updateSourceDraft={dashboard.updateSourceDraft}
+          updateSourceProxy={dashboard.updateSourceProxy}
         />
       ) : null}
 
       {dashboard.activeSection === 'filters' ? (
-        <section className="section-panel">
-          <div className="panel-heading">
-            <h3>Filtros</h3>
-            <span>0</span>
-          </div>
-          <p className="empty-inline">Sin filtros configurados. Las reglas locales se implementaran en la siguiente vertical.</p>
-        </section>
+        <FiltersView
+          filterName={dashboard.filterName}
+          filterRules={dashboard.filterRules}
+          filterTerms={dashboard.filterTerms}
+          saving={dashboard.savingFilter}
+          onCreateFilter={dashboard.onCreateFilter}
+          setFilterName={dashboard.setFilterName}
+          setFilterTerms={dashboard.setFilterTerms}
+        />
       ) : null}
 
-      {dashboard.activeSection === 'runs' ? <RunsView getSourceName={dashboard.getSourceName} runs={dashboard.runs} /> : null}
+      {dashboard.activeSection === 'runs' ? (
+        <RunsView
+          getSourceName={dashboard.getSourceName}
+          monitorSessions={dashboard.monitorSessions}
+          runs={dashboard.runs}
+          onLoadRunEvents={dashboard.onLoadRunEvents}
+        />
+      ) : null}
 
       {dashboard.activeSection === 'settings' ? (
         <SettingsView
+          onCreateProxy={dashboard.onCreateProxy}
+          onTestProxy={(profileId) => void dashboard.onTestProxy(profileId)}
           onToggleScheduler={() => void dashboard.onToggleScheduler()}
+          proxyDraft={dashboard.proxyDraft}
+          proxyProfiles={dashboard.proxyProfiles}
+          savingProxy={dashboard.savingProxy}
           savingScheduler={dashboard.savingScheduler}
           scheduler={dashboard.scheduler}
+          setProxyDraft={dashboard.setProxyDraft}
         />
       ) : null}
     </DashboardShell>

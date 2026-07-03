@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import (
     SCHEDULER_SETTING_KEY,
@@ -119,8 +119,8 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
         def reap_completed(self) -> None:
             return None
 
-        def submit(self, source_id: int, task) -> bool:
-            submitted.append(source_id)
+        def submit(self, session_id: int, task) -> bool:
+            submitted.append(session_id)
             return True
 
     with SessionLocal() as db:
@@ -145,6 +145,17 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
         db.add(source)
         db.commit()
         source_id = source.id
+        session = MonitorSession(
+            source_id=source_id,
+            status="active",
+            filter_snapshot=[],
+            filter_hash="pytest-filter-hash",
+            cadence_snapshot=source.scheduler_config,
+            runtime_metadata={},
+        )
+        db.add(session)
+        db.commit()
+        session_id = session.id
 
     try:
         runner = SchedulerRunner(Settings(scheduler_enabled=True), executor=FakeExecutor())  # type: ignore[arg-type]
@@ -152,7 +163,7 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
 
         assert submitted_ids == []
         assert submitted == []
-        assert runner.next_due_by_source_id[source_id] == datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
+        assert runner.next_due_by_session_id[session_id] == datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
     finally:
         with SessionLocal() as db:
             for active_source_id in previously_active_source_ids:
@@ -160,6 +171,9 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
                 if active_source is not None:
                     active_source.is_active = True
             source = db.get(SearchSource, source_id)
+            session = db.get(MonitorSession, session_id)
+            if session is not None:
+                db.delete(session)
             if source is not None:
                 db.delete(source)
             setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)

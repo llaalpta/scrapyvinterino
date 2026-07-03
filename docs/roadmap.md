@@ -21,7 +21,7 @@ Status values:
 | 6 | done | Bounded concurrent scheduler and runtime cache | `docs/specs/008-scheduler.md` | Run sources concurrently with limits, jitter, isolated anonymous sessions, and global item cache before alerting. |
 | 7 | done | Results and opportunities browser | `docs/specs/007-opportunities-table.md` | Paginated results, source scrape traceability, filters, mobile cards, and separate tabs before creating opportunities. |
 | 8 | done | Frontend structure baseline | `docs/development.md` | Split the PWA into layout, feature, shared component, helper, hook, and style modules before adding local filters. |
-| 9 | not-started | Local filters and opportunities | `docs/specs/006-local-filters.md` | Apply application-owned filters and create notification-worthy opportunities. |
+| 9 | done | Session exclusion filters, monitor, and proxy pool | `docs/specs/006-local-filters.md` | Launch monitor sessions with source snapshots, exclusion filters, opportunities, run monitor, and encrypted proxy profiles. |
 
 ## Next
 

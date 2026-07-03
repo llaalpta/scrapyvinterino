@@ -1,30 +1,30 @@
 import { PanelLeftClose, PanelLeftOpen, Play } from 'lucide-react';
 import type { ReactNode } from 'react';
-import type { SearchSource } from '../../api';
+import type { MonitorSession } from '../../api';
 import { navItems } from '../../app/navigation';
 
 export function DashboardShell({
   activeSection,
-  activeSource,
+  activeSession,
   activeSubtitle,
   activeTitle,
   children,
   error,
   navCollapsed,
-  runningSourceId,
-  onRunSource,
+  runningSessionId,
+  onRunSession,
   onSelectSection,
   onToggleNav
 }: {
   activeSection: string;
-  activeSource: SearchSource | undefined;
+  activeSession: MonitorSession | undefined;
   activeSubtitle: string;
   activeTitle: string;
   children: ReactNode;
   error: string | null;
   navCollapsed: boolean;
-  runningSourceId: number | null;
-  onRunSource: (sourceId: number) => void;
+  runningSessionId: number | null;
+  onRunSession: (sessionId: number) => void;
   onSelectSection: (section: string) => void;
   onToggleNav: () => void;
 }) {
@@ -74,16 +74,16 @@ export function DashboardShell({
           </div>
           <button
             type="button"
-            disabled={!activeSource || runningSourceId !== null}
-            title={activeSource ? 'Ejecutar fuente activa' : 'Crea una fuente activa para ejecutar una busqueda'}
+            disabled={!activeSession || runningSessionId !== null}
+            title={activeSession ? 'Ejecutar sesion activa' : 'Lanza una sesion activa para ejecutar una busqueda'}
             onClick={() => {
-              if (activeSource) {
-                onRunSource(activeSource.id);
+              if (activeSession) {
+                onRunSession(activeSession.id);
               }
             }}
           >
             <Play size={18} />
-            {runningSourceId ? 'Ejecutando...' : 'Ejecutar busqueda'}
+            {runningSessionId ? 'Ejecutando...' : 'Ejecutar sesion'}
           </button>
         </header>
 

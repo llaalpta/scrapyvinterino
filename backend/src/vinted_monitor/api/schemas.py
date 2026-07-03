@@ -67,6 +67,90 @@ class SchedulerStateRead(BaseModel):
     proxy_configured: bool
 
 
+class FilterRuleCreate(BaseModel):
+    name: str
+    definition: dict[str, Any]
+    is_active: bool = True
+
+
+class FilterRuleUpdate(BaseModel):
+    name: str | None = None
+    definition: dict[str, Any] | None = None
+    is_active: bool | None = None
+
+
+class FilterRuleRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_id: int | None
+    name: str
+    definition: dict[str, Any]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProxyProfileCreate(BaseModel):
+    name: str
+    scheme: str = "http"
+    host: str
+    port: int = Field(ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    is_active: bool = True
+
+
+class ProxyProfileUpdate(BaseModel):
+    name: str | None = None
+    scheme: str | None = None
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    clear_password: bool = False
+    is_active: bool | None = None
+
+
+class ProxyProfileRead(BaseModel):
+    id: int
+    name: str
+    scheme: str
+    host: str
+    port: int
+    username: str | None
+    username_masked: str | None
+    has_password: bool
+    password_fingerprint: str | None
+    is_active: bool
+    last_test_status: str | None
+    last_test_ip: str | None
+    last_test_error: str | None
+
+
+class MonitorSessionCreate(BaseModel):
+    source_id: int = Field(ge=1)
+    filter_rule_ids: list[int] = Field(default_factory=list)
+    proxy_profile_id: int | None = Field(default=None, ge=1)
+
+
+class MonitorSessionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_id: int
+    source_name: str | None = None
+    proxy_profile_id: int | None
+    proxy_name: str | None = None
+    status: str
+    filter_snapshot: list[dict[str, Any]]
+    filter_hash: str
+    cadence_snapshot: dict[str, Any]
+    runtime_metadata: dict[str, Any]
+    started_at: datetime
+    stopped_at: datetime | None
+
+
 class ItemRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -119,8 +203,11 @@ class OpportunityResultRead(BaseModel):
     item: ItemRead
     source_id: int
     source_name: str
-    rule_id: int
+    session_id: int | None
+    rule_id: int | None
     status: str
+    evaluation_status: str
+    filter_snapshot: list[dict[str, Any]]
     score: Decimal | None
     created_at: datetime
 
@@ -138,14 +225,40 @@ class RunRead(BaseModel):
 
     id: int
     source_id: int
+    session_id: int | None
     status: str
     trigger: str
     started_at: datetime
     finished_at: datetime | None
     items_found: int
     items_new: int
+    items_filter_passed: int
+    items_discarded_by_filters: int
+    items_filter_pending: int
     opportunities_created: int
     error_message: str | None
+    runtime_metadata: dict[str, Any]
+
+
+class RunEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    run_id: int | None
+    session_id: int | None
+    source_id: int | None
+    phase: str
+    method: str | None
+    url: str | None
+    status_code: int | None
+    duration_ms: int | None
+    proxy_profile_id: int | None
+    egress_ip: str | None
+    user_agent: str | None
+    auth_mode: str | None
+    message: str | None
+    details: dict[str, Any]
+    created_at: datetime
 
 
 class ActionRequestCreate(BaseModel):

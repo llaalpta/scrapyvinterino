@@ -5,7 +5,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from vinted_monitor.api.main import app
-from vinted_monitor.db.models import FilterRule, Item, Opportunity, Run, SearchSource, SourceSeenItem
+from vinted_monitor.db.models import (
+    FilterRule,
+    Item,
+    MonitorSession,
+    Opportunity,
+    Run,
+    RunEvent,
+    SearchSource,
+    SessionItemState,
+    SourceSeenItem,
+)
 from vinted_monitor.db.session import SessionLocal
 
 PREFIX = "pytest-browser-"
@@ -30,9 +40,14 @@ def cleanup_browser_data() -> None:
             )
         )
         run_ids = list(db.scalars(select(Run.id).where(Run.source_id.in_(source_ids)))) if source_ids else []
+        session_ids = list(db.scalars(select(MonitorSession.id).where(MonitorSession.source_id.in_(source_ids)))) if source_ids else []
         rule_ids = list(db.scalars(select(FilterRule.id).where(FilterRule.source_id.in_(source_ids)))) if source_ids else []
 
+        if session_ids:
+            db.query(RunEvent).filter(RunEvent.session_id.in_(session_ids)).delete(synchronize_session=False)
+            db.query(SessionItemState).filter(SessionItemState.session_id.in_(session_ids)).delete(synchronize_session=False)
         if item_ids:
+            db.query(SessionItemState).filter(SessionItemState.item_id.in_(item_ids)).delete(synchronize_session=False)
             db.query(SourceSeenItem).filter(SourceSeenItem.item_id.in_(item_ids)).delete(synchronize_session=False)
             db.query(Opportunity).filter(Opportunity.item_id.in_(item_ids)).delete(synchronize_session=False)
             db.query(Item).filter(Item.id.in_(item_ids)).delete(synchronize_session=False)
@@ -40,8 +55,12 @@ def cleanup_browser_data() -> None:
             db.query(Opportunity).filter(Opportunity.rule_id.in_(rule_ids)).delete(synchronize_session=False)
             db.query(FilterRule).filter(FilterRule.id.in_(rule_ids)).delete(synchronize_session=False)
         if run_ids:
+            db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(Run).filter(Run.id.in_(run_ids)).delete(synchronize_session=False)
+        if session_ids:
+            db.query(MonitorSession).filter(MonitorSession.id.in_(session_ids)).delete(synchronize_session=False)
         if source_ids:
+            db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(SearchSource).filter(SearchSource.id.in_(source_ids)).delete(synchronize_session=False)
         db.commit()
 

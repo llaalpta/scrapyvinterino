@@ -20,13 +20,14 @@ export function OpportunitiesView({
         <span>{opportunityPage.total}</span>
       </div>
       {opportunityPage.items.length === 0 ? (
-        <p className="empty-inline">Todavia no hay oportunidades. Se crearan cuando implementemos reglas locales.</p>
+        <p className="empty-inline">Todavia no hay oportunidades. Se crearan desde sesiones activas.</p>
       ) : (
         <div className="opportunity-list">
           {opportunityPage.items.map((opportunity) => (
             <article className="opportunity-row" key={opportunity.id}>
               <ItemCell item={opportunity.item} />
               <span>{opportunity.source_name}</span>
+              <span className={`status evaluation ${opportunity.evaluation_status}`}>{evaluationLabel(opportunity.evaluation_status)}</span>
               <span>{formatDate(opportunity.created_at)}</span>
               <RowActions item={opportunity.item} />
             </article>
@@ -43,4 +44,17 @@ export function OpportunitiesView({
       />
     </section>
   );
+}
+
+function evaluationLabel(status: string): string {
+  if (status === 'passed_without_filters') {
+    return 'Sin filtros';
+  }
+  if (status === 'passed_without_detail') {
+    return 'Sin detalle';
+  }
+  if (status === 'detail_error') {
+    return 'Error detalle';
+  }
+  return 'Filtrada OK';
 }

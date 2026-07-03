@@ -6,9 +6,22 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
-from vinted_monitor.db.models import ErrorLog, Item, Run, SearchSource, SourceSeenItem
+from vinted_monitor.db.models import (
+    ErrorLog,
+    FilterRule,
+    Item,
+    MonitorSession,
+    Opportunity,
+    ProxyProfile,
+    Run,
+    RunEvent,
+    SearchSource,
+    SessionItemState,
+    SourceSeenItem,
+)
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
+from vinted_monitor.services.filters import create_filter_rule
 from vinted_monitor.services.runs import (
     FAILED,
     GLOBAL_KNOWN_ID_CACHE,
@@ -22,6 +35,7 @@ from vinted_monitor.services.runs import (
     execute_source_run,
     list_runs,
 )
+from vinted_monitor.services.sessions import start_monitor_session
 
 
 class FakeSuccessProvider:
@@ -130,6 +144,7 @@ class FakeInvalidItemProvider:
 def source_id() -> int:
     SOURCE_SEEN_ID_CACHE.clear()
     GLOBAL_KNOWN_ID_CACHE.clear()
+    cleanup_source(None)
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest manual run source",
@@ -151,20 +166,40 @@ def source_id() -> int:
         GLOBAL_KNOWN_ID_CACHE.clear()
 
 
-def cleanup_source(source_id: int) -> None:
+def cleanup_source(source_id: int | None) -> None:
     with SessionLocal() as db:
-        run_ids = list(db.scalars(select(Run.id).where(Run.source_id == source_id)))
+        source_ids = (
+            [source_id]
+            if source_id is not None
+            else list(db.scalars(select(SearchSource.id).where(SearchSource.name.like("pytest%"))))
+        )
+        run_ids = list(db.scalars(select(Run.id).where(Run.source_id.in_(source_ids)))) if source_ids else []
+        session_ids = list(db.scalars(select(MonitorSession.id).where(MonitorSession.source_id.in_(source_ids)))) if source_ids else []
         pytest_item_ids = list(db.scalars(select(Item.id).where(Item.vinted_item_id.like("pytest-run-item-%"))))
+        if session_ids:
+            db.query(RunEvent).filter(RunEvent.session_id.in_(session_ids)).delete(synchronize_session=False)
+            db.query(SessionItemState).filter(SessionItemState.session_id.in_(session_ids)).delete(synchronize_session=False)
         if pytest_item_ids:
+            db.query(SessionItemState).filter(SessionItemState.item_id.in_(pytest_item_ids)).delete(synchronize_session=False)
+            db.query(Opportunity).filter(Opportunity.item_id.in_(pytest_item_ids)).delete(synchronize_session=False)
             db.query(SourceSeenItem).filter(SourceSeenItem.item_id.in_(pytest_item_ids)).delete(synchronize_session=False)
         if run_ids:
+            db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(Run).filter(Run.id.in_(run_ids)).delete(synchronize_session=False)
-        db.query(ErrorLog).filter(ErrorLog.source_id == source_id).delete(synchronize_session=False)
+        if source_ids:
+            db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
+            db.query(ErrorLog).filter(ErrorLog.source_id.in_(source_ids)).delete(synchronize_session=False)
+            db.query(MonitorSession).filter(MonitorSession.source_id.in_(source_ids)).delete(synchronize_session=False)
+        db.query(FilterRule).filter(FilterRule.name.like("pytest%")).delete(synchronize_session=False)
+        db.query(ProxyProfile).filter(ProxyProfile.name.like("pytest%")).delete(synchronize_session=False)
         db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item-%")).delete(synchronize_session=False)
-        source = db.get(SearchSource, source_id)
-        if source is not None:
-            db.delete(source)
+        if source_id is not None:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+        elif source_ids:
+            db.query(SearchSource).filter(SearchSource.id.in_(source_ids)).delete(synchronize_session=False)
         db.commit()
 
 
@@ -306,6 +341,106 @@ def test_execute_source_run_records_scheduler_trigger(source_id: int) -> None:
 
         assert run.status == SUCCESS
         assert run.trigger == SCHEDULER_TRIGGER
+
+
+def test_session_run_creates_opportunities_without_filters_and_skips_reprocessing(source_id: int) -> None:
+    with SessionLocal() as db:
+        session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[])
+        first_run = execute_source_run(db, source_id, provider=FakeSuccessProvider(item_count=2), session=session)
+        second_run = execute_source_run(db, source_id, provider=FakeSuccessProvider(item_count=2), session=session)
+        opportunities = list(db.scalars(select(Opportunity).where(Opportunity.session_id == session.id)))
+        states = list(db.scalars(select(SessionItemState).where(SessionItemState.session_id == session.id)))
+
+        assert first_run.items_filter_passed == 2
+        assert first_run.items_discarded_by_filters == 0
+        assert first_run.opportunities_created == 2
+        assert second_run.items_filter_passed == 0
+        assert second_run.opportunities_created == 0
+        assert len(opportunities) == 2
+        assert {opportunity.evaluation_status for opportunity in opportunities} == {"passed_without_filters"}
+        assert len(states) == 2
+
+
+def test_known_global_item_can_create_opportunity_in_different_session(source_id: int) -> None:
+    with SessionLocal() as db:
+        second_source = SearchSource(
+            name="pytest second session source",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=True,
+            scheduler_config={},
+        )
+        db.add(second_source)
+        db.commit()
+        db.refresh(second_source)
+        second_source_id = second_source.id
+
+    try:
+        with SessionLocal() as db:
+            first_session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[])
+            second_session = start_monitor_session(db, source_id=second_source_id, filter_rule_ids=[])
+            first_run = execute_source_run(db, source_id, provider=FakeSuccessProvider(item_count=1), session=first_session)
+            second_run = execute_source_run(db, second_source_id, provider=FakeSuccessProvider(item_count=1), session=second_session)
+            opportunity_sessions = list(
+                db.scalars(
+                    select(Opportunity.session_id)
+                    .join(Item, Item.id == Opportunity.item_id)
+                    .where(Item.vinted_item_id == "pytest-run-item-0")
+                    .order_by(Opportunity.session_id)
+                )
+            )
+
+            assert first_run.items_new == 1
+            assert second_run.items_new == 0
+            assert opportunity_sessions == sorted([first_session.id, second_session.id])
+    finally:
+        cleanup_source(second_source_id)
+
+
+def test_session_run_discards_items_matching_exclusion_filter(source_id: int) -> None:
+    with SessionLocal() as db:
+        rule = create_filter_rule(db, name="pytest blacklist detail", definition={"blacklist_terms": ["detalle"]})
+        session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[rule.id])
+        run = execute_source_run(db, source_id, provider=FakeDetailProvider(item_count=1), session=session)
+        opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.session_id == session.id))
+        state = db.scalar(select(SessionItemState).where(SessionItemState.session_id == session.id))
+
+        assert run.items_filter_passed == 0
+        assert run.items_discarded_by_filters == 1
+        assert run.opportunities_created == 0
+        assert opportunity_count == 0
+        assert state is not None
+        assert state.status == "discarded"
+
+
+def test_session_run_creates_opportunity_when_detail_fetch_fails(source_id: int) -> None:
+    with SessionLocal() as db:
+        rule = create_filter_rule(db, name="pytest blacklist unused", definition={"blacklist_terms": ["unused"]})
+        session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[rule.id])
+        run = execute_source_run(db, source_id, provider=FakeFailingDetailProvider(item_count=1), session=session)
+        opportunity = db.scalar(select(Opportunity).where(Opportunity.session_id == session.id))
+        state = db.scalar(select(SessionItemState).where(SessionItemState.session_id == session.id))
+
+        assert run.items_filter_passed == 1
+        assert run.items_filter_pending == 1
+        assert run.opportunities_created == 1
+        assert opportunity is not None
+        assert opportunity.evaluation_status == "detail_error"
+        assert state is not None
+        assert state.status == "detail_error"
+
+
+def test_session_run_creates_opportunity_when_detail_limit_is_reached(source_id: int) -> None:
+    with SessionLocal() as db:
+        rule = create_filter_rule(db, name="pytest blacklist none", definition={"blacklist_terms": ["unused"]})
+        session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[rule.id])
+        run = execute_source_run(db, source_id, provider=FakeLimitedDetailProvider(item_count=2), session=session)
+        statuses = set(db.scalars(select(Opportunity.evaluation_status).where(Opportunity.session_id == session.id)))
+
+        assert run.items_filter_passed == 2
+        assert run.items_filter_pending == 1
+        assert run.opportunities_created == 2
+        assert statuses == {"passed", "passed_without_detail"}
 
 
 def test_execute_manual_run_records_detail_failure_without_failing_run(source_id: int) -> None:
@@ -462,3 +597,35 @@ def test_manual_run_api_returns_400_for_inactive_source(source_id: int) -> None:
         assert response.status_code == 400
     finally:
         app.dependency_overrides.clear()
+
+
+def test_proxy_profile_api_does_not_return_or_store_raw_password() -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/proxy-profiles",
+            json={
+                "name": "pytest proxy profile",
+                "scheme": "http",
+                "host": "proxy.example.test",
+                "port": 8080,
+                "username": "pytest-user",
+                "password": "pytest-secret-password",
+            },
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert "pytest-secret-password" not in str(body)
+        assert body["has_password"] is True
+        assert body["username_masked"] != "pytest-user"
+
+        with SessionLocal() as db:
+            profile = db.scalar(select(ProxyProfile).where(ProxyProfile.name == "pytest proxy profile"))
+            assert profile is not None
+            assert profile.password_encrypted is not None
+            assert "pytest-secret-password" not in profile.password_encrypted
+    finally:
+        cleanup_source(None)

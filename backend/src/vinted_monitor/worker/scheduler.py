@@ -10,16 +10,16 @@ import structlog
 
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
-from vinted_monitor.services.runs import SCHEDULER_TRIGGER, execute_source_run
+from vinted_monitor.services.runs import SCHEDULER_TRIGGER
 from vinted_monitor.services.scheduler import (
     get_scheduler_state,
     get_scheduler_timezone,
     is_within_allowed_windows,
-    list_schedulable_sources,
+    list_schedulable_sessions,
     next_run_after,
-    source_config,
+    session_config,
 )
+from vinted_monitor.services.sessions import run_monitor_session
 
 RunTask = Callable[[int], None]
 
@@ -80,7 +80,7 @@ class SchedulerRunner:
         )
         self.rng = rng or random.Random()
         self.timezone = get_scheduler_timezone(settings)
-        self.next_due_by_source_id: dict[int, datetime] = {}
+        self.next_due_by_session_id: dict[int, datetime] = {}
         self.logger = structlog.get_logger()
 
     def run_once(self, now: datetime | None = None) -> list[int]:
@@ -92,32 +92,32 @@ class SchedulerRunner:
             if not state.effective_enabled:
                 return []
 
-            sources = list_schedulable_sources(db)
-            source_ids = {source.id for source in sources}
-            self.next_due_by_source_id = {
-                source_id: due_at
-                for source_id, due_at in self.next_due_by_source_id.items()
-                if source_id in source_ids
+            sessions = list_schedulable_sessions(db)
+            session_ids = {session.id for session in sessions}
+            self.next_due_by_session_id = {
+                session_id: due_at
+                for session_id, due_at in self.next_due_by_session_id.items()
+                if session_id in session_ids
             }
 
             submitted: list[int] = []
-            due_sources = []
-            for source in sources:
-                due_at = self.next_due_by_source_id.setdefault(source.id, current_time)
-                config = source_config(source)
+            due_sessions = []
+            for session in sessions:
+                due_at = self.next_due_by_session_id.setdefault(session.id, current_time)
+                config = session_config(session)
                 if due_at <= current_time:
                     if not is_within_allowed_windows(current_time, config.allowed_windows, self.timezone):
-                        self.next_due_by_source_id[source.id] = next_run_after(current_time, config, self.rng, self.timezone)
+                        self.next_due_by_session_id[session.id] = next_run_after(current_time, config, self.rng, self.timezone)
                         continue
-                    due_sources.append((due_at, source.id, config))
+                    due_sessions.append((due_at, session.id, config))
 
-            for _, source_id, config in sorted(due_sources, key=lambda entry: (entry[0], entry[1])):
+            for _, session_id, config in sorted(due_sessions, key=lambda entry: (entry[0], entry[1])):
                 if self.executor.available_slots <= 0:
                     break
-                if not self.executor.submit(source_id, self._run_source):
+                if not self.executor.submit(session_id, self._run_session):
                     continue
-                self.next_due_by_source_id[source_id] = next_run_after(current_time, config, self.rng, self.timezone)
-                submitted.append(source_id)
+                self.next_due_by_session_id[session_id] = next_run_after(current_time, config, self.rng, self.timezone)
+                submitted.append(session_id)
 
             return submitted
 
@@ -126,18 +126,17 @@ class SchedulerRunner:
             try:
                 submitted = self.run_once()
                 if submitted:
-                    self.logger.info("scheduler_submitted_runs", source_ids=submitted)
+                    self.logger.info("scheduler_submitted_runs", session_ids=submitted)
             except Exception as exc:
                 self.logger.error("scheduler_loop_error", error=str(exc))
             time.sleep(max(self.settings.scheduler_poll_interval_seconds, 1))
 
-    def _run_source(self, source_id: int) -> None:
+    def _run_session(self, session_id: int) -> None:
         with SessionLocal() as db:
-            provider = HttpVintedCatalogProvider()
-            run = execute_source_run(db, source_id, provider=provider, trigger=SCHEDULER_TRIGGER)
+            run = run_monitor_session(db, session_id, trigger=SCHEDULER_TRIGGER)
             self.logger.info(
                 "scheduler_run_finished",
-                source_id=source_id,
+                session_id=session_id,
                 run_id=run.id,
                 status=run.status,
                 items_found=run.items_found,

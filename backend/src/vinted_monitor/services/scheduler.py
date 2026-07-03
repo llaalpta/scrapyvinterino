@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings
-from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 
 SCHEDULER_SETTING_KEY = "scheduler"
 DEFAULT_INTERVAL_SECONDS = 300
@@ -108,8 +108,27 @@ def list_schedulable_sources(db: Session) -> list[SearchSource]:
     return list(db.scalars(select(SearchSource).where(SearchSource.is_active.is_(True)).order_by(SearchSource.id.asc())))
 
 
+def list_schedulable_sessions(db: Session) -> list[MonitorSession]:
+    statement = (
+        select(MonitorSession)
+        .join(SearchSource, SearchSource.id == MonitorSession.source_id)
+        .where(MonitorSession.status == "active", SearchSource.is_active.is_(True))
+        .order_by(MonitorSession.id.asc())
+    )
+    return list(db.scalars(statement))
+
+
 def source_config(source: SearchSource) -> SourceSchedulerConfig:
     normalized = normalize_scheduler_config(source.scheduler_config)
+    return SourceSchedulerConfig(
+        interval_seconds=normalized["interval_seconds"],
+        jitter_percent=normalized["jitter_percent"],
+        allowed_windows=tuple(normalized["allowed_windows"]),
+    )
+
+
+def session_config(session: MonitorSession) -> SourceSchedulerConfig:
+    normalized = normalize_scheduler_config(session.cadence_snapshot)
     return SourceSchedulerConfig(
         interval_seconds=normalized["interval_seconds"],
         jitter_percent=normalized["jitter_percent"],

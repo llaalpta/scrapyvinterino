@@ -156,14 +156,36 @@
   }
 
   .source-row,
+  .source-card-header,
   .source-schedule,
-  .settings-grid {
+  .settings-grid,
+  .proxy-form,
+  .opportunity-row {
     grid-template-columns: 1fr;
     align-items: start;
   }
 
+  .source-card-header,
+  .monitor-card-header {
+    flex-direction: column;
+  }
+
+  .source-actions,
+  .source-badges,
+  .proxy-row,
+  .filter-rule-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .source-actions button,
+  .proxy-row button {
+    width: 100%;
+  }
+
   .run-row,
-  .run-row dl {
+  .run-row dl,
+  .monitor-card dl {
     grid-template-columns: 1fr;
   }
 

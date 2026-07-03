@@ -6,20 +6,29 @@ from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text
-from vinted_monitor.db.models import ErrorLog, Item, Run, SearchSource, SourceSeenItem
+from vinted_monitor.db.models import ErrorLog, Item, MonitorSession, Opportunity, Run, SearchSource, SessionItemState, SourceSeenItem
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
+from vinted_monitor.services.filters import evaluate_exclusion_filters
 from vinted_monitor.services.items import apply_item_detail, get_items_by_vinted_ids, persist_catalog_items, record_item_detail_error
+from vinted_monitor.services.run_events import record_run_event
 
 RUNNING = "running"
 SUCCESS = "success"
 FAILED = "failed"
 MANUAL_TRIGGER = "manual"
 SCHEDULER_TRIGGER = "scheduler"
+SESSION_STATUS_ACTIVE = "active"
+SESSION_ITEM_PASSED = "passed"
+SESSION_ITEM_DISCARDED = "discarded"
+SESSION_ITEM_PASSED_WITHOUT_FILTERS = "passed_without_filters"
+SESSION_ITEM_PASSED_WITHOUT_DETAIL = "passed_without_detail"
+SESSION_ITEM_DETAIL_ERROR = "detail_error"
 SOURCE_SEEN_ID_CACHE_LIMIT = 10_000
 GLOBAL_KNOWN_ID_CACHE_LIMIT = 50_000
 # These caches are hints only. Database writes remain the source of truth for
@@ -45,6 +54,14 @@ class SearchSourceInactiveError(ValueError):
     pass
 
 
+class RunAlreadyActiveError(ValueError):
+    pass
+
+
+class MonitorSessionRunError(ValueError):
+    pass
+
+
 def execute_manual_run(
     db: Session,
     source_id: int,
@@ -53,33 +70,86 @@ def execute_manual_run(
     return execute_source_run(db, source_id, provider=provider, trigger=MANUAL_TRIGGER)
 
 
+def execute_session_run(
+    db: Session,
+    session_id: int,
+    provider: ManualRunProvider | None = None,
+    trigger: str = MANUAL_TRIGGER,
+) -> Run:
+    session = db.get(MonitorSession, session_id)
+    if session is None:
+        raise MonitorSessionRunError(f"Monitor session {session_id} does not exist")
+    if session.status != SESSION_STATUS_ACTIVE:
+        raise MonitorSessionRunError(f"Monitor session {session_id} is not active")
+    return execute_source_run(db, session.source_id, provider=provider, trigger=trigger, session=session)
+
+
 def execute_source_run(
     db: Session,
     source_id: int,
     provider: ManualRunProvider | None = None,
     trigger: str = MANUAL_TRIGGER,
+    session: MonitorSession | None = None,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if not source.is_active:
         raise SearchSourceInactiveError(f"Search source {source_id} is inactive")
+    if session is not None and _active_run_exists(db, session_id=session.id):
+        raise RunAlreadyActiveError(f"Monitor session {session.id} already has a running run")
 
     run = Run(
         source_id=source.id,
+        session_id=session.id if session else None,
         status=RUNNING,
         trigger=trigger,
         items_found=0,
         items_new=0,
+        items_filter_passed=0,
+        items_discarded_by_filters=0,
+        items_filter_pending=0,
         opportunities_created=0,
+        runtime_metadata=_run_runtime_metadata(session),
     )
     db.add(run)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if session is not None:
+            raise RunAlreadyActiveError(f"Monitor session {session.id} already has a running run") from exc
+        raise
     db.refresh(run)
 
     run_provider = provider or HttpVintedCatalogProvider()
+    record_run_event(
+        db,
+        run_id=run.id,
+        session_id=session.id if session else None,
+        source_id=source.id,
+        phase="catalog_search_start",
+        method="GET",
+        url=source.url,
+        proxy_profile_id=session.proxy_profile_id if session else None,
+        user_agent=get_settings().vinted_user_agent,
+        auth_mode="public_anonymous",
+    )
     try:
         result = run_provider.search(source)
+        record_run_event(
+            db,
+            run_id=run.id,
+            session_id=session.id if session else None,
+            source_id=source.id,
+            phase="catalog_search_success",
+            method="GET",
+            url=source.url,
+            proxy_profile_id=session.proxy_profile_id if session else None,
+            user_agent=get_settings().vinted_user_agent,
+            auth_mode="public_anonymous",
+            details={"provider": result.provider_metadata},
+        )
     except Exception as exc:
         return _record_failed_run(db, run, source, exc)
 
@@ -107,13 +177,28 @@ def execute_source_run(
             candidate for candidate in unique_candidates if candidate.vinted_item_id in inserted_vinted_item_ids
         ]
         _track_source_seen_items(db, source.id, run.id, unique_candidates, item_ids_by_vinted_id)
-        _fetch_and_persist_details(db, run_provider, source, run, global_new_candidates, items_by_vinted_id)
+        session_result = _evaluate_session_candidates(
+            db,
+            run_provider,
+            source,
+            run,
+            session,
+            unique_candidates,
+        ) if session is not None else None
+        if session is None:
+            _fetch_and_persist_details(db, run_provider, source, run, global_new_candidates, items_by_vinted_id)
 
         run.status = SUCCESS
         run.finished_at = datetime.now(UTC)
         run.items_found = persistence_result.found_count
         run.items_new = persistence_result.inserted_count
-        run.opportunities_created = 0
+        if session_result is not None:
+            run.items_filter_passed = session_result["passed"]
+            run.items_discarded_by_filters = session_result["discarded"]
+            run.items_filter_pending = session_result["pending"]
+            run.opportunities_created = session_result["opportunities_created"]
+        else:
+            run.opportunities_created = 0
         run.error_message = None
         db.commit()
         committed_item_ids_by_vinted_id = {
@@ -138,8 +223,42 @@ def list_runs(db: Session, limit: int = 50) -> list[Run]:
     return list(db.scalars(statement))
 
 
+def _active_run_exists(db: Session, *, session_id: int) -> bool:
+    return (
+        db.scalar(
+            select(Run.id)
+            .where(Run.session_id == session_id, Run.status == RUNNING, Run.finished_at.is_(None))
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _run_runtime_metadata(session: MonitorSession | None) -> dict:
+    if session is None:
+        return {"auth_mode": "public_anonymous"}
+    return {
+        "session_id": session.id,
+        "filter_hash": session.filter_hash,
+        "filter_count": len(session.filter_snapshot or []),
+        "proxy_profile_id": session.proxy_profile_id,
+        "auth_mode": "public_anonymous",
+    }
+
+
 def _record_failed_run(db: Session, run: Run, source: SearchSource, exc: Exception) -> Run:
     message = redact_sensitive_text(str(exc))
+    record_run_event(
+        db,
+        run_id=run.id,
+        session_id=run.session_id,
+        source_id=source.id,
+        phase="run_failed",
+        message=message,
+        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        user_agent=get_settings().vinted_user_agent,
+        auth_mode="public_anonymous",
+    )
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
     run.error_message = message
@@ -155,6 +274,162 @@ def _record_failed_run(db: Session, run: Run, source: SearchSource, exc: Excepti
     db.commit()
     db.refresh(run)
     return run
+
+
+def _evaluate_session_candidates(
+    db: Session,
+    provider: ManualRunProvider,
+    source: SearchSource,
+    run: Run,
+    session: MonitorSession,
+    candidates: list[CatalogItemCandidate],
+) -> dict[str, int]:
+    if not candidates:
+        return {"passed": 0, "discarded": 0, "pending": 0, "opportunities_created": 0}
+
+    items_by_vinted_id = get_items_by_vinted_ids(db, [candidate.vinted_item_id for candidate in candidates])
+    item_ids = [item.id for item in items_by_vinted_id.values()]
+    existing_states = {
+        state.item_id: state
+        for state in db.scalars(
+            select(SessionItemState).where(
+                SessionItemState.session_id == session.id,
+                SessionItemState.item_id.in_(item_ids),
+                SessionItemState.filter_hash == session.filter_hash,
+            )
+        )
+    } if item_ids else {}
+
+    passed = 0
+    discarded = 0
+    pending = 0
+    opportunities_created = 0
+    provider_settings = getattr(provider, "settings", get_settings())
+    max_detail_candidates = max(provider_settings.vinted_detail_max_candidates_per_run, 0)
+    detail_attempts = 0
+
+    for candidate in candidates:
+        item = items_by_vinted_id.get(candidate.vinted_item_id)
+        if item is None or item.id in existing_states:
+            continue
+
+        evaluation_status = SESSION_ITEM_PASSED
+        matched_terms: list[str] = []
+        filters = session.filter_snapshot or []
+        if not filters:
+            evaluation_status = SESSION_ITEM_PASSED_WITHOUT_FILTERS
+        else:
+            if item.detail_last_fetched_at is None and detail_attempts < max_detail_candidates:
+                detail_attempts += 1
+                try:
+                    detail = provider.fetch_detail(candidate)
+                    apply_item_detail(db, item, detail)
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        session_id=session.id,
+                        source_id=source.id,
+                        phase="detail_fetch_success",
+                        method="GET",
+                        url=candidate.url,
+                        proxy_profile_id=session.proxy_profile_id,
+                        user_agent=get_settings().vinted_user_agent,
+                        auth_mode="public_anonymous",
+                    )
+                except Exception as exc:
+                    pending += 1
+                    evaluation_status = SESSION_ITEM_DETAIL_ERROR
+                    record_item_detail_error(db, item, str(exc))
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        session_id=session.id,
+                        source_id=source.id,
+                        phase="detail_fetch_error",
+                        method="GET",
+                        url=candidate.url,
+                        proxy_profile_id=session.proxy_profile_id,
+                        user_agent=get_settings().vinted_user_agent,
+                        auth_mode="public_anonymous",
+                        message=str(exc),
+                    )
+            elif item.detail_last_fetched_at is None:
+                pending += 1
+                evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
+
+            if evaluation_status == SESSION_ITEM_PASSED:
+                decision = evaluate_exclusion_filters(item, filters)
+                evaluation_status = decision.status
+                matched_terms = decision.matched_terms
+
+        if evaluation_status == SESSION_ITEM_DISCARDED:
+            discarded += 1
+            _record_session_item_state(db, session, item, evaluation_status, None)
+            record_run_event(
+                db,
+                run_id=run.id,
+                session_id=session.id,
+                source_id=source.id,
+                phase="item_discarded",
+                url=item.url,
+                proxy_profile_id=session.proxy_profile_id,
+                message=f"Matched blacklist terms: {', '.join(matched_terms)}",
+            )
+            continue
+
+        opportunity, created = _get_or_create_session_opportunity(db, session, source, item, evaluation_status)
+        opportunities_created += 1 if created else 0
+        passed += 1
+        _record_session_item_state(db, session, item, evaluation_status, opportunity.id)
+
+    return {
+        "passed": passed,
+        "discarded": discarded,
+        "pending": pending,
+        "opportunities_created": opportunities_created,
+    }
+
+
+def _get_or_create_session_opportunity(
+    db: Session,
+    session: MonitorSession,
+    source: SearchSource,
+    item: Item,
+    evaluation_status: str,
+) -> tuple[Opportunity, bool]:
+    existing = db.scalar(select(Opportunity).where(Opportunity.session_id == session.id, Opportunity.item_id == item.id))
+    if existing is not None:
+        return existing, False
+    opportunity = Opportunity(
+        source_id=source.id,
+        session_id=session.id,
+        item_id=item.id,
+        rule_id=None,
+        status="new",
+        evaluation_status=evaluation_status,
+        filter_snapshot=session.filter_snapshot or [],
+    )
+    db.add(opportunity)
+    db.flush()
+    return opportunity, True
+
+
+def _record_session_item_state(
+    db: Session,
+    session: MonitorSession,
+    item: Item,
+    status: str,
+    opportunity_id: int | None,
+) -> None:
+    state = SessionItemState(
+        session_id=session.id,
+        item_id=item.id,
+        filter_hash=session.filter_hash,
+        status=status,
+        opportunity_id=opportunity_id,
+    )
+    db.add(state)
+    db.flush()
 
 
 def _deduplicate_candidates(candidates: list[CatalogItemCandidate]) -> list[CatalogItemCandidate]:

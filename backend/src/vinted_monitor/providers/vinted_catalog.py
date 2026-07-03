@@ -25,9 +25,15 @@ class VintedCatalogSessionError(VintedCatalogProviderError):
 
 
 class HttpVintedCatalogProvider:
-    def __init__(self, settings: Settings | None = None, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        transport: httpx.BaseTransport | None = None,
+        proxy_url: str | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
         self.transport = transport
+        self.proxy_url = proxy_url
         self._cookies = httpx.Cookies()
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
@@ -88,7 +94,7 @@ class HttpVintedCatalogProvider:
         self._cookies = client.cookies
 
     def _client(self, headers: dict[str, str]) -> httpx.Client:
-        proxies = self.settings.vinted_proxy_url if self.settings.vinted_proxy_enabled else None
+        proxies = self.proxy_url or (self.settings.vinted_proxy_url if self.settings.vinted_proxy_enabled else None)
         timeout = self.settings.vinted_request_timeout_ms / 1000
         return httpx.Client(
             follow_redirects=True,
