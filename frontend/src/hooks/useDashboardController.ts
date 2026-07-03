@@ -3,6 +3,7 @@ import {
   createFilterRule,
   createProxyProfile,
   createSource,
+  deleteSource,
   fetchFilterRules,
   fetchItems,
   fetchMonitorSessions,
@@ -221,18 +222,39 @@ export function useDashboardController() {
   }
 
   async function onStartSession(source: SearchSource) {
+    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    const durationMinutes = Number(draft.sessionDurationMinutes);
+    if (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440) {
+      setError('La duracion de la sesion debe estar entre 1 y 1440 minutos');
+      return;
+    }
     setError(null);
     try {
       const proxyValue = selectedProxyBySource[source.id];
       const created = await startMonitorSession({
         source_id: source.id,
         filter_rule_ids: selectedFilterIdsBySource[source.id] ?? [],
-        proxy_profile_id: proxyValue ? Number(proxyValue) : null
+        proxy_profile_id: proxyValue ? Number(proxyValue) : null,
+        duration_minutes: durationMinutes
       });
-      setMonitorSessions((current) => [created, ...current]);
+      setMonitorSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
+      setRunningSessionId(created.id);
+      const run = await runMonitorSession(created.id);
+      const [itemData, opportunityData, runData, sessionData] = await Promise.all([
+        fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)),
+        fetchOpportunities(),
+        fetchRuns(),
+        fetchMonitorSessions()
+      ]);
+      setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
+      setItemPage(itemData);
+      setOpportunityPage(opportunityData);
+      setMonitorSessions(sessionData);
       setActiveSection('runs');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar la sesion');
+    } finally {
+      setRunningSessionId(null);
     }
   }
 
@@ -274,8 +296,42 @@ export function useDashboardController() {
     }
   }
 
+  async function onDeleteSource(source: SearchSource) {
+    setError(null);
+    setSavingSourceId(source.id);
+    try {
+      await deleteSource(source.id);
+      setSources((current) => current.filter((entry) => entry.id !== source.id));
+      setSourceDrafts((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      setSelectedFilterIdsBySource((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      setSelectedProxyBySource((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      await refreshRuntime();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo eliminar la fuente');
+    } finally {
+      setSavingSourceId(null);
+    }
+  }
+
   async function onSaveSourceSchedule(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    const allowedWindows = buildAllowedWindows(draft);
+    if (allowedWindows === null) {
+      setError('Configura hora de inicio y hora de fin, o deja ambas vacias');
+      return;
+    }
     setError(null);
     setSavingSourceId(source.id);
     try {
@@ -283,14 +339,17 @@ export function useDashboardController() {
         scheduler_config: {
           interval_seconds: Number(draft.intervalSeconds),
           jitter_percent: Number(draft.jitterPercent),
-          allowed_windows: draft.allowedWindows
-            .split(',')
-            .map((entry) => entry.trim())
-            .filter(Boolean)
+          allowed_windows: allowedWindows
         }
       });
       replaceSource(updated);
-      setSourceDrafts((current) => ({ ...current, [updated.id]: buildSourceDraft(updated) }));
+      setSourceDrafts((current) => ({
+        ...current,
+        [updated.id]: {
+          ...buildSourceDraft(updated),
+          sessionDurationMinutes: (current[updated.id] ?? draft).sessionDurationMinutes
+        }
+      }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo guardar la cadencia');
     } finally {
@@ -306,7 +365,7 @@ export function useDashboardController() {
     setSourceDrafts((current) => ({
       ...current,
       [sourceId]: {
-        ...(current[sourceId] ?? { intervalSeconds: '300', jitterPercent: '20', allowedWindows: '' }),
+        ...(current[sourceId] ?? { intervalSeconds: '300', jitterPercent: '20', windowStart: '', windowEnd: '', sessionDurationMinutes: '60' }),
         [field]: value
       }
     }));
@@ -369,6 +428,7 @@ export function useDashboardController() {
     onCreateFilter,
     onCreateProxy,
     onCreateSource,
+    onDeleteSource,
     onLoadRunEvents: fetchRunEvents,
     onRunSession,
     onSaveSourceSchedule,
@@ -433,4 +493,16 @@ function sectionSubtitle(
     return 'Blacklists excluyentes para sesiones';
   }
   return `${itemTotal} resultados para la consulta actual`;
+}
+
+function buildAllowedWindows(draft: SourceDraft): string[] | null {
+  const start = draft.windowStart.trim();
+  const end = draft.windowEnd.trim();
+  if (!start && !end) {
+    return [];
+  }
+  if (!start || !end) {
+    return null;
+  }
+  return [`${start}-${end}`];
 }

@@ -9,9 +9,10 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 - Enable or disable scheduler globally.
 - Enable or disable each source.
 - Start and stop monitor sessions for a source, filter snapshot, cadence snapshot, and optional proxy profile.
+- Start a monitor session for a bounded duration from now, with `auto_stop_at` stored on the session.
 - Configure interval seconds per source, default `300`, minimum `60`, maximum `3600`.
 - Add jitter/randomization between runs, default `20%`, minimum `0%`, maximum `50%`.
-- Support allowed execution windows.
+- Support one daily allowed execution window configured by start/end timepickers and stored as `HH:MM-HH:MM`.
 - Record scheduler-triggered errors in the same run/error model.
 - Run multiple active sessions concurrently with explicit limits.
 - Allow at most `2` active source runs globally by default.
@@ -52,7 +53,7 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-source concurrency limit, default `1`;
-- source interval seconds: default `300`, minimum `60`, maximum `3600`;
+  - source interval seconds: default `300`, minimum `60`, maximum `3600`;
   - source jitter percent: default `20`, minimum `0`, maximum `50`;
   - optional allowed windows as local `HH:MM-HH:MM` ranges;
   - scheduler timezone, default `Europe/Madrid`;
@@ -73,6 +74,10 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 - Scheduler can be disabled completely.
 - A source can be paused without deleting it.
 - Runs are not triggered outside configured local-time windows.
+- Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
+- A bounded session created for N minutes stores `auto_stop_at = now + N minutes`.
+- Launching a bounded session from the PWA creates the session and immediately executes one run.
+- Expired active sessions are stopped before manual run execution or scheduler planning.
 - Jitter prevents fixed exact polling intervals.
 - Scheduler failures are logged without stopping the worker.
 - Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.

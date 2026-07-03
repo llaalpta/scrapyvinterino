@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
+from vinted_monitor.services.sessions import expire_monitor_sessions
 
 SCHEDULER_SETTING_KEY = "scheduler"
 DEFAULT_INTERVAL_SECONDS = 300
@@ -105,14 +106,21 @@ def normalize_scheduler_config(value: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def list_schedulable_sources(db: Session) -> list[SearchSource]:
-    return list(db.scalars(select(SearchSource).where(SearchSource.is_active.is_(True)).order_by(SearchSource.id.asc())))
+    return list(
+        db.scalars(
+            select(SearchSource)
+            .where(SearchSource.is_active.is_(True), SearchSource.archived_at.is_(None))
+            .order_by(SearchSource.id.asc())
+        )
+    )
 
 
 def list_schedulable_sessions(db: Session) -> list[MonitorSession]:
+    expire_monitor_sessions(db)
     statement = (
         select(MonitorSession)
         .join(SearchSource, SearchSource.id == MonitorSession.source_id)
-        .where(MonitorSession.status == "active", SearchSource.is_active.is_(True))
+        .where(MonitorSession.status == "active", SearchSource.is_active.is_(True), SearchSource.archived_at.is_(None))
         .order_by(MonitorSession.id.asc())
     )
     return list(db.scalars(statement))

@@ -7,6 +7,7 @@ export type SearchSource = {
   normalized_query: Record<string, string[]>;
   is_active: boolean;
   scheduler_config: SourceSchedulerConfig;
+  archived_at: string | null;
 };
 
 export type FilterRule = {
@@ -50,6 +51,7 @@ export type MonitorSession = {
   runtime_metadata: Record<string, unknown>;
   started_at: string;
   stopped_at: string | null;
+  auto_stop_at: string | null;
 };
 
 export type SourceSchedulerConfig = {
@@ -257,6 +259,13 @@ export function updateSource(
   return patchJson<SearchSource>(`/api/sources/${sourceId}`, payload);
 }
 
+export async function deleteSource(sourceId: number): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/sources/${sourceId}`, { method: 'DELETE' });
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+}
+
 export function fetchScheduler(): Promise<SchedulerState> {
   return getJson<SchedulerState>('/api/scheduler');
 }
@@ -312,6 +321,7 @@ export function startMonitorSession(payload: {
   source_id: number;
   filter_rule_ids: number[];
   proxy_profile_id?: number | null;
+  duration_minutes?: number | null;
 }): Promise<MonitorSession> {
   return postJson<MonitorSession>('/api/monitor-sessions', payload);
 }

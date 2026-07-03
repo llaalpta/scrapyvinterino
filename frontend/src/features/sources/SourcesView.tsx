@@ -1,4 +1,4 @@
-import { Play, Power, Save, Square } from 'lucide-react';
+import { Play, Power, Save, Square, Trash2 } from 'lucide-react';
 import type { FormEvent } from 'react';
 import type { FilterRule, MonitorSession, ProxyProfile, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
@@ -8,6 +8,7 @@ export function SourcesView({
   filterRules,
   monitorSessions,
   onCreateSource,
+  onDeleteSource,
   onRunSession,
   onSaveSourceSchedule,
   onStartSession,
@@ -31,6 +32,7 @@ export function SourcesView({
   filterRules: FilterRule[];
   monitorSessions: MonitorSession[];
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
+  onDeleteSource: (source: SearchSource) => void;
   onRunSession: (sessionId: number) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
@@ -106,11 +108,19 @@ export function SourcesView({
                     />
                   </label>
                   <label>
-                    Ventanas
+                    Inicio
                     <input
-                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).allowedWindows}
-                      placeholder="09:00-23:00"
-                      onChange={(event) => updateSourceDraft(source.id, 'allowedWindows', event.target.value)}
+                      type="time"
+                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).windowStart}
+                      onChange={(event) => updateSourceDraft(source.id, 'windowStart', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Fin
+                    <input
+                      type="time"
+                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).windowEnd}
+                      onChange={(event) => updateSourceDraft(source.id, 'windowEnd', event.target.value)}
                     />
                   </label>
                   <label>
@@ -123,6 +133,16 @@ export function SourcesView({
                         </option>
                       ))}
                     </select>
+                  </label>
+                  <label>
+                    Duracion min
+                    <input
+                      type="number"
+                      min="1"
+                      max="1440"
+                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).sessionDurationMinutes}
+                      onChange={(event) => updateSourceDraft(source.id, 'sessionDurationMinutes', event.target.value)}
+                    />
                   </label>
                   <button type="button" disabled={savingSourceId === source.id} title="Guardar cadencia" onClick={() => onSaveSourceSchedule(source)}>
                     <Save size={16} />
@@ -150,6 +170,7 @@ export function SourcesView({
                 {activeSession ? (
                   <p className="source-session-line">
                     Sesion #{activeSession.id} desde {formatDate(activeSession.started_at)}
+                    {activeSession.auto_stop_at ? ` hasta ${formatDate(activeSession.auto_stop_at)}` : ''}
                     {activeSession.proxy_name ? ` - ${activeSession.proxy_name}` : ''}
                   </p>
                 ) : null}
@@ -175,6 +196,19 @@ export function SourcesView({
                   <button type="button" disabled={savingSourceId === source.id} onClick={() => onToggleSource(source)}>
                     <Power size={16} />
                     {source.is_active ? 'Pausar fuente' : 'Activar fuente'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingSourceId === source.id}
+                    title="Eliminar fuente"
+                    onClick={() => {
+                      if (window.confirm(`Eliminar la fuente "${source.name}"? Se conservara el historico.`)) {
+                        onDeleteSource(source);
+                      }
+                    }}
+                  >
+                    <Trash2 size={16} />
+                    Eliminar fuente
                   </button>
                 </div>
               </article>

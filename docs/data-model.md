@@ -3,10 +3,10 @@
 Tablas principales:
 
 - `users`: acceso local.
-- `search_sources`: URLs de busqueda y configuracion base.
+- `search_sources`: URLs de busqueda y configuracion base; `archived_at` oculta una fuente sin borrar historico.
 - `app_settings`: configuracion global mutable desde la PWA, como el estado UI del scheduler.
 - `filter_rules`: filtros excluyentes nombrados que se snapshottean al lanzar sesiones.
-- `monitor_sessions`: contexto operativo de una fuente, filtros, cadencia, proxy y metadatos runtime.
+- `monitor_sessions`: contexto operativo de una fuente, filtros, cadencia, proxy, `auto_stop_at` opcional y metadatos runtime.
 - `session_item_state`: estado minimo de cada item evaluado por una sesion para no repetir detalle/filtros.
 - `runs`: ejecuciones de fuente o sesion, con `trigger`, contadores de filtrado y metadatos runtime.
 - `items`: articulos normalizados de Vinted; `vinted_item_id` define identidad global y si un item ya fue detectado.

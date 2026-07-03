@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -74,6 +74,7 @@ from vinted_monitor.services.search_sources import (
     SearchSourceNotFoundError as SourceUpdateNotFoundError,
 )
 from vinted_monitor.services.search_sources import (
+    archive_source,
     create_source,
     list_sources,
     update_source,
@@ -134,6 +135,15 @@ def patch_source(source_id: int, payload: SearchSourceUpdate, db: Session = Depe
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/sources/{source_id}", status_code=204)
+def delete_source(source_id: int, db: Session = Depends(get_db)) -> Response:
+    try:
+        archive_source(db, source_id)
+    except SourceUpdateNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 @app.get("/api/scheduler", response_model=SchedulerStateRead)
@@ -254,6 +264,7 @@ def post_monitor_session(payload: MonitorSessionCreate, db: Session = Depends(ge
             source_id=payload.source_id,
             filter_rule_ids=payload.filter_rule_ids,
             proxy_profile_id=payload.proxy_profile_id,
+            duration_minutes=payload.duration_minutes,
         )
     except (MonitorSessionSourceError, FilterRuleNotFoundError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from vinted_monitor.api.main import app
 from vinted_monitor.api.schemas import SearchSourceCreate
-from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
 from vinted_monitor.services.search_sources import (
@@ -184,6 +184,83 @@ def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -
             if source is not None:
                 db.delete(source)
                 db.commit()
+
+
+def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/sources",
+        json={"name": "pytest archived source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.delete(f"/api/sources/{source_id}")
+        assert response.status_code == 204
+
+        second_response = client.delete(f"/api/sources/{source_id}")
+        assert second_response.status_code == 204
+
+        list_response = client.get("/api/sources")
+        assert list_response.status_code == 200
+        assert all(source["id"] != source_id for source in list_response.json())
+
+        patch_response = client.patch(f"/api/sources/{source_id}", json={"is_active": True})
+        assert patch_response.status_code == 404
+
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+            assert source.archived_at is not None
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+def test_delete_source_api_stops_active_monitor_session() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/sources",
+        json={"name": "pytest archived session source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+    with SessionLocal() as db:
+        session = MonitorSession(
+            source_id=source_id,
+            status="active",
+            filter_snapshot=[],
+            filter_hash="pytest-filter-hash",
+            cadence_snapshot={},
+            runtime_metadata={},
+        )
+        db.add(session)
+        db.commit()
+        session_id = session.id
+
+    try:
+        response = client.delete(f"/api/sources/{source_id}")
+        assert response.status_code == 204
+
+        with SessionLocal() as db:
+            session = db.get(MonitorSession, session_id)
+            assert session is not None
+            assert session.status == "stopped"
+            assert session.stopped_at is not None
+    finally:
+        with SessionLocal() as db:
+            session = db.get(MonitorSession, session_id)
+            if session is not None:
+                db.delete(session)
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            db.commit()
 
 
 def test_scheduler_api_updates_persisted_ui_gate() -> None:

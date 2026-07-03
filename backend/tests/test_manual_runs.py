@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -35,7 +36,7 @@ from vinted_monitor.services.runs import (
     execute_source_run,
     list_runs,
 )
-from vinted_monitor.services.sessions import start_monitor_session
+from vinted_monitor.services.sessions import MonitorSessionConflictError, run_monitor_session, start_monitor_session
 
 
 class FakeSuccessProvider:
@@ -359,6 +360,33 @@ def test_session_run_creates_opportunities_without_filters_and_skips_reprocessin
         assert len(opportunities) == 2
         assert {opportunity.evaluation_status for opportunity in opportunities} == {"passed_without_filters"}
         assert len(states) == 2
+
+
+def test_start_monitor_session_persists_auto_stop_at_from_duration(source_id: int) -> None:
+    now = datetime.now(UTC)
+
+    with SessionLocal() as db:
+        session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[], duration_minutes=5)
+
+        assert session.auto_stop_at is not None
+        assert now + timedelta(minutes=4, seconds=55) <= session.auto_stop_at <= now + timedelta(minutes=5, seconds=5)
+        assert session.runtime_metadata["duration_minutes"] == 5
+
+
+def test_run_monitor_session_stops_expired_timed_session_without_running(source_id: int) -> None:
+    with SessionLocal() as db:
+        session = start_monitor_session(db, source_id=source_id, filter_rule_ids=[], duration_minutes=1)
+        session.auto_stop_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+        session_id = session.id
+
+        with pytest.raises(MonitorSessionConflictError, match="is not active"):
+            run_monitor_session(db, session_id, provider=FakeSuccessProvider(item_count=1))
+
+        stopped = db.get(MonitorSession, session_id)
+        assert stopped is not None
+        assert stopped.status == "stopped"
+        assert stopped.stopped_at is not None
 
 
 def test_known_global_item_can_create_opportunity_in_different_session(source_id: int) -> None:

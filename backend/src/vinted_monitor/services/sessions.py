@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +16,7 @@ from vinted_monitor.services.runs import ManualRunProvider, execute_session_run
 
 ACTIVE_SESSION = "active"
 STOPPED_SESSION = "stopped"
+MAX_DURATION_MINUTES = 1440
 
 
 class MonitorSessionNotFoundError(ValueError):
@@ -38,6 +39,7 @@ class MonitorSessionResult:
 
 
 def list_monitor_sessions(db: Session) -> list[MonitorSessionResult]:
+    expire_monitor_sessions(db)
     rows = db.execute(
         select(MonitorSession, SearchSource.name.label("source_name"), ProxyProfile.name.label("proxy_name"))
         .join(SearchSource, SearchSource.id == MonitorSession.source_id)
@@ -53,10 +55,14 @@ def start_monitor_session(
     source_id: int,
     filter_rule_ids: list[int],
     proxy_profile_id: int | None = None,
+    duration_minutes: int | None = None,
 ) -> MonitorSession:
+    expire_monitor_sessions(db)
     source = db.get(SearchSource, source_id)
     if source is None:
         raise MonitorSessionSourceError(f"Search source {source_id} does not exist")
+    if source.archived_at is not None:
+        raise MonitorSessionSourceError(f"Search source {source_id} is archived")
     if not source.is_active:
         raise MonitorSessionSourceError(f"Search source {source_id} is paused")
     existing_active = db.scalar(
@@ -69,8 +75,11 @@ def start_monitor_session(
         raise MonitorSessionSourceError(f"Proxy profile {proxy_profile_id} does not exist")
     if proxy is not None and not proxy.is_active:
         raise MonitorSessionSourceError(f"Proxy profile {proxy_profile_id} is inactive")
+    if duration_minutes is not None and (duration_minutes < 1 or duration_minutes > MAX_DURATION_MINUTES):
+        raise MonitorSessionSourceError(f"duration_minutes must be between 1 and {MAX_DURATION_MINUTES}")
 
     snapshot = get_filter_snapshot(db, filter_rule_ids)
+    now = datetime.now(UTC)
     session = MonitorSession(
         source_id=source.id,
         proxy_profile_id=proxy_profile_id,
@@ -81,7 +90,9 @@ def start_monitor_session(
         runtime_metadata={
             "auth_mode": "public_anonymous",
             "proxy_profile_id": proxy_profile_id,
+            "duration_minutes": duration_minutes,
         },
+        auto_stop_at=now + timedelta(minutes=duration_minutes) if duration_minutes is not None else None,
     )
     db.add(session)
     try:
@@ -104,6 +115,26 @@ def stop_monitor_session(db: Session, session_id: int) -> MonitorSession:
     return session
 
 
+def expire_monitor_sessions(db: Session, now: datetime | None = None) -> int:
+    current_time = now or datetime.now(UTC)
+    expired_sessions = list(
+        db.scalars(
+            select(MonitorSession).where(
+                MonitorSession.status == ACTIVE_SESSION,
+                MonitorSession.auto_stop_at.is_not(None),
+                MonitorSession.auto_stop_at <= current_time,
+            )
+        )
+    )
+    if not expired_sessions:
+        return 0
+    for session in expired_sessions:
+        session.status = STOPPED_SESSION
+        session.stopped_at = current_time
+    db.commit()
+    return len(expired_sessions)
+
+
 def run_monitor_session(
     db: Session,
     session_id: int,
@@ -113,6 +144,7 @@ def run_monitor_session(
     trigger: str = "manual",
 ):
     settings = settings or get_settings()
+    expire_monitor_sessions(db)
     session = db.get(MonitorSession, session_id)
     if session is None:
         raise MonitorSessionNotFoundError(f"Monitor session {session_id} does not exist")

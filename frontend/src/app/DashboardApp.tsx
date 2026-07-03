@@ -52,6 +52,7 @@ export function DashboardApp() {
           filterRules={dashboard.filterRules}
           monitorSessions={dashboard.monitorSessions}
           onCreateSource={dashboard.onCreateSource}
+          onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
           onRunSession={(sessionId) => void dashboard.onRunSession(sessionId)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}

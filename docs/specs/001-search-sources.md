@@ -11,6 +11,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Store a normalized representation of query parameters.
 - Keep sources active by default.
 - Validate that the URL is an anonymous public Vinted catalog URL before saving it.
+- Archive sources from the PWA as the safe delete behavior while preserving historical runs, seen items, sessions, and opportunities.
 
 ## Out of Scope
 
@@ -24,9 +25,11 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - API:
   - `GET /api/sources`
   - `POST /api/sources`
+  - `DELETE /api/sources/{source_id}`
 - PWA:
   - source creation form;
-  - source count and visible source list.
+  - source count and visible source list;
+  - archive/delete action with confirmation.
 - Database:
   - `search_sources`.
 
@@ -43,6 +46,9 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 
 - A valid Vinted catalog URL can be saved with a name.
 - Saved sources are visible after refresh.
+- Archived sources are hidden from the default source list and cannot be scheduled or launched.
+- Archiving a source pauses it and stops any active monitor session for that source.
+- Archiving a source preserves historical rows for audit and result traceability.
 - The original URL is preserved unchanged except for surrounding whitespace trimming.
 - Query parameters are stored in normalized JSON.
 - Invalid URL input is rejected by the API.
@@ -58,6 +64,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
   - valid source form submission creates a visible source;
   - invalid source form submission shows an error and does not persist.
 - Confirm `search_sources` row includes `url` and `normalized_query`.
+- Confirm archived sources keep historical runs and disappear from the default PWA source list.
 
 ## Audit
 

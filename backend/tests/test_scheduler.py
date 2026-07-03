@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import sleep
 from zoneinfo import ZoneInfo
@@ -15,6 +15,7 @@ from vinted_monitor.services.scheduler import (
     SourceSchedulerConfig,
     get_scheduler_state,
     is_within_allowed_windows,
+    list_schedulable_sessions,
     next_run_after,
     normalize_scheduler_config,
     update_scheduler_enabled,
@@ -179,6 +180,55 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
             setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
             if setting is not None:
                 db.delete(setting)
+            db.commit()
+
+
+def test_schedulable_sessions_expires_timed_session_before_scheduling() -> None:
+    source_id: int | None = None
+    session_id: int | None = None
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest expired timed scheduler source",
+            url="https://www.vinted.es/catalog?search_text=",
+            normalized_query={"search_text": [""]},
+            is_active=True,
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+        session = MonitorSession(
+            source_id=source_id,
+            status="active",
+            filter_snapshot=[],
+            filter_hash="pytest-filter-hash",
+            cadence_snapshot={},
+            runtime_metadata={},
+            auto_stop_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        db.add(session)
+        db.commit()
+        session_id = session.id
+
+    try:
+        with SessionLocal() as db:
+            sessions = list_schedulable_sessions(db)
+            stopped = db.get(MonitorSession, session_id)
+
+            assert all(entry.id != session_id for entry in sessions)
+            assert stopped is not None
+            assert stopped.status == "stopped"
+            assert stopped.stopped_at is not None
+    finally:
+        with SessionLocal() as db:
+            if session_id is not None:
+                session = db.get(MonitorSession, session_id)
+                if session is not None:
+                    db.delete(session)
+            if source_id is not None:
+                source = db.get(SearchSource, source_id)
+                if source is not None:
+                    db.delete(source)
             db.commit()
 
 

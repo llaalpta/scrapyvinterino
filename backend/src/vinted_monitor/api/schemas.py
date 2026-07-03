@@ -32,6 +32,7 @@ class SearchSourceRead(BaseModel):
     normalized_query: dict[str, Any]
     is_active: bool
     scheduler_config: dict[str, Any]
+    archived_at: datetime | None
 
 
 class SearchSourceUpdate(BaseModel):
@@ -132,6 +133,7 @@ class MonitorSessionCreate(BaseModel):
     source_id: int = Field(ge=1)
     filter_rule_ids: list[int] = Field(default_factory=list)
     proxy_profile_id: int | None = Field(default=None, ge=1)
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
 
 
 class MonitorSessionRead(BaseModel):
@@ -149,6 +151,7 @@ class MonitorSessionRead(BaseModel):
     runtime_metadata: dict[str, Any]
     started_at: datetime
     stopped_at: datetime | None
+    auto_stop_at: datetime | None
 
 
 class ItemRead(BaseModel):

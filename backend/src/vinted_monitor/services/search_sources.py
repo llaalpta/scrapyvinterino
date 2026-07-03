@@ -1,9 +1,10 @@
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.db.models import SearchSource
+from vinted_monitor.db.models import MonitorSession, SearchSource
 from vinted_monitor.services.scheduler import normalize_scheduler_config
 
 ALLOWED_VINTED_CATALOG_HOSTS = {"www.vinted.es", "vinted.es"}
@@ -61,7 +62,7 @@ def create_source(db: Session, name: str, url: str) -> SearchSource:
 
 
 def list_sources(db: Session) -> list[SearchSource]:
-    return list(db.scalars(select(SearchSource).order_by(SearchSource.id.desc())))
+    return list(db.scalars(select(SearchSource).where(SearchSource.archived_at.is_(None)).order_by(SearchSource.id.desc())))
 
 
 def update_source(
@@ -74,6 +75,8 @@ def update_source(
     source = db.get(SearchSource, source_id)
     if source is None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
 
     if is_active is not None:
         source.is_active = is_active
@@ -83,3 +86,22 @@ def update_source(
     db.commit()
     db.refresh(source)
     return source
+
+
+def archive_source(db: Session, source_id: int) -> None:
+    source = db.get(SearchSource, source_id)
+    if source is None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.archived_at is not None:
+        return
+
+    now = datetime.now(UTC)
+    source.is_active = False
+    source.archived_at = now
+    active_sessions = db.scalars(
+        select(MonitorSession).where(MonitorSession.source_id == source_id, MonitorSession.status == "active")
+    )
+    for session in active_sessions:
+        session.status = "stopped"
+        session.stopped_at = now
+    db.commit()

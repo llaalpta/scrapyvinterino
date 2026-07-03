@@ -36,6 +36,7 @@ class SearchSource(Base):
     scheduler_config: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AppSetting(Base):
@@ -143,6 +144,7 @@ class MonitorSession(Base):
     runtime_metadata: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auto_stop_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SessionItemState(Base):
