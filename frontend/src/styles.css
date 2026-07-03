@@ -708,6 +708,7 @@ th {
 @media (max-width: 820px) {
   .shell,
   .shell.nav-collapsed {
+    display: block;
     grid-template-columns: 1fr;
   }
 
@@ -715,11 +716,11 @@ th {
     position: sticky;
     top: 0;
     z-index: 30;
+    display: block;
     height: auto;
-    max-height: 62vh;
-    overflow-y: auto;
-    gap: 14px;
-    padding: 12px 14px;
+    max-height: none;
+    overflow: hidden;
+    padding: 10px 12px 8px;
     box-shadow: 0 8px 18px rgb(15 23 42 / 0.12);
   }
 
@@ -739,18 +740,30 @@ th {
   }
 
   h1 {
-    font-size: 22px;
+    font-size: 20px;
   }
 
   nav {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
     gap: 6px;
+    overflow-x: auto;
+    padding-top: 8px;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  nav::-webkit-scrollbar {
+    display: none;
   }
 
   nav button,
   .shell.nav-collapsed nav button {
+    width: auto;
+    min-height: 36px;
+    flex: 0 0 auto;
     justify-content: flex-start;
-    padding: 8px 9px;
+    padding: 8px 10px;
   }
 
   .nav-label,
@@ -764,7 +777,7 @@ th {
   }
 
   .content {
-    padding: 18px;
+    padding: 16px 18px 18px;
   }
 
   .topbar,

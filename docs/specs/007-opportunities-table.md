@@ -40,7 +40,7 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - PWA:
   - tabbed Results, Opportunities, Sources, Filters, Runs, and Settings views.
   - collapsible dashboard navigation on desktop;
-  - sticky dashboard navigation on mobile.
+  - sticky horizontal dashboard navigation on mobile.
 - Database:
   - `opportunities`;
   - `items`.
@@ -66,7 +66,7 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - Table remains usable on desktop widths and is replaced by cards on mobile widths.
 - The page itself does not scroll horizontally; horizontal overflow is limited to the desktop table container.
 - Desktop navigation can collapse to a compact icon rail without losing access to any section.
-- Mobile navigation remains visible at the top while scrolling.
+- Mobile navigation remains visible at the top while scrolling and keeps a stable height across sections.
 
 ## Verification
 

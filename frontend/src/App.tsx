@@ -251,6 +251,11 @@ export function App() {
     return sources.find((source) => source.id === sourceId)?.name ?? `Fuente ${sourceId}`;
   }
 
+  function selectSection(section: string) {
+    setActiveSection(section);
+    window.setTimeout(() => window.scrollTo({ top: 0, left: 0 }), 0);
+  }
+
   return (
     <main className={navCollapsed ? 'shell nav-collapsed' : 'shell'}>
       <aside className="sidebar">
@@ -279,7 +284,7 @@ export function App() {
               type="button"
               title={navCollapsed ? item.label : undefined}
               aria-label={item.label}
-              onClick={() => setActiveSection(item.id)}
+              onClick={() => selectSection(item.id)}
             >
               <Icon size={18} />
               <span className="nav-label">{item.label}</span>
