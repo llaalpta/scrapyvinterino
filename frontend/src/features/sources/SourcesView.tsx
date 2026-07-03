@@ -1,19 +1,17 @@
-import { Play, Power, Save, Square, Trash2 } from 'lucide-react';
+import { Play, Save, Square, Trash2 } from 'lucide-react';
 import type { FormEvent } from 'react';
-import type { FilterRule, MonitorSession, ProxyProfile, SearchSource } from '../../api';
+import type { FilterRule, ProxyProfile, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { buildSourceDraft, type SourceDraft } from './sourceDrafts';
 
 export function SourcesView({
   filterRules,
-  monitorSessions,
   onCreateSource,
   onDeleteSource,
-  onRunSession,
+  onRunMonitor,
   onSaveSourceSchedule,
   onStartSession,
-  onStopSession,
-  onToggleSource,
+  onStopMonitor,
   proxyProfiles,
   runningSessionId,
   savingSourceId,
@@ -30,14 +28,12 @@ export function SourcesView({
   updateSourceProxy
 }: {
   filterRules: FilterRule[];
-  monitorSessions: MonitorSession[];
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
-  onRunSession: (sessionId: number) => void;
+  onRunMonitor: (sourceId: number) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
-  onStopSession: (sessionId: number) => void;
-  onToggleSource: (source: SearchSource) => void;
+  onStopMonitor: (sourceId: number) => void;
   proxyProfiles: ProxyProfile[];
   runningSessionId: number | null;
   savingSourceId: number | null;
@@ -56,21 +52,22 @@ export function SourcesView({
   return (
     <section className="sources-panel">
       <div className="panel-heading">
-        <h3>Fuentes de busqueda</h3>
+        <h3>Monitores de oportunidad</h3>
         <span>{sources.length}</span>
       </div>
       <form className="source-form" onSubmit={onCreateSource}>
-        <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre de busqueda" required />
+        <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
         <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
         <button type="submit">Guardar URL</button>
       </form>
       {sources.length === 0 ? (
-        <p className="empty-inline">No hay fuentes configuradas.</p>
+        <p className="empty-inline">No hay monitores configurados.</p>
       ) : (
         <div className="source-cards">
           {sources.map((source) => {
-            const activeSession = monitorSessions.find((session) => session.source_id === source.id && session.status === 'active');
             const selectedFilters = selectedFilterIdsBySource[source.id] ?? [];
+            const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+            const isRecurring = draft.monitorMode !== 'manual';
             return (
               <article className="source-card" key={source.id}>
                 <div className="source-card-header">
@@ -81,19 +78,30 @@ export function SourcesView({
                     </a>
                   </div>
                   <div className="source-badges">
-                    <span className={source.is_active ? 'status active' : 'status'}>{source.is_active ? 'Disponible' : 'Pausada'}</span>
-                    {activeSession ? <span className="status running">Sesion activa</span> : null}
+                    <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Pausado'}</span>
+                    <span className="status active">{modeLabel(source.monitor_mode)}</span>
                   </div>
                 </div>
 
                 <div className="source-schedule">
                   <label>
-                    Intervalo
+                    Modo
+                    <select value={draft.monitorMode} onChange={(event) => updateSourceDraft(source.id, 'monitorMode', event.target.value)}>
+                      <option value="manual">Puntual</option>
+                      <option value="continuous">Continuo</option>
+                      <option value="duration">Durante X minutos</option>
+                      <option value="window">Rango horario</option>
+                    </select>
+                  </label>
+                  {isRecurring ? (
+                    <>
+                  <label>
+                    Intervalo seg
                     <input
                       type="number"
                       min="60"
                       max="3600"
-                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).intervalSeconds}
+                      value={draft.intervalSeconds}
                       onChange={(event) => updateSourceDraft(source.id, 'intervalSeconds', event.target.value)}
                     />
                   </label>
@@ -103,15 +111,19 @@ export function SourcesView({
                       type="number"
                       min="0"
                       max="50"
-                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).jitterPercent}
+                      value={draft.jitterPercent}
                       onChange={(event) => updateSourceDraft(source.id, 'jitterPercent', event.target.value)}
                     />
                   </label>
+                    </>
+                  ) : null}
+                  {draft.monitorMode === 'window' ? (
+                    <>
                   <label>
                     Inicio
                     <input
                       type="time"
-                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).windowStart}
+                      value={draft.windowStart}
                       onChange={(event) => updateSourceDraft(source.id, 'windowStart', event.target.value)}
                     />
                   </label>
@@ -119,10 +131,12 @@ export function SourcesView({
                     Fin
                     <input
                       type="time"
-                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).windowEnd}
+                      value={draft.windowEnd}
                       onChange={(event) => updateSourceDraft(source.id, 'windowEnd', event.target.value)}
                     />
                   </label>
+                    </>
+                  ) : null}
                   <label>
                     Proxy
                     <select value={selectedProxyBySource[source.id] ?? ''} onChange={(event) => updateSourceProxy(source.id, event.target.value)}>
@@ -134,17 +148,19 @@ export function SourcesView({
                       ))}
                     </select>
                   </label>
+                  {draft.monitorMode === 'duration' ? (
                   <label>
                     Duracion min
                     <input
                       type="number"
                       min="1"
                       max="1440"
-                      value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).sessionDurationMinutes}
+                      value={draft.sessionDurationMinutes}
                       onChange={(event) => updateSourceDraft(source.id, 'sessionDurationMinutes', event.target.value)}
                     />
                   </label>
-                  <button type="button" disabled={savingSourceId === source.id} title="Guardar cadencia" onClick={() => onSaveSourceSchedule(source)}>
+                  ) : null}
+                  <button type="button" disabled={savingSourceId === source.id} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
                     <Save size={16} />
                     Guardar
                   </button>
@@ -167,48 +183,44 @@ export function SourcesView({
                   )}
                 </div>
 
-                {activeSession ? (
+                {source.is_active || source.last_run_at ? (
                   <p className="source-session-line">
-                    Sesion #{activeSession.id} desde {formatDate(activeSession.started_at)}
-                    {activeSession.auto_stop_at ? ` hasta ${formatDate(activeSession.auto_stop_at)}` : ''}
-                    {activeSession.proxy_name ? ` - ${activeSession.proxy_name}` : ''}
+                    {source.is_active ? `Activo desde ${source.monitor_started_at ? formatDate(source.monitor_started_at) : 'ahora'}` : 'Pausado'}
+                    {source.monitor_until ? ` hasta ${formatDate(source.monitor_until)}` : ''}
+                    {source.last_run_at ? ` - ultima consulta ${formatDate(source.last_run_at)}` : ''}
                   </p>
                 ) : null}
 
                 <div className="source-actions">
-                  {activeSession ? (
+                  {source.is_active ? (
                     <>
-                      <button type="button" disabled={runningSessionId !== null} onClick={() => onRunSession(activeSession.id)}>
+                      <button type="button" disabled={runningSessionId !== null} onClick={() => onRunMonitor(source.id)}>
                         <Play size={17} />
-                        {runningSessionId === activeSession.id ? 'Ejecutando' : 'Ejecutar sesion'}
+                        {runningSessionId === source.id ? 'Ejecutando' : 'Ejecutar ahora'}
                       </button>
-                      <button type="button" onClick={() => onStopSession(activeSession.id)}>
+                      <button type="button" onClick={() => onStopMonitor(source.id)}>
                         <Square size={16} />
-                        Detener sesion
+                        Parar monitor
                       </button>
                     </>
                   ) : (
-                    <button type="button" disabled={!source.is_active} onClick={() => onStartSession(source)}>
+                    <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
                       <Play size={17} />
-                      Lanzar sesion
+                      {draft.monitorMode === 'manual' ? 'Lanzar puntual' : 'Activar monitor'}
                     </button>
                   )}
-                  <button type="button" disabled={savingSourceId === source.id} onClick={() => onToggleSource(source)}>
-                    <Power size={16} />
-                    {source.is_active ? 'Pausar fuente' : 'Activar fuente'}
-                  </button>
                   <button
                     type="button"
                     disabled={savingSourceId === source.id}
-                    title="Eliminar fuente"
+                    title="Archivar monitor"
                     onClick={() => {
-                      if (window.confirm(`Eliminar la fuente "${source.name}"? Se conservara el historico.`)) {
+                      if (window.confirm(`Archivar el monitor "${source.name}"? Se conservara el historico.`)) {
                         onDeleteSource(source);
                       }
                     }}
                   >
                     <Trash2 size={16} />
-                    Eliminar fuente
+                    Archivar monitor
                   </button>
                 </div>
               </article>
@@ -218,4 +230,17 @@ export function SourcesView({
       )}
     </section>
   );
+}
+
+function modeLabel(mode: SearchSource['monitor_mode']): string {
+  if (mode === 'continuous') {
+    return 'Continuo';
+  }
+  if (mode === 'duration') {
+    return 'Duracion';
+  }
+  if (mode === 'window') {
+    return 'Rango horario';
+  }
+  return 'Puntual';
 }

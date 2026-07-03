@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -106,13 +106,38 @@ def normalize_scheduler_config(value: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def list_schedulable_sources(db: Session) -> list[SearchSource]:
+    expire_source_monitors(db)
     return list(
         db.scalars(
             select(SearchSource)
-            .where(SearchSource.is_active.is_(True), SearchSource.archived_at.is_(None))
+            .where(
+                SearchSource.is_active.is_(True),
+                SearchSource.archived_at.is_(None),
+                SearchSource.monitor_mode != "manual",
+            )
             .order_by(SearchSource.id.asc())
         )
     )
+
+
+def expire_source_monitors(db: Session, now: datetime | None = None) -> int:
+    current_time = now or datetime.now(UTC)
+    expired_sources = list(
+        db.scalars(
+            select(SearchSource).where(
+                SearchSource.is_active.is_(True),
+                SearchSource.monitor_until.is_not(None),
+                SearchSource.monitor_until <= current_time,
+            )
+        )
+    )
+    if not expired_sources:
+        return 0
+    for source in expired_sources:
+        source.is_active = False
+        source.next_run_at = None
+    db.commit()
+    return len(expired_sources)
 
 
 def list_schedulable_sessions(db: Session) -> list[MonitorSession]:

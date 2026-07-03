@@ -42,7 +42,7 @@ export function SettingsView({
           <div>
             <strong>Concurrencia</strong>
             <p>
-              {scheduler.max_concurrent_runs} global / {scheduler.per_source_concurrency} por sesion
+              {scheduler.max_concurrent_runs} global / {scheduler.per_source_concurrency} por monitor
             </p>
           </div>
           <div>
@@ -97,7 +97,7 @@ export function SettingsView({
           </button>
         </form>
         {proxyProfiles.length === 0 ? (
-          <p className="empty-inline">Sin proxys configurados. Las sesiones pueden usar directo o el proxy de .env.</p>
+          <p className="empty-inline">Sin proxys configurados. Los monitores pueden usar directo o el proxy de .env.</p>
         ) : (
           <div className="proxy-list">
             {proxyProfiles.map((proxy) => (

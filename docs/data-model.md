@@ -3,17 +3,17 @@
 Tablas principales:
 
 - `users`: acceso local.
-- `search_sources`: URLs de busqueda y configuracion base; `archived_at` oculta una fuente sin borrar historico.
+- `search_sources`: monitores de oportunidad reutilizables; guardan URL, modo, cadencia, filtros/proxy opcionales y estado runtime. `archived_at` oculta un monitor sin borrar historico.
 - `app_settings`: configuracion global mutable desde la PWA, como el estado UI del scheduler.
-- `filter_rules`: filtros excluyentes nombrados que se snapshottean al lanzar sesiones.
-- `monitor_sessions`: contexto operativo de una fuente, filtros, cadencia, proxy, `auto_stop_at` opcional y metadatos runtime.
-- `session_item_state`: estado minimo de cada item evaluado por una sesion para no repetir detalle/filtros.
-- `runs`: ejecuciones de fuente o sesion, con `trigger`, contadores de filtrado y metadatos runtime.
-- `items`: articulos normalizados de Vinted; `vinted_item_id` define identidad global y si un item ya fue detectado.
-- `source_seen_items`: trazabilidad de que fuente vio cada articulo; no decide si el articulo es globalmente nuevo.
-- `opportunities`: articulos vistos por una sesion que no fueron descartados; la unicidad notificable principal es por `session_id` y `item_id`.
+- `filter_rules`: filtros excluyentes nombrados y opcionales; determinan oportunidades, no la identidad del monitor.
+- `monitor_sessions`: historico legacy de sesiones; el flujo principal usa monitores directamente.
+- `session_item_state`: estado legacy de items evaluados por una sesion.
+- `runs`: ejecuciones de monitor, con `trigger`, contadores de filtrado y metadatos runtime.
+- `items`: articulos normalizados de Vinted; `vinted_item_id` define identidad de catalogo/cache.
+- `source_seen_items`: trazabilidad de que monitor vio cada articulo; decide si el articulo es nuevo para ese monitor.
+- `opportunities`: articulos vistos por un monitor que no fueron descartados; la unicidad notificable principal del flujo nuevo es por monitor e item.
 - `proxy_profiles`: proxys configurables desde UI con secretos cifrados.
-- `run_events`: eventos HTTP y operativos saneados para depurar sesiones/runs.
+- `run_events`: eventos HTTP y operativos saneados para depurar monitores/runs.
 - `action_requests`: acciones solicitadas por usuario.
 - `action_executions`: resultado de acciones autenticadas futuras.
 - `checkout_snapshots`: opciones de envio/pago futuras.

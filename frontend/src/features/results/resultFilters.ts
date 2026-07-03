@@ -43,7 +43,7 @@ export function summarizeFilters(filters: ResultFilters, sources: SearchSource[]
   if (filters.sourceId) {
     summaries.push({
       field: 'sourceId',
-      label: sources.find((source) => source.id === Number(filters.sourceId))?.name ?? `Fuente ${filters.sourceId}`
+      label: sources.find((source) => source.id === Number(filters.sourceId))?.name ?? `Monitor ${filters.sourceId}`
     });
   }
   if (filters.scrapedFrom) {

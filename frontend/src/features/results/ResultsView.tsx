@@ -102,7 +102,7 @@ export function ResultsView({
         </div>
         <div className="result-filters">
           <label>
-            Fuente
+            Monitor
             <select value={filters.sourceId} onChange={(event) => onFilterChange('sourceId', event.target.value)}>
               <option value="">Todas</option>
               {sources.map((source) => (
@@ -140,7 +140,7 @@ export function ResultsView({
           <thead>
             <tr>
               <th>Articulo</th>
-              <th>Fuente</th>
+              <th>Monitor</th>
               <th>Scrape</th>
               <th>Marca</th>
               <th>Talla</th>
@@ -214,7 +214,7 @@ function ResultCard({ item }: { item: ItemResult }) {
           <dd>{formatPrice(item)}</dd>
         </div>
         <div>
-          <dt>Fuente</dt>
+          <dt>Monitor</dt>
           <dd>{item.last_scraped_source_name}</dd>
         </div>
         <div>

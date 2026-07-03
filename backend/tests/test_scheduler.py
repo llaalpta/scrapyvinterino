@@ -16,6 +16,7 @@ from vinted_monitor.services.scheduler import (
     get_scheduler_state,
     is_within_allowed_windows,
     list_schedulable_sessions,
+    list_schedulable_sources,
     next_run_after,
     normalize_scheduler_config,
     update_scheduler_enabled,
@@ -120,8 +121,8 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
         def reap_completed(self) -> None:
             return None
 
-        def submit(self, session_id: int, task) -> bool:
-            submitted.append(session_id)
+        def submit(self, source_id: int, task) -> bool:
+            submitted.append(source_id)
             return True
 
     with SessionLocal() as db:
@@ -137,6 +138,7 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
             url="https://www.vinted.es/catalog?search_text=",
             normalized_query={"search_text": [""]},
             is_active=True,
+            monitor_mode="window",
             scheduler_config={
                 "interval_seconds": 300,
                 "jitter_percent": 0,
@@ -146,17 +148,6 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
         db.add(source)
         db.commit()
         source_id = source.id
-        session = MonitorSession(
-            source_id=source_id,
-            status="active",
-            filter_snapshot=[],
-            filter_hash="pytest-filter-hash",
-            cadence_snapshot=source.scheduler_config,
-            runtime_metadata={},
-        )
-        db.add(session)
-        db.commit()
-        session_id = session.id
 
     try:
         runner = SchedulerRunner(Settings(scheduler_enabled=True), executor=FakeExecutor())  # type: ignore[arg-type]
@@ -164,7 +155,7 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
 
         assert submitted_ids == []
         assert submitted == []
-        assert runner.next_due_by_session_id[session_id] == datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
+        assert runner.next_due_by_session_id[source_id] == datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
     finally:
         with SessionLocal() as db:
             for active_source_id in previously_active_source_ids:
@@ -172,9 +163,6 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
                 if active_source is not None:
                     active_source.is_active = True
             source = db.get(SearchSource, source_id)
-            session = db.get(MonitorSession, session_id)
-            if session is not None:
-                db.delete(session)
             if source is not None:
                 db.delete(source)
             setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
@@ -225,6 +213,40 @@ def test_schedulable_sessions_expires_timed_session_before_scheduling() -> None:
                 session = db.get(MonitorSession, session_id)
                 if session is not None:
                     db.delete(session)
+            if source_id is not None:
+                source = db.get(SearchSource, source_id)
+                if source is not None:
+                    db.delete(source)
+            db.commit()
+
+
+def test_schedulable_sources_expires_timed_monitor_before_scheduling() -> None:
+    source_id: int | None = None
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest expired timed monitor source",
+            url="https://www.vinted.es/catalog?search_text=",
+            normalized_query={"search_text": [""]},
+            is_active=True,
+            monitor_mode="duration",
+            scheduler_config={},
+            monitor_until=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        with SessionLocal() as db:
+            sources = list_schedulable_sources(db)
+            stopped = db.get(SearchSource, source_id)
+
+            assert all(entry.id != source_id for entry in sources)
+            assert stopped is not None
+            assert stopped.is_active is False
+            assert stopped.next_run_at is None
+    finally:
+        with SessionLocal() as db:
             if source_id is not None:
                 source = db.get(SearchSource, source_id)
                 if source is not None:

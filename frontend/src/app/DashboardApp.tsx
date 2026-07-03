@@ -13,13 +13,10 @@ export function DashboardApp() {
   return (
     <DashboardShell
       activeSection={dashboard.activeSection}
-      activeSession={dashboard.activeSession}
       activeSubtitle={dashboard.activeSubtitle}
       activeTitle={dashboard.activeTitle}
       error={dashboard.error}
       navCollapsed={dashboard.navCollapsed}
-      runningSessionId={dashboard.runningSessionId}
-      onRunSession={(sessionId) => void dashboard.onRunSession(sessionId)}
       onSelectSection={dashboard.selectSection}
       onToggleNav={() => dashboard.setNavCollapsed((current) => !current)}
     >
@@ -50,14 +47,12 @@ export function DashboardApp() {
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
           filterRules={dashboard.filterRules}
-          monitorSessions={dashboard.monitorSessions}
           onCreateSource={dashboard.onCreateSource}
           onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
-          onRunSession={(sessionId) => void dashboard.onRunSession(sessionId)}
+          onRunMonitor={(sourceId) => void dashboard.onRunMonitor(sourceId)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
-          onStopSession={(sessionId) => void dashboard.onStopSession(sessionId)}
-          onToggleSource={(source) => void dashboard.onToggleSource(source)}
+          onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
           proxyProfiles={dashboard.proxyProfiles}
           runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}

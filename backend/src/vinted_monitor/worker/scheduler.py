@@ -9,17 +9,17 @@ from datetime import UTC, datetime
 import structlog
 
 from vinted_monitor.core.config import Settings
+from vinted_monitor.db.models import SearchSource
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.services.runs import SCHEDULER_TRIGGER
+from vinted_monitor.services.runs import SCHEDULER_TRIGGER, execute_monitor_run
 from vinted_monitor.services.scheduler import (
     get_scheduler_state,
     get_scheduler_timezone,
     is_within_allowed_windows,
-    list_schedulable_sessions,
+    list_schedulable_sources,
     next_run_after,
-    session_config,
+    source_config,
 )
-from vinted_monitor.services.sessions import run_monitor_session
 
 RunTask = Callable[[int], None]
 
@@ -92,32 +92,37 @@ class SchedulerRunner:
             if not state.effective_enabled:
                 return []
 
-            sessions = list_schedulable_sessions(db)
-            session_ids = {session.id for session in sessions}
+            sources = list_schedulable_sources(db)
+            source_ids = {source.id for source in sources}
             self.next_due_by_session_id = {
-                session_id: due_at
-                for session_id, due_at in self.next_due_by_session_id.items()
-                if session_id in session_ids
+                source_id: due_at
+                for source_id, due_at in self.next_due_by_session_id.items()
+                if source_id in source_ids
             }
 
             submitted: list[int] = []
-            due_sessions = []
-            for session in sessions:
-                due_at = self.next_due_by_session_id.setdefault(session.id, current_time)
-                config = session_config(session)
+            due_sources = []
+            for source in sources:
+                due_at = self.next_due_by_session_id.setdefault(source.id, source.next_run_at or current_time)
+                config = source_config(source)
                 if due_at <= current_time:
                     if not is_within_allowed_windows(current_time, config.allowed_windows, self.timezone):
-                        self.next_due_by_session_id[session.id] = next_run_after(current_time, config, self.rng, self.timezone)
+                        self.next_due_by_session_id[source.id] = next_run_after(current_time, config, self.rng, self.timezone)
                         continue
-                    due_sessions.append((due_at, session.id, config))
+                    due_sources.append((due_at, source.id, config))
 
-            for _, session_id, config in sorted(due_sessions, key=lambda entry: (entry[0], entry[1])):
+            for _, source_id, config in sorted(due_sources, key=lambda entry: (entry[0], entry[1])):
                 if self.executor.available_slots <= 0:
                     break
-                if not self.executor.submit(session_id, self._run_session):
+                if not self.executor.submit(source_id, self._run_source):
                     continue
-                self.next_due_by_session_id[session_id] = next_run_after(current_time, config, self.rng, self.timezone)
-                submitted.append(session_id)
+                next_due = next_run_after(current_time, config, self.rng, self.timezone)
+                self.next_due_by_session_id[source_id] = next_due
+                source = db.get(SearchSource, source_id)
+                if source is not None:
+                    source.next_run_at = next_due
+                submitted.append(source_id)
+            db.commit()
 
             return submitted
 
@@ -131,12 +136,12 @@ class SchedulerRunner:
                 self.logger.error("scheduler_loop_error", error=str(exc))
             time.sleep(max(self.settings.scheduler_poll_interval_seconds, 1))
 
-    def _run_session(self, session_id: int) -> None:
+    def _run_source(self, source_id: int) -> None:
         with SessionLocal() as db:
-            run = run_monitor_session(db, session_id, trigger=SCHEDULER_TRIGGER)
+            run = execute_monitor_run(db, source_id, trigger=SCHEDULER_TRIGGER)
             self.logger.info(
                 "scheduler_run_finished",
-                session_id=session_id,
+                source_id=source_id,
                 run_id=run.id,
                 status=run.status,
                 items_found=run.items_found,

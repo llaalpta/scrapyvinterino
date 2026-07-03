@@ -14,7 +14,10 @@ import {
   fetchScheduler,
   fetchSources,
   runMonitorSession,
+  runMonitor,
+  startMonitor,
   startMonitorSession,
+  stopMonitor,
   stopMonitorSession,
   testProxyProfile,
   updateScheduler,
@@ -96,6 +99,8 @@ export function useDashboardController() {
         setProxyProfiles(proxyData);
         setMonitorSessions(sessionData);
         setSourceDrafts(buildSourceDrafts(sourceData));
+        setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
+        setSelectedProxyBySource(buildSelectedProxyIds(sourceData));
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
@@ -143,7 +148,7 @@ export function useDashboardController() {
       setSourceName('');
       setSourceUrl('');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo crear la fuente');
+      setError(caught instanceof Error ? caught.message : 'No se pudo crear el monitor');
     }
   }
 
@@ -221,38 +226,58 @@ export function useDashboardController() {
     }
   }
 
+  async function onRunMonitor(sourceId: number) {
+    setError(null);
+    setRunningSessionId(sourceId);
+    try {
+      const created = await runMonitor(sourceId);
+      const [sourceData, itemData, opportunityData, runData] = await Promise.all([
+        fetchSources(),
+        fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)),
+        fetchOpportunities(),
+        fetchRuns()
+      ]);
+      setSources(sourceData);
+      setSourceDrafts(buildSourceDrafts(sourceData));
+      setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
+      setItemPage(itemData);
+      setOpportunityPage(opportunityData);
+      setActiveSection('runs');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
+    } finally {
+      setRunningSessionId(null);
+    }
+  }
+
   async function onStartSession(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
     const durationMinutes = Number(draft.sessionDurationMinutes);
-    if (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440) {
-      setError('La duracion de la sesion debe estar entre 1 y 1440 minutos');
+    if (draft.monitorMode === 'duration' && (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440)) {
+      setError('La duracion del monitor debe estar entre 1 y 1440 minutos');
       return;
     }
     setError(null);
+    setRunningSessionId(source.id);
     try {
-      const proxyValue = selectedProxyBySource[source.id];
-      const created = await startMonitorSession({
-        source_id: source.id,
-        filter_rule_ids: selectedFilterIdsBySource[source.id] ?? [],
-        proxy_profile_id: proxyValue ? Number(proxyValue) : null,
-        duration_minutes: durationMinutes
-      });
-      setMonitorSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
-      setRunningSessionId(created.id);
-      const run = await runMonitorSession(created.id);
-      const [itemData, opportunityData, runData, sessionData] = await Promise.all([
+      await saveMonitorConfig(source, draft);
+      const run = await startMonitor(source.id);
+      const [sourceData, itemData, opportunityData, runData, sessionData] = await Promise.all([
+        fetchSources(),
         fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)),
         fetchOpportunities(),
         fetchRuns(),
         fetchMonitorSessions()
       ]);
+      setSources(sourceData);
+      setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
       setItemPage(itemData);
       setOpportunityPage(opportunityData);
       setMonitorSessions(sessionData);
       setActiveSection('runs');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo lanzar la sesion');
+      setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
       setRunningSessionId(null);
     }
@@ -265,6 +290,19 @@ export function useDashboardController() {
       setMonitorSessions((current) => current.map((session) => (session.id === stopped.id ? stopped : session)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo detener la sesion');
+    }
+  }
+
+  async function onStopMonitor(sourceId: number) {
+    setError(null);
+    setSavingSourceId(sourceId);
+    try {
+      replaceSource(await stopMonitor(sourceId));
+      await refreshRuntime();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo parar el monitor');
+    } finally {
+      setSavingSourceId(null);
     }
   }
 
@@ -290,7 +328,7 @@ export function useDashboardController() {
       replaceSource(await updateSource(source.id, { is_active: !source.is_active }));
       await refreshRuntime();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar la fuente');
+      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el monitor');
     } finally {
       setSavingSourceId(null);
     }
@@ -319,7 +357,7 @@ export function useDashboardController() {
       });
       await refreshRuntime();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo eliminar la fuente');
+      setError(caught instanceof Error ? caught.message : 'No se pudo archivar el monitor');
     } finally {
       setSavingSourceId(null);
     }
@@ -327,7 +365,7 @@ export function useDashboardController() {
 
   async function onSaveSourceSchedule(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    const allowedWindows = buildAllowedWindows(draft);
+    const allowedWindows = draft.monitorMode === 'window' ? buildAllowedWindows(draft) : [];
     if (allowedWindows === null) {
       setError('Configura hora de inicio y hora de fin, o deja ambas vacias');
       return;
@@ -335,13 +373,7 @@ export function useDashboardController() {
     setError(null);
     setSavingSourceId(source.id);
     try {
-      const updated = await updateSource(source.id, {
-        scheduler_config: {
-          interval_seconds: Number(draft.intervalSeconds),
-          jitter_percent: Number(draft.jitterPercent),
-          allowed_windows: allowedWindows
-        }
-      });
+      const updated = await saveMonitorConfig(source, draft, allowedWindows);
       replaceSource(updated);
       setSourceDrafts((current) => ({
         ...current,
@@ -365,7 +397,14 @@ export function useDashboardController() {
     setSourceDrafts((current) => ({
       ...current,
       [sourceId]: {
-        ...(current[sourceId] ?? { intervalSeconds: '300', jitterPercent: '20', windowStart: '', windowEnd: '', sessionDurationMinutes: '60' }),
+        ...(current[sourceId] ?? {
+          monitorMode: 'manual',
+          intervalSeconds: '300',
+          jitterPercent: '20',
+          windowStart: '',
+          windowEnd: '',
+          sessionDurationMinutes: '60'
+        }),
         [field]: value
       }
     }));
@@ -398,7 +437,7 @@ export function useDashboardController() {
   }
 
   function getSourceName(sourceId: number): string {
-    return sources.find((source) => source.id === sourceId)?.name ?? `Fuente ${sourceId}`;
+    return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
   }
 
   function selectSection(section: string) {
@@ -430,9 +469,11 @@ export function useDashboardController() {
     onCreateSource,
     onDeleteSource,
     onLoadRunEvents: fetchRunEvents,
+    onRunMonitor,
     onRunSession,
     onSaveSourceSchedule,
     onStartSession,
+    onStopMonitor,
     onStopSession,
     onTestProxy,
     onToggleScheduler,
@@ -467,6 +508,27 @@ export function useDashboardController() {
     updateSourceDraft,
     updateSourceProxy
   };
+
+  async function saveMonitorConfig(source: SearchSource, draft: SourceDraft, precomputedAllowedWindows?: string[] | null) {
+    const allowedWindows = precomputedAllowedWindows ?? (draft.monitorMode === 'window' ? buildAllowedWindows(draft) : []);
+    if (allowedWindows === null) {
+      throw new Error('Configura hora de inicio y hora de fin, o deja ambas vacias');
+    }
+    const intervalSeconds = Number(draft.intervalSeconds);
+    const jitterPercent = Number(draft.jitterPercent);
+    const durationMinutes = Number(draft.sessionDurationMinutes);
+    return updateSource(source.id, {
+      monitor_mode: draft.monitorMode,
+      duration_minutes: draft.monitorMode === 'duration' ? durationMinutes : source.duration_minutes,
+      filter_rule_ids: selectedFilterIdsBySource[source.id] ?? [],
+      proxy_profile_id: selectedProxyBySource[source.id] ? Number(selectedProxyBySource[source.id]) : null,
+      scheduler_config: {
+        interval_seconds: intervalSeconds,
+        jitter_percent: jitterPercent,
+        allowed_windows: draft.monitorMode === 'window' ? allowedWindows : []
+      }
+    });
+  }
 }
 
 function sectionSubtitle(
@@ -481,7 +543,7 @@ function sectionSubtitle(
     return `${opportunityTotal} oportunidades`;
   }
   if (section === 'sources') {
-    return `${sourceTotal} fuentes configuradas - ${sessionTotal} sesiones`;
+    return `${sourceTotal} monitores configurados`;
   }
   if (section === 'runs') {
     return `${runTotal} ejecuciones registradas`;
@@ -490,9 +552,19 @@ function sectionSubtitle(
     return 'Configuracion local del monitor';
   }
   if (section === 'filters') {
-    return 'Blacklists excluyentes para sesiones';
+    return 'Filtros opcionales para oportunidades';
   }
   return `${itemTotal} resultados para la consulta actual`;
+}
+
+function buildSelectedFilterIds(sources: SearchSource[]): Record<number, number[]> {
+  return Object.fromEntries(sources.map((source) => [source.id, source.filter_rule_ids ?? []]));
+}
+
+function buildSelectedProxyIds(sources: SearchSource[]): Record<number, string> {
+  return Object.fromEntries(
+    sources.flatMap((source) => (source.proxy_profile_id ? [[source.id, String(source.proxy_profile_id)]] : []))
+  );
 }
 
 function buildAllowedWindows(draft: SourceDraft): string[] | null {

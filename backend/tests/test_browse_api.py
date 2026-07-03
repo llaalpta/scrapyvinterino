@@ -166,7 +166,7 @@ def build_item(suffix: str, title: str, price: Decimal) -> Item:
     )
 
 
-def test_items_api_returns_paginated_global_items_with_latest_source() -> None:
+def test_items_api_returns_paginated_monitor_seen_items() -> None:
     seed_browser_data()
     client = TestClient(app)
     try:
@@ -177,7 +177,7 @@ def test_items_api_returns_paginated_global_items_with_latest_source() -> None:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["total"] == 3
+        assert body["total"] == 4
         assert body["page"] == 1
         assert body["page_size"] == 2
         assert body["total_pages"] == 2
@@ -187,7 +187,7 @@ def test_items_api_returns_paginated_global_items_with_latest_source() -> None:
         cleanup_browser_data()
 
 
-def test_items_api_source_filter_keeps_global_dedupe_but_uses_filtered_source_metadata() -> None:
+def test_items_api_source_filter_uses_filtered_monitor_metadata() -> None:
     ids = seed_browser_data()
     client = TestClient(app)
     try:
@@ -233,15 +233,17 @@ def test_items_api_rejects_invalid_ranges() -> None:
 
 
 def test_opportunities_api_returns_paginated_opportunities() -> None:
-    seed_browser_data()
+    ids = seed_browser_data()
     client = TestClient(app)
     try:
-        response = client.get("/api/opportunities?page=1&page_size=25")
+        response = client.get("/api/opportunities?page=1&page_size=25", params={"source_id": ids["source_b"]})
 
         assert response.status_code == 200
         body = response.json()
         assert body["total"] == 1
         assert body["items"][0]["source_name"] == f"{PREFIX}source-b"
         assert body["items"][0]["item"]["vinted_item_id"] == f"{PREFIX}source-b-only"
+        assert body["items"][0]["last_scraped_at"] == SEED_NOW.isoformat().replace("+00:00", "Z")
+        assert body["items"][0]["last_run_id"] is not None
     finally:
         cleanup_browser_data()

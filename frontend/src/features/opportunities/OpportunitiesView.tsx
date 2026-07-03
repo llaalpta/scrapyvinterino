@@ -20,7 +20,7 @@ export function OpportunitiesView({
         <span>{opportunityPage.total}</span>
       </div>
       {opportunityPage.items.length === 0 ? (
-        <p className="empty-inline">Todavia no hay oportunidades. Se crearan desde sesiones activas.</p>
+        <p className="empty-inline">Todavia no hay oportunidades. Se crearan desde monitores activos o ejecuciones puntuales.</p>
       ) : (
         <div className="opportunity-list">
           {opportunityPage.items.map((opportunity) => (
@@ -28,7 +28,7 @@ export function OpportunitiesView({
               <ItemCell item={opportunity.item} />
               <span>{opportunity.source_name}</span>
               <span className={`status evaluation ${opportunity.evaluation_status}`}>{evaluationLabel(opportunity.evaluation_status)}</span>
-              <span>{formatDate(opportunity.created_at)}</span>
+              <span>{formatDate(opportunity.last_scraped_at)}</span>
               <RowActions item={opportunity.item} />
             </article>
           ))}

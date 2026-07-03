@@ -2,29 +2,29 @@
 
 ## Goal
 
-Automatically execute active monitor sessions on safe, bounded intervals with enough concurrency and runtime cache support to keep opportunity alerts fast without relying on post-MVP optimizations.
+Automatically execute active opportunity monitors on safe, bounded intervals with enough concurrency and runtime cache support to keep opportunity alerts fast without relying on post-MVP optimizations.
 
 ## Scope
 
 - Enable or disable scheduler globally.
-- Enable or disable each source.
-- Start and stop monitor sessions for a source, filter snapshot, cadence snapshot, and optional proxy profile.
-- Start a monitor session for a bounded duration from now, with `auto_stop_at` stored on the session.
-- Configure interval seconds per source, default `300`, minimum `60`, maximum `3600`.
+- Enable, pause, stop, or archive each monitor.
+- Start and stop monitor execution using the monitor's current filters, cadence, duration/window mode, and optional proxy profile.
+- Start a monitor for a bounded duration from now, with `monitor_until` stored on the monitor.
+- Configure interval seconds per monitor, default `300`, minimum `60`, maximum `3600`.
 - Add jitter/randomization between runs, default `20%`, minimum `0%`, maximum `50%`.
 - Support one daily allowed execution window configured by start/end timepickers and stored as `HH:MM-HH:MM`.
 - Record scheduler-triggered errors in the same run/error model.
-- Run multiple active sessions concurrently with explicit limits.
-- Allow at most `2` active source runs globally by default.
-- Allow at most `1` active run per source.
-- Keep source execution fair so one noisy source cannot starve others.
+- Run multiple active monitors concurrently with explicit limits.
+- Allow at most `2` active monitor runs globally by default.
+- Allow at most `1` active run per monitor.
+- Keep monitor execution fair so one noisy monitor cannot starve others.
 - Maintain a process-local global cache mapping `vinted_item_id -> item_id`.
-- Maintain a process-local per-source recent-seen cache for traceability acceleration.
-- Use caches as acceleration only after successful commits; PostgreSQL remains the source of truth for global dedupe.
+- Maintain a process-local per-monitor recent-seen cache for traceability acceleration.
+- Use caches as acceleration only after successful commits; PostgreSQL remains the source of truth for monitor visibility and item identity.
 - Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
 - Keep proxy usage optional and disabled by default.
 - Support UI-managed proxy profiles with encrypted credentials.
-- Assign proxy/session identity consistently for a session run; do not mix cookies across proxies.
+- Assign proxy/session identity consistently for a monitor run; do not mix cookies across proxies.
 
 ## Out of Scope
 
@@ -40,21 +40,20 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 
 - Worker:
   - scheduler loop;
-  - bounded session run executor;
+  - bounded monitor run executor;
   - process-local item cache;
   - isolated provider/session factory.
 - API/PWA:
   - scheduler settings persisted in `app_settings`;
-  - source pause/enable controls;
-  - monitor session controls;
+  - monitor pause/start/stop/archive controls;
   - proxy profile controls.
 - Configuration:
   - deployment scheduler enable flag in `.env` as an operational gate;
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
-  - per-source concurrency limit, default `1`;
-  - source interval seconds: default `300`, minimum `60`, maximum `3600`;
-  - source jitter percent: default `20`, minimum `0`, maximum `50`;
+  - per-monitor concurrency limit, default `1`;
+  - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
+  - monitor jitter percent: default `20`, minimum `0`, maximum `50`;
   - optional allowed windows as local `HH:MM-HH:MM` ranges;
   - scheduler timezone, default `Europe/Madrid`;
   - optional proxy enable flag and proxy URL fallback;
@@ -62,7 +61,8 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 - Database:
   - `app_settings`;
   - `search_sources.scheduler_config`;
-  - `monitor_sessions`;
+  - `search_sources.monitor_mode`, `duration_minutes`, `monitor_until`, `next_run_at`, `filter_rule_ids`, and `proxy_profile_id`;
+  - `monitor_sessions` only as legacy history;
   - `proxy_profiles`;
   - `runs.trigger`;
   - `items`;
@@ -72,19 +72,19 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 ## Acceptance Criteria
 
 - Scheduler can be disabled completely.
-- A source can be paused without deleting it.
+- A monitor can be paused without deleting it.
 - Runs are not triggered outside configured local-time windows.
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
-- A bounded session created for N minutes stores `auto_stop_at = now + N minutes`.
-- Launching a bounded session from the PWA creates the session and immediately executes one run.
-- Expired active sessions are stopped before manual run execution or scheduler planning.
+- A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
+- Launching a bounded monitor from the PWA stores the config and immediately executes one run.
+- Expired active monitors are stopped before scheduler planning.
 - Jitter prevents fixed exact polling intervals.
 - Scheduler failures are logged without stopping the worker.
 - Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
-- No more than `2` session runs execute at the same time by default.
-- The same active session never has two active runs at the same time.
-- Manual and scheduler-triggered runs share the same global dedupe, detail fetch, source traceability, redaction, and error behavior.
-- Runtime cache stores only safe IDs and minimal timestamps: `vinted_item_id`, `item_id`, and recent source visibility metadata.
+- No more than `2` monitor runs execute at the same time by default.
+- The same active monitor never has two active runs at the same time.
+- Manual and scheduler-triggered runs share the same item identity, monitor dedupe, detail fetch, source traceability, redaction, and error behavior.
+- Runtime cache stores only safe IDs and minimal timestamps: `vinted_item_id`, `item_id`, and recent monitor visibility metadata.
 - Runtime cache never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
 - Cache hits can avoid unnecessary DB item lookups and detail fetches, but cannot create or suppress `items_new` without committed DB state.
 - Cache hits must not suppress required `source_seen_items` first/last run updates.
@@ -95,8 +95,8 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 - Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
 - Proxy enabled without a usable proxy URL/profile is invalid config and fails clearly with redacted details.
 - If a proxy request fails, only the affected run/source is failed and logged with redacted details.
-- Repeated items in the same session cannot generate duplicate opportunities.
-- A globally known item can still create a session opportunity in a different session if that session sees it.
+- Repeated items in the same monitor cannot generate duplicate opportunities.
+- A globally known item can still create an opportunity in a different monitor if that monitor sees it.
 
 ## Verification
 
@@ -108,11 +108,11 @@ Automatically execute active monitor sessions on safe, bounded intervals with en
 - Unit tests confirming cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
 - Manual check with short interval in local Docker.
 - Confirm run records identify scheduler-triggered executions.
-- Confirm two different sessions can run concurrently up to the global limit.
-- Confirm a third due source waits when the global limit is reached.
-- Confirm repeated overlapping-source items use global dedupe and do not fetch detail twice.
+- Confirm two different monitors can run concurrently up to the global limit.
+- Confirm a third due monitor waits when the global limit is reached.
+- Confirm repeated overlapping-monitor items use item identity plus monitor-scoped dedupe and do not duplicate opportunities within a monitor.
 - Confirm proxy disabled path uses direct provider behavior.
 - Confirm proxy disabled path passes no proxy config to the provider.
 - Confirm proxy enabled path passes configured outbound Vinted proxy to the provider without returning or logging credentials.
 - Confirm proxy enabled without URL fails with a clear redacted error.
-- Confirm session refresh failure marks only the affected run failed and does not stop the scheduler loop.
+- Confirm anonymous session refresh failure marks only the affected run failed and does not stop the scheduler loop.

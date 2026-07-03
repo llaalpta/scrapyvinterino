@@ -56,7 +56,7 @@ export function RunsView({
                     <strong>{session?.source_name ?? getSourceName(run.source_id)}</strong>
                     <span>
                       Run #{run.id}
-                      {run.session_id ? ` - Sesion #${run.session_id}` : ''} - {run.trigger}
+                      {run.session_id ? ` - historico #${run.session_id}` : ''} - {run.trigger}
                     </span>
                   </div>
                   <span className={`run-status ${run.status}`}>{run.status}</span>
@@ -75,7 +75,7 @@ export function RunsView({
                     <dd>{run.items_found}</dd>
                   </div>
                   <div>
-                    <dt>Nuevos globales</dt>
+                    <dt>Nuevos monitor</dt>
                     <dd>{run.items_new}</dd>
                   </div>
                   <div>
@@ -96,7 +96,7 @@ export function RunsView({
                   </div>
                 </dl>
                 <div className="runtime-line">
-                  <span>Proxy: {session?.proxy_name ?? 'Directo / .env'}</span>
+                  <span>Proxy: {session?.proxy_name ?? proxyLabel(run.runtime_metadata)}</span>
                   <span>Auth: {String(run.runtime_metadata.auth_mode ?? 'public_anonymous')}</span>
                   <span>Filtros: {String(run.runtime_metadata.filter_count ?? session?.filter_snapshot.length ?? 0)}</span>
                 </div>
@@ -126,6 +126,16 @@ export function RunsView({
       )}
     </section>
   );
+}
+
+function proxyLabel(metadata: Record<string, unknown>): string {
+  if (typeof metadata.proxy_name === 'string' && metadata.proxy_name) {
+    return metadata.proxy_name;
+  }
+  if (typeof metadata.proxy_profile_id === 'number') {
+    return `Perfil #${metadata.proxy_profile_id}`;
+  }
+  return 'Directo / .env';
 }
 
 function formatDuration(startedAt: string, finishedAt: string | null): string {

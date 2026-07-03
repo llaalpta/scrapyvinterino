@@ -32,12 +32,49 @@ class SearchSourceRead(BaseModel):
     normalized_query: dict[str, Any]
     is_active: bool
     scheduler_config: dict[str, Any]
+    monitor_mode: str
+    duration_minutes: int | None
+    filter_rule_ids: list[int]
+    proxy_profile_id: int | None
+    monitor_started_at: datetime | None
+    monitor_until: datetime | None
+    last_run_at: datetime | None
+    next_run_at: datetime | None
     archived_at: datetime | None
 
 
 class SearchSourceUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
     is_active: bool | None = None
     scheduler_config: dict[str, Any] | None = None
+    monitor_mode: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
+    filter_rule_ids: list[int] | None = None
+    proxy_profile_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_optional_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_search_source_name(value)
+
+    @field_validator("url")
+    @classmethod
+    def validate_optional_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_vinted_catalog_url(value)
+
+    @field_validator("monitor_mode")
+    @classmethod
+    def validate_monitor_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in {"manual", "continuous", "duration", "window"}:
+            raise ValueError("monitor_mode must be one of manual, continuous, duration, window")
+        return value
 
     @field_validator("scheduler_config")
     @classmethod
@@ -213,6 +250,8 @@ class OpportunityResultRead(BaseModel):
     filter_snapshot: list[dict[str, Any]]
     score: Decimal | None
     created_at: datetime
+    last_scraped_at: datetime
+    last_run_id: int | None
 
 
 class OpportunityResultPageRead(BaseModel):

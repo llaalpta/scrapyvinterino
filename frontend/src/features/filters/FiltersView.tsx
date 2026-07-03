@@ -39,7 +39,7 @@ export function FiltersView({
         </button>
       </form>
       {filterRules.length === 0 ? (
-        <p className="empty-inline">Sin filtros. Las sesiones sin filtros crean oportunidades marcadas como Sin filtros.</p>
+        <p className="empty-inline">Sin filtros. Los monitores sin filtros crean oportunidades marcadas como Sin filtros.</p>
       ) : (
         <div className="filters-list">
           {filterRules.map((rule) => (

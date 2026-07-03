@@ -183,14 +183,7 @@
 }
 
 .source-schedule {
-  grid-template-columns:
-    minmax(88px, 0.7fr)
-    minmax(78px, 0.6fr)
-    minmax(96px, 0.75fr)
-    minmax(96px, 0.75fr)
-    minmax(140px, 1fr)
-    minmax(108px, 0.85fr)
-    auto;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
 }
 
 .source-schedule select,

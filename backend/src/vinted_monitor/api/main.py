@@ -1,9 +1,13 @@
+import asyncio
+import json
 from datetime import datetime
 from decimal import Decimal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.api.schemas import (
@@ -32,7 +36,8 @@ from vinted_monitor.api.schemas import (
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.db.session import get_db
+from vinted_monitor.db.models import RunEvent
+from vinted_monitor.db.session import SessionLocal, get_db
 from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
@@ -67,17 +72,21 @@ from vinted_monitor.services.runs import (
     SearchSourceInactiveError,
     SearchSourceNotFoundError,
     execute_manual_run,
+    execute_monitor_run,
     list_runs,
 )
-from vinted_monitor.services.scheduler import get_scheduler_state, update_scheduler_enabled
+from vinted_monitor.services.scheduler import get_scheduler_state, next_run_after, source_config, update_scheduler_enabled
 from vinted_monitor.services.search_sources import (
-    SearchSourceNotFoundError as SourceUpdateNotFoundError,
-)
-from vinted_monitor.services.search_sources import (
+    SearchSourceConfigError,
     archive_source,
     create_source,
     list_sources,
+    start_source_monitor,
+    stop_source_monitor,
     update_source,
+)
+from vinted_monitor.services.search_sources import (
+    SearchSourceNotFoundError as SourceUpdateNotFoundError,
 )
 from vinted_monitor.services.sessions import (
     MonitorSessionConflictError,
@@ -117,8 +126,18 @@ def get_sources(db: Session = Depends(get_db)) -> list:
     return list_sources(db)
 
 
+@app.get("/api/monitors", response_model=list[SearchSourceRead])
+def get_monitors(db: Session = Depends(get_db)) -> list:
+    return list_sources(db)
+
+
 @app.post("/api/sources", response_model=SearchSourceRead, status_code=201)
 def post_source(payload: SearchSourceCreate, db: Session = Depends(get_db)):
+    return create_source(db, payload.name, payload.url)
+
+
+@app.post("/api/monitors", response_model=SearchSourceRead, status_code=201)
+def post_monitor(payload: SearchSourceCreate, db: Session = Depends(get_db)):
     return create_source(db, payload.name, payload.url)
 
 
@@ -128,13 +147,27 @@ def patch_source(source_id: int, payload: SearchSourceUpdate, db: Session = Depe
         return update_source(
             db,
             source_id,
+            name=payload.name,
+            url=payload.url,
             is_active=payload.is_active,
             scheduler_config=payload.scheduler_config,
+            monitor_mode=payload.monitor_mode,
+            duration_minutes=payload.duration_minutes,
+            filter_rule_ids=payload.filter_rule_ids,
+            proxy_profile_id=payload.proxy_profile_id,
+            clear_proxy_profile="proxy_profile_id" in payload.model_fields_set and payload.proxy_profile_id is None,
         )
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
+    except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SearchSourceConfigError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.patch("/api/monitors/{monitor_id}", response_model=SearchSourceRead)
+def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
+    return patch_source(monitor_id, payload, db)
 
 
 @app.delete("/api/sources/{source_id}", status_code=204)
@@ -144,6 +177,44 @@ def delete_source(source_id: int, db: Session = Depends(get_db)) -> Response:
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(status_code=204)
+
+
+@app.delete("/api/monitors/{monitor_id}", status_code=204)
+def delete_monitor(monitor_id: int, db: Session = Depends(get_db)) -> Response:
+    return delete_source(monitor_id, db)
+
+
+@app.post("/api/monitors/{monitor_id}/start", response_model=RunRead, status_code=201)
+def post_monitor_start(
+    monitor_id: int,
+    db: Session = Depends(get_db),
+    provider: ManualRunProvider = Depends(get_manual_run_provider),
+):
+    try:
+        source = start_source_monitor(db, monitor_id)
+        run = execute_monitor_run(db, monitor_id, provider=provider)
+        if source.monitor_mode == "manual":
+            stop_source_monitor(db, monitor_id)
+        else:
+            refreshed = db.get(type(source), monitor_id)
+            if refreshed is not None:
+                refreshed.next_run_at = next_run_after(run.finished_at or run.started_at, source_config(refreshed))
+                db.commit()
+        return run
+    except SourceUpdateNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SearchSourceConfigError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/monitors/{monitor_id}/stop", response_model=SearchSourceRead)
+def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
+    try:
+        return stop_source_monitor(db, monitor_id)
+    except SourceUpdateNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/scheduler", response_model=SchedulerStateRead)
@@ -327,14 +398,38 @@ def get_items(
     )
 
 
+@app.get("/api/monitors/{monitor_id}/results", response_model=ItemResultPageRead)
+def get_monitor_results(
+    monitor_id: int,
+    page: int = Query(DEFAULT_PAGE, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    scraped_from: datetime | None = None,
+    scraped_to: datetime | None = None,
+    price_min: Decimal | None = Query(None, ge=0),
+    price_max: Decimal | None = Query(None, ge=0),
+    db: Session = Depends(get_db),
+) -> ItemResultPageRead:
+    return get_items(
+        page=page,
+        page_size=page_size,
+        source_id=monitor_id,
+        scraped_from=scraped_from,
+        scraped_to=scraped_to,
+        price_min=price_min,
+        price_max=price_max,
+        db=db,
+    )
+
+
 @app.get("/api/opportunities", response_model=OpportunityResultPageRead)
 def get_opportunities(
     page: int = Query(DEFAULT_PAGE, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    source_id: int | None = Query(None, ge=1),
     db: Session = Depends(get_db),
 ) -> OpportunityResultPageRead:
     try:
-        result_page = list_opportunity_results(db, page=page, page_size=page_size)
+        result_page = list_opportunity_results(db, page=page, page_size=page_size, source_id=source_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return OpportunityResultPageRead(
@@ -354,6 +449,55 @@ def get_runs(limit: int = 50, db: Session = Depends(get_db)) -> list:
 @app.get("/api/runs/{run_id}/events", response_model=list[RunEventRead])
 def get_run_events(run_id: int, db: Session = Depends(get_db)) -> list:
     return list_run_events(db, run_id)
+
+
+@app.get("/api/monitors/{monitor_id}/events", response_model=list[RunEventRead])
+def get_monitor_events(monitor_id: int, db: Session = Depends(get_db)) -> list:
+    return list(db.scalars(select(RunEvent).where(RunEvent.source_id == monitor_id).order_by(RunEvent.created_at.asc(), RunEvent.id.asc())))
+
+
+@app.get("/api/monitors/events/stream")
+def stream_monitor_events(last_event_id: int = Query(0, ge=0)):
+    async def event_stream():
+        current_id = last_event_id
+        while True:
+            with SessionLocal() as db:
+                events = list(
+                    db.scalars(
+                        select(RunEvent)
+                        .where(RunEvent.id > current_id, RunEvent.source_id.is_not(None))
+                        .order_by(RunEvent.id.asc())
+                        .limit(100)
+                    )
+                )
+            for event in events:
+                current_id = event.id
+                payload = {
+                    "id": event.id,
+                    "source_id": event.source_id,
+                    "run_id": event.run_id,
+                    "phase": event.phase,
+                    "created_at": event.created_at.isoformat(),
+                    "message": event.message,
+                }
+                yield f"id: {event.id}\nevent: monitor_event\ndata: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/monitors/{monitor_id}/runs", response_model=RunRead, status_code=201)
+def post_monitor_run(
+    monitor_id: int,
+    db: Session = Depends(get_db),
+    provider: ManualRunProvider = Depends(get_manual_run_provider),
+):
+    try:
+        return execute_monitor_run(db, monitor_id, provider=provider)
+    except SearchSourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/sources/{source_id}/runs", response_model=RunRead, status_code=201)
@@ -408,4 +552,6 @@ def _opportunity_result_read(result: OpportunityResult) -> OpportunityResultRead
         filter_snapshot=result.opportunity.filter_snapshot,
         score=result.opportunity.score,
         created_at=result.opportunity.created_at,
+        last_scraped_at=result.last_scraped_at or result.opportunity.created_at,
+        last_run_id=result.last_run_id,
     )

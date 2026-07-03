@@ -27,12 +27,15 @@ from vinted_monitor.services.runs import (
     FAILED,
     GLOBAL_KNOWN_ID_CACHE,
     MANUAL_TRIGGER,
+    RUNNING,
     SCHEDULER_TRIGGER,
     SOURCE_SEEN_ID_CACHE,
     SUCCESS,
+    RunAlreadyActiveError,
     SearchSourceInactiveError,
     SearchSourceNotFoundError,
     execute_manual_run,
+    execute_monitor_run,
     execute_source_run,
     list_runs,
 )
@@ -176,6 +179,7 @@ def cleanup_source(source_id: int | None) -> None:
         )
         run_ids = list(db.scalars(select(Run.id).where(Run.source_id.in_(source_ids)))) if source_ids else []
         session_ids = list(db.scalars(select(MonitorSession.id).where(MonitorSession.source_id.in_(source_ids)))) if source_ids else []
+        rule_ids = list(db.scalars(select(FilterRule.id).where(FilterRule.name.like("pytest%"))))
         pytest_item_ids = list(db.scalars(select(Item.id).where(Item.vinted_item_id.like("pytest-run-item-%"))))
         if session_ids:
             db.query(RunEvent).filter(RunEvent.session_id.in_(session_ids)).delete(synchronize_session=False)
@@ -184,6 +188,8 @@ def cleanup_source(source_id: int | None) -> None:
             db.query(SessionItemState).filter(SessionItemState.item_id.in_(pytest_item_ids)).delete(synchronize_session=False)
             db.query(Opportunity).filter(Opportunity.item_id.in_(pytest_item_ids)).delete(synchronize_session=False)
             db.query(SourceSeenItem).filter(SourceSeenItem.item_id.in_(pytest_item_ids)).delete(synchronize_session=False)
+        if rule_ids:
+            db.query(Opportunity).filter(Opportunity.rule_id.in_(rule_ids)).delete(synchronize_session=False)
         if run_ids:
             db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.run_id.in_(run_ids)).delete(synchronize_session=False)
@@ -191,7 +197,12 @@ def cleanup_source(source_id: int | None) -> None:
         if source_ids:
             db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.source_id.in_(source_ids)).delete(synchronize_session=False)
+            db.query(Opportunity).filter(Opportunity.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(MonitorSession).filter(MonitorSession.source_id.in_(source_ids)).delete(synchronize_session=False)
+            db.query(SearchSource).filter(SearchSource.id.in_(source_ids)).update(
+                {SearchSource.proxy_profile_id: None},
+                synchronize_session=False,
+            )
         db.query(FilterRule).filter(FilterRule.name.like("pytest%")).delete(synchronize_session=False)
         db.query(ProxyProfile).filter(ProxyProfile.name.like("pytest%")).delete(synchronize_session=False)
         db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item-%")).delete(synchronize_session=False)
@@ -246,7 +257,7 @@ def test_execute_manual_run_updates_existing_items_without_counting_them_new(sou
         assert db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item-%"))) == 2
 
 
-def test_execute_manual_run_fetches_detail_only_for_globally_new_items(source_id: int) -> None:
+def test_execute_manual_run_fetches_detail_only_for_monitor_new_items(source_id: int) -> None:
     provider = FakeDetailProvider(item_count=2)
 
     with SessionLocal() as db:
@@ -263,7 +274,7 @@ def test_execute_manual_run_fetches_detail_only_for_globally_new_items(source_id
         assert item.photos == ["https://images.example.test/pytest-run-item-0-detail.webp"]
 
 
-def test_execute_manual_run_does_not_count_same_item_new_for_different_source(source_id: int) -> None:
+def test_execute_manual_run_counts_same_item_new_for_different_monitor(source_id: int) -> None:
     with SessionLocal() as db:
         second_source = SearchSource(
             name="pytest second source",
@@ -292,11 +303,94 @@ def test_execute_manual_run_does_not_count_same_item_new_for_different_source(so
             )
 
             assert first_run.items_new == 1
-            assert second_run.items_new == 0
-            assert provider.detail_calls == ["pytest-run-item-0"]
+            assert second_run.items_new == 1
+            assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-0"]
             assert seen_sources == sorted([source_id, second_source_id])
     finally:
         cleanup_source(second_source_id)
+
+
+def test_execute_monitor_run_creates_one_opportunity_per_monitor_item(source_id: int) -> None:
+    with SessionLocal() as db:
+        first_run = execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1))
+        second_run = execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1))
+        opportunities = list(db.scalars(select(Opportunity).where(Opportunity.source_id == source_id, Opportunity.session_id.is_(None))))
+
+        assert first_run.items_new == 1
+        assert first_run.opportunities_created == 1
+        assert second_run.items_new == 0
+        assert second_run.opportunities_created == 0
+        assert len(opportunities) == 1
+        assert opportunities[0].evaluation_status == "passed_without_filters"
+
+
+def test_execute_monitor_run_rejects_active_monitor_run(source_id: int) -> None:
+    with SessionLocal() as db:
+        db.add(Run(source_id=source_id, status=RUNNING, trigger=MANUAL_TRIGGER))
+        db.commit()
+
+        with pytest.raises(RunAlreadyActiveError, match="already has a running run"):
+            execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1))
+
+
+def test_execute_monitor_run_records_monitor_runtime_context(source_id: int) -> None:
+    with SessionLocal() as db:
+        rule = create_filter_rule(db, name="pytest monitor context filter", definition={"blacklist_terms": ["unused"]})
+        proxy = ProxyProfile(
+            name="pytest monitor context proxy",
+            scheme="http",
+            host="proxy.example.test",
+            port=8080,
+            is_active=True,
+        )
+        db.add(proxy)
+        db.flush()
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.filter_rule_ids = [rule.id]
+        source.proxy_profile_id = proxy.id
+        db.commit()
+
+        run = execute_monitor_run(db, source_id, provider=FakeDetailProvider(item_count=1))
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+
+        assert run.runtime_metadata["filter_count"] == 1
+        assert run.runtime_metadata["filter_rule_ids"] == [rule.id]
+        assert run.runtime_metadata["proxy_profile_id"] == proxy.id
+        assert run.runtime_metadata["proxy_name"] == "pytest monitor context proxy"
+        assert {event.proxy_profile_id for event in events if event.phase.startswith("catalog_search")} == {proxy.id}
+
+
+def test_monitor_run_api_returns_409_for_active_monitor_run(source_id: int) -> None:
+    with SessionLocal() as db:
+        db.add(Run(source_id=source_id, status=RUNNING, trigger=MANUAL_TRIGGER))
+        db.commit()
+
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider()
+    client = TestClient(app)
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/runs")
+
+        assert response.status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_monitor_start_api_returns_409_for_active_monitor_run(source_id: int) -> None:
+    with SessionLocal() as db:
+        db.add(Run(source_id=source_id, status=RUNNING, trigger=MANUAL_TRIGGER))
+        db.commit()
+
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider()
+    client = TestClient(app)
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/start")
+
+        assert response.status_code == 409
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_execute_manual_run_updates_source_seen_without_changing_first_run(source_id: int) -> None:
@@ -419,7 +513,7 @@ def test_known_global_item_can_create_opportunity_in_different_session(source_id
             )
 
             assert first_run.items_new == 1
-            assert second_run.items_new == 0
+            assert second_run.items_new == 1
             assert opportunity_sessions == sorted([first_session.id, second_session.id])
     finally:
         cleanup_source(second_source_id)

@@ -7,6 +7,14 @@ export type SearchSource = {
   normalized_query: Record<string, string[]>;
   is_active: boolean;
   scheduler_config: SourceSchedulerConfig;
+  monitor_mode: 'manual' | 'continuous' | 'duration' | 'window';
+  duration_minutes: number | null;
+  filter_rule_ids: number[];
+  proxy_profile_id: number | null;
+  monitor_started_at: string | null;
+  monitor_until: string | null;
+  last_run_at: string | null;
+  next_run_at: string | null;
   archived_at: string | null;
 };
 
@@ -121,6 +129,8 @@ export type OpportunityResult = {
   filter_snapshot: Array<{ id: number; name: string; definition: Record<string, unknown> }>;
   score: string | null;
   created_at: string;
+  last_scraped_at: string;
+  last_run_id: number | null;
 };
 
 export type Page<T> = {
@@ -245,22 +255,31 @@ async function getErrorMessage(response: Response): Promise<string> {
 }
 
 export function fetchSources(): Promise<SearchSource[]> {
-  return getJson<SearchSource[]>('/api/sources');
+  return getJson<SearchSource[]>('/api/monitors');
 }
 
 export async function createSource(payload: { name: string; url: string }): Promise<SearchSource> {
-  return postJson<SearchSource>('/api/sources', payload);
+  return postJson<SearchSource>('/api/monitors', payload);
 }
 
 export function updateSource(
   sourceId: number,
-  payload: { is_active?: boolean; scheduler_config?: SourceSchedulerConfig }
+  payload: {
+    name?: string;
+    url?: string;
+    is_active?: boolean;
+    scheduler_config?: SourceSchedulerConfig;
+    monitor_mode?: SearchSource['monitor_mode'];
+    duration_minutes?: number | null;
+    filter_rule_ids?: number[];
+    proxy_profile_id?: number | null;
+  }
 ): Promise<SearchSource> {
-  return patchJson<SearchSource>(`/api/sources/${sourceId}`, payload);
+  return patchJson<SearchSource>(`/api/monitors/${sourceId}`, payload);
 }
 
 export async function deleteSource(sourceId: number): Promise<void> {
-  const response = await fetch(`${apiBaseUrl}/api/sources/${sourceId}`, { method: 'DELETE' });
+  const response = await fetch(`${apiBaseUrl}/api/monitors/${sourceId}`, { method: 'DELETE' });
   if (!response.ok) {
     throw new Error(await getErrorMessage(response));
   }
@@ -332,6 +351,18 @@ export function stopMonitorSession(sessionId: number): Promise<MonitorSession> {
 
 export function runMonitorSession(sessionId: number): Promise<Run> {
   return postJson<Run>(`/api/monitor-sessions/${sessionId}/runs`);
+}
+
+export function startMonitor(sourceId: number): Promise<Run> {
+  return postJson<Run>(`/api/monitors/${sourceId}/start`);
+}
+
+export function stopMonitor(sourceId: number): Promise<SearchSource> {
+  return postJson<SearchSource>(`/api/monitors/${sourceId}/stop`);
+}
+
+export function runMonitor(sourceId: number): Promise<Run> {
+  return postJson<Run>(`/api/monitors/${sourceId}/runs`);
 }
 
 export function fetchOpportunities(query: { page?: number; page_size?: number } = {}): Promise<Page<OpportunityResult>> {
