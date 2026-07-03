@@ -296,6 +296,7 @@ export function App() {
             pageSize={resultsPageSize}
             sources={sources}
             onApply={() => void loadItems(1)}
+            onApplyFilters={(filters) => void loadItems(1, filters)}
             onClear={clearResultFilters}
             onFilterChange={updateResultFilter}
             onPageChange={(page) => void loadItems(page)}
@@ -356,6 +357,7 @@ function ResultsView({
   pageSize,
   sources,
   onApply,
+  onApplyFilters,
   onClear,
   onFilterChange,
   onPageChange,
@@ -367,6 +369,7 @@ function ResultsView({
   pageSize: number;
   sources: SearchSource[];
   onApply: () => void;
+  onApplyFilters: (filters: ResultFilters) => void;
   onClear: () => void;
   onFilterChange: (field: keyof ResultFilters, value: string) => void;
   onPageChange: (page: number) => void;
@@ -386,35 +389,61 @@ function ResultsView({
     setFiltersOpen(false);
   }
 
+  function removeFilter(field: keyof ResultFilters) {
+    const nextFilters = { ...filters, [field]: '' };
+    onFilterChange(field, '');
+    setFiltersOpen(false);
+    onApplyFilters(nextFilters);
+  }
+
   return (
     <section className="results-view">
       <div className="results-controls">
-        <button className="filter-toggle" type="button" onClick={() => setFiltersOpen(true)}>
+        <button className="filter-toggle" type="button" aria-expanded={filtersOpen} onClick={() => setFiltersOpen((current) => !current)}>
           <SlidersHorizontal size={17} />
           Filtros
           {activeFilterCount > 0 ? <span>{activeFilterCount}</span> : null}
         </button>
         <div className="filter-summary" aria-live="polite">
-          {filterSummaries.length > 0 ? filterSummaries.map((summary) => <span key={summary}>{summary}</span>) : <span>Sin filtros activos</span>}
+          {filterSummaries.length > 0 ? (
+            filterSummaries.map((summary) => (
+              <button key={summary.field} type="button" title={`Quitar ${summary.label}`} onClick={() => removeFilter(summary.field)}>
+                {summary.label}
+                <X size={14} />
+              </button>
+            ))
+          ) : (
+            <span>Sin filtros activos</span>
+          )}
         </div>
       </div>
 
       {filtersOpen ? <button className="filter-backdrop" type="button" aria-label="Cerrar filtros" onClick={() => setFiltersOpen(false)} /> : null}
 
-      <section className={filtersOpen ? 'filter-panel open' : 'filter-panel'}>
+      <form
+        className={filtersOpen ? 'filter-panel open' : 'filter-panel'}
+        onSubmit={(event) => {
+          event.preventDefault();
+          applyFilters();
+        }}
+      >
         <div className="filter-panel-heading">
           <h3>Filtros de resultados</h3>
-          <button type="button" title="Cerrar filtros" onClick={() => setFiltersOpen(false)}>
-            <X size={17} />
-          </button>
+          <div className="filter-panel-actions">
+            <button type="button" disabled={loading || activeFilterCount === 0} onClick={clearFilters}>
+              <RotateCcw size={17} />
+              Limpiar
+            </button>
+            <button type="submit" disabled={loading}>
+              <Search size={17} />
+              Aplicar
+            </button>
+            <button className="icon-button" type="button" title="Cerrar filtros" onClick={() => setFiltersOpen(false)}>
+              <X size={17} />
+            </button>
+          </div>
         </div>
-        <form
-          className="result-filters"
-          onSubmit={(event) => {
-            event.preventDefault();
-            applyFilters();
-          }}
-        >
+        <div className="result-filters">
           <label>
             Fuente
             <select value={filters.sourceId} onChange={(event) => onFilterChange('sourceId', event.target.value)}>
@@ -446,16 +475,8 @@ function ResultsView({
             Precio max
             <input min="0" type="number" value={filters.priceMax} onChange={(event) => onFilterChange('priceMax', event.target.value)} />
           </label>
-          <button type="submit" disabled={loading}>
-            <Search size={17} />
-            Aplicar
-          </button>
-          <button type="button" disabled={loading} onClick={clearFilters}>
-            <RotateCcw size={17} />
-            Limpiar
-          </button>
-        </form>
-      </section>
+        </div>
+      </form>
 
       <div className="table-wrap result-table">
         <table>
@@ -926,22 +947,30 @@ function countActiveFilters(filters: ResultFilters): number {
   return [filters.sourceId, filters.scrapedFrom, filters.scrapedTo, filters.priceMin, filters.priceMax].filter(Boolean).length;
 }
 
-function summarizeFilters(filters: ResultFilters, sources: SearchSource[]): string[] {
-  const summaries: string[] = [];
+type FilterSummary = {
+  field: keyof ResultFilters;
+  label: string;
+};
+
+function summarizeFilters(filters: ResultFilters, sources: SearchSource[]): FilterSummary[] {
+  const summaries: FilterSummary[] = [];
   if (filters.sourceId) {
-    summaries.push(sources.find((source) => source.id === Number(filters.sourceId))?.name ?? `Fuente ${filters.sourceId}`);
+    summaries.push({
+      field: 'sourceId',
+      label: sources.find((source) => source.id === Number(filters.sourceId))?.name ?? `Fuente ${filters.sourceId}`
+    });
   }
   if (filters.scrapedFrom) {
-    summaries.push(`Desde ${formatDate(new Date(filters.scrapedFrom).toISOString())}`);
+    summaries.push({ field: 'scrapedFrom', label: `Desde ${formatDate(new Date(filters.scrapedFrom).toISOString())}` });
   }
   if (filters.scrapedTo) {
-    summaries.push(`Hasta ${formatDate(new Date(filters.scrapedTo).toISOString())}`);
+    summaries.push({ field: 'scrapedTo', label: `Hasta ${formatDate(new Date(filters.scrapedTo).toISOString())}` });
   }
   if (filters.priceMin) {
-    summaries.push(`Min ${filters.priceMin}`);
+    summaries.push({ field: 'priceMin', label: `Min ${filters.priceMin}` });
   }
   if (filters.priceMax) {
-    summaries.push(`Max ${filters.priceMax}`);
+    summaries.push({ field: 'priceMax', label: `Max ${filters.priceMax}` });
   }
   return summaries;
 }

@@ -11,6 +11,8 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - Paginate result queries server-side; do not rely on infinite scroll.
 - Filter results by scrape date/time range, price range, and scrape source.
 - Keep result filters collapsed by default; open them inline on desktop and as a drawer on mobile.
+- Reuse the same filter button to open and close the filter panel.
+- Allow active filter chips to remove individual filters.
 - Keep page-size selection in the pagination controls, not in the product filters.
 - Show the source that last scraped the item and the scrape date/time.
 - If a source filter is active, show the scrape date/time for that source.
@@ -50,6 +52,7 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - No infinite-scroll behavior is needed to inspect results.
 - Result rows include source name and scrape date/time.
 - Date/time, price, and source filters update the backend query.
+- Active filter chips can clear individual filters without opening the panel.
 - Pagination controls request new pages from the backend.
 - Page-size controls request page 1 with the selected number of results per page.
 - Results can be filtered to a specific source without duplicating globally deduped items.

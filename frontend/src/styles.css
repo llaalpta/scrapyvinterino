@@ -202,15 +202,30 @@ input {
   font-size: 13px;
 }
 
-.filter-summary span {
+.filter-summary span,
+.filter-summary button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 240px;
   overflow: hidden;
   border: 1px solid #d8e0e7;
   border-radius: 999px;
   padding: 5px 9px;
+  min-height: 30px;
   background: #ffffff;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.filter-summary button {
+  color: #17352f;
+  cursor: pointer;
+}
+
+.filter-summary button:hover {
+  border-color: #9fb3c8;
+  background: #f3f6f8;
 }
 
 .filter-backdrop {
@@ -243,7 +258,14 @@ input {
   font-size: 16px;
 }
 
-.filter-panel-heading button {
+.filter-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.filter-panel-actions .icon-button {
   width: 36px;
   min-height: 36px;
   padding: 0;
@@ -666,6 +688,10 @@ th {
     max-width: 100%;
   }
 
+  .filter-summary button {
+    max-width: 100%;
+  }
+
   .filter-backdrop {
     position: fixed;
     inset: 0;
@@ -692,6 +718,23 @@ th {
     border-bottom: 0;
     border-left: 0;
     border-radius: 14px 14px 0 0;
+  }
+
+  .filter-panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .filter-panel-actions {
+    justify-content: stretch;
+  }
+
+  .filter-panel-actions button {
+    flex: 1;
+  }
+
+  .filter-panel-actions .icon-button {
+    flex: 0 0 38px;
   }
 
   .result-filters {
