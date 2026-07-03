@@ -22,6 +22,32 @@ docker compose up --build
 - `8000`: API FastAPI.
 - `5432`: Postgres local.
 
+## Frontend Structure
+
+The PWA should stay modular before new product flows are added. `frontend/src/App.tsx` is only the React root wrapper and should not own feature UI, API orchestration, or reusable components.
+
+Accepted structure:
+
+- `frontend/src/app/`: dashboard-level composition and navigation metadata.
+- `frontend/src/components/`: reusable UI pieces shared by multiple features, such as pagination, item cells, row actions, and layout shells.
+- `frontend/src/features/<feature>/`: feature-owned views and helpers. Current feature folders include `results`, `opportunities`, `sources`, `runs`, and `settings`.
+- `frontend/src/hooks/`: reusable React state orchestration hooks, including dashboard controllers that coordinate API calls and feature state.
+- `frontend/src/utils/`: generic formatting and pure helpers that do not know about feature state.
+- `frontend/src/api.ts`: API types and HTTP client functions only.
+- `frontend/src/styles/`: CSS split by responsibility and imported through `styles/index.css`.
+
+Feature work should add or extend a feature module instead of growing the dashboard root. If a file starts mixing cross-feature state, feature rendering, reusable components, and formatting helpers, split it before adding more behavior.
+
+### Frontend Baseline Acceptance
+
+- The app root remains a thin wrapper.
+- Dashboard state orchestration is separated from layout rendering.
+- Cross-feature dashboard state is extracted into a hook instead of living directly in the composition component.
+- Results, opportunities, sources, runs, and settings have feature-owned view modules.
+- Shared item rendering, row actions, and pagination are reusable components.
+- CSS is imported from `styles/index.css` and split into focused files.
+- Existing desktop and mobile dashboard behavior remains unchanged.
+
 ## Notas Windows
 
 Si `python` no aparece tras instalarlo, abrir una nueva terminal o usar la ruta real de instalacion en `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`.

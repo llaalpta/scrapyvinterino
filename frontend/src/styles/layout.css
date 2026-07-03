@@ -1,0 +1,143 @@
+.shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.shell.nav-collapsed {
+  grid-template-columns: 76px 1fr;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 28px;
+  color: #f8fafc;
+  background: #163832;
+}
+
+.brand-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.nav-toggle {
+  width: 38px;
+  min-height: 38px;
+  flex: 0 0 auto;
+  border-color: #2f6259;
+  color: #d6f4ef;
+  background: #1e4a43;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: #8fd4c8;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+nav {
+  display: grid;
+  gap: 8px;
+}
+
+nav button {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: auto;
+  border: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #d6f4ef;
+  background: transparent;
+  text-decoration: none;
+}
+
+nav button svg {
+  flex: 0 0 auto;
+}
+
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+nav button.active,
+nav button:hover {
+  background: #23554d;
+}
+
+.shell.nav-collapsed .sidebar {
+  gap: 24px;
+  padding: 18px 14px;
+}
+
+.shell.nav-collapsed .brand-row {
+  justify-content: center;
+}
+
+.shell.nav-collapsed .brand-copy {
+  display: none;
+}
+
+.shell.nav-collapsed nav button {
+  justify-content: center;
+  padding: 10px;
+}
+
+.shell.nav-collapsed .nav-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.content {
+  min-width: 0;
+  padding: 28px;
+}
+
+.topbar,
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.topbar p {
+  margin-top: 6px;
+  color: #697586;
+}
+
+.notice {
+  margin-bottom: 20px;
+  border: 1px solid #f5c2c7;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #842029;
+  background: #f8d7da;
+}
+
+.toolbar {
+  justify-content: flex-start;
+}

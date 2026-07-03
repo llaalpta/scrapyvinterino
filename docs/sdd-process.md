@@ -34,6 +34,8 @@ The audit must answer:
 
 For frontend work, a screen is not done just because it compiles. Navigation must land somewhere real, enabled buttons must perform their visible action, and future actions must be disabled, absent, or shown as an honest empty state.
 
+Frontend structure is part of the acceptance bar. Before adding a non-trivial PWA flow, keep the React root thin, place feature screens under `frontend/src/features/`, shared UI under `frontend/src/components/`, composition under `frontend/src/app/`, cross-feature state hooks under `frontend/src/hooks/`, and styles under `frontend/src/styles/`. Do not continue growing a multi-view `App.tsx` monolith when the change adds new state, controls, or views.
+
 ## Browser QA Rule
 
 When a spec changes the PWA, run a browser-driven QA pass against the live development app.
@@ -146,6 +148,7 @@ Before considering work done:
 - No duplicate or contradictory docs were introduced.
 - Code matches the documented architecture.
 - UI/API/database behavior matches what the user can actually do.
+- Non-trivial frontend changes follow the documented module boundaries instead of adding more mixed responsibility to the app root.
 - For PWA changes, Playwright or equivalent browser QA covered the live app.
 - Post-implementation audit completed or explicitly unavailable.
 - Audit findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
