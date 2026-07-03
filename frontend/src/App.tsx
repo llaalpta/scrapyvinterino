@@ -1,13 +1,17 @@
-import { ExternalLink, Heart, Play, Settings, ShoppingCart } from 'lucide-react';
+import { ExternalLink, Heart, Play, Power, Save, Settings, ShoppingCart } from 'lucide-react';
 import { FormEvent, useEffect, useState } from 'react';
 import {
   createSource,
   fetchItems,
   fetchRuns,
+  fetchScheduler,
   fetchSources,
   runSource,
+  updateScheduler,
+  updateSource,
   type Item,
   type Run,
+  type SchedulerState,
   type SearchSource
 } from './api';
 
@@ -19,11 +23,21 @@ const navItems = [
   { id: 'settings', label: 'Settings' }
 ];
 
+type SourceDraft = {
+  intervalSeconds: string;
+  jitterPercent: string;
+  allowedWindows: string;
+};
+
 export function App() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
+  const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [runningSourceId, setRunningSourceId] = useState<number | null>(null);
+  const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
+  const [savingScheduler, setSavingScheduler] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
@@ -31,11 +45,13 @@ export function App() {
   const activeSource = sources.find((source) => source.is_active);
 
   useEffect(() => {
-    Promise.all([fetchSources(), fetchItems(), fetchRuns()])
-      .then(([sourceData, itemData, runData]) => {
+    Promise.all([fetchSources(), fetchItems(), fetchRuns(), fetchScheduler()])
+      .then(([sourceData, itemData, runData, schedulerData]) => {
         setSources(sourceData);
         setItems(itemData);
         setRuns(runData);
+        setScheduler(schedulerData);
+        setSourceDrafts(buildSourceDrafts(sourceData));
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
@@ -48,6 +64,7 @@ export function App() {
     try {
       const created = await createSource({ name: sourceName, url: sourceUrl });
       setSources((current) => [created, ...current]);
+      setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
       setSourceName('');
       setSourceUrl('');
     } catch (caught) {
@@ -70,6 +87,73 @@ export function App() {
     } finally {
       setRunningSourceId(null);
     }
+  }
+
+  async function onToggleScheduler() {
+    if (!scheduler) {
+      return;
+    }
+    setError(null);
+    setSavingScheduler(true);
+    try {
+      const updated = await updateScheduler({ enabled: !scheduler.enabled });
+      setScheduler(updated);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el scheduler');
+    } finally {
+      setSavingScheduler(false);
+    }
+  }
+
+  async function onToggleSource(source: SearchSource) {
+    setError(null);
+    setSavingSourceId(source.id);
+    try {
+      const updated = await updateSource(source.id, { is_active: !source.is_active });
+      replaceSource(updated);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar la fuente');
+    } finally {
+      setSavingSourceId(null);
+    }
+  }
+
+  async function onSaveSourceSchedule(source: SearchSource) {
+    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    setError(null);
+    setSavingSourceId(source.id);
+    try {
+      const updated = await updateSource(source.id, {
+        scheduler_config: {
+          interval_seconds: Number(draft.intervalSeconds),
+          jitter_percent: Number(draft.jitterPercent),
+          allowed_windows: draft.allowedWindows
+            .split(',')
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        }
+      });
+      replaceSource(updated);
+      setSourceDrafts((current) => ({ ...current, [updated.id]: buildSourceDraft(updated) }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo guardar la cadencia');
+    } finally {
+      setSavingSourceId(null);
+    }
+  }
+
+  function replaceSource(updated: SearchSource) {
+    setSources((current) => current.map((source) => (source.id === updated.id ? updated : source)));
+  }
+
+  function updateSourceDraft(sourceId: number, field: keyof SourceDraft, value: string) {
+    setSourceDrafts((current) => ({
+      ...current,
+      [sourceId]: {
+        ...(current[sourceId] ?? { intervalSeconds: '300', jitterPercent: '20', allowedWindows: '' }),
+        [field]: value
+      }
+    }));
   }
 
   function getSourceName(sourceId: number): string {
@@ -146,9 +230,48 @@ export function App() {
             <div className="sources-list">
               {sources.map((source) => (
                 <article className="source-row" key={source.id}>
-                  <div>
+                  <div className="source-main">
                     <strong>{source.name}</strong>
                     <a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>
+                  </div>
+                  <div className="source-schedule">
+                    <label>
+                      Intervalo
+                      <input
+                        type="number"
+                        min="60"
+                        max="3600"
+                        value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).intervalSeconds}
+                        onChange={(event) => updateSourceDraft(source.id, 'intervalSeconds', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Jitter %
+                      <input
+                        type="number"
+                        min="0"
+                        max="50"
+                        value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).jitterPercent}
+                        onChange={(event) => updateSourceDraft(source.id, 'jitterPercent', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Ventanas
+                      <input
+                        value={(sourceDrafts[source.id] ?? buildSourceDraft(source)).allowedWindows}
+                        placeholder="09:00-23:00"
+                        onChange={(event) => updateSourceDraft(source.id, 'allowedWindows', event.target.value)}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={savingSourceId === source.id}
+                      title="Guardar cadencia"
+                      onClick={() => void onSaveSourceSchedule(source)}
+                    >
+                      <Save size={16} />
+                      Guardar
+                    </button>
                   </div>
                   <button
                     type="button"
@@ -158,6 +281,15 @@ export function App() {
                   >
                     <Play size={17} />
                     {runningSourceId === source.id ? 'Ejecutando' : 'Ejecutar'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingSourceId === source.id}
+                    title={source.is_active ? 'Pausar fuente' : 'Activar fuente'}
+                    onClick={() => void onToggleSource(source)}
+                  >
+                    <Power size={16} />
+                    {source.is_active ? 'Pausar' : 'Activar'}
                   </button>
                   <span className={source.is_active ? 'status active' : 'status'}>{source.is_active ? 'Activa' : 'Pausada'}</span>
                 </article>
@@ -256,6 +388,10 @@ export function App() {
                       <dd className={`run-status ${run.status}`}>{run.status}</dd>
                     </div>
                     <div>
+                      <dt>Trigger</dt>
+                      <dd>{run.trigger}</dd>
+                    </div>
+                    <div>
                       <dt>Encontrados</dt>
                       <dd>{run.items_found}</dd>
                     </div>
@@ -277,13 +413,55 @@ export function App() {
         <section id="settings" className="section-panel">
           <div className="panel-heading">
             <h3>Settings</h3>
-            <span>Local</span>
+            <span>{scheduler?.effective_enabled ? 'Scheduler activo' : 'Scheduler parado'}</span>
           </div>
-          <p className="empty-inline">Configuracion pendiente.</p>
+          {scheduler ? (
+            <div className="settings-grid">
+              <div>
+                <strong>Scheduler</strong>
+                <p>{scheduler.enabled ? 'Habilitado en la UI' : 'Deshabilitado en la UI'}</p>
+              </div>
+              <div>
+                <strong>Runtime</strong>
+                <p>{scheduler.runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'}</p>
+              </div>
+              <div>
+                <strong>Concurrencia</strong>
+                <p>{scheduler.max_concurrent_runs} global / {scheduler.per_source_concurrency} por fuente</p>
+              </div>
+              <div>
+                <strong>Zona horaria</strong>
+                <p>{scheduler.timezone}</p>
+              </div>
+              <div>
+                <strong>Proxy Vinted</strong>
+                <p>{scheduler.proxy_enabled ? (scheduler.proxy_configured ? 'Activo y configurado' : 'Activo sin URL') : 'Desactivado'}</p>
+              </div>
+              <button type="button" disabled={savingScheduler} onClick={() => void onToggleScheduler()}>
+                <Power size={17} />
+                {scheduler.enabled ? 'Deshabilitar scheduler' : 'Habilitar scheduler'}
+              </button>
+            </div>
+          ) : (
+            <p className="empty-inline">No se pudo cargar la configuracion del scheduler.</p>
+          )}
         </section>
       </section>
     </main>
   );
+}
+
+function buildSourceDrafts(sources: SearchSource[]): Record<number, SourceDraft> {
+  return Object.fromEntries(sources.map((source) => [source.id, buildSourceDraft(source)]));
+}
+
+function buildSourceDraft(source: SearchSource): SourceDraft {
+  const config = source.scheduler_config ?? {};
+  return {
+    intervalSeconds: String(config.interval_seconds ?? 300),
+    jitterPercent: String(config.jitter_percent ?? 20),
+    allowedWindows: (config.allowed_windows ?? []).join(', ')
+  };
 }
 
 function formatDate(value: string): string {

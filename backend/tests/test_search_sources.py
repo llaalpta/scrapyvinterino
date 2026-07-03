@@ -4,8 +4,9 @@ from pydantic import ValidationError
 
 from vinted_monitor.api.main import app
 from vinted_monitor.api.schemas import SearchSourceCreate
-from vinted_monitor.db.models import SearchSource
+from vinted_monitor.db.models import AppSetting, SearchSource
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
 from vinted_monitor.services.search_sources import (
     normalize_vinted_catalog_url,
     validate_search_source_name,
@@ -111,3 +112,98 @@ def test_create_source_api_rejects_invalid_url() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_update_source_api_persists_pause_and_scheduler_config() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/sources",
+        json={"name": "pytest scheduler source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(
+            f"/api/sources/{source_id}",
+            json={
+                "is_active": False,
+                "scheduler_config": {
+                    "interval_seconds": 120,
+                    "jitter_percent": 10,
+                    "allowed_windows": ["09:00-23:00"],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["is_active"] is False
+        assert body["scheduler_config"] == {
+            "interval_seconds": 120,
+            "jitter_percent": 10,
+            "allowed_windows": ["09:00-23:00"],
+        }
+
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+            assert source.scheduler_config["interval_seconds"] == 120
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/sources",
+        json={"name": "pytest invalid scheduler source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(
+            f"/api/sources/{source_id}",
+            json={"scheduler_config": {"interval_seconds": 30}},
+        )
+
+        assert response.status_code == 422
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.scheduler_config == {}
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+def test_scheduler_api_updates_persisted_ui_gate() -> None:
+    client = TestClient(app)
+
+    try:
+        response = client.patch("/api/scheduler", json={"enabled": True})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["enabled"] is True
+        assert "runtime_enabled" in body
+        assert "effective_enabled" in body
+
+        get_response = client.get("/api/scheduler")
+        assert get_response.status_code == 200
+        assert get_response.json()["enabled"] is True
+    finally:
+        with SessionLocal() as db:
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+                db.commit()

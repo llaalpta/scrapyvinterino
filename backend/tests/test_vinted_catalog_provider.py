@@ -183,6 +183,25 @@ def test_http_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
     assert [httpx.URL(call).path for call in calls] == ["/catalog", "/api/v2/catalog/items"]
 
 
+def test_http_provider_configures_proxy_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_proxies: list[str | None] = []
+
+    class FakeClient:
+        def __init__(self, *args, proxy=None, **kwargs) -> None:
+            captured_proxies.append(proxy)
+
+    monkeypatch.setattr("vinted_monitor.providers.vinted_catalog.httpx.Client", FakeClient)
+
+    HttpVintedCatalogProvider(
+        settings=Settings(vinted_proxy_enabled=False, vinted_proxy_url="http://user:pass@proxy.example:8000")
+    )._client({})
+    HttpVintedCatalogProvider(
+        settings=Settings(vinted_proxy_enabled=True, vinted_proxy_url="http://user:pass@proxy.example:8000")
+    )._client({})
+
+    assert captured_proxies == [None, "http://user:pass@proxy.example:8000"]
+
+
 def test_http_provider_refreshes_anonymous_session_once_after_auth_failure() -> None:
     api_calls = 0
     bootstrap_calls = 0

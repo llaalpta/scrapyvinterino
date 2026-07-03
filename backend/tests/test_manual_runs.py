@@ -12,11 +12,14 @@ from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDe
 from vinted_monitor.services.runs import (
     FAILED,
     GLOBAL_KNOWN_ID_CACHE,
+    MANUAL_TRIGGER,
+    SCHEDULER_TRIGGER,
     SOURCE_SEEN_ID_CACHE,
     SUCCESS,
     SearchSourceInactiveError,
     SearchSourceNotFoundError,
     execute_manual_run,
+    execute_source_run,
     list_runs,
 )
 
@@ -181,13 +184,16 @@ def test_execute_manual_run_records_success_and_persists_items(source_id: int) -
         assert run.items_found == 2
         assert run.items_new == 2
         assert run.opportunities_created == 0
+        assert run.trigger == MANUAL_TRIGGER
         assert run.error_message is None
-        assert "pytest-run-item-0" in GLOBAL_KNOWN_ID_CACHE
-        assert "pytest-run-item-0" in SOURCE_SEEN_ID_CACHE[source_id]
 
     assert count_items() == before_items + 2
 
     with SessionLocal() as db:
+        item_id = db.scalar(select(Item.id).where(Item.vinted_item_id == "pytest-run-item-0"))
+        assert item_id is not None
+        assert GLOBAL_KNOWN_ID_CACHE["pytest-run-item-0"] == item_id
+        assert SOURCE_SEEN_ID_CACHE[source_id]["pytest-run-item-0"] == item_id
         seen_count = db.scalar(select(func.count()).select_from(SourceSeenItem).where(SourceSeenItem.source_id == source_id))
         assert seen_count == 2
 
@@ -292,6 +298,14 @@ def test_execute_manual_run_detail_fetch_respects_candidate_limit(source_id: int
 
         assert run.items_new == 3
         assert provider.detail_calls == ["pytest-run-item-0"]
+
+
+def test_execute_source_run_records_scheduler_trigger(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_source_run(db, source_id, provider=FakeSuccessProvider(item_count=1), trigger=SCHEDULER_TRIGGER)
+
+        assert run.status == SUCCESS
+        assert run.trigger == SCHEDULER_TRIGGER
 
 
 def test_execute_manual_run_records_detail_failure_without_failing_run(source_id: int) -> None:
@@ -413,6 +427,7 @@ def test_manual_run_api_creates_run_with_injected_provider(source_id: int) -> No
         body = response.json()
         assert body["source_id"] == source_id
         assert body["status"] == SUCCESS
+        assert body["trigger"] == MANUAL_TRIGGER
         assert body["items_found"] == 3
         assert body["items_new"] == 3
 

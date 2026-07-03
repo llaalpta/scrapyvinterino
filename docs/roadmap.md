@@ -18,7 +18,7 @@ Status values:
 | 3 | done | Manual runs | `docs/specs/003-manual-run.md` | Trigger source execution manually and record run state. |
 | 4 | done | Item persistence | `docs/specs/004-item-persistence.md` | Store normalized public catalog items. |
 | 5 | done | Fast detection and seen tracking | `docs/specs/005-deduplication-and-opportunities.md` | Use fast catalog JSON, global dedupe, source traceability, and bounded detail fetch. |
-| 6 | not-started | Bounded concurrent scheduler and runtime cache | `docs/specs/008-scheduler.md` | Run sources concurrently with limits, jitter, isolated anonymous sessions, and global item cache before alerting. |
+| 6 | done | Bounded concurrent scheduler and runtime cache | `docs/specs/008-scheduler.md` | Run sources concurrently with limits, jitter, isolated anonymous sessions, and global item cache before alerting. |
 | 7 | not-started | Local filters and opportunities | `docs/specs/006-local-filters.md` | Apply application-owned filters and create notification-worthy opportunities. |
 | 8 | not-started | Opportunities table | `docs/specs/007-opportunities-table.md` | Show new opportunities and action affordances in the PWA. |
 

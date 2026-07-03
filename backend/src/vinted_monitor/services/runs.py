@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
+from threading import RLock
 from typing import Protocol
 
 from sqlalchemy import select
@@ -17,12 +18,15 @@ from vinted_monitor.services.items import apply_item_detail, get_items_by_vinted
 RUNNING = "running"
 SUCCESS = "success"
 FAILED = "failed"
+MANUAL_TRIGGER = "manual"
+SCHEDULER_TRIGGER = "scheduler"
 SOURCE_SEEN_ID_CACHE_LIMIT = 10_000
 GLOBAL_KNOWN_ID_CACHE_LIMIT = 50_000
 # These caches are hints only. Database writes remain the source of truth for
 # newness, item updates, and source traceability.
-SOURCE_SEEN_ID_CACHE: dict[int, OrderedDict[str, None]] = {}
-GLOBAL_KNOWN_ID_CACHE: OrderedDict[str, None] = OrderedDict()
+SOURCE_SEEN_ID_CACHE: dict[int, OrderedDict[str, int]] = {}
+GLOBAL_KNOWN_ID_CACHE: OrderedDict[str, int] = OrderedDict()
+_CACHE_LOCK = RLock()
 
 
 class ManualRunProvider(Protocol):
@@ -46,6 +50,15 @@ def execute_manual_run(
     source_id: int,
     provider: ManualRunProvider | None = None,
 ) -> Run:
+    return execute_source_run(db, source_id, provider=provider, trigger=MANUAL_TRIGGER)
+
+
+def execute_source_run(
+    db: Session,
+    source_id: int,
+    provider: ManualRunProvider | None = None,
+    trigger: str = MANUAL_TRIGGER,
+) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
@@ -55,6 +68,7 @@ def execute_manual_run(
     run = Run(
         source_id=source.id,
         status=RUNNING,
+        trigger=trigger,
         items_found=0,
         items_new=0,
         opportunities_created=0,
@@ -72,12 +86,27 @@ def execute_manual_run(
     try:
         persistence_result = persist_catalog_items(db, result.items)
         unique_candidates = _deduplicate_candidates(result.items)
-        items_by_vinted_id = get_items_by_vinted_ids(db, [candidate.vinted_item_id for candidate in unique_candidates])
+        cached_item_ids_by_vinted_id = _get_cached_known_item_ids(
+            [candidate.vinted_item_id for candidate in unique_candidates]
+        )
         inserted_vinted_item_ids = set(persistence_result.inserted_vinted_item_ids)
+        lookup_vinted_item_ids = sorted(
+            {
+                candidate.vinted_item_id
+                for candidate in unique_candidates
+                if candidate.vinted_item_id in inserted_vinted_item_ids
+                or candidate.vinted_item_id not in cached_item_ids_by_vinted_id
+            }
+        )
+        items_by_vinted_id = get_items_by_vinted_ids(db, lookup_vinted_item_ids)
+        item_ids_by_vinted_id = {
+            **cached_item_ids_by_vinted_id,
+            **{vinted_item_id: item.id for vinted_item_id, item in items_by_vinted_id.items()},
+        }
         global_new_candidates = [
             candidate for candidate in unique_candidates if candidate.vinted_item_id in inserted_vinted_item_ids
         ]
-        _track_source_seen_items(db, source.id, run.id, unique_candidates, items_by_vinted_id)
+        _track_source_seen_items(db, source.id, run.id, unique_candidates, item_ids_by_vinted_id)
         _fetch_and_persist_details(db, run_provider, source, run, global_new_candidates, items_by_vinted_id)
 
         run.status = SUCCESS
@@ -87,9 +116,13 @@ def execute_manual_run(
         run.opportunities_created = 0
         run.error_message = None
         db.commit()
-        committed_vinted_item_ids = [candidate.vinted_item_id for candidate in unique_candidates]
-        _remember_known_ids(committed_vinted_item_ids)
-        _remember_source_seen_ids(source.id, committed_vinted_item_ids)
+        committed_item_ids_by_vinted_id = {
+            candidate.vinted_item_id: item_ids_by_vinted_id[candidate.vinted_item_id]
+            for candidate in unique_candidates
+            if candidate.vinted_item_id in item_ids_by_vinted_id
+        }
+        _remember_known_items(committed_item_ids_by_vinted_id)
+        _remember_source_seen_items(source.id, committed_item_ids_by_vinted_id)
         db.refresh(run)
         return run
     except Exception as exc:
@@ -136,29 +169,42 @@ def _track_source_seen_items(
     source_id: int,
     run_id: int,
     candidates: list[CatalogItemCandidate],
-    items_by_vinted_id: dict[str, Item],
+    item_ids_by_vinted_id: dict[str, int],
 ) -> None:
     if not candidates:
         return
 
-    _upsert_source_seen_items(db, source_id, run_id, [items_by_vinted_id[candidate.vinted_item_id] for candidate in candidates])
+    _upsert_source_seen_item_ids(
+        db,
+        source_id,
+        run_id,
+        [
+            item_ids_by_vinted_id[candidate.vinted_item_id]
+            for candidate in candidates
+            if candidate.vinted_item_id in item_ids_by_vinted_id
+        ],
+    )
 
 
 def _upsert_source_seen_items(db: Session, source_id: int, run_id: int, items: list[Item]) -> None:
-    if not items:
+    _upsert_source_seen_item_ids(db, source_id, run_id, [item.id for item in items])
+
+
+def _upsert_source_seen_item_ids(db: Session, source_id: int, run_id: int, item_ids: list[int]) -> None:
+    if not item_ids:
         return
 
     now = datetime.now(UTC)
     rows = [
         {
             "source_id": source_id,
-            "item_id": item.id,
+            "item_id": item_id,
             "first_run_id": run_id,
             "last_run_id": run_id,
             "first_seen_at": now,
             "last_seen_at": now,
         }
-        for item in items
+        for item_id in item_ids
     ]
     statement = pg_insert(SourceSeenItem).values(rows)
     db.execute(
@@ -173,19 +219,30 @@ def _upsert_source_seen_items(db: Session, source_id: int, run_id: int, items: l
     db.flush()
 
 
-def _remember_known_ids(vinted_item_ids: list[str]) -> None:
-    _remember_ids(GLOBAL_KNOWN_ID_CACHE, vinted_item_ids, GLOBAL_KNOWN_ID_CACHE_LIMIT)
+def _get_cached_known_item_ids(vinted_item_ids: list[str]) -> dict[str, int]:
+    with _CACHE_LOCK:
+        return {
+            vinted_item_id: GLOBAL_KNOWN_ID_CACHE[vinted_item_id]
+            for vinted_item_id in vinted_item_ids
+            if vinted_item_id in GLOBAL_KNOWN_ID_CACHE
+        }
 
 
-def _remember_source_seen_ids(source_id: int, vinted_item_ids: list[str]) -> None:
-    cache = SOURCE_SEEN_ID_CACHE.setdefault(source_id, OrderedDict())
-    _remember_ids(cache, vinted_item_ids, SOURCE_SEEN_ID_CACHE_LIMIT)
+def _remember_known_items(items_by_vinted_id: dict[str, int]) -> None:
+    with _CACHE_LOCK:
+        _remember_items(GLOBAL_KNOWN_ID_CACHE, items_by_vinted_id, GLOBAL_KNOWN_ID_CACHE_LIMIT)
 
 
-def _remember_ids(cache: OrderedDict[str, None], vinted_item_ids: list[str], limit: int) -> None:
-    for vinted_item_id in vinted_item_ids:
+def _remember_source_seen_items(source_id: int, items_by_vinted_id: dict[str, int]) -> None:
+    with _CACHE_LOCK:
+        cache = SOURCE_SEEN_ID_CACHE.setdefault(source_id, OrderedDict())
+        _remember_items(cache, items_by_vinted_id, SOURCE_SEEN_ID_CACHE_LIMIT)
+
+
+def _remember_items(cache: OrderedDict[str, int], items_by_vinted_id: dict[str, int], limit: int) -> None:
+    for vinted_item_id, item_id in items_by_vinted_id.items():
         cache.pop(vinted_item_id, None)
-        cache[vinted_item_id] = None
+        cache[vinted_item_id] = item_id
     while len(cache) > limit:
         cache.popitem(last=False)
 

@@ -38,6 +38,14 @@ class SearchSource(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Item(Base):
     __tablename__ = "items"
 
@@ -78,6 +86,7 @@ class Run(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
     status: Mapped[str] = mapped_column(String(40))
+    trigger: Mapped[str] = mapped_column(String(40), default="manual")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     items_found: Mapped[int] = mapped_column(Integer, default=0)

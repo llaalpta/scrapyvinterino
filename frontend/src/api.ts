@@ -6,6 +6,25 @@ export type SearchSource = {
   url: string;
   normalized_query: Record<string, string[]>;
   is_active: boolean;
+  scheduler_config: SourceSchedulerConfig;
+};
+
+export type SourceSchedulerConfig = {
+  interval_seconds?: number;
+  jitter_percent?: number;
+  allowed_windows?: string[];
+};
+
+export type SchedulerState = {
+  enabled: boolean;
+  runtime_enabled: boolean;
+  effective_enabled: boolean;
+  max_concurrent_runs: number;
+  per_source_concurrency: number;
+  poll_interval_seconds: number;
+  timezone: string;
+  proxy_enabled: boolean;
+  proxy_configured: boolean;
 };
 
 export type Item = {
@@ -42,6 +61,7 @@ export type Run = {
   id: number;
   source_id: number;
   status: string;
+  trigger: string;
   started_at: string;
   finished_at: string | null;
   items_found: number;
@@ -65,6 +85,20 @@ async function postJson<T>(path: string, payload?: unknown): Promise<T> {
       'Content-Type': 'application/json'
     },
     body: payload === undefined ? undefined : JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(await getErrorMessage(response));
+  }
+  return response.json() as Promise<T>;
+}
+
+async function patchJson<T>(path: string, payload: unknown): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
   });
   if (!response.ok) {
     throw new Error(await getErrorMessage(response));
@@ -108,6 +142,21 @@ export function fetchSources(): Promise<SearchSource[]> {
 
 export async function createSource(payload: { name: string; url: string }): Promise<SearchSource> {
   return postJson<SearchSource>('/api/sources', payload);
+}
+
+export function updateSource(
+  sourceId: number,
+  payload: { is_active?: boolean; scheduler_config?: SourceSchedulerConfig }
+): Promise<SearchSource> {
+  return patchJson<SearchSource>(`/api/sources/${sourceId}`, payload);
+}
+
+export function fetchScheduler(): Promise<SchedulerState> {
+  return getJson<SchedulerState>('/api/scheduler');
+}
+
+export function updateScheduler(payload: { enabled: boolean }): Promise<SchedulerState> {
+  return patchJson<SchedulerState>('/api/scheduler', payload);
 }
 
 export function fetchItems(): Promise<Item[]> {

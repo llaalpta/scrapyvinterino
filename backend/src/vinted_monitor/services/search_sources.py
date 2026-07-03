@@ -4,9 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.db.models import SearchSource
+from vinted_monitor.services.scheduler import normalize_scheduler_config
 
 ALLOWED_VINTED_CATALOG_HOSTS = {"www.vinted.es", "vinted.es"}
 ALLOWED_VINTED_CATALOG_PATHS = {"/catalog", "/catalog/"}
+
+
+class SearchSourceNotFoundError(ValueError):
+    pass
 
 
 def validate_search_source_name(name: str) -> str:
@@ -57,3 +62,24 @@ def create_source(db: Session, name: str, url: str) -> SearchSource:
 
 def list_sources(db: Session) -> list[SearchSource]:
     return list(db.scalars(select(SearchSource).order_by(SearchSource.id.desc())))
+
+
+def update_source(
+    db: Session,
+    source_id: int,
+    *,
+    is_active: bool | None = None,
+    scheduler_config: dict | None = None,
+) -> SearchSource:
+    source = db.get(SearchSource, source_id)
+    if source is None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+
+    if is_active is not None:
+        source.is_active = is_active
+    if scheduler_config is not None:
+        source.scheduler_config = normalize_scheduler_config(scheduler_config)
+
+    db.commit()
+    db.refresh(source)
+    return source

@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     )
 
     scheduler_enabled: bool = False
+    scheduler_max_concurrent_runs: int = 2
+    scheduler_per_source_concurrency: int = 1
+    scheduler_poll_interval_seconds: int = 5
+    scheduler_timezone: str = "Europe/Madrid"
     log_level: str = "INFO"
 
     vinted_auth_enabled: bool = False

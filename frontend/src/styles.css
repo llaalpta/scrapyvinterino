@@ -81,6 +81,7 @@ nav a:hover {
 }
 
 .content {
+  min-width: 0;
   padding: 28px;
 }
 
@@ -149,12 +150,17 @@ button:disabled {
   background: #ffffff;
 }
 
+input {
+  font: inherit;
+}
+
 section[id] {
   scroll-margin-top: 20px;
 }
 
 .sources-panel,
 .section-panel {
+  min-width: 0;
   margin-bottom: 20px;
   border: 1px solid #d8e0e7;
   border-radius: 8px;
@@ -199,7 +205,7 @@ section[id] {
 
 .source-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(220px, 1fr) minmax(360px, 1.2fr) auto auto auto;
   align-items: center;
   gap: 14px;
   padding: 12px 14px;
@@ -209,7 +215,7 @@ section[id] {
   border-top: 1px solid #e5eaf0;
 }
 
-.source-row div {
+.source-main {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -225,6 +231,30 @@ section[id] {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.source-schedule {
+  display: grid;
+  grid-template-columns: minmax(82px, 0.7fr) minmax(72px, 0.6fr) minmax(120px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.source-schedule label {
+  display: grid;
+  gap: 4px;
+  color: #52606d;
+  font-size: 12px;
+}
+
+.source-schedule input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #1f2933;
+  background: #ffffff;
 }
 
 .status.active {
@@ -270,7 +300,7 @@ section[id] {
 
 .run-row dl {
   display: grid;
-  grid-template-columns: repeat(4, minmax(86px, 1fr));
+  grid-template-columns: repeat(5, minmax(86px, 1fr));
   gap: 10px;
   margin: 0;
 }
@@ -302,8 +332,31 @@ section[id] {
   color: #697586;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+}
+
+.settings-grid div {
+  display: grid;
+  gap: 5px;
+}
+
+.settings-grid strong {
+  color: #1f2933;
+}
+
+.settings-grid p {
+  color: #697586;
+  font-size: 13px;
+}
+
 .table-wrap {
   overflow: auto;
+  max-width: 100%;
   margin-bottom: 20px;
   border: 1px solid #d8e0e7;
   border-radius: 8px;
@@ -393,7 +446,9 @@ th {
     flex-direction: column;
   }
 
-  .source-row {
+  .source-row,
+  .source-schedule,
+  .settings-grid {
     grid-template-columns: 1fr;
     align-items: start;
   }

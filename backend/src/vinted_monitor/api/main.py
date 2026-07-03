@@ -7,8 +7,11 @@ from vinted_monitor.api.schemas import (
     ActionRequestRead,
     ItemRead,
     RunRead,
+    SchedulerStateRead,
+    SchedulerUpdate,
     SearchSourceCreate,
     SearchSourceRead,
+    SearchSourceUpdate,
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
@@ -23,7 +26,15 @@ from vinted_monitor.services.runs import (
     execute_manual_run,
     list_runs,
 )
-from vinted_monitor.services.search_sources import create_source, list_sources
+from vinted_monitor.services.scheduler import get_scheduler_state, update_scheduler_enabled
+from vinted_monitor.services.search_sources import (
+    SearchSourceNotFoundError as SourceUpdateNotFoundError,
+)
+from vinted_monitor.services.search_sources import (
+    create_source,
+    list_sources,
+    update_source,
+)
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -56,6 +67,31 @@ def get_sources(db: Session = Depends(get_db)) -> list:
 @app.post("/api/sources", response_model=SearchSourceRead, status_code=201)
 def post_source(payload: SearchSourceCreate, db: Session = Depends(get_db)):
     return create_source(db, payload.name, payload.url)
+
+
+@app.patch("/api/sources/{source_id}", response_model=SearchSourceRead)
+def patch_source(source_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
+    try:
+        return update_source(
+            db,
+            source_id,
+            is_active=payload.is_active,
+            scheduler_config=payload.scheduler_config,
+        )
+    except SourceUpdateNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/scheduler", response_model=SchedulerStateRead)
+def get_scheduler(db: Session = Depends(get_db)):
+    return get_scheduler_state(db, settings)
+
+
+@app.patch("/api/scheduler", response_model=SchedulerStateRead)
+def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
+    return update_scheduler_enabled(db, payload.enabled, settings)
 
 
 @app.get("/api/items", response_model=list[ItemRead])

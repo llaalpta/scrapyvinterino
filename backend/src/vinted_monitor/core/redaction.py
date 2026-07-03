@@ -5,8 +5,10 @@ SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 BEARER_TOKEN_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+URL_USERINFO_PATTERN = re.compile(r"\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@([^\s/]+)", re.IGNORECASE)
 
 
 def redact_sensitive_text(value: str) -> str:
-    redacted = BEARER_TOKEN_PATTERN.sub("Bearer <redacted>", value)
+    redacted = URL_USERINFO_PATTERN.sub(lambda match: f"{match.group(1)}<redacted>:<redacted>@{match.group(4)}", value)
+    redacted = BEARER_TOKEN_PATTERN.sub("Bearer <redacted>", redacted)
     return SENSITIVE_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}<redacted>", redacted)

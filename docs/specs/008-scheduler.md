@@ -10,7 +10,7 @@ Automatically execute configured sources on safe, bounded intervals with enough 
 - Enable or disable each source.
 - Configure interval seconds per source, default `300`, minimum `60`, maximum `3600`.
 - Add jitter/randomization between runs, default `20%`, minimum `0%`, maximum `50%`.
-- Support pause windows or allowed execution windows.
+- Support allowed execution windows.
 - Record scheduler-triggered errors in the same run/error model.
 - Run multiple sources concurrently with explicit limits.
 - Allow at most `2` active source runs globally by default.
@@ -42,19 +42,22 @@ Automatically execute configured sources on safe, bounded intervals with enough 
   - process-local item cache;
   - isolated provider/session factory.
 - API/PWA:
-  - scheduler settings;
+  - scheduler settings persisted in `app_settings`;
   - source pause/enable controls.
 - Configuration:
-  - global scheduler enable flag;
+  - deployment scheduler enable flag in `.env` as an operational gate;
+  - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-source concurrency limit, default `1`;
-  - source interval seconds: default `300`, minimum `60`, maximum `3600`;
+- source interval seconds: default `300`, minimum `60`, maximum `3600`;
   - source jitter percent: default `20`, minimum `0`, maximum `50`;
   - optional allowed windows as local `HH:MM-HH:MM` ranges;
+  - scheduler timezone, default `Europe/Madrid`;
   - optional proxy enable flag and proxy URL.
 - Database:
+  - `app_settings`;
   - `search_sources.scheduler_config`;
-  - `runs`;
+  - `runs.trigger`;
   - `items`;
   - `source_seen_items`;
   - `errors`.
@@ -63,10 +66,10 @@ Automatically execute configured sources on safe, bounded intervals with enough 
 
 - Scheduler can be disabled completely.
 - A source can be paused without deleting it.
-- Runs are not triggered outside configured windows.
+- Runs are not triggered outside configured local-time windows.
 - Jitter prevents fixed exact polling intervals.
 - Scheduler failures are logged without stopping the worker.
-- Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, or pause windows that cannot be parsed.
+- Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
 - No more than `2` source runs execute at the same time by default.
 - The same source never has two active runs at the same time.
 - Manual and scheduler-triggered runs share the same global dedupe, detail fetch, source traceability, redaction, and error behavior.

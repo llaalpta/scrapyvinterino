@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from vinted_monitor.services.scheduler import SchedulerConfigError, normalize_scheduler_config
 from vinted_monitor.services.search_sources import validate_search_source_name, validate_vinted_catalog_url
 
 
@@ -31,6 +32,39 @@ class SearchSourceRead(BaseModel):
     normalized_query: dict[str, Any]
     is_active: bool
     scheduler_config: dict[str, Any]
+
+
+class SearchSourceUpdate(BaseModel):
+    is_active: bool | None = None
+    scheduler_config: dict[str, Any] | None = None
+
+    @field_validator("scheduler_config")
+    @classmethod
+    def validate_scheduler_config(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            return normalize_scheduler_config(value)
+        except SchedulerConfigError as exc:
+            raise ValueError(str(exc)) from exc
+
+
+class SchedulerUpdate(BaseModel):
+    enabled: bool
+
+
+class SchedulerStateRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    enabled: bool
+    runtime_enabled: bool
+    effective_enabled: bool
+    max_concurrent_runs: int
+    per_source_concurrency: int
+    poll_interval_seconds: int
+    timezone: str
+    proxy_enabled: bool
+    proxy_configured: bool
 
 
 class ItemRead(BaseModel):
@@ -71,6 +105,7 @@ class RunRead(BaseModel):
     id: int
     source_id: int
     status: str
+    trigger: str
     started_at: datetime
     finished_at: datetime | None
     items_found: int
