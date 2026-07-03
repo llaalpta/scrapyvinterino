@@ -437,10 +437,11 @@ def test_manual_run_api_creates_run_with_injected_provider(source_id: int) -> No
 
         items_response = client.get("/api/items")
         assert items_response.status_code == 200
-        items = items_response.json()
+        items = items_response.json()["items"]
         persisted_item = next(item for item in items if item["vinted_item_id"] == "pytest-run-item-0")
         assert persisted_item["title"] == "Pytest item 0"
         assert persisted_item["last_seen_at"]
+        assert persisted_item["last_scraped_source_name"] == "pytest manual run source"
     finally:
         app.dependency_overrides.clear()
 

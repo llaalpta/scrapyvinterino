@@ -99,6 +99,40 @@ class ItemRead(BaseModel):
     last_seen_at: datetime
 
 
+class ItemResultRead(ItemRead):
+    last_scraped_at: datetime
+    last_scraped_source_id: int
+    last_scraped_source_name: str
+    last_run_id: int
+
+
+class ItemResultPageRead(BaseModel):
+    items: list[ItemResultRead]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class OpportunityResultRead(BaseModel):
+    id: int
+    item: ItemRead
+    source_id: int
+    source_name: str
+    rule_id: int
+    status: str
+    score: Decimal | None
+    created_at: datetime
+
+
+class OpportunityResultPageRead(BaseModel):
+    items: list[OpportunityResultRead]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
 class RunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

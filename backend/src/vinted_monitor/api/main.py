@@ -1,4 +1,7 @@
-from fastapi import Depends, FastAPI, HTTPException
+from datetime import datetime
+from decimal import Decimal
+
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -6,6 +9,10 @@ from vinted_monitor.api.schemas import (
     ActionRequestCreate,
     ActionRequestRead,
     ItemRead,
+    ItemResultPageRead,
+    ItemResultRead,
+    OpportunityResultPageRead,
+    OpportunityResultRead,
     RunRead,
     SchedulerStateRead,
     SchedulerUpdate,
@@ -18,7 +25,15 @@ from vinted_monitor.core.logging import configure_logging
 from vinted_monitor.db.session import get_db
 from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
 from vinted_monitor.services.actions import create_action_request
-from vinted_monitor.services.items import list_items
+from vinted_monitor.services.browse import (
+    DEFAULT_PAGE,
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    ItemResult,
+    OpportunityResult,
+    list_item_results,
+    list_opportunity_results,
+)
 from vinted_monitor.services.runs import (
     ManualRunProvider,
     SearchSourceInactiveError,
@@ -94,9 +109,56 @@ def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
     return update_scheduler_enabled(db, payload.enabled, settings)
 
 
-@app.get("/api/items", response_model=list[ItemRead])
-def get_items(limit: int = 100, db: Session = Depends(get_db)) -> list:
-    return list_items(db, limit=limit)
+@app.get("/api/items", response_model=ItemResultPageRead)
+def get_items(
+    page: int = Query(DEFAULT_PAGE, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    source_id: int | None = Query(None, ge=1),
+    scraped_from: datetime | None = None,
+    scraped_to: datetime | None = None,
+    price_min: Decimal | None = Query(None, ge=0),
+    price_max: Decimal | None = Query(None, ge=0),
+    db: Session = Depends(get_db),
+) -> ItemResultPageRead:
+    try:
+        result_page = list_item_results(
+            db,
+            page=page,
+            page_size=page_size,
+            source_id=source_id,
+            scraped_from=scraped_from,
+            scraped_to=scraped_to,
+            price_min=price_min,
+            price_max=price_max,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ItemResultPageRead(
+        items=[_item_result_read(item_result) for item_result in result_page.items],
+        total=result_page.total,
+        page=result_page.page,
+        page_size=result_page.page_size,
+        total_pages=result_page.total_pages,
+    )
+
+
+@app.get("/api/opportunities", response_model=OpportunityResultPageRead)
+def get_opportunities(
+    page: int = Query(DEFAULT_PAGE, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    db: Session = Depends(get_db),
+) -> OpportunityResultPageRead:
+    try:
+        result_page = list_opportunity_results(db, page=page, page_size=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return OpportunityResultPageRead(
+        items=[_opportunity_result_read(opportunity_result) for opportunity_result in result_page.items],
+        total=result_page.total,
+        page=result_page.page,
+        page_size=result_page.page_size,
+        total_pages=result_page.total_pages,
+    )
 
 
 @app.get("/api/runs", response_model=list[RunRead])
@@ -127,3 +189,28 @@ def post_action(payload: ActionRequestCreate, db: Session = Depends(get_db)):
         return create_action_request(db, payload.item_id, payload.action_type, payload.payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _item_result_read(result: ItemResult) -> ItemResultRead:
+    return ItemResultRead.model_validate(
+        {
+            **ItemRead.model_validate(result.item).model_dump(),
+            "last_scraped_at": result.last_scraped_at,
+            "last_scraped_source_id": result.last_scraped_source_id,
+            "last_scraped_source_name": result.last_scraped_source_name,
+            "last_run_id": result.last_run_id,
+        }
+    )
+
+
+def _opportunity_result_read(result: OpportunityResult) -> OpportunityResultRead:
+    return OpportunityResultRead(
+        id=result.opportunity.id,
+        item=ItemRead.model_validate(result.item),
+        source_id=result.opportunity.source_id,
+        source_name=result.source_name,
+        rule_id=result.opportunity.rule_id,
+        status=result.opportunity.status,
+        score=result.opportunity.score,
+        created_at=result.opportunity.created_at,
+    )

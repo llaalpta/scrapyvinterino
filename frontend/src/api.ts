@@ -57,6 +57,42 @@ export type Item = {
   last_seen_at: string;
 };
 
+export type ItemResult = Item & {
+  last_scraped_at: string;
+  last_scraped_source_id: number;
+  last_scraped_source_name: string;
+  last_run_id: number;
+};
+
+export type OpportunityResult = {
+  id: number;
+  item: Item;
+  source_id: number;
+  source_name: string;
+  rule_id: number;
+  status: string;
+  score: string | null;
+  created_at: string;
+};
+
+export type Page<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+};
+
+export type ItemQuery = {
+  page?: number;
+  page_size?: number;
+  source_id?: number | null;
+  scraped_from?: string;
+  scraped_to?: string;
+  price_min?: string;
+  price_max?: string;
+};
+
 export type Run = {
   id: number;
   source_id: number;
@@ -159,8 +195,12 @@ export function updateScheduler(payload: { enabled: boolean }): Promise<Schedule
   return patchJson<SchedulerState>('/api/scheduler', payload);
 }
 
-export function fetchItems(): Promise<Item[]> {
-  return getJson<Item[]>('/api/items');
+export function fetchItems(query: ItemQuery = {}): Promise<Page<ItemResult>> {
+  return getJson<Page<ItemResult>>(`/api/items${toQueryString(query)}`);
+}
+
+export function fetchOpportunities(query: { page?: number; page_size?: number } = {}): Promise<Page<OpportunityResult>> {
+  return getJson<Page<OpportunityResult>>(`/api/opportunities${toQueryString(query)}`);
 }
 
 export function fetchRuns(): Promise<Run[]> {
@@ -169,4 +209,15 @@ export function fetchRuns(): Promise<Run[]> {
 
 export function runSource(sourceId: number): Promise<Run> {
   return postJson<Run>(`/api/sources/${sourceId}/runs`);
+}
+
+function toQueryString(query: Record<string, string | number | null | undefined>): string {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      params.set(key, String(value));
+    }
+  });
+  const serialized = params.toString();
+  return serialized ? `?${serialized}` : '';
 }
