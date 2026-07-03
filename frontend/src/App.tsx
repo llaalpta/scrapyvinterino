@@ -8,6 +8,8 @@ import {
   RotateCcw,
   Save,
   Search,
+  SlidersHorizontal,
+  X,
   ShoppingCart
 } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
@@ -55,7 +57,6 @@ type ResultFilters = {
   scrapedTo: string;
   priceMin: string;
   priceMax: string;
-  pageSize: string;
 };
 
 const defaultFilters: ResultFilters = {
@@ -63,8 +64,7 @@ const defaultFilters: ResultFilters = {
   scrapedFrom: '',
   scrapedTo: '',
   priceMin: '',
-  priceMax: '',
-  pageSize: '25'
+  priceMax: ''
 };
 
 export function App() {
@@ -75,6 +75,7 @@ export function App() {
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [resultFilters, setResultFilters] = useState<ResultFilters>(defaultFilters);
+  const [resultsPageSize, setResultsPageSize] = useState(25);
   const [runningSourceId, setRunningSourceId] = useState<number | null>(null);
   const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
   const [savingScheduler, setSavingScheduler] = useState(false);
@@ -106,11 +107,11 @@ export function App() {
       });
   }, []);
 
-  async function loadItems(page = 1, filters = resultFilters) {
+  async function loadItems(page = 1, filters = resultFilters, pageSize = resultsPageSize) {
     setLoadingResults(true);
     setError(null);
     try {
-      setItemPage(await fetchItems(buildItemQuery(filters, page)));
+      setItemPage(await fetchItems(buildItemQuery(filters, page, pageSize)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudieron cargar los resultados');
     } finally {
@@ -149,7 +150,7 @@ export function App() {
     setRunningSourceId(sourceId);
     try {
       const created = await runSource(sourceId);
-      const [itemData, runData] = await Promise.all([fetchItems(buildItemQuery(resultFilters, 1)), fetchRuns()]);
+      const [itemData, runData] = await Promise.all([fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)), fetchRuns()]);
       setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
       setItemPage(itemData);
       setActiveSection('runs');
@@ -231,7 +232,12 @@ export function App() {
 
   function clearResultFilters() {
     setResultFilters(defaultFilters);
-    void loadItems(1, defaultFilters);
+    void loadItems(1, defaultFilters, resultsPageSize);
+  }
+
+  function changeResultsPageSize(pageSize: number) {
+    setResultsPageSize(pageSize);
+    void loadItems(1, resultFilters, pageSize);
   }
 
   function getSourceName(sourceId: number): string {
@@ -287,11 +293,13 @@ export function App() {
             filters={resultFilters}
             itemPage={itemPage}
             loading={loadingResults}
+            pageSize={resultsPageSize}
             sources={sources}
             onApply={() => void loadItems(1)}
             onClear={clearResultFilters}
             onFilterChange={updateResultFilter}
             onPageChange={(page) => void loadItems(page)}
+            onPageSizeChange={changeResultsPageSize}
           />
         ) : null}
 
@@ -345,78 +353,109 @@ function ResultsView({
   filters,
   itemPage,
   loading,
+  pageSize,
   sources,
   onApply,
   onClear,
   onFilterChange,
-  onPageChange
+  onPageChange,
+  onPageSizeChange
 }: {
   filters: ResultFilters;
   itemPage: Page<ItemResult>;
   loading: boolean;
+  pageSize: number;
   sources: SearchSource[];
   onApply: () => void;
   onClear: () => void;
   onFilterChange: (field: keyof ResultFilters, value: string) => void;
   onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: number) => void;
 }) {
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeFilterCount = countActiveFilters(filters);
+  const filterSummaries = summarizeFilters(filters, sources);
+
+  function applyFilters() {
+    onApply();
+    setFiltersOpen(false);
+  }
+
+  function clearFilters() {
+    onClear();
+    setFiltersOpen(false);
+  }
+
   return (
     <section className="results-view">
-      <form
-        className="result-filters"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onApply();
-        }}
-      >
-        <label>
-          Fuente
-          <select value={filters.sourceId} onChange={(event) => onFilterChange('sourceId', event.target.value)}>
-            <option value="">Todas</option>
-            {sources.map((source) => (
-              <option key={source.id} value={source.id}>
-                {source.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Desde
-          <input
-            type="datetime-local"
-            value={filters.scrapedFrom}
-            onChange={(event) => onFilterChange('scrapedFrom', event.target.value)}
-          />
-        </label>
-        <label>
-          Hasta
-          <input type="datetime-local" value={filters.scrapedTo} onChange={(event) => onFilterChange('scrapedTo', event.target.value)} />
-        </label>
-        <label>
-          Precio min
-          <input min="0" type="number" value={filters.priceMin} onChange={(event) => onFilterChange('priceMin', event.target.value)} />
-        </label>
-        <label>
-          Precio max
-          <input min="0" type="number" value={filters.priceMax} onChange={(event) => onFilterChange('priceMax', event.target.value)} />
-        </label>
-        <label>
-          Tamano
-          <select value={filters.pageSize} onChange={(event) => onFilterChange('pageSize', event.target.value)}>
-            <option value="25">25</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
-        </label>
-        <button type="submit" disabled={loading}>
-          <Search size={17} />
-          Aplicar
+      <div className="results-controls">
+        <button className="filter-toggle" type="button" onClick={() => setFiltersOpen(true)}>
+          <SlidersHorizontal size={17} />
+          Filtros
+          {activeFilterCount > 0 ? <span>{activeFilterCount}</span> : null}
         </button>
-        <button type="button" disabled={loading} onClick={onClear}>
-          <RotateCcw size={17} />
-          Limpiar
-        </button>
-      </form>
+        <div className="filter-summary" aria-live="polite">
+          {filterSummaries.length > 0 ? filterSummaries.map((summary) => <span key={summary}>{summary}</span>) : <span>Sin filtros activos</span>}
+        </div>
+      </div>
+
+      {filtersOpen ? <button className="filter-backdrop" type="button" aria-label="Cerrar filtros" onClick={() => setFiltersOpen(false)} /> : null}
+
+      <section className={filtersOpen ? 'filter-panel open' : 'filter-panel'}>
+        <div className="filter-panel-heading">
+          <h3>Filtros de resultados</h3>
+          <button type="button" title="Cerrar filtros" onClick={() => setFiltersOpen(false)}>
+            <X size={17} />
+          </button>
+        </div>
+        <form
+          className="result-filters"
+          onSubmit={(event) => {
+            event.preventDefault();
+            applyFilters();
+          }}
+        >
+          <label>
+            Fuente
+            <select value={filters.sourceId} onChange={(event) => onFilterChange('sourceId', event.target.value)}>
+              <option value="">Todas</option>
+              {sources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Desde
+            <input
+              type="datetime-local"
+              value={filters.scrapedFrom}
+              onChange={(event) => onFilterChange('scrapedFrom', event.target.value)}
+            />
+          </label>
+          <label>
+            Hasta
+            <input type="datetime-local" value={filters.scrapedTo} onChange={(event) => onFilterChange('scrapedTo', event.target.value)} />
+          </label>
+          <label>
+            Precio min
+            <input min="0" type="number" value={filters.priceMin} onChange={(event) => onFilterChange('priceMin', event.target.value)} />
+          </label>
+          <label>
+            Precio max
+            <input min="0" type="number" value={filters.priceMax} onChange={(event) => onFilterChange('priceMax', event.target.value)} />
+          </label>
+          <button type="submit" disabled={loading}>
+            <Search size={17} />
+            Aplicar
+          </button>
+          <button type="button" disabled={loading} onClick={clearFilters}>
+            <RotateCcw size={17} />
+            Limpiar
+          </button>
+        </form>
+      </section>
 
       <div className="table-wrap result-table">
         <table>
@@ -455,7 +494,14 @@ function ResultsView({
         )}
       </div>
 
-      <Pagination page={itemPage.page} pageSize={itemPage.page_size} total={itemPage.total} totalPages={itemPage.total_pages} onPageChange={onPageChange} />
+      <Pagination
+        page={itemPage.page}
+        pageSize={pageSize}
+        total={itemPage.total}
+        totalPages={itemPage.total_pages}
+        onPageChange={onPageChange}
+        onPageSizeChange={onPageSizeChange}
+      />
     </section>
   );
 }
@@ -789,10 +835,12 @@ function Pagination({
   page,
   pageSize,
   total,
-  totalPages
+  totalPages,
+  onPageSizeChange
 }: {
   disabled?: boolean;
   onPageChange: (page: number) => void;
+  onPageSizeChange?: (pageSize: number) => void;
   page: number;
   pageSize: number;
   total: number;
@@ -806,6 +854,16 @@ function Pagination({
         Mostrando {firstItem}-{lastItem} de {total}
       </span>
       <div>
+        {onPageSizeChange ? (
+          <label>
+            Resultados por pagina
+            <select value={pageSize} disabled={disabled} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+          </label>
+        ) : null}
         <button type="button" disabled={disabled || page <= 1} onClick={() => onPageChange(page - 1)}>
           <ChevronLeft size={17} />
           Anterior
@@ -852,16 +910,40 @@ function buildSourceDraft(source: SearchSource): SourceDraft {
   };
 }
 
-function buildItemQuery(filters: ResultFilters, page: number): ItemQuery {
+function buildItemQuery(filters: ResultFilters, page: number, pageSize: number): ItemQuery {
   return {
     page,
-    page_size: Number(filters.pageSize || 25),
+    page_size: pageSize,
     source_id: filters.sourceId ? Number(filters.sourceId) : null,
     scraped_from: toApiDateTime(filters.scrapedFrom),
     scraped_to: toApiDateTime(filters.scrapedTo),
     price_min: filters.priceMin,
     price_max: filters.priceMax
   };
+}
+
+function countActiveFilters(filters: ResultFilters): number {
+  return [filters.sourceId, filters.scrapedFrom, filters.scrapedTo, filters.priceMin, filters.priceMax].filter(Boolean).length;
+}
+
+function summarizeFilters(filters: ResultFilters, sources: SearchSource[]): string[] {
+  const summaries: string[] = [];
+  if (filters.sourceId) {
+    summaries.push(sources.find((source) => source.id === Number(filters.sourceId))?.name ?? `Fuente ${filters.sourceId}`);
+  }
+  if (filters.scrapedFrom) {
+    summaries.push(`Desde ${formatDate(new Date(filters.scrapedFrom).toISOString())}`);
+  }
+  if (filters.scrapedTo) {
+    summaries.push(`Hasta ${formatDate(new Date(filters.scrapedTo).toISOString())}`);
+  }
+  if (filters.priceMin) {
+    summaries.push(`Min ${filters.priceMin}`);
+  }
+  if (filters.priceMax) {
+    summaries.push(`Max ${filters.priceMax}`);
+  }
+  return summaries;
 }
 
 function toApiDateTime(value: string): string | undefined {

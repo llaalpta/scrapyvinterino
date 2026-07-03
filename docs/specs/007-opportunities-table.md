@@ -10,6 +10,8 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - Display scraped item rows as mobile cards/list items instead of a table.
 - Paginate result queries server-side; do not rely on infinite scroll.
 - Filter results by scrape date/time range, price range, and scrape source.
+- Keep result filters collapsed by default; open them inline on desktop and as a drawer on mobile.
+- Keep page-size selection in the pagination controls, not in the product filters.
 - Show the source that last scraped the item and the scrape date/time.
 - If a source filter is active, show the scrape date/time for that source.
 - Keep an Opportunities tab as a separate, honest empty/paginated view until local filters create opportunities.
@@ -49,6 +51,7 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - Result rows include source name and scrape date/time.
 - Date/time, price, and source filters update the backend query.
 - Pagination controls request new pages from the backend.
+- Page-size controls request page 1 with the selected number of results per page.
 - Results can be filtered to a specific source without duplicating globally deduped items.
 - If an item was seen by multiple sources, the unfiltered row shows the most recent source that saw it.
 - The Opportunities tab is present and truthful when there are no opportunities.
@@ -56,6 +59,7 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - Future actions are visible but disabled or feature-flagged.
 - Empty state is clear.
 - Table remains usable on desktop widths and is replaced by cards on mobile widths.
+- The page itself does not scroll horizontally; horizontal overflow is limited to the desktop table container.
 
 ## Verification
 
@@ -65,4 +69,4 @@ Show scraped results and future opportunities in the private PWA with paginated 
 - Backend tests for invalid filter ranges.
 - Backend tests for paginated opportunities empty and seeded data.
 - Frontend build.
-- Playwright check against the running app for tabs, filters, pagination, desktop table, mobile cards, and disabled future actions.
+- Playwright check against the running app for tabs, collapsed filters, mobile filter drawer, pagination page size, desktop table, mobile cards, no page-level horizontal scroll, and disabled future actions.
