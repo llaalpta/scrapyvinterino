@@ -1,13 +1,19 @@
 import {
+  Activity,
+  Bell,
   ChevronLeft,
   ChevronRight,
+  Database,
   ExternalLink,
   Heart,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Power,
   RotateCcw,
   Save,
   Search,
+  Settings,
   SlidersHorizontal,
   X,
   ShoppingCart
@@ -34,12 +40,12 @@ import {
 } from './api';
 
 const navItems = [
-  { id: 'results', label: 'Resultados' },
-  { id: 'opportunities', label: 'Oportunidades' },
-  { id: 'sources', label: 'Fuentes' },
-  { id: 'filters', label: 'Filtros' },
-  { id: 'runs', label: 'Runs' },
-  { id: 'settings', label: 'Settings' }
+  { id: 'results', label: 'Resultados', icon: Search },
+  { id: 'opportunities', label: 'Oportunidades', icon: Bell },
+  { id: 'sources', label: 'Fuentes', icon: Database },
+  { id: 'filters', label: 'Filtros', icon: SlidersHorizontal },
+  { id: 'runs', label: 'Runs', icon: Activity },
+  { id: 'settings', label: 'Settings', icon: Settings }
 ];
 
 const emptyItemPage: Page<ItemResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
@@ -85,6 +91,7 @@ export function App() {
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
   const [activeSection, setActiveSection] = useState('results');
+  const [navCollapsed, setNavCollapsed] = useState(false);
   const activeSource = sources.find((source) => source.is_active);
   const activeTitle = useMemo(() => navItems.find((item) => item.id === activeSection)?.label ?? 'Resultados', [activeSection]);
   const activeSubtitle = useMemo(
@@ -245,23 +252,40 @@ export function App() {
   }
 
   return (
-    <main className="shell">
+    <main className={navCollapsed ? 'shell nav-collapsed' : 'shell'}>
       <aside className="sidebar">
-        <div>
-          <p className="eyebrow">Personal dashboard</p>
-          <h1>Vinted Monitor</h1>
+        <div className="brand-row">
+          <div className="brand-copy">
+            <p className="eyebrow">Personal dashboard</p>
+            <h1>Vinted Monitor</h1>
+          </div>
+          <button
+            className="nav-toggle"
+            type="button"
+            aria-label={navCollapsed ? 'Expandir navegacion' : 'Contraer navegacion'}
+            title={navCollapsed ? 'Expandir navegacion' : 'Contraer navegacion'}
+            onClick={() => setNavCollapsed((current) => !current)}
+          >
+            {navCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
         </div>
         <nav>
-          {navItems.map((item) => (
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
             <button
               className={activeSection === item.id ? 'active' : ''}
               key={item.id}
               type="button"
+              title={navCollapsed ? item.label : undefined}
+              aria-label={item.label}
               onClick={() => setActiveSection(item.id)}
             >
-              {item.label}
+              <Icon size={18} />
+              <span className="nav-label">{item.label}</span>
             </button>
-          ))}
+            );
+          })}
         </nav>
       </aside>
 

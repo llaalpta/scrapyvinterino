@@ -31,6 +31,10 @@ select {
   min-width: 0;
 }
 
+.shell.nav-collapsed {
+  grid-template-columns: 76px 1fr;
+}
+
 .sidebar {
   position: sticky;
   top: 0;
@@ -43,6 +47,26 @@ select {
   padding: 28px;
   color: #f8fafc;
   background: #163832;
+}
+
+.brand-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.nav-toggle {
+  width: 38px;
+  min-height: 38px;
+  flex: 0 0 auto;
+  border-color: #2f6259;
+  color: #d6f4ef;
+  background: #1e4a43;
 }
 
 .eyebrow {
@@ -84,9 +108,46 @@ nav button {
   text-decoration: none;
 }
 
+nav button svg {
+  flex: 0 0 auto;
+}
+
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 nav button.active,
 nav button:hover {
   background: #23554d;
+}
+
+.shell.nav-collapsed .sidebar {
+  gap: 24px;
+  padding: 18px 14px;
+}
+
+.shell.nav-collapsed .brand-row {
+  justify-content: center;
+}
+
+.shell.nav-collapsed .brand-copy {
+  display: none;
+}
+
+.shell.nav-collapsed nav button {
+  justify-content: center;
+  padding: 10px;
+}
+
+.shell.nav-collapsed .nav-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .content {
@@ -645,19 +706,61 @@ th {
 }
 
 @media (max-width: 820px) {
-  .shell {
+  .shell,
+  .shell.nav-collapsed {
     grid-template-columns: 1fr;
   }
 
   .sidebar {
-    position: static;
+    position: sticky;
+    top: 0;
+    z-index: 30;
     height: auto;
-    overflow: visible;
-    padding: 18px;
+    max-height: 62vh;
+    overflow-y: auto;
+    gap: 14px;
+    padding: 12px 14px;
+    box-shadow: 0 8px 18px rgb(15 23 42 / 0.12);
+  }
+
+  .brand-row,
+  .shell.nav-collapsed .brand-row {
+    align-items: center;
+    justify-content: flex-start;
+  }
+
+  .brand-copy,
+  .shell.nav-collapsed .brand-copy {
+    display: block;
+  }
+
+  .nav-toggle {
+    display: none;
+  }
+
+  h1 {
+    font-size: 22px;
   }
 
   nav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  nav button,
+  .shell.nav-collapsed nav button {
+    justify-content: flex-start;
+    padding: 8px 9px;
+  }
+
+  .nav-label,
+  .shell.nav-collapsed .nav-label {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: hidden;
+    clip: auto;
+    white-space: nowrap;
   }
 
   .content {
