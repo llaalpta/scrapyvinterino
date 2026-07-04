@@ -89,6 +89,28 @@ class FakeSuccessProvider:
         )
 
 
+class FakeEventingProvider(FakeSuccessProvider):
+    event_sink = None
+
+    def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+        if self.event_sink is not None:
+            self.event_sink(
+                phase="anonymous_session_bootstrap_start",
+                method="GET",
+                url=source.url,
+                message="Obtaining anonymous public Vinted session",
+            )
+            self.event_sink(
+                phase="anonymous_session_bootstrap_success",
+                method="GET",
+                url=source.url,
+                status_code=200,
+                duration_ms=12,
+                details={"session_marker_count": 1},
+            )
+        return super().search(source, page)
+
+
 class FakeDiscardingDetailProvider(FakeSuccessProvider):
     def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
         self.detail_calls.append(candidate.vinted_item_id)
@@ -186,6 +208,20 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         assert item_count == 2
         assert opportunity_count == 2
         assert sorted(cache.marked_seen) == ["pytest-run-item-0", "pytest-run-item-1"]
+
+
+def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_monitor_run(db, source_id, provider=FakeEventingProvider(item_count=1), seen_cache=FakeSeenCache())
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+
+        phases = [event.phase for event in events]
+        assert "anonymous_session_bootstrap_start" in phases
+        assert "anonymous_session_bootstrap_success" in phases
+        bootstrap_success = next(event for event in events if event.phase == "anonymous_session_bootstrap_success")
+        assert bootstrap_success.status_code == 200
+        assert bootstrap_success.duration_ms == 12
+        assert bootstrap_success.details == {"session_marker_count": 1}
 
 
 def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:

@@ -109,8 +109,10 @@ export function RunsView({
                       <article key={event.id}>
                         <strong>{event.phase}</strong>
                         <span>{formatDate(event.created_at)}</span>
+                        <span>{eventMeta(event)}</span>
                         {event.url ? <code>{event.url}</code> : null}
                         {event.message ? <p>{event.message}</p> : null}
+                        {Object.keys(event.details).length > 0 ? <code>{JSON.stringify(event.details)}</code> : null}
                       </article>
                     ))}
                   </div>
@@ -122,6 +124,20 @@ export function RunsView({
       )}
     </section>
   );
+}
+
+function eventMeta(event: RunEvent): string {
+  const parts = [];
+  if (event.method) {
+    parts.push(event.method);
+  }
+  if (event.status_code) {
+    parts.push(String(event.status_code));
+  }
+  if (event.duration_ms !== null) {
+    parts.push(`${event.duration_ms}ms`);
+  }
+  return parts.join(' - ');
 }
 
 function proxyLabel(metadata: Record<string, unknown>): string {

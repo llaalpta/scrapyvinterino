@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
@@ -24,16 +25,33 @@ class VintedCatalogSessionError(VintedCatalogProviderError):
     pass
 
 
+class ProviderEventSink(Protocol):
+    def __call__(
+        self,
+        *,
+        phase: str,
+        method: str | None = None,
+        url: str | None = None,
+        status_code: int | None = None,
+        duration_ms: int | None = None,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        pass
+
+
 class HttpVintedCatalogProvider:
     def __init__(
         self,
         settings: Settings | None = None,
         transport: httpx.BaseTransport | None = None,
         proxy_url: str | None = None,
+        event_sink: ProviderEventSink | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.transport = transport
         self.proxy_url = proxy_url
+        self.event_sink = event_sink
         self._cookies = httpx.Cookies()
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
@@ -44,6 +62,12 @@ class HttpVintedCatalogProvider:
             try:
                 response = self._request_catalog_api(client, source, page)
             except VintedCatalogSessionError:
+                self._emit_event(
+                    phase="anonymous_session_refresh_start",
+                    method="GET",
+                    url=source.url,
+                    message="Catalog session was rejected; refreshing anonymous public session",
+                )
                 self._bootstrap_anonymous_session(client, source.url)
                 response = self._request_catalog_api(client, source, page)
 
@@ -61,37 +85,124 @@ class HttpVintedCatalogProvider:
 
     def _request_catalog_api(self, client: httpx.Client, source: Any, page: int | None) -> dict[str, Any]:
         url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
+        params = build_catalog_api_params(source.url, page, self.settings.vinted_fast_catalog_per_page)
+        self._emit_event(
+            phase="catalog_api_request_start",
+            method="GET",
+            url=url,
+            details={
+                "page": params["page"],
+                "per_page": params["per_page"],
+                "order": params["order"],
+                "session_marker_count": len(client.cookies),
+            },
+        )
+        started_at = time.perf_counter()
         try:
-            response = client.get(url, params=build_catalog_api_params(source.url, page, self.settings.vinted_fast_catalog_per_page))
+            response = client.get(url, params=params)
         except httpx.HTTPError as exc:
+            self._emit_event(
+                phase="catalog_api_request_error",
+                method="GET",
+                url=url,
+                duration_ms=_elapsed_ms(started_at),
+                message=str(exc),
+            )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
 
         if response.status_code in {401, 403}:
+            self._emit_event(
+                phase="catalog_api_session_rejected",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                message=f"Catalog API rejected anonymous session with status {response.status_code}",
+            )
             raise VintedCatalogSessionError(f"Vinted catalog API session rejected with status {response.status_code}")
 
         try:
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            self._emit_event(
+                phase="catalog_api_request_error",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                message=str(exc),
+            )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
 
         content_type = response.headers.get("content-type", "")
         if "json" not in content_type.lower():
+            self._emit_event(
+                phase="catalog_api_session_rejected",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                message="Catalog API returned a non-JSON response",
+                details={"content_type": content_type},
+            )
             raise VintedCatalogSessionError("Vinted catalog API returned a non-JSON response")
 
         payload = response.json()
         if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            self._emit_event(
+                phase="catalog_api_parse_error",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                message="Catalog API response did not contain items",
+            )
             raise VintedCatalogProviderError("Vinted catalog API response did not contain items")
 
+        self._emit_event(
+            phase="catalog_api_request_success",
+            method="GET",
+            url=url,
+            status_code=response.status_code,
+            duration_ms=_elapsed_ms(started_at),
+            details={
+                "item_count": len(payload.get("items", [])),
+                "content_type": content_type,
+            },
+        )
         return payload
 
     def _bootstrap_anonymous_session(self, client: httpx.Client, referer_url: str) -> None:
+        self._emit_event(
+            phase="anonymous_session_bootstrap_start",
+            method="GET",
+            url=referer_url,
+            message="Obtaining anonymous public Vinted session",
+        )
+        started_at = time.perf_counter()
         try:
             response = client.get(referer_url, headers=_html_headers(self.settings.vinted_user_agent))
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            self._emit_event(
+                phase="anonymous_session_bootstrap_error",
+                method="GET",
+                url=referer_url,
+                duration_ms=_elapsed_ms(started_at),
+                message=str(exc),
+            )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
 
         self._cookies = client.cookies
+        self._emit_event(
+            phase="anonymous_session_bootstrap_success",
+            method="GET",
+            url=referer_url,
+            status_code=response.status_code,
+            duration_ms=_elapsed_ms(started_at),
+            message="Anonymous public session obtained",
+            details={"session_marker_count": len(self._cookies)},
+        )
 
     def _client(self, headers: dict[str, str]) -> httpx.Client:
         proxies = self.proxy_url or (self.settings.vinted_proxy_url if self.settings.vinted_proxy_enabled else None)
@@ -103,6 +214,29 @@ class HttpVintedCatalogProvider:
             proxy=proxies,
             timeout=timeout,
             transport=self.transport,
+        )
+
+    def _emit_event(
+        self,
+        *,
+        phase: str,
+        method: str | None = None,
+        url: str | None = None,
+        status_code: int | None = None,
+        duration_ms: int | None = None,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if self.event_sink is None:
+            return
+        self.event_sink(
+            phase=phase,
+            method=method,
+            url=url,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            message=message,
+            details=details,
         )
 
 
@@ -156,6 +290,10 @@ def _first_query_value(query: Mapping[str, list[str]], key: str) -> str | None:
     if not values:
         return None
     return values[0]
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(round((time.perf_counter() - started_at) * 1000), 0)
 
 
 def parse_catalog_api_payload(payload: Mapping[str, Any], base_url: str = "https://www.vinted.es") -> CatalogSearchResult:

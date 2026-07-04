@@ -17,6 +17,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Add jitter/randomization between runs, default `20%`, minimum `0%`, maximum `50%`.
 - Support one daily allowed execution window configured by start/end timepickers and stored as `HH:MM-HH:MM`.
 - Record scheduler-triggered errors in the same run/error model.
+- Record safe run progress events for anonymous session bootstrap, catalog API request, retries, detail fetches, and failures.
 - Run multiple active monitors concurrently with explicit limits.
 - Allow at most `2` active monitor runs globally by default.
 - Allow at most `1` active run per monitor.
@@ -89,6 +90,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
 - Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
 - Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
+- Run logs show operational progress with sanitized URLs, status codes, durations, proxy profile id, auth mode, and safe counts only; they never expose cookie or token values.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
 - Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.

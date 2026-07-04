@@ -183,6 +183,38 @@ def test_http_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
     assert [httpx.URL(call).path for call in calls] == ["/catalog", "/api/v2/catalog/items"]
 
 
+def test_http_provider_emits_safe_session_and_catalog_events() -> None:
+    events: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/catalog":
+            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=secret; Path=/;"})
+        if request.url.path == "/api/v2/catalog/items":
+            return httpx.Response(200, json=load_fixture(), headers={"content-type": "application/json"})
+        return httpx.Response(404)
+
+    provider = HttpVintedCatalogProvider(
+        settings=Settings(),
+        transport=httpx.MockTransport(handler),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+
+    phases = [event["phase"] for event in events]
+    assert phases == [
+        "anonymous_session_bootstrap_start",
+        "anonymous_session_bootstrap_success",
+        "catalog_api_request_start",
+        "catalog_api_request_success",
+    ]
+    assert events[1]["details"] == {"session_marker_count": 1}
+    assert events[2]["details"]["session_marker_count"] == 1
+    assert events[3]["details"]["item_count"] == 2
+    assert "secret" not in json.dumps(events)
+    assert "access_token_web" not in json.dumps(events)
+
+
 def test_http_provider_configures_proxy_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_proxies: list[str | None] = []
 

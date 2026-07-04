@@ -108,6 +108,7 @@ def execute_monitor_run(
     policy_hash = _policy_hash(source, get_filter_snapshot(db, source.filter_rule_ids or []))
     run.runtime_metadata = {**(run.runtime_metadata or {}), "policy_hash": policy_hash}
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+    _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
 
     try:
         cache.require_available()
@@ -234,6 +235,45 @@ def _run_runtime_metadata(db: Session, source: SearchSource) -> dict:
         "proxy_name": proxy.name if proxy is not None else None,
         "auth_mode": "public_anonymous",
     }
+
+
+def _attach_provider_event_sink(
+    db: Session,
+    provider: ManualRunProvider,
+    run: Run,
+    source: SearchSource,
+    proxy_profile_id: int | None,
+) -> None:
+    if not hasattr(provider, "event_sink"):
+        return
+
+    def sink(
+        *,
+        phase: str,
+        method: str | None = None,
+        url: str | None = None,
+        status_code: int | None = None,
+        duration_ms: int | None = None,
+        message: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase=phase,
+            method=method,
+            url=url,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            proxy_profile_id=proxy_profile_id,
+            user_agent=get_settings().vinted_user_agent,
+            auth_mode="public_anonymous",
+            message=message,
+            details=details,
+        )
+
+    provider.event_sink = sink
 
 
 def _record_failed_run(
