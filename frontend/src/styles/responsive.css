@@ -159,12 +159,40 @@
   .source-card-header,
   .source-schedule,
   .source-schedule.compact,
-  .monitor-workspace,
   .settings-grid,
   .proxy-form,
   .opportunity-row {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .monitor-table-header {
+    display: none;
+  }
+
+  .monitor-table-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .monitor-table-cell {
+    display: grid;
+    grid-template-columns: minmax(86px, 0.32fr) minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+  }
+
+  .monitor-table-cell::before {
+    content: attr(data-label);
+    color: #697586;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .monitor-table-main strong,
+  .monitor-table-main span {
+    white-space: normal;
   }
 
   .source-card-header,

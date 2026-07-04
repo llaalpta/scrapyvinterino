@@ -69,6 +69,7 @@ export function SourcesView({
 }) {
   const activeSources = useMemo(() => sources.filter((source) => source.is_active), [sources]);
   const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
+  const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
   const activeSourceIds = useMemo(() => new Set(activeSources.map((source) => source.id)), [activeSources]);
   const activeRuns = useMemo(() => runs.filter((run) => activeSourceIds.has(run.source_id)), [activeSourceIds, runs]);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
@@ -171,15 +172,14 @@ export function SourcesView({
 
       {sources.length > 0 ? (
         <div className="monitor-workspace">
-          <MonitorList
-            activeSources={activeSources}
+          <MonitorTable
             filterRules={filterRules}
-            inactiveSources={inactiveSources}
             monitorStatsBySource={monitorStatsBySource}
             proxyProfiles={proxyProfiles}
             selectedFilterIdsBySource={selectedFilterIdsBySource}
             selectedMonitorId={selectedMonitorId}
             selectedProxyBySource={selectedProxyBySource}
+            sources={orderedSources}
             sourceDrafts={sourceDrafts}
             onSelectMonitor={setSelectedMonitorId}
           />
@@ -368,92 +368,72 @@ function formatSeconds(seconds: number): string {
   return `${days}d ${hours % 24}h`;
 }
 
-function MonitorSectionHeading({ count, label }: { count: number; label: string }) {
-  return (
-    <div className="source-section-heading">
-      <h4>{label}</h4>
-      <span>{count}</span>
-    </div>
-  );
-}
-
 type MonitorActivity = ReturnType<typeof useRunActivity>;
 
-function MonitorList({
-  activeSources,
+function MonitorTable({
   filterRules,
-  inactiveSources,
   monitorStatsBySource,
   onSelectMonitor,
   proxyProfiles,
   selectedFilterIdsBySource,
   selectedMonitorId,
   selectedProxyBySource,
+  sources,
   sourceDrafts
 }: {
-  activeSources: SearchSource[];
   filterRules: FilterRule[];
-  inactiveSources: SearchSource[];
   monitorStatsBySource: Record<number, MonitorStats>;
   onSelectMonitor: (sourceId: number) => void;
   proxyProfiles: ProxyProfile[];
   selectedFilterIdsBySource: Record<number, number[]>;
   selectedMonitorId: number | null;
   selectedProxyBySource: Record<number, string>;
+  sources: SearchSource[];
   sourceDrafts: Record<number, SourceDraft>;
 }) {
   return (
-    <aside className="monitor-list-panel" aria-label="Lista de monitores">
-      <MonitorSectionHeading label="Monitores activos" count={activeSources.length} />
-      {activeSources.length === 0 ? (
-        <p className="empty-inline compact">No hay monitores activos.</p>
-      ) : (
-        <div className="monitor-list-group">
-          {activeSources.map((source) => (
-            <MonitorListRow
+    <section className="monitor-table-panel" aria-label="Monitores configurados">
+      <div className="monitor-table-heading">
+        <h4>Monitores</h4>
+        <span>{sources.length}</span>
+      </div>
+      <div className="monitor-table">
+        <div className="monitor-table-header" aria-hidden="true">
+          <span>Monitor</span>
+          <span>Estado</span>
+          <span>Modo</span>
+          <span>Configuracion</span>
+          <span>Metricas</span>
+        </div>
+        {sources.map((source) => {
+          const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+          const summary = source.is_active
+            ? monitorSummary(source, filterRules, proxyProfiles)
+            : draftSummary(
+                source,
+                draft,
+                selectedFilterIdsBySource[source.id] ?? [],
+                selectedProxyBySource[source.id] ?? '',
+                filterRules,
+                proxyProfiles
+              );
+          return (
+            <MonitorTableRow
               isSelected={source.id === selectedMonitorId}
               key={source.id}
               source={source}
               stats={monitorStatsBySource[source.id] ?? null}
-              summary={monitorSummary(source, filterRules, proxyProfiles)}
+              summary={summary}
               onSelect={() => onSelectMonitor(source.id)}
             />
-          ))}
-        </div>
-      )}
-
-      <MonitorSectionHeading label="Monitores inactivos" count={inactiveSources.length} />
-      {inactiveSources.length === 0 ? (
-        <p className="empty-inline compact">No hay monitores inactivos.</p>
-      ) : (
-        <div className="monitor-list-group">
-          {inactiveSources.map((source) => {
-            const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-            return (
-              <MonitorListRow
-                isSelected={source.id === selectedMonitorId}
-                key={source.id}
-                source={source}
-                stats={monitorStatsBySource[source.id] ?? null}
-                summary={draftSummary(
-                  source,
-                  draft,
-                  selectedFilterIdsBySource[source.id] ?? [],
-                  selectedProxyBySource[source.id] ?? '',
-                  filterRules,
-                  proxyProfiles
-                )}
-                onSelect={() => onSelectMonitor(source.id)}
-              />
-            );
-          })}
-        </div>
-      )}
-    </aside>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
-function MonitorListRow({
+function MonitorTableRow({
   isSelected,
   onSelect,
   source,
@@ -466,25 +446,55 @@ function MonitorListRow({
   stats: MonitorStats | null;
   summary: string[];
 }) {
+  const modeEntries = summary.filter((entry) => !entry.startsWith('Filtros:') && !entry.startsWith('Proxy:')).slice(0, 3);
+  const configEntries = summary.filter((entry) => entry.startsWith('Filtros:') || entry.startsWith('Proxy:'));
+  const rowClassName = [
+    'monitor-table-row',
+    source.is_active ? 'is-active' : '',
+    isSelected ? 'selected' : ''
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
-    <button className={`monitor-list-row${isSelected ? ' selected' : ''}`} type="button" aria-pressed={isSelected} onClick={onSelect}>
-      <span className="monitor-list-row-main">
-        <strong>{source.name}</strong>
-        <span>{source.url}</span>
+    <button
+      className={rowClassName}
+      type="button"
+      aria-pressed={isSelected}
+      aria-label={`${source.name}, ${source.is_active ? 'activo' : 'inactivo'}`}
+      onClick={onSelect}
+    >
+      <span className="monitor-table-cell monitor-table-main" data-label="Monitor">
+        <span className="monitor-table-value">
+          <strong>{source.name}</strong>
+          <span>{source.url}</span>
+        </span>
       </span>
-      <span className="monitor-list-row-status">
-        <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
-        <span className="status active">{modeLabel(source.monitor_mode)}</span>
+      <span className="monitor-table-cell" data-label="Estado">
+        <span className="monitor-table-value monitor-table-status">
+          <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
+        </span>
       </span>
-      <span className="monitor-list-row-summary">
-        {summary.slice(0, 3).map((entry) => (
-          <span key={entry}>{entry}</span>
-        ))}
+      <span className="monitor-table-cell" data-label="Modo">
+        <span className="monitor-table-value monitor-table-tags">
+          {modeEntries.map((entry) => (
+            <span key={entry}>{entry}</span>
+          ))}
+        </span>
       </span>
-      <span className="monitor-list-row-metrics">
-        {monitorListMetrics(stats).map((entry) => (
-          <span key={entry}>{entry}</span>
-        ))}
+      <span className="monitor-table-cell" data-label="Configuracion">
+        <span className="monitor-table-value monitor-table-tags">
+          {configEntries.map((entry) => (
+            <span key={entry}>{entry}</span>
+          ))}
+        </span>
+      </span>
+      <span className="monitor-table-cell" data-label="Metricas">
+        <span className="monitor-table-value monitor-table-metrics">
+          {monitorListMetrics(stats).map((entry) => (
+            <span key={entry}>{entry}</span>
+          ))}
+        </span>
       </span>
     </button>
   );

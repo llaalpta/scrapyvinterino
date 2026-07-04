@@ -34,7 +34,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
   - legacy `/api/sources` aliases during migration.
 - PWA:
   - monitor creation form;
-  - monitor count and visible monitor list with a selected monitor detail panel;
+  - monitor count and visible monitor table with a selected monitor detail panel;
   - archive/delete action with confirmation.
 - Database:
   - `search_sources`.
@@ -52,7 +52,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 
 - A valid Vinted catalog URL can be saved with a name.
 - Saved monitors are visible after refresh.
-- Multiple saved monitors are shown as compact selectable rows grouped by active and inactive state, with one selected monitor detail visible at a time.
+- Multiple saved monitors are shown in one compact selectable table with active monitors first, status chips/styles per row, and one selected monitor detail visible at a time.
 - The monitor detail updates when a different monitor row is selected.
 - Archived monitors are hidden from the default monitor list and cannot be scheduled or launched.
 - Archiving a monitor stops it and preserves historical rows for audit and result traceability.
@@ -73,8 +73,8 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Playwright checks:
   - valid monitor form submission creates a visible monitor;
   - invalid monitor form submission shows an error and does not persist.
-  - selecting a compact monitor row updates the detail panel.
-  - mobile monitor layout stacks the list above the detail without horizontal overflow and scrolls the selected detail into view.
+  - selecting a compact monitor table row updates the detail panel.
+  - mobile monitor layout keeps the table above the detail without horizontal overflow and scrolls the selected detail into view.
 - Confirm `search_sources` row includes `url` and `normalized_query`.
 - Confirm archived monitors keep historical runs and disappear from the default PWA monitor list.
 

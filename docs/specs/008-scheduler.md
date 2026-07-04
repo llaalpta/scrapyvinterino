@@ -104,9 +104,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
 - The PWA Monitors view renders active monitor logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
-- Active monitors appear before inactive monitors in the PWA's compact monitor list and show a selected-monitor detail with operational summary, performance card, and a working stop control.
+- Active monitors appear before inactive monitors in the PWA's single compact monitor table, using status chips and row styling instead of separate active/inactive sections, and show a selected-monitor detail with operational summary, performance card, and a working stop control.
 - Active monitor detail does not show an `Ejecutar ahora` button because periodic execution is already configured.
-- Every non-archived monitor can be selected from the compact monitor list to show active-session metrics or latest-session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket so historical and punctual runs remain visible after the monitor stops.
+- Every non-archived monitor can be selected from the compact monitor table to show active-session metrics or latest-session metrics, accumulated historical metrics, and a full-width bar chart of `items_found` by time bucket so historical and punctual runs remain visible after the monitor stops.
 - Monitor detail views with no sessions yet show no session/acumulated metric rows until the first launch produces data.
 - The performance chart supports fixed operational ranges labeled `Minuto`, `Hora`, `Dia`, `Mes`, and `Todo`.
 - Fixed performance chart ranges use deterministic current-period buckets: current minute by 5-second bucket, current hour by 5-minute bucket, current day by 1-hour bucket, and current calendar month by 1-day bucket.
@@ -115,7 +115,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - The performance chart labels the X axis as time and the Y axis as found items, and its tooltip shows the exact bucket interval plus found/run counts.
 - The performance chart renders each bar as the exact bucket interval from `bucket_start` to `bucket_end`; bars must not be centered on bucket midpoints or rely on automatic categorical bar width.
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
-- Inactive monitors appear below active monitors in the compact monitor list; selecting an inactive monitor shows historical performance and editing/launch/archive controls without implying the monitor is running.
+- Inactive monitors appear after active monitors in the compact monitor table; selecting an inactive monitor shows historical performance and editing/launch/archive controls without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
@@ -139,7 +139,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm monitor sessions are created, closed, and associated to punctual runs, and created/associated/stopped for recurring runs.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
 - Confirm selecting inactive monitors still shows historical chart and accumulated counts after manual or stopped recurring runs.
-- Confirm the compact monitor list selects active and inactive monitors, updates the detail panel, and scrolls the detail into view on mobile.
+- Confirm the compact monitor table selects active and inactive monitors, updates the full-width detail panel, and scrolls the detail into view on mobile without horizontal overflow.
 - Confirm active monitor details show stop/log controls and do not show punctual launch controls.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
