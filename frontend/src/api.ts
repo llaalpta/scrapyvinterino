@@ -362,8 +362,8 @@ export function fetchOpportunities(query: OpportunityQuery = {}): Promise<Page<O
   return getJson<Page<OpportunityResult>>(`/api/opportunities${toQueryString(query)}`);
 }
 
-export function fetchRuns(): Promise<Run[]> {
-  return getJson<Run[]>('/api/runs');
+export function fetchRuns(query: { limit?: number; source_id?: number } = {}): Promise<Run[]> {
+  return getJson<Run[]>(`/api/runs${toQueryString(query)}`);
 }
 
 export function fetchMonitorStats(sourceId: number, range: MonitorStatsRange = 'hours'): Promise<MonitorStats> {

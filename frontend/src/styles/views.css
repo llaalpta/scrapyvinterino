@@ -129,14 +129,126 @@
   background: #ccfbf1;
 }
 
-.source-cards {
+.monitor-workspace {
   display: grid;
+  grid-template-columns: minmax(280px, 0.42fr) minmax(0, 1fr);
   gap: 14px;
+  border-top: 1px solid #e5eaf0;
   padding: 14px;
 }
 
-.source-sections {
+.monitor-list-panel {
   display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.monitor-list-panel .source-section-heading {
+  border-top: 0;
+  padding: 0;
+}
+
+.monitor-list-group {
+  display: grid;
+  gap: 8px;
+}
+
+.monitor-list-row {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #e5eaf0;
+  border-radius: 8px;
+  padding: 10px;
+  color: inherit;
+  text-align: left;
+  background: #ffffff;
+}
+
+.monitor-list-row:hover,
+.monitor-list-row.selected {
+  border-color: #2f7d6d;
+  background: #f5fbf8;
+}
+
+.monitor-list-row:focus-visible {
+  outline: 2px solid #2f7d6d;
+  outline-offset: 2px;
+}
+
+.monitor-list-row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.monitor-list-row-main strong {
+  overflow: hidden;
+  color: #1f2933;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-list-row-main span {
+  overflow: hidden;
+  color: #697586;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-list-row-status,
+.monitor-list-row-summary,
+.monitor-list-row-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.monitor-list-row-summary span,
+.monitor-list-row-metrics span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid #d8e0e7;
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #52606d;
+  font-size: 11px;
+  background: #ffffff;
+}
+
+.monitor-list-row-metrics span {
+  color: #1f2933;
+  font-weight: 650;
+}
+
+.monitor-detail-card {
+  min-width: 0;
+  align-self: start;
+}
+
+.monitor-detail-shell {
+  min-width: 0;
+}
+
+.monitor-config-panel {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #e5eaf0;
+  padding-top: 12px;
+}
+
+.monitor-config-panel h4 {
+  color: #1f2933;
+  font-size: 14px;
+}
+
+.monitor-config-editor {
+  display: grid;
+  gap: 12px;
 }
 
 .source-section-heading,
@@ -183,33 +295,6 @@
 
 .active-monitor-card {
   background: #f8fcfb;
-}
-
-.inactive-monitor-card {
-  gap: 12px;
-}
-
-.inactive-monitor-compact {
-  display: grid;
-  gap: 9px;
-}
-
-.inactive-monitor-details {
-  min-width: 0;
-}
-
-.inactive-monitor-details summary {
-  cursor: pointer;
-  color: #52606d;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.inactive-monitor-details[open] {
-  display: grid;
-  gap: 12px;
-  border-top: 1px solid #e5eaf0;
-  padding-top: 12px;
 }
 
 .source-card-header,

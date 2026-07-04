@@ -302,8 +302,11 @@ def execute_monitor_run(
         return _record_failed_run(db, run, source, exc)
 
 
-def list_runs(db: Session, limit: int = 50) -> list[Run]:
-    statement = select(Run).order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
+def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> list[Run]:
+    statement = select(Run)
+    if source_id is not None:
+        statement = statement.where(Run.source_id == source_id)
+    statement = statement.order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
     return list(db.scalars(statement))
 
 

@@ -336,8 +336,8 @@ def get_opportunities(
 
 
 @app.get("/api/runs", response_model=list[RunRead])
-def get_runs(limit: int = 50, db: Session = Depends(get_db)) -> list:
-    return list_runs(db, limit=limit)
+def get_runs(limit: int = 50, source_id: int | None = None, db: Session = Depends(get_db)) -> list:
+    return list_runs(db, limit=limit, source_id=source_id)
 
 
 @app.get("/api/monitors/{monitor_id}/stats", response_model=MonitorStatsRead)

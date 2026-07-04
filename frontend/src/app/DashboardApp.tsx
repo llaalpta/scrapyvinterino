@@ -37,11 +37,13 @@ export function DashboardApp() {
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
           filterRules={dashboard.filterRules}
+          monitorRunsBySource={dashboard.monitorRunsBySource}
           monitorStatsBySource={dashboard.monitorStatsBySource}
           monitorStatsRangeBySource={dashboard.monitorStatsRangeBySource}
           onCreateSource={dashboard.onCreateSource}
           onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
           onLoadMonitorStats={(sourceId, range) => void dashboard.loadMonitorStats(sourceId, range)}
+          onLoadMonitorRuns={(sourceId) => void dashboard.loadMonitorRuns(sourceId)}
           onLoadRunEvents={dashboard.onLoadRunEvents}
           onRefreshRuntime={dashboard.refreshRuntime}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}

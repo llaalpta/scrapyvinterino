@@ -1,5 +1,5 @@
 import { Play, Save, Square, Trash2 } from 'lucide-react';
-import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, type FormEvent, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { FilterRule, MonitorStats, MonitorStatsRange, ProxyProfile, Run, RunEvent, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { RunActivityList } from '../runs/RunsView';
@@ -10,10 +10,12 @@ const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
   filterRules,
+  monitorRunsBySource,
   monitorStatsBySource,
   monitorStatsRangeBySource,
   onCreateSource,
   onDeleteSource,
+  onLoadMonitorRuns,
   onLoadMonitorStats,
   onLoadRunEvents,
   onRefreshRuntime,
@@ -37,10 +39,12 @@ export function SourcesView({
   updateSourceProxy
 }: {
   filterRules: FilterRule[];
+  monitorRunsBySource: Record<number, Run[]>;
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
+  onLoadMonitorRuns: (sourceId: number) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onLoadRunEvents: (runId: number) => Promise<RunEvent[]>;
   onRefreshRuntime: () => Promise<void>;
@@ -67,7 +71,19 @@ export function SourcesView({
   const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
   const activeSourceIds = useMemo(() => new Set(activeSources.map((source) => source.id)), [activeSources]);
   const activeRuns = useMemo(() => runs.filter((run) => activeSourceIds.has(run.source_id)), [activeSourceIds, runs]);
+  const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
+  const [requestedSelectedMonitorId, setSelectedMonitorId] = useState<number | null>(null);
+  const selectedMonitorId = sources.some((source) => source.id === requestedSelectedMonitorId)
+    ? requestedSelectedMonitorId
+    : defaultSelectedMonitorId;
+  const selectedSource = useMemo(
+    () => sources.find((source) => source.id === selectedMonitorId) ?? null,
+    [selectedMonitorId, sources]
+  );
   const refreshTimerRef = useRef<number | null>(null);
+  const loadingStatsRef = useRef<Set<string>>(new Set());
+  const loadingRunsRef = useRef<Set<number>>(new Set());
+  const detailRef = useRef<HTMLDivElement | null>(null);
   const handleRunEvent = useCallback(
     (event: RunEvent) => {
       if (!event.source_id || !activeSourceIds.has(event.source_id) || !shouldRefreshRuns(event.phase)) {
@@ -96,6 +112,45 @@ export function SourcesView({
     };
   }, []);
 
+  useEffect(() => {
+    if (!selectedSource) {
+      return;
+    }
+    const range = monitorStatsRangeBySource[selectedSource.id] ?? 'hours';
+    const loadingKey = `${selectedSource.id}:${range}`;
+    if (monitorStatsBySource[selectedSource.id]) {
+      loadingStatsRef.current.delete(loadingKey);
+      return;
+    }
+    if (loadingStatsRef.current.has(loadingKey)) {
+      return;
+    }
+    loadingStatsRef.current.add(loadingKey);
+    onLoadMonitorStats(selectedSource.id, range);
+  }, [monitorStatsBySource, monitorStatsRangeBySource, onLoadMonitorStats, selectedSource]);
+
+  useEffect(() => {
+    if (!selectedSource?.is_active) {
+      return;
+    }
+    if (monitorRunsBySource[selectedSource.id]) {
+      loadingRunsRef.current.delete(selectedSource.id);
+      return;
+    }
+    if (loadingRunsRef.current.has(selectedSource.id)) {
+      return;
+    }
+    loadingRunsRef.current.add(selectedSource.id);
+    onLoadMonitorRuns(selectedSource.id);
+  }, [monitorRunsBySource, onLoadMonitorRuns, selectedSource]);
+
+  useEffect(() => {
+    if (requestedSelectedMonitorId === null || !window.matchMedia('(max-width: 820px)').matches) {
+      return;
+    }
+    window.setTimeout(() => detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  }, [requestedSelectedMonitorId]);
+
   function getSourceName(sourceId: number): string {
     return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
   }
@@ -115,93 +170,45 @@ export function SourcesView({
       {sources.length === 0 ? <p className="empty-inline">No hay monitores configurados.</p> : null}
 
       {sources.length > 0 ? (
-        <div className="source-sections">
-          <MonitorSectionHeading label="Monitores activos" count={activeSources.length} />
-          {activeSources.length === 0 ? (
-            <p className="empty-inline compact">No hay monitores activos.</p>
-          ) : (
-            <div className="source-cards active-source-cards">
-              {activeSources.map((source) => {
-                const sourceRuns = activeRuns.filter((run) => run.source_id === source.id).slice(0, 3);
-                return (
-                  <article className="source-card active-monitor-card" key={source.id}>
-                    <div className="source-card-header">
-                      <div className="source-main">
-                        <strong>{source.name}</strong>
-                        <a href={source.url} target="_blank" rel="noreferrer">
-                          {source.url}
-                        </a>
-                      </div>
-                      <div className="source-badges">
-                        <span className="status running">Activo</span>
-                        <span className="status active">{modeLabel(source.monitor_mode)}</span>
-                      </div>
-                    </div>
-
-                    <div className="source-config-summary">
-                      {monitorSummary(source, filterRules, proxyProfiles).map((entry) => (
-                        <span key={entry}>{entry}</span>
-                      ))}
-                    </div>
-
-                    <div className="source-actions">
-                      <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
-                        <Square size={16} />
-                        Parar sesion
-                      </button>
-                    </div>
-
-                    <MonitorPerformancePanel
-                      range={monitorStatsRangeBySource[source.id] ?? 'hours'}
-                      stats={monitorStatsBySource[source.id] ?? null}
-                      onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
-                    />
-
-                    <details className="active-monitor-logs">
-                      <summary>Logs de ejecuciones</summary>
-                      <RunActivityList
-                        activity={activity}
-                        emptyText="Sin ejecuciones recientes para este monitor."
-                        getSourceName={getSourceName}
-                        runs={sourceRuns}
-                        variant="inline"
-                      />
-                    </details>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-
-          <MonitorSectionHeading label="Monitores inactivos" count={inactiveSources.length} />
-          {inactiveSources.length === 0 ? (
-            <p className="empty-inline compact">No hay monitores inactivos.</p>
-          ) : (
-            <div className="source-cards">
-              {inactiveSources.map((source) => (
-                <InactiveMonitorCard
-                  filterRules={filterRules}
-                  key={source.id}
-                  onDeleteSource={onDeleteSource}
-                  onLoadMonitorStats={onLoadMonitorStats}
-                  onSaveSourceSchedule={onSaveSourceSchedule}
-                  onStartSession={onStartSession}
-                  proxyProfiles={proxyProfiles}
-                  runningSessionId={runningSessionId}
-                  savingSourceId={savingSourceId}
-                  selectedFilterIds={selectedFilterIdsBySource[source.id] ?? []}
-                  selectedProxy={selectedProxyBySource[source.id] ?? ''}
-                  source={source}
-                  sourceDraft={sourceDrafts[source.id] ?? buildSourceDraft(source)}
-                  stats={monitorStatsBySource[source.id] ?? null}
-                  statsRange={monitorStatsRangeBySource[source.id] ?? 'hours'}
-                  toggleSourceFilter={toggleSourceFilter}
-                  updateSourceDraft={updateSourceDraft}
-                  updateSourceProxy={updateSourceProxy}
-                />
-              ))}
-            </div>
-          )}
+        <div className="monitor-workspace">
+          <MonitorList
+            activeSources={activeSources}
+            filterRules={filterRules}
+            inactiveSources={inactiveSources}
+            monitorStatsBySource={monitorStatsBySource}
+            proxyProfiles={proxyProfiles}
+            selectedFilterIdsBySource={selectedFilterIdsBySource}
+            selectedMonitorId={selectedMonitorId}
+            selectedProxyBySource={selectedProxyBySource}
+            sourceDrafts={sourceDrafts}
+            onSelectMonitor={setSelectedMonitorId}
+          />
+          <div className="monitor-detail-shell" ref={detailRef}>
+            <MonitorDetail
+              activity={activity}
+              activeRuns={activeRuns}
+              filterRules={filterRules}
+              getSourceName={getSourceName}
+              monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
+              onDeleteSource={onDeleteSource}
+              onLoadMonitorStats={onLoadMonitorStats}
+              onSaveSourceSchedule={onSaveSourceSchedule}
+              onStartSession={onStartSession}
+              onStopMonitor={onStopMonitor}
+              proxyProfiles={proxyProfiles}
+              runningSessionId={runningSessionId}
+              savingSourceId={savingSourceId}
+              selectedFilterIdsBySource={selectedFilterIdsBySource}
+              selectedProxyBySource={selectedProxyBySource}
+              source={selectedSource}
+              sourceDrafts={sourceDrafts}
+              stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
+              statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'hours') : 'hours'}
+              toggleSourceFilter={toggleSourceFilter}
+              updateSourceDraft={updateSourceDraft}
+              updateSourceProxy={updateSourceProxy}
+            />
+          </div>
         </div>
       ) : null}
     </section>
@@ -370,39 +377,290 @@ function MonitorSectionHeading({ count, label }: { count: number; label: string 
   );
 }
 
-function InactiveMonitorCard({
+type MonitorActivity = ReturnType<typeof useRunActivity>;
+
+function MonitorList({
+  activeSources,
   filterRules,
+  inactiveSources,
+  monitorStatsBySource,
+  onSelectMonitor,
+  proxyProfiles,
+  selectedFilterIdsBySource,
+  selectedMonitorId,
+  selectedProxyBySource,
+  sourceDrafts
+}: {
+  activeSources: SearchSource[];
+  filterRules: FilterRule[];
+  inactiveSources: SearchSource[];
+  monitorStatsBySource: Record<number, MonitorStats>;
+  onSelectMonitor: (sourceId: number) => void;
+  proxyProfiles: ProxyProfile[];
+  selectedFilterIdsBySource: Record<number, number[]>;
+  selectedMonitorId: number | null;
+  selectedProxyBySource: Record<number, string>;
+  sourceDrafts: Record<number, SourceDraft>;
+}) {
+  return (
+    <aside className="monitor-list-panel" aria-label="Lista de monitores">
+      <MonitorSectionHeading label="Monitores activos" count={activeSources.length} />
+      {activeSources.length === 0 ? (
+        <p className="empty-inline compact">No hay monitores activos.</p>
+      ) : (
+        <div className="monitor-list-group">
+          {activeSources.map((source) => (
+            <MonitorListRow
+              isSelected={source.id === selectedMonitorId}
+              key={source.id}
+              source={source}
+              stats={monitorStatsBySource[source.id] ?? null}
+              summary={monitorSummary(source, filterRules, proxyProfiles)}
+              onSelect={() => onSelectMonitor(source.id)}
+            />
+          ))}
+        </div>
+      )}
+
+      <MonitorSectionHeading label="Monitores inactivos" count={inactiveSources.length} />
+      {inactiveSources.length === 0 ? (
+        <p className="empty-inline compact">No hay monitores inactivos.</p>
+      ) : (
+        <div className="monitor-list-group">
+          {inactiveSources.map((source) => {
+            const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+            return (
+              <MonitorListRow
+                isSelected={source.id === selectedMonitorId}
+                key={source.id}
+                source={source}
+                stats={monitorStatsBySource[source.id] ?? null}
+                summary={draftSummary(
+                  source,
+                  draft,
+                  selectedFilterIdsBySource[source.id] ?? [],
+                  selectedProxyBySource[source.id] ?? '',
+                  filterRules,
+                  proxyProfiles
+                )}
+                onSelect={() => onSelectMonitor(source.id)}
+              />
+            );
+          })}
+        </div>
+      )}
+    </aside>
+  );
+}
+
+function MonitorListRow({
+  isSelected,
+  onSelect,
+  source,
+  stats,
+  summary
+}: {
+  isSelected: boolean;
+  onSelect: () => void;
+  source: SearchSource;
+  stats: MonitorStats | null;
+  summary: string[];
+}) {
+  return (
+    <button className={`monitor-list-row${isSelected ? ' selected' : ''}`} type="button" aria-pressed={isSelected} onClick={onSelect}>
+      <span className="monitor-list-row-main">
+        <strong>{source.name}</strong>
+        <span>{source.url}</span>
+      </span>
+      <span className="monitor-list-row-status">
+        <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
+        <span className="status active">{modeLabel(source.monitor_mode)}</span>
+      </span>
+      <span className="monitor-list-row-summary">
+        {summary.slice(0, 3).map((entry) => (
+          <span key={entry}>{entry}</span>
+        ))}
+      </span>
+      <span className="monitor-list-row-metrics">
+        {monitorListMetrics(stats).map((entry) => (
+          <span key={entry}>{entry}</span>
+        ))}
+      </span>
+    </button>
+  );
+}
+
+function MonitorDetail({
+  activity,
+  activeRuns,
+  filterRules,
+  getSourceName,
+  monitorRuns,
   onDeleteSource,
   onLoadMonitorStats,
   onSaveSourceSchedule,
   onStartSession,
+  onStopMonitor,
   proxyProfiles,
   runningSessionId,
   savingSourceId,
-  selectedFilterIds,
-  selectedProxy,
   source,
-  sourceDraft,
+  sourceDrafts,
+  selectedFilterIdsBySource,
+  selectedProxyBySource,
   stats,
   statsRange,
   toggleSourceFilter,
   updateSourceDraft,
   updateSourceProxy
 }: {
+  activity: MonitorActivity;
+  activeRuns: Run[];
   filterRules: FilterRule[];
+  getSourceName: (sourceId: number) => string;
+  monitorRuns: Run[];
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
+  onStopMonitor: (sourceId: number) => void;
   proxyProfiles: ProxyProfile[];
   runningSessionId: number | null;
+  savingSourceId: number | null;
+  selectedFilterIdsBySource: Record<number, number[]>;
+  selectedProxyBySource: Record<number, string>;
+  source: SearchSource | null;
+  sourceDrafts: Record<number, SourceDraft>;
+  stats: MonitorStats | null;
+  statsRange: MonitorStatsRange;
+  toggleSourceFilter: (sourceId: number, filterId: number) => void;
+  updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
+  updateSourceProxy: (sourceId: number, value: string) => void;
+}) {
+  if (!source) {
+    return <p className="empty-inline compact">Selecciona un monitor para ver el detalle.</p>;
+  }
+
+  const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+  const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
+  const selectedProxy = selectedProxyBySource[source.id] ?? '';
+  const sourceRuns = (monitorRuns.length > 0 ? monitorRuns : activeRuns.filter((run) => run.source_id === source.id)).slice(0, 3);
+
+  return (
+    <article className={`source-card monitor-detail-card${source.is_active ? ' active-monitor-card' : ' inactive-monitor-card'}`}>
+      <div className="source-card-header">
+        <div className="source-main">
+          <strong>{source.name}</strong>
+          <a href={source.url} target="_blank" rel="noreferrer">
+            {source.url}
+          </a>
+        </div>
+        <div className="source-badges">
+          <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
+          <span className="status active">{modeLabel(source.monitor_mode)}</span>
+        </div>
+      </div>
+
+      <div className="source-config-summary">
+        {(source.is_active
+          ? monitorSummary(source, filterRules, proxyProfiles)
+          : draftSummary(source, sourceDraft, selectedFilterIds, selectedProxy, filterRules, proxyProfiles)
+        ).map((entry) => (
+          <span key={entry}>{entry}</span>
+        ))}
+      </div>
+
+      <div className="source-actions">
+        {source.is_active ? (
+          <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
+            <Square size={16} />
+            Parar sesion
+          </button>
+        ) : (
+          <>
+            <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
+              <Play size={17} />
+              Lanzar sesion
+            </button>
+            <button
+              type="button"
+              disabled={savingSourceId === source.id}
+              title="Archivar monitor"
+              onClick={() => {
+                if (window.confirm(`Archivar el monitor "${source.name}"? Se conservara el historico.`)) {
+                  onDeleteSource(source);
+                }
+              }}
+            >
+              <Trash2 size={16} />
+              Archivar monitor
+            </button>
+          </>
+        )}
+      </div>
+
+      <MonitorPerformancePanel
+        range={statsRange}
+        stats={stats}
+        onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
+      />
+
+      {!source.is_active ? (
+        <section className="monitor-config-panel">
+          <h4>Configuracion</h4>
+          <MonitorConfigEditor
+            filterRules={filterRules}
+            onSaveSourceSchedule={onSaveSourceSchedule}
+            proxyProfiles={proxyProfiles}
+            savingSourceId={savingSourceId}
+            selectedFilterIds={selectedFilterIds}
+            selectedProxy={selectedProxy}
+            source={source}
+            sourceDraft={sourceDraft}
+            toggleSourceFilter={toggleSourceFilter}
+            updateSourceDraft={updateSourceDraft}
+            updateSourceProxy={updateSourceProxy}
+          />
+        </section>
+      ) : null}
+
+      {source.is_active ? (
+        <details className="active-monitor-logs">
+          <summary>Logs de ejecuciones</summary>
+          <RunActivityList
+            activity={activity}
+            emptyText="Sin ejecuciones recientes para este monitor."
+            getSourceName={getSourceName}
+            runs={sourceRuns}
+            variant="inline"
+          />
+        </details>
+      ) : null}
+    </article>
+  );
+}
+
+function MonitorConfigEditor({
+  filterRules,
+  onSaveSourceSchedule,
+  proxyProfiles,
+  savingSourceId,
+  selectedFilterIds,
+  selectedProxy,
+  source,
+  sourceDraft,
+  toggleSourceFilter,
+  updateSourceDraft,
+  updateSourceProxy
+}: {
+  filterRules: FilterRule[];
+  onSaveSourceSchedule: (source: SearchSource) => void;
+  proxyProfiles: ProxyProfile[];
   savingSourceId: number | null;
   selectedFilterIds: number[];
   selectedProxy: string;
   source: SearchSource;
   sourceDraft: SourceDraft;
-  stats: MonitorStats | null;
-  statsRange: MonitorStatsRange;
   toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
   updateSourceProxy: (sourceId: number, value: string) => void;
@@ -410,30 +668,7 @@ function InactiveMonitorCard({
   const isRecurring = sourceDraft.monitorMode !== 'manual';
 
   return (
-    <article className="source-card inactive-monitor-card">
-      <div className="inactive-monitor-compact">
-        <div className="source-card-header compact">
-          <div className="source-main">
-            <strong>{source.name}</strong>
-            <a href={source.url} target="_blank" rel="noreferrer">
-              {source.url}
-            </a>
-          </div>
-          <div className="source-badges">
-            <span className="status">Inactivo</span>
-            <span className="status active">{modeLabel(source.monitor_mode)}</span>
-          </div>
-        </div>
-
-        <div className="source-config-summary inactive">
-          {draftSummary(source, sourceDraft, selectedFilterIds, selectedProxy, filterRules, proxyProfiles).map((entry) => (
-            <span key={entry}>{entry}</span>
-          ))}
-        </div>
-      </div>
-
-      <details className="inactive-monitor-details">
-        <summary>Editar configuracion</summary>
+    <div className="monitor-config-editor">
         <div className="source-schedule compact">
           <label>
             Modo
@@ -529,37 +764,22 @@ function InactiveMonitorCard({
             ))
           )}
         </div>
-      </details>
-
-      {source.last_run_at ? <p className="source-session-line">Ultima consulta {formatDate(source.last_run_at)}</p> : null}
-
-      <MonitorPerformancePanel
-        range={statsRange}
-        stats={stats}
-        onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
-      />
-
-      <div className="source-actions">
-        <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
-          <Play size={17} />
-          Lanzar sesion
-        </button>
-        <button
-          type="button"
-          disabled={savingSourceId === source.id}
-          title="Archivar monitor"
-          onClick={() => {
-            if (window.confirm(`Archivar el monitor "${source.name}"? Se conservara el historico.`)) {
-              onDeleteSource(source);
-            }
-          }}
-        >
-          <Trash2 size={16} />
-          Archivar monitor
-        </button>
-      </div>
-    </article>
+    </div>
   );
+}
+
+function monitorListMetrics(stats: MonitorStats | null): string[] {
+  if (!stats) {
+    return ['Metricas al seleccionar'];
+  }
+  if (stats.historical_summary.sessions_count === 0) {
+    return ['Sin sesiones'];
+  }
+  return [
+    `${stats.historical_summary.runs_count} ejec.`,
+    `${stats.historical_summary.items_found} encontrados`,
+    `${stats.historical_summary.opportunities_created} oportunidades`
+  ];
 }
 
 function monitorSummary(source: SearchSource, filterRules: FilterRule[], proxyProfiles: ProxyProfile[]): string[] {

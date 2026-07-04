@@ -543,6 +543,52 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
         cleanup_source(source_id)
 
 
+def test_runs_endpoint_filters_by_source_id() -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source_a = SearchSource(
+            name="pytest runs filter a",
+            url="https://www.vinted.es/catalog?search_text=runs-a",
+            normalized_query={"search_text": ["runs-a"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+            filter_rule_ids=[],
+        )
+        source_b = SearchSource(
+            name="pytest runs filter b",
+            url="https://www.vinted.es/catalog?search_text=runs-b",
+            normalized_query={"search_text": ["runs-b"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+            filter_rule_ids=[],
+        )
+        db.add_all([source_a, source_b])
+        db.flush()
+        db.add_all(
+            [
+                Run(source_id=source_a.id, status=SUCCESS, trigger="manual", started_at=datetime(2026, 7, 4, 9, 0, tzinfo=UTC)),
+                Run(source_id=source_b.id, status=SUCCESS, trigger="manual", started_at=datetime(2026, 7, 4, 10, 0, tzinfo=UTC)),
+            ]
+        )
+        db.commit()
+        source_a_id = source_a.id
+        source_b_id = source_b.id
+
+    try:
+        response = client.get(f"/api/runs?source_id={source_a_id}&limit=10")
+
+        assert response.status_code == 200
+        runs = response.json()
+        assert len(runs) == 1
+        assert runs[0]["source_id"] == source_a_id
+    finally:
+        cleanup_source(source_a_id)
+        cleanup_source(source_b_id)
+
+
 def test_monitor_stats_range_bucket_granularity() -> None:
     cleanup_source(None)
     now = datetime(2026, 7, 4, 12, 34, 56, tzinfo=UTC)

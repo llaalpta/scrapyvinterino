@@ -46,6 +46,7 @@ export function useDashboardController() {
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
   const [opportunityPage, setOpportunityPage] = useState<Page<OpportunityResult>>(emptyOpportunityPage);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [monitorRunsBySource, setMonitorRunsBySource] = useState<Record<number, Run[]>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
@@ -74,21 +75,29 @@ export function useDashboardController() {
     [activeSection, opportunityPage.total, sources.length]
   );
 
-  const loadMonitorStatsForSources = useCallback(
+  const refreshLoadedMonitorStats = useCallback(
     async (sourceData: SearchSource[]) => {
       if (sourceData.length === 0) {
         setMonitorStatsBySource({});
         return;
       }
+      const visibleIds = new Set(sourceData.map((source) => source.id));
+      const loadedIds = Object.keys(monitorStatsBySource)
+        .map(Number)
+        .filter((sourceId) => visibleIds.has(sourceId));
+      if (loadedIds.length === 0) {
+        setMonitorStatsBySource({});
+        return;
+      }
       const entries = await Promise.all(
-        sourceData.map(async (source) => {
-          const range = monitorStatsRangeBySource[source.id] ?? 'hours';
-          return [source.id, await fetchMonitorStats(source.id, range)] as const;
+        loadedIds.map(async (sourceId) => {
+          const range = monitorStatsRangeBySource[sourceId] ?? 'hours';
+          return [sourceId, await fetchMonitorStats(sourceId, range)] as const;
         })
       );
       setMonitorStatsBySource(Object.fromEntries(entries));
     },
-    [monitorStatsRangeBySource]
+    [monitorStatsBySource, monitorStatsRangeBySource]
   );
 
   useEffect(() => {
@@ -110,11 +119,6 @@ export function useDashboardController() {
         setSourceDrafts(buildSourceDrafts(sourceData));
         setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
         setSelectedProxyBySource(buildSelectedProxyIds(sourceData));
-        if (sourceData.length > 0) {
-          void Promise.all(sourceData.map(async (source) => [source.id, await fetchMonitorStats(source.id, 'hours')] as const)).then(
-            (entries) => setMonitorStatsBySource(Object.fromEntries(entries))
-          );
-        }
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
@@ -125,8 +129,8 @@ export function useDashboardController() {
     const [opportunityData, runData] = await Promise.all([fetchOpportunities(), fetchRuns()]);
     setOpportunityPage(opportunityData);
     setRuns(runData);
-    await loadMonitorStatsForSources(sourceData);
-  }, [loadMonitorStatsForSources, sources]);
+    await refreshLoadedMonitorStats(sourceData);
+  }, [refreshLoadedMonitorStats, sources]);
 
   async function loadOpportunities(page = 1, filters = opportunityFilters, pageSize = opportunitiesPageSize) {
     setLoadingOpportunities(true);
@@ -147,6 +151,8 @@ export function useDashboardController() {
       const created = await createSource({ name: sourceName, url: sourceUrl });
       setSources((current) => [created, ...current]);
       setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
+      setSelectedFilterIdsBySource((current) => ({ ...current, [created.id]: created.filter_rule_ids ?? [] }));
+      setSelectedProxyBySource((current) => ({ ...current, [created.id]: created.proxy_profile_id ? String(created.proxy_profile_id) : '' }));
       await loadMonitorStats(created.id, 'hours');
       setSourceName('');
       setSourceUrl('');
@@ -220,7 +226,8 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
-      await loadMonitorStatsForSources(sourceData);
+      setMonitorRunsBySource((current) => ({ ...current, [sourceId]: [created, ...(current[sourceId] ?? []).filter((run) => run.id !== created.id)].slice(0, 10) }));
+      await loadMonitorStats(sourceId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
     } finally {
@@ -244,7 +251,8 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
-      await loadMonitorStatsForSources(sourceData);
+      setMonitorRunsBySource((current) => ({ ...current, [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, 10) }));
+      await loadMonitorStats(source.id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
@@ -311,6 +319,16 @@ export function useDashboardController() {
         return next;
       });
       setSelectedProxyBySource((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      setMonitorStatsBySource((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      setMonitorRunsBySource((current) => {
         const next = { ...current };
         delete next[source.id];
         return next;
@@ -397,6 +415,11 @@ export function useDashboardController() {
     setMonitorStatsBySource((current) => ({ ...current, [sourceId]: stats }));
   }
 
+  async function loadMonitorRuns(sourceId: number, limit = 10) {
+    const sourceRuns = await fetchRuns({ source_id: sourceId, limit });
+    setMonitorRunsBySource((current) => ({ ...current, [sourceId]: sourceRuns }));
+  }
+
   function getSourceName(sourceId: number): string {
     return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
   }
@@ -419,6 +442,7 @@ export function useDashboardController() {
     getSourceName,
     loadOpportunities,
     loadMonitorStats,
+    loadMonitorRuns,
     loadingOpportunities,
     navCollapsed,
     onCreateFilter,
@@ -435,6 +459,7 @@ export function useDashboardController() {
     onToggleSource,
     monitorStatsBySource,
     monitorStatsRangeBySource,
+    monitorRunsBySource,
     opportunityPage,
     proxyDraft,
     proxyProfiles,
