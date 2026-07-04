@@ -208,11 +208,22 @@ def test_http_provider_emits_safe_session_and_catalog_events() -> None:
         "catalog_api_request_start",
         "catalog_api_request_success",
     ]
-    assert events[1]["details"] == {"session_marker_count": 1}
+    assert events[1]["details"]["session_marker_count"] == 1
+    assert events[1]["details"]["session_markers"] == [
+        {
+            "kind": "cookie",
+            "name": "access_token_web",
+            "masked": "<masked>",
+            "length": 6,
+            "fingerprint": "sha256:2bb80d537b1d",
+            "domain": "www.vinted.es",
+        }
+    ]
     assert events[2]["details"]["session_marker_count"] == 1
+    assert events[2]["details"]["timeout_ms"] == 15000
+    assert events[2]["details"]["attempt"] == 1
     assert events[3]["details"]["item_count"] == 2
     assert "secret" not in json.dumps(events)
-    assert "access_token_web" not in json.dumps(events)
 
 
 def test_http_provider_configures_proxy_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

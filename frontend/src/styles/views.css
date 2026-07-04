@@ -345,30 +345,146 @@
 
 .run-events {
   display: grid;
-  gap: 8px;
-  max-height: 260px;
+  gap: 0;
+  max-height: 420px;
   overflow: auto;
   border: 1px solid #e5eaf0;
   border-radius: 8px;
-  padding: 10px;
-  background: #ffffff;
+  background: #0f172a;
 }
 
-.run-events article {
+.event-stream-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-bottom: 1px solid rgb(148 163 184 / 0.22);
+  padding: 10px 12px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.event-stream-status.connected svg {
+  color: #22c55e;
+}
+
+.event-stream-status.error svg {
+  color: #f97316;
+}
+
+.run-event-entry {
   display: grid;
-  gap: 4px;
-  border-bottom: 1px solid #edf2f7;
-  padding-bottom: 8px;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  border-bottom: 1px solid rgb(148 163 184 / 0.22);
+  padding: 12px;
+  color: #dbeafe;
 }
 
-.run-events article:last-child {
+.run-event-entry:last-child {
   border-bottom: 0;
-  padding-bottom: 0;
 }
 
-.run-events code {
+.event-rail {
+  display: flex;
+  justify-content: center;
+  padding-top: 2px;
+  color: #60a5fa;
+}
+
+.run-event-entry.warning .event-rail {
+  color: #f59e0b;
+}
+
+.run-event-entry.error .event-rail {
+  color: #ef4444;
+}
+
+.event-body {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.event-title-row,
+.event-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.event-title-row strong {
+  color: #f8fafc;
+}
+
+.event-meta-row span {
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+}
+
+.event-level {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.event-level.info,
+.event-level.debug {
+  color: #bfdbfe;
+  background: rgb(59 130 246 / 0.18);
+}
+
+.event-level.warning {
+  color: #fde68a;
+  background: rgb(245 158 11 / 0.18);
+}
+
+.event-level.error {
+  color: #fecaca;
+  background: rgb(239 68 68 / 0.18);
+}
+
+.event-url,
+.event-details code {
+  display: block;
   overflow-wrap: anywhere;
-  white-space: normal;
+  white-space: pre-wrap;
+}
+
+.event-url {
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: #bae6fd;
+  background: rgb(15 23 42 / 0.7);
+}
+
+.event-body p {
+  margin: 0;
+  color: #e2e8f0;
+}
+
+.event-details {
+  min-width: 0;
+}
+
+.event-details summary {
+  cursor: pointer;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.event-details code {
+  margin-top: 6px;
+  border-radius: 6px;
+  padding: 8px;
+  color: #d1fae5;
+  background: rgb(2 6 23 / 0.64);
 }
 
 .empty-inline {

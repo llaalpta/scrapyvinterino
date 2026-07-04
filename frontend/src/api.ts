@@ -150,6 +150,7 @@ export type RunEvent = {
   run_id: number | null;
   source_id: number | null;
   phase: string;
+  level: 'debug' | 'info' | 'warning' | 'error';
   method: string | null;
   url: string | null;
   status_code: number | null;
@@ -325,6 +326,10 @@ export function fetchRuns(): Promise<Run[]> {
 
 export function fetchRunEvents(runId: number): Promise<RunEvent[]> {
   return getJson<RunEvent[]>(`/api/runs/${runId}/events`);
+}
+
+export function monitorEventsStreamUrl(lastEventId = 0): string {
+  return `${apiBaseUrl}/api/monitors/events/stream?last_event_id=${lastEventId}`;
 }
 
 export function runSource(sourceId: number): Promise<Run> {

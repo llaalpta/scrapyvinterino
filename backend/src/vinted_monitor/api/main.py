@@ -369,8 +369,18 @@ def stream_monitor_events(last_event_id: int = Query(0, ge=0)):
                     "source_id": event.source_id,
                     "run_id": event.run_id,
                     "phase": event.phase,
+                    "level": event.level,
                     "created_at": event.created_at.isoformat(),
+                    "method": event.method,
+                    "url": event.url,
+                    "status_code": event.status_code,
+                    "duration_ms": event.duration_ms,
+                    "proxy_profile_id": event.proxy_profile_id,
+                    "egress_ip": event.egress_ip,
+                    "user_agent": event.user_agent,
+                    "auth_mode": event.auth_mode,
                     "message": event.message,
+                    "details": event.details,
                 }
                 yield f"id: {event.id}\nevent: monitor_event\ndata: {json.dumps(payload)}\n\n"
             await asyncio.sleep(2)

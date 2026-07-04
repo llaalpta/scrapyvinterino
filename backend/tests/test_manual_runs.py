@@ -221,7 +221,11 @@ def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
         bootstrap_success = next(event for event in events if event.phase == "anonymous_session_bootstrap_success")
         assert bootstrap_success.status_code == 200
         assert bootstrap_success.duration_ms == 12
+        assert bootstrap_success.level == "info"
         assert bootstrap_success.details == {"session_marker_count": 1}
+        redis_event = next(event for event in events if event.phase == "redis_seen_result")
+        assert redis_event.details["seen_miss_count"] == 1
+        assert next(event for event in events if event.phase == "run_succeeded").level == "info"
 
 
 def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:
@@ -399,12 +403,15 @@ def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:
         run = execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache(unavailable=True))
         source = db.get(SearchSource, source_id)
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
 
         assert run.status == FAILED
         assert "Redis seen cache is unavailable" in (run.error_message or "")
         assert source is not None
         assert source.is_active is False
         assert opportunity_count == 0
+        assert any(event.phase == "redis_check_error" and event.level == "error" for event in events)
+        assert any(event.phase == "run_failed" and event.level == "error" for event in events)
 
 
 def test_same_item_can_create_opportunity_in_different_monitor(source_id: int) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import select
@@ -9,6 +10,7 @@ from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import RunEvent
 
 MAX_MESSAGE_LENGTH = 1200
+LOG_LEVELS = {"debug", "info", "warning", "error"}
 
 
 def record_run_event(
@@ -21,6 +23,7 @@ def record_run_event(
     url: str | None = None,
     status_code: int | None = None,
     duration_ms: int | None = None,
+    level: str | None = None,
     proxy_profile_id: int | None = None,
     egress_ip: str | None = None,
     user_agent: str | None = None,
@@ -32,6 +35,7 @@ def record_run_event(
         run_id=run_id,
         source_id=source_id,
         phase=phase,
+        level=_event_level(phase, level),
         method=method,
         url=sanitize_url(url) if url else None,
         status_code=status_code,
@@ -74,17 +78,36 @@ def _redacted_message(message: str | None) -> str | None:
 
 
 def _redacted_details(details: dict) -> dict:
-    redacted: dict = {}
-    for key, value in details.items():
-        if _is_sensitive_key(str(key)):
-            redacted[key] = "<redacted>"
-        elif isinstance(value, str):
-            redacted[key] = redact_sensitive_text(value)[:MAX_MESSAGE_LENGTH]
-        else:
-            redacted[key] = value
-    return redacted
+    return _redact_value(details)
+
+
+def _redact_value(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and _is_sensitive_key(key):
+        return "<redacted>"
+    if isinstance(value, str):
+        return redact_sensitive_text(value)[:MAX_MESSAGE_LENGTH]
+    if isinstance(value, dict):
+        return {child_key: _redact_value(child_value, key=str(child_key)) for child_key, child_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(child_value) for child_value in value]
+    return value
 
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
+    safe_keys = {"masked", "fingerprint", "session_markers"}
+    if lowered in safe_keys:
+        return False
     return any(token in lowered for token in ["token", "cookie", "password", "secret", "authorization", "csrf"])
+
+
+def _event_level(phase: str, level: str | None) -> str:
+    if level is not None:
+        normalized = level.lower()
+        return normalized if normalized in LOG_LEVELS else "info"
+    lowered = phase.lower()
+    if any(token in lowered for token in ["failed", "failure", "error"]):
+        return "error"
+    if any(token in lowered for token in ["rejected", "discarded", "skipped", "unavailable", "blocked"]):
+        return "warning"
+    return "info"

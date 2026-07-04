@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -102,6 +103,20 @@ def execute_monitor_run(
         db.rollback()
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_started",
+        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        user_agent=get_settings().vinted_user_agent,
+        auth_mode="public_anonymous",
+        details={
+            "trigger": trigger,
+            "monitor_mode": source.monitor_mode,
+            "filter_count": len(source.filter_rule_ids or []),
+        },
+    )
 
     run_provider = provider or _provider_for_source(db, source)
     cache = seen_cache or get_seen_cache()
@@ -110,14 +125,42 @@ def execute_monitor_run(
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
 
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="redis_check_start",
+        proxy_profile_id=proxy_profile_id,
+        message="Checking Redis seen cache availability",
+        details={"policy_hash": policy_hash},
+    )
     try:
         cache.require_available()
     except SeenCacheUnavailableError as exc:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="redis_check_error",
+            level="error",
+            proxy_profile_id=proxy_profile_id,
+            message=str(exc),
+            details={"policy_hash": policy_hash},
+        )
         source.is_active = False
         source.monitor_mode = "manual"
         source.monitor_until = None
         source.next_run_at = None
         return _record_failed_run(db, run, source, exc, kind="redis_unavailable")
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="redis_check_success",
+        proxy_profile_id=proxy_profile_id,
+        message="Redis seen cache is available",
+        details={"policy_hash": policy_hash},
+    )
 
     record_run_event(
         db,
@@ -153,6 +196,21 @@ def execute_monitor_run(
         unique_candidates = _deduplicate_candidates(result.items)
         claimed_ids = cache.claim_unseen(source.id, policy_hash, [candidate.vinted_item_id for candidate in unique_candidates])
         monitor_new_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id in claimed_ids]
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="redis_seen_result",
+            proxy_profile_id=proxy_profile_id,
+            message="Monitor seen cache evaluated catalog candidates",
+            details={
+                "candidate_count": len(result.items),
+                "unique_candidate_count": len(unique_candidates),
+                "seen_hit_count": len(unique_candidates) - len(monitor_new_candidates),
+                "seen_miss_count": len(monitor_new_candidates),
+                "policy_hash": policy_hash,
+            },
+        )
         monitor_result = _evaluate_monitor_candidates(
             db,
             run_provider,
@@ -173,6 +231,23 @@ def execute_monitor_run(
         run.error_message = None
         source.last_run_at = run.finished_at
         _clear_manual_monitor_runtime(source)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="run_succeeded",
+            proxy_profile_id=proxy_profile_id,
+            user_agent=get_settings().vinted_user_agent,
+            auth_mode="public_anonymous",
+            details={
+                "items_found": run.items_found,
+                "items_new": run.items_new,
+                "items_filter_passed": run.items_filter_passed,
+                "items_discarded_by_filters": run.items_discarded_by_filters,
+                "items_filter_pending": run.items_filter_pending,
+                "opportunities_created": run.opportunities_created,
+            },
+        )
         db.commit()
         cache.mark_seen(source.id, policy_hash, processed_ids)
         db.refresh(run)
@@ -254,6 +329,7 @@ def _attach_provider_event_sink(
         url: str | None = None,
         status_code: int | None = None,
         duration_ms: int | None = None,
+        level: str | None = None,
         message: str | None = None,
         details: dict | None = None,
     ) -> None:
@@ -266,6 +342,7 @@ def _attach_provider_event_sink(
             url=url,
             status_code=status_code,
             duration_ms=duration_ms,
+            level=level,
             proxy_profile_id=proxy_profile_id,
             user_agent=get_settings().vinted_user_agent,
             auth_mode="public_anonymous",
@@ -290,10 +367,12 @@ def _record_failed_run(
         run_id=run.id,
         source_id=source.id,
         phase="run_failed",
+        level="error",
         message=message,
         proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
         user_agent=get_settings().vinted_user_agent,
         auth_mode="public_anonymous",
+        details={"kind": kind or exc.__class__.__name__},
     )
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
@@ -351,6 +430,19 @@ def _evaluate_monitor_candidates(
         if filters:
             if detail_attempts < max_detail_candidates:
                 detail_attempts += 1
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_start",
+                    method="GET",
+                    url=candidate.url,
+                    proxy_profile_id=source.proxy_profile_id,
+                    user_agent=get_settings().vinted_user_agent,
+                    auth_mode="public_anonymous",
+                    details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
+                )
+                detail_started_at = time.perf_counter()
                 try:
                     detail = provider.fetch_detail(candidate)
                     apply_item_detail_data(transient_item, detail)
@@ -361,9 +453,11 @@ def _evaluate_monitor_candidates(
                         phase="detail_fetch_success",
                         method="GET",
                         url=candidate.url,
+                        duration_ms=_elapsed_ms(detail_started_at),
                         proxy_profile_id=source.proxy_profile_id,
                         user_agent=get_settings().vinted_user_agent,
                         auth_mode="public_anonymous",
+                        details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
                     )
                 except Exception as exc:
                     pending += 1
@@ -376,14 +470,31 @@ def _evaluate_monitor_candidates(
                         phase="detail_fetch_error",
                         method="GET",
                         url=candidate.url,
+                        duration_ms=_elapsed_ms(detail_started_at),
+                        level="error",
                         proxy_profile_id=source.proxy_profile_id,
                         user_agent=get_settings().vinted_user_agent,
                         auth_mode="public_anonymous",
                         message=detail_error,
+                        details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
                     )
             else:
                 pending += 1
                 evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_skipped",
+                    level="warning",
+                    url=candidate.url,
+                    proxy_profile_id=source.proxy_profile_id,
+                    message="Detail fetch limit reached; opportunity can still be created without detail filters",
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "max_detail_candidates": max_detail_candidates,
+                    },
+                )
 
             if evaluation_status == SESSION_ITEM_PASSED:
                 decision = evaluate_exclusion_filters(transient_item, filters)
@@ -397,11 +508,28 @@ def _evaluate_monitor_candidates(
                 run_id=run.id,
                 source_id=source.id,
                 phase="item_discarded",
+                level="warning",
                 url=candidate.url,
                 proxy_profile_id=source.proxy_profile_id,
                 message=f"Matched blacklist terms: {', '.join(matched_terms)}",
+                details={"vinted_item_id": candidate.vinted_item_id, "matched_terms": matched_terms},
             )
             continue
+
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="filter_passed",
+            url=candidate.url,
+            proxy_profile_id=source.proxy_profile_id,
+            message="Candidate passed monitor filters",
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "evaluation_status": evaluation_status,
+                "filter_count": len(filters),
+            },
+        )
 
         item = get_or_persist_catalog_item(db, candidate)
         if detail is not None:
@@ -409,6 +537,21 @@ def _evaluate_monitor_candidates(
         if detail_error is not None:
             record_item_detail_error(db, item, detail_error)
         _, created = _get_or_create_monitor_opportunity(db, source, run, item, evaluation_status, filters)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="opportunity_created" if created else "opportunity_skipped",
+            level="info" if created else "warning",
+            url=candidate.url,
+            proxy_profile_id=source.proxy_profile_id,
+            message="Opportunity created" if created else "Opportunity already existed for this monitor item",
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "item_id": item.id,
+                "evaluation_status": evaluation_status,
+            },
+        )
         opportunities_created += 1 if created else 0
         passed += 1
 
@@ -469,6 +612,10 @@ def _policy_hash(source: SearchSource, filters: list[dict]) -> str:
     }
     serialized = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(round((time.perf_counter() - started_at) * 1000), 0)
 
 
 def raise_(exc: Exception):

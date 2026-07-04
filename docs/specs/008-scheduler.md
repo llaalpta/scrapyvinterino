@@ -18,6 +18,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Support one daily allowed execution window configured by start/end timepickers and stored as `HH:MM-HH:MM`.
 - Record scheduler-triggered errors in the same run/error model.
 - Record safe run progress events for anonymous session bootstrap, catalog API request, retries, detail fetches, and failures.
+- Record professional run logs with level, phase, sanitized URL, status code, duration, timeout, attempt/retry details, Redis state, filter outcome, and opportunity outcome.
 - Run multiple active monitors concurrently with explicit limits.
 - Allow at most `2` active monitor runs globally by default.
 - Allow at most `1` active run per monitor.
@@ -61,6 +62,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - scheduler timezone, default `Europe/Madrid`;
   - optional proxy enable flag and proxy URL fallback;
   - optional UI-managed proxy profiles.
+- Run event log:
+  - `level`: `debug`, `info`, `warning`, or `error`;
+  - stable machine phase such as `run_started`, `redis_check_error`, `anonymous_session_bootstrap_success`, `catalog_api_request_success`, `detail_fetch_error`, `item_discarded`, or `opportunity_created`;
+  - `duration_ms`, `status_code`, `timeout_ms`, `attempt`, and `retry_reason` when available;
+  - safe session markers with name, length, masked preview, and fingerprint, never the full value.
 - Database:
   - `app_settings`;
   - `search_sources.scheduler_config`;
@@ -91,6 +97,10 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
 - Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
 - Run logs show operational progress with sanitized URLs, status codes, durations, proxy profile id, auth mode, and safe counts only; they never expose cookie or token values.
+- Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
+- Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
+- The PWA run monitor renders logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
+- The PWA can receive monitor log updates from the existing SSE stream.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
 - Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.
@@ -118,3 +128,5 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm proxy enabled path passes configured outbound Vinted proxy to the provider without returning or logging credentials.
 - Confirm proxy enabled without URL fails with a clear redacted error.
 - Confirm anonymous session refresh failure marks only the affected run failed and does not stop the scheduler loop.
+- Confirm redaction tests cover nested details, URLs, bearer tokens, cookies, token-like assignments, masked values, and fingerprints.
+- Confirm PWA build succeeds after adding the log timeline and stream event fields.

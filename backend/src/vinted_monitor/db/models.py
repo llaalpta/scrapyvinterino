@@ -164,6 +164,7 @@ class RunEvent(Base):
     run_id: Mapped[int | None] = mapped_column(ForeignKey("runs.id"))
     source_id: Mapped[int | None] = mapped_column(ForeignKey("search_sources.id"))
     phase: Mapped[str] = mapped_column(String(80))
+    level: Mapped[str] = mapped_column(String(20), default="info")
     method: Mapped[str | None] = mapped_column(String(12))
     url: Mapped[str | None] = mapped_column(Text)
     status_code: Mapped[int | None] = mapped_column(Integer)

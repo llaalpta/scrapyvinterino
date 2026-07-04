@@ -24,25 +24,26 @@ Status values:
 | 9 | done | Session exclusion filters, monitor, and proxy pool | `docs/specs/006-local-filters.md` | Launch monitor sessions with source snapshots, exclusion filters, opportunities, run monitor, and encrypted proxy profiles. |
 | 10 | done | Source archive, time windows, and timed sessions | `docs/specs/001-search-sources.md`, `docs/specs/008-scheduler.md` | Archive sources safely, configure one daily time window with timepickers, and launch bounded sessions from now. |
 | 11 | done | Opportunity monitors model correction | `docs/specs/001-search-sources.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md`, `docs/specs/008-scheduler.md` | Treat configured Vinted searches as reusable monitors with per-monitor dedupe, optional filters, and accumulated monitor metrics. |
+| 12 | done | Professional monitor logs | `docs/specs/008-scheduler.md`, `docs/security.md` | Structured run events with levels, safe session diagnostics, durations, Redis/cache events, and PWA log timeline. |
 
 ## Next
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 12 | done | Fast opportunity pipeline with Redis seen cache | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md`, `docs/specs/007-opportunities-table.md`, `docs/specs/008-scheduler.md` | Make Redis mandatory for monitor seen state, persist only opportunities as product results, and remove seen-results/session legacy. |
-| 13 | not-started | Notifications | `docs/spec.md` | PWA push, Telegram, webhook, Discord, or email after web monitoring works. |
+| 13 | done | Fast opportunity pipeline with Redis seen cache | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md`, `docs/specs/007-opportunities-table.md`, `docs/specs/008-scheduler.md` | Make Redis mandatory for monitor seen state, persist only opportunities as product results, and remove seen-results/session legacy. |
+| 14 | not-started | Notifications | `docs/spec.md` | PWA push, Telegram, webhook, Discord, or email after web monitoring works. |
 
 ## Later
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 14 | not-started | Production deployment hardening | `docs/deployment.md` | Traefik and Cloudflare deployment details. |
+| 15 | not-started | Production deployment hardening | `docs/deployment.md` | Traefik and Cloudflare deployment details. |
 
 ## Future Authenticated Actions
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 15 | not-started | Authenticated actions | `docs/specs/009-authenticated-actions.md` | Favorites, checkout discovery, pre-purchase, and explicit purchase. |
+| 16 | not-started | Authenticated actions | `docs/specs/009-authenticated-actions.md` | Favorites, checkout discovery, pre-purchase, and explicit purchase. |
 
 ## Roadmap Rules
 

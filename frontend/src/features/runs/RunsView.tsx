@@ -1,6 +1,6 @@
-import { FileText } from 'lucide-react';
-import { useState } from 'react';
-import type { Run, RunEvent } from '../../api';
+import { AlertTriangle, Clock3, FileText, Info, RefreshCw, XCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { monitorEventsStreamUrl, type Run, type RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
 
 export function RunsView({
@@ -15,6 +15,26 @@ export function RunsView({
   const [openRunId, setOpenRunId] = useState<number | null>(null);
   const [eventsByRunId, setEventsByRunId] = useState<Record<number, RunEvent[]>>({});
   const [loadingRunId, setLoadingRunId] = useState<number | null>(null);
+  const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
+
+  useEffect(() => {
+    if (runs.length === 0) {
+      return undefined;
+    }
+
+    const events = new EventSource(monitorEventsStreamUrl());
+    events.addEventListener('open', () => setStreamStatus('connected'));
+    events.addEventListener('error', () => setStreamStatus('error'));
+    events.addEventListener('monitor_event', (message) => {
+      const event = parseRunEvent(message);
+      if (!event?.run_id) {
+        return;
+      }
+      setEventsByRunId((current) => mergeRunEvent(current, event));
+    });
+
+    return () => events.close();
+  }, [runs.length]);
 
   async function toggleLogs(runId: number) {
     if (openRunId === runId) {
@@ -105,15 +125,12 @@ export function RunsView({
                   <div className="run-events">
                     {loadingRunId === run.id ? <p>Cargando logs...</p> : null}
                     {!loadingRunId && events.length === 0 ? <p>Sin eventos para este run.</p> : null}
+                    <div className={`event-stream-status ${streamStatus}`}>
+                      <RefreshCw size={14} />
+                      <span>{streamLabel(streamStatus)}</span>
+                    </div>
                     {events.map((event) => (
-                      <article key={event.id}>
-                        <strong>{event.phase}</strong>
-                        <span>{formatDate(event.created_at)}</span>
-                        <span>{eventMeta(event)}</span>
-                        {event.url ? <code>{event.url}</code> : null}
-                        {event.message ? <p>{event.message}</p> : null}
-                        {Object.keys(event.details).length > 0 ? <code>{JSON.stringify(event.details)}</code> : null}
-                      </article>
+                      <RunEventEntry event={event} key={event.id} />
                     ))}
                   </div>
                 ) : null}
@@ -123,6 +140,37 @@ export function RunsView({
         </div>
       )}
     </section>
+  );
+}
+
+function RunEventEntry({ event }: { event: RunEvent }) {
+  const Icon = eventIcon(event.level);
+  const hasDetails = Object.keys(event.details).length > 0;
+  return (
+    <article className={`run-event-entry ${event.level}`}>
+      <div className="event-rail">
+        <Icon size={16} />
+      </div>
+      <div className="event-body">
+        <div className="event-title-row">
+          <strong>{eventLabel(event.phase)}</strong>
+          <span className={`event-level ${event.level}`}>{levelLabel(event.level)}</span>
+        </div>
+        <div className="event-meta-row">
+          <span>{formatDate(event.created_at)}</span>
+          {eventMeta(event) ? <span>{eventMeta(event)}</span> : null}
+          {event.auth_mode ? <span>{event.auth_mode}</span> : null}
+        </div>
+        {event.url ? <code className="event-url">{event.url}</code> : null}
+        {event.message ? <p>{event.message}</p> : null}
+        {hasDetails ? (
+          <details className="event-details">
+            <summary>Detalles</summary>
+            <code>{JSON.stringify(event.details, null, 2)}</code>
+          </details>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -138,6 +186,93 @@ function eventMeta(event: RunEvent): string {
     parts.push(`${event.duration_ms}ms`);
   }
   return parts.join(' - ');
+}
+
+function parseRunEvent(message: MessageEvent): RunEvent | null {
+  try {
+    return JSON.parse(message.data) as RunEvent;
+  } catch {
+    return null;
+  }
+}
+
+function mergeRunEvent(current: Record<number, RunEvent[]>, event: RunEvent): Record<number, RunEvent[]> {
+  if (!event.run_id) {
+    return current;
+  }
+  const existing = current[event.run_id] ?? [];
+  if (existing.some((entry) => entry.id === event.id)) {
+    return current;
+  }
+  return {
+    ...current,
+    [event.run_id]: [...existing, event].sort((left, right) => left.id - right.id)
+  };
+}
+
+function eventIcon(level: RunEvent['level']) {
+  if (level === 'error') {
+    return XCircle;
+  }
+  if (level === 'warning') {
+    return AlertTriangle;
+  }
+  if (level === 'debug') {
+    return Clock3;
+  }
+  return Info;
+}
+
+function levelLabel(level: RunEvent['level']): string {
+  const labels = {
+    debug: 'Debug',
+    info: 'Info',
+    warning: 'Aviso',
+    error: 'Error'
+  };
+  return labels[level];
+}
+
+function streamLabel(status: 'connecting' | 'connected' | 'error'): string {
+  if (status === 'connected') {
+    return 'Logs en vivo';
+  }
+  if (status === 'error') {
+    return 'Stream no disponible; abre logs para recargar';
+  }
+  return 'Conectando stream';
+}
+
+function eventLabel(phase: string): string {
+  const labels: Record<string, string> = {
+    run_started: 'Run iniciado',
+    run_succeeded: 'Run completado',
+    run_failed: 'Run fallido',
+    redis_check_start: 'Comprobando Redis',
+    redis_check_success: 'Redis disponible',
+    redis_check_error: 'Redis no disponible',
+    redis_seen_result: 'Cache de vistos evaluada',
+    catalog_search_start: 'Iniciando busqueda',
+    catalog_search_success: 'Busqueda completada',
+    anonymous_session_bootstrap_start: 'Obteniendo sesion anonima',
+    anonymous_session_bootstrap_success: 'Sesion anonima obtenida',
+    anonymous_session_bootstrap_error: 'Error obteniendo sesion anonima',
+    anonymous_session_refresh_start: 'Refrescando sesion anonima',
+    catalog_api_request_start: 'Consultando API de catalogo',
+    catalog_api_request_success: 'API de catalogo respondio',
+    catalog_api_request_error: 'Error en API de catalogo',
+    catalog_api_session_rejected: 'Sesion rechazada por catalogo',
+    catalog_api_parse_error: 'Respuesta de catalogo no procesable',
+    detail_fetch_start: 'Obteniendo detalle',
+    detail_fetch_success: 'Detalle obtenido',
+    detail_fetch_error: 'Error obteniendo detalle',
+    detail_fetch_skipped: 'Detalle omitido',
+    filter_passed: 'Filtros superados',
+    item_discarded: 'Item descartado',
+    opportunity_created: 'Oportunidad creada',
+    opportunity_skipped: 'Oportunidad ya existente'
+  };
+  return labels[phase] ?? phase.replaceAll('_', ' ');
 }
 
 function proxyLabel(metadata: Record<string, unknown>): string {

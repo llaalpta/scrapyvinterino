@@ -247,6 +247,7 @@ class RunEventRead(BaseModel):
     run_id: int | None
     source_id: int | None
     phase: str
+    level: str
     method: str | None
     url: str | None
     status_code: int | None
