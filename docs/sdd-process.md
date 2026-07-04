@@ -40,6 +40,8 @@ Frontend structure is part of the acceptance bar. Before adding a non-trivial PW
 
 When a spec changes the PWA, run a browser-driven QA pass against the live development app.
 
+Use `.\scripts\qa-pwa.ps1 start` as the default PWA QA entrypoint. It keeps backend services in Docker and runs an isolated local Vite server on `127.0.0.1:5176` with a localhost API proxy, avoiding conflicts with the Docker frontend service and stale browser sessions.
+
 The QA pass should use Playwright MCP when available and cover the behavior claimed by the spec:
 
 - navigate through the routes or anchors that should work;

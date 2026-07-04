@@ -146,7 +146,7 @@ export function SourcesView({
                     <div className="source-actions">
                       <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
                         <Square size={16} />
-                        Detener monitor
+                        Parar sesion
                       </button>
                     </div>
 
@@ -247,13 +247,22 @@ function MonitorPerformancePanel({
     sessionMarkerPosition !== null && sessionMarkerPosition > 0.86 ? 'monitor-session-marker align-left' : 'monitor-session-marker';
   const session = stats?.session_summary;
   const historical = stats?.historical_summary;
+  const visibleSession = stats?.active_session ?? stats?.latest_session ?? null;
+  const hasAnySession = (historical?.sessions_count ?? 0) > 0 || visibleSession !== null;
+  const sessionStatus = stats?.active_session ? 'Sesion activa' : 'Ultima sesion';
+  const sessionEndLabel = stats?.active_session ? 'Duracion activa' : 'Fin';
+  const sessionEndValue = stats?.active_session
+    ? formatSeconds(stats.active_session.duration_seconds)
+    : visibleSession?.stopped_at
+      ? formatDate(visibleSession.stopped_at)
+      : '-';
 
   return (
     <section className="monitor-performance">
       <div className="monitor-performance-heading">
         <div>
           <h4>Rendimiento del monitor</h4>
-          <span>{stats?.active_session ? `Sesion activa desde ${formatDate(stats.active_session.started_at)}` : 'Sin sesion activa'}</span>
+          <span>{visibleSession ? `${sessionStatus} desde ${formatDate(visibleSession.started_at)}` : 'Sin sesiones registradas'}</span>
         </div>
         <div className="range-tabs" aria-label="Rango de grafica">
           {rangeOptions.map((option) => (
@@ -269,58 +278,62 @@ function MonitorPerformancePanel({
         </div>
       </div>
 
-      <dl className="monitor-session-strip">
-        <Metric label="Inicio" value={stats?.active_session ? formatDate(stats.active_session.started_at) : '-'} />
-        <Metric label="Duracion activa" value={formatSeconds(stats?.active_session?.duration_seconds ?? 0)} />
-        <Metric label="Runs sesion" value={String(session?.runs_count ?? 0)} />
-        <Metric label="Encontrados sesion" value={String(session?.items_found ?? 0)} />
-        <Metric label="Oportunidades sesion" value={String(session?.opportunities_created ?? 0)} />
-        <Metric label="Errores sesion" value={String(session?.failed_runs ?? 0)} />
-      </dl>
+      {hasAnySession ? (
+        <>
+          <dl className="monitor-session-strip">
+            <Metric label="Inicio" value={visibleSession ? formatDate(visibleSession.started_at) : '-'} />
+            <Metric label={sessionEndLabel} value={sessionEndValue} />
+            <Metric label="Runs sesion" value={String(session?.runs_count ?? 0)} />
+            <Metric label="Encontrados sesion" value={String(session?.items_found ?? 0)} />
+            <Metric label="Oportunidades sesion" value={String(session?.opportunities_created ?? 0)} />
+            <Metric label="Errores sesion" value={String(session?.failed_runs ?? 0)} />
+          </dl>
 
-      <div className="monitor-chart">
-        {chartData.length === 0 ? (
-          <p className="empty-inline compact">Sin datos historicos para graficar.</p>
-        ) : (
-          <div className="monitor-chart-canvas">
-            <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={chartData} margin={{ top: 14, right: 10, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis
-                  dataKey="bucketStartMs"
-                  domain={chartDomain}
-                  tickFormatter={(value) => formatChartTick(Number(value), range)}
-                  type="number"
-                />
-                <YAxis allowDecimals={false} width={34} />
-                <Tooltip
-                  formatter={(value, name) => [String(value), name === 'itemsFound' ? 'Encontrados' : 'Runs']}
-                  labelFormatter={(value) => formatChartTooltip(Number(value), range)}
-                />
-                <Bar dataKey="itemsFound" fill="#2f7d6d" name="Encontrados" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-            {sessionMarkerPosition !== null ? (
-              <div className="monitor-plot-overlay" aria-hidden="true">
-                <div className={sessionMarkerClass} style={{ left: `${sessionMarkerPosition * 100}%` }}>
-                  <span>Inicio sesion</span>
-                </div>
+          <dl className="monitor-accumulated-strip">
+            <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
+            <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
+            <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
+            <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
+            <Metric label="Nuevos" value={String(historical?.items_new ?? 0)} />
+            <Metric label="Descartados" value={String(historical?.items_discarded_by_filters ?? 0)} />
+            <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
+            <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
+          </dl>
+
+          <div className="monitor-chart">
+            {chartData.length === 0 ? (
+              <p className="empty-inline compact">Sin datos historicos para graficar.</p>
+            ) : (
+              <div className="monitor-chart-canvas">
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart data={chartData} margin={{ top: 14, right: 10, bottom: 4, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis
+                      dataKey="bucketStartMs"
+                      domain={chartDomain}
+                      tickFormatter={(value) => formatChartTick(Number(value), range)}
+                      type="number"
+                    />
+                    <YAxis allowDecimals={false} width={34} />
+                    <Tooltip
+                      formatter={(value, name) => [String(value), name === 'itemsFound' ? 'Encontrados' : 'Runs']}
+                      labelFormatter={(value) => formatChartTooltip(Number(value), range)}
+                    />
+                    <Bar dataKey="itemsFound" fill="#2f7d6d" name="Encontrados" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+                {sessionMarkerPosition !== null ? (
+                  <div className="monitor-plot-overlay" aria-hidden="true">
+                    <div className={sessionMarkerClass} style={{ left: `${sessionMarkerPosition * 100}%` }}>
+                      <span>Inicio sesion</span>
+                    </div>
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+            )}
           </div>
-        )}
-      </div>
-
-      <dl className="monitor-accumulated-strip">
-        <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
-        <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
-        <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
-        <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
-        <Metric label="Nuevos" value={String(historical?.items_new ?? 0)} />
-        <Metric label="Descartados" value={String(historical?.items_discarded_by_filters ?? 0)} />
-        <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
-        <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
-      </dl>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -561,7 +574,7 @@ function InactiveMonitorCard({
       <div className="source-actions">
         <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
           <Play size={17} />
-          {sourceDraft.monitorMode === 'manual' ? 'Ejecutar prueba' : 'Activar monitor'}
+          Lanzar sesion
         </button>
         <button
           type="button"

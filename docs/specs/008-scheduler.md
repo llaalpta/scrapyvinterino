@@ -84,12 +84,12 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Scheduler can be disabled completely.
 - A monitor can be stopped without deleting it.
 - A new monitor is inactive until launched.
-- Punctual/manual execution can run from inactive state and returns to inactive state after the run.
+- Punctual/manual execution can run from inactive state, creates a monitor session, closes that session after the run, and returns to inactive state.
 - Runs are not triggered outside configured local-time windows.
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA stores the config, marks it active, and immediately executes one run.
-- Launching a recurring monitor creates one active monitor session and associates recurring runs with it.
+- Launching any monitor creates a monitor session; recurring sessions remain active until stopped/expired/failed, while punctual sessions close after the run.
 - The scheduler only considers active recurring monitors.
 - Expired active monitors are stopped before scheduler planning.
 - Jitter prevents fixed exact polling intervals.
@@ -106,7 +106,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - The PWA Monitors view renders active monitor logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
 - Active monitors appear before inactive monitors in the PWA and show a compact operational summary, always-visible performance card, and a working stop control.
 - Active monitor cards do not show an `Ejecutar ahora` button because periodic execution is already configured.
-- Every non-archived monitor card, active or inactive, shows session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket so historical and punctual runs remain visible after the monitor stops.
+- Every non-archived monitor card, active or inactive, shows active-session metrics or latest-session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket so historical and punctual runs remain visible after the monitor stops.
+- Monitor cards with no sessions yet show no session/acumulated metric rows until the first launch produces data.
 - The performance chart supports minutes, hours, days, current month, and all-history ranges.
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
 - Inactive monitors appear below active monitors as compact cards with configuration summarized by default, always-visible historical performance, and editing available without implying the monitor is running.
@@ -130,7 +131,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Unit tests confirming Redis cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
 - Manual check with short interval in local Docker.
 - Confirm run records identify scheduler-triggered executions.
-- Confirm monitor sessions are created, closed, and associated to recurring runs.
+- Confirm monitor sessions are created, closed, and associated to punctual runs, and created/associated/stopped for recurring runs.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
 - Confirm inactive monitor cards still show historical chart and accumulated counts after manual or stopped recurring runs.
 - Confirm two different monitors can run concurrently up to the global limit.

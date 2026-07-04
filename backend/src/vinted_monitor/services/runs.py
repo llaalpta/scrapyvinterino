@@ -23,7 +23,7 @@ from vinted_monitor.services.items import (
     get_or_persist_catalog_item,
     record_item_detail_error,
 )
-from vinted_monitor.services.monitor_sessions import get_active_monitor_session, stop_active_monitor_session
+from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.proxies import proxy_url_for_profile
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
@@ -66,7 +66,19 @@ def execute_manual_run(
     provider: ManualRunProvider | None = None,
     seen_cache: SeenCache | None = None,
 ) -> Run:
-    return execute_monitor_run(db, source_id, provider=provider, trigger=MANUAL_TRIGGER, seen_cache=seen_cache, require_active=False)
+    source = db.get(SearchSource, source_id)
+    if source is not None and source.is_active:
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has an active session")
+    return execute_monitor_run(
+        db,
+        source_id,
+        provider=provider,
+        trigger=MANUAL_TRIGGER,
+        seen_cache=seen_cache,
+        require_active=False,
+        create_session_for_run=True,
+        close_session_on_finish=True,
+    )
 
 
 def execute_monitor_run(
@@ -76,6 +88,8 @@ def execute_monitor_run(
     trigger: str = MANUAL_TRIGGER,
     seen_cache: SeenCache | None = None,
     require_active: bool = True,
+    create_session_for_run: bool = False,
+    close_session_on_finish: bool = False,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
@@ -85,7 +99,10 @@ def execute_monitor_run(
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
 
-    active_session = get_active_monitor_session(db, source.id) if require_active and source.monitor_mode != "manual" else None
+    run_session = start_monitor_session(db, source, allow_manual=True) if create_session_for_run else None
+    active_session = run_session
+    if active_session is None and require_active and source.monitor_mode != "manual":
+        active_session = get_active_monitor_session(db, source.id)
     run = Run(
         source_id=source.id,
         monitor_session_id=active_session.id if active_session is not None else None,
@@ -152,6 +169,7 @@ def execute_monitor_run(
         )
         source.is_active = False
         source.monitor_mode = "manual"
+        source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
         stop_active_monitor_session(db, source.id, reason="redis_unavailable")
@@ -234,6 +252,8 @@ def execute_monitor_run(
         run.opportunities_created = monitor_result["opportunities_created"]
         run.error_message = None
         source.last_run_at = run.finished_at
+        if close_session_on_finish and run.monitor_session_id is not None:
+            stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="completed")
         _clear_manual_monitor_runtime(source)
         record_run_event(
             db,
@@ -262,6 +282,7 @@ def execute_monitor_run(
         source = db.get(SearchSource, source.id) or source
         source.is_active = False
         source.monitor_mode = "manual"
+        source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
         stop_active_monitor_session(db, source.id, reason="redis_unavailable")
@@ -382,8 +403,12 @@ def _record_failed_run(
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
     run.error_message = message
-    if source.monitor_mode != "manual":
+    if run.monitor_session_id is not None:
         stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="failed")
+        source.is_active = False
+        source.monitor_started_at = None
+        source.monitor_until = None
+        source.next_run_at = None
     _clear_manual_monitor_runtime(source)
     db.add(
         ErrorLog(

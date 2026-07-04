@@ -159,9 +159,11 @@ export type MonitorStatsSummary = {
   opportunities_created: number;
 };
 
-export type MonitorActiveSession = {
+export type MonitorSession = {
   id: number;
   started_at: string;
+  stopped_at: string | null;
+  stop_reason: string | null;
   duration_seconds: number;
 };
 
@@ -174,7 +176,8 @@ export type MonitorChartPoint = {
 
 export type MonitorStats = {
   range: MonitorStatsRange;
-  active_session: MonitorActiveSession | null;
+  active_session: MonitorSession | null;
+  latest_session: MonitorSession | null;
   session_summary: MonitorStatsSummary;
   historical_summary: MonitorStatsSummary;
   chart_points: MonitorChartPoint[];

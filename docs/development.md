@@ -35,7 +35,21 @@ Las migraciones Alembic pueden compactarse o romper compatibilidad con datos loc
 - `8000`: API FastAPI.
 - `5432`: Postgres local.
 
-When running Vite outside Docker, set `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` so `/api` and `/health` proxy to the local FastAPI service instead of the Docker Compose service name.
+## PWA QA estable
+
+Para QA de la PWA, usa la ruta aislada:
+
+```powershell
+.\scripts\qa-pwa.ps1 start
+```
+
+El script levanta backend/worker/cache con Docker Compose, arranca Vite local en `http://127.0.0.1:5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`. No mata procesos ajenos: si el puerto esta ocupado por otro proceso, falla con un mensaje claro.
+
+Para cerrar solo el Vite lanzado por el script:
+
+```powershell
+.\scripts\qa-pwa.ps1 stop
+```
 
 ## Frontend Structure
 

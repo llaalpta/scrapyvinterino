@@ -135,6 +135,7 @@ def expire_source_monitors(db: Session, now: datetime | None = None) -> int:
         return 0
     for source in expired_sources:
         source.is_active = False
+        source.monitor_started_at = None
         source.next_run_at = None
         stop_active_monitor_session(db, source.id, stopped_at=current_time, reason="expired")
     db.commit()

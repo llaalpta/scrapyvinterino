@@ -6,8 +6,14 @@ from sqlalchemy.orm import Session
 from vinted_monitor.db.models import MonitorSession, SearchSource
 
 
-def start_monitor_session(db: Session, source: SearchSource, *, started_at: datetime | None = None) -> MonitorSession | None:
-    if source.monitor_mode == "manual":
+def start_monitor_session(
+    db: Session,
+    source: SearchSource,
+    *,
+    started_at: datetime | None = None,
+    allow_manual: bool = False,
+) -> MonitorSession | None:
+    if source.monitor_mode == "manual" and not allow_manual:
         return None
     existing = get_active_monitor_session(db, source.id)
     if existing is not None:

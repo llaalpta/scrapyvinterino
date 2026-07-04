@@ -152,6 +152,7 @@ def start_source_monitor(db: Session, source_id: int) -> SearchSource:
 def stop_source_monitor(db: Session, source_id: int) -> SearchSource:
     source = _get_live_source(db, source_id)
     source.is_active = False
+    source.monitor_started_at = None
     source.next_run_at = None
     source.monitor_until = None
     stop_active_monitor_session(db, source.id, reason="stopped")

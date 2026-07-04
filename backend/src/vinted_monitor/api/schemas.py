@@ -259,15 +259,18 @@ class MonitorSummaryRead(BaseModel):
     opportunities_created: int
 
 
-class ActiveMonitorSessionRead(BaseModel):
+class MonitorSessionRead(BaseModel):
     id: int
     started_at: datetime
+    stopped_at: datetime | None
+    stop_reason: str | None
     duration_seconds: int
 
 
 class MonitorStatsRead(BaseModel):
     range: str
-    active_session: ActiveMonitorSessionRead | None
+    active_session: MonitorSessionRead | None
+    latest_session: MonitorSessionRead | None
     session_summary: MonitorSummaryRead
     historical_summary: MonitorSummaryRead
     chart_points: list[MonitorChartPointRead]

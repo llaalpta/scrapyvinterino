@@ -184,7 +184,7 @@ def post_monitor_start(
         source = start_source_monitor(db, monitor_id)
         run = execute_monitor_run(db, monitor_id, provider=provider)
         refreshed = db.get(type(source), monitor_id)
-        if refreshed is not None:
+        if refreshed is not None and refreshed.is_active and run.status == "success":
             refreshed.next_run_at = next_run_after(run.finished_at or run.started_at, source_config(refreshed))
             db.commit()
         return run

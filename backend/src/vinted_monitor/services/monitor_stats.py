@@ -32,16 +32,19 @@ class MonitorSummary:
 
 
 @dataclass(frozen=True)
-class ActiveMonitorSession:
+class MonitorSessionDetails:
     id: int
     started_at: datetime
+    stopped_at: datetime | None
+    stop_reason: str | None
     duration_seconds: int
 
 
 @dataclass(frozen=True)
 class MonitorStats:
     range: str
-    active_session: ActiveMonitorSession | None
+    active_session: MonitorSessionDetails | None
+    latest_session: MonitorSessionDetails | None
     session_summary: MonitorSummary
     historical_summary: MonitorSummary
     chart_points: list[MonitorChartPoint]
@@ -73,12 +76,14 @@ def get_monitor_stats(db: Session, monitor_id: int, *, range_name: str = "hours"
     )
     runs = list(db.scalars(select(Run).where(Run.source_id == monitor_id).order_by(Run.started_at.asc(), Run.id.asc())))
     active_session = next((session for session in reversed(sessions) if session.stopped_at is None), None)
-    active_runs = [run for run in runs if active_session is not None and run.monitor_session_id == active_session.id]
+    latest_session = active_session or next((session for session in reversed(sessions) if session.stopped_at is not None), None)
+    session_runs = [run for run in runs if latest_session is not None and run.monitor_session_id == latest_session.id]
 
     return MonitorStats(
         range=range_name,
-        active_session=_active_session_read(active_session, current_time),
-        session_summary=_summary(sessions=[active_session] if active_session is not None else [], runs=active_runs, now=current_time),
+        active_session=_session_read(active_session, current_time),
+        latest_session=_session_read(latest_session, current_time),
+        session_summary=_summary(sessions=[latest_session] if latest_session is not None else [], runs=session_runs, now=current_time),
         historical_summary=_summary(sessions=sessions, runs=runs, now=current_time),
         chart_points=_chart_points(runs, range_name, current_time),
     )
@@ -98,10 +103,16 @@ def _summary(*, sessions: list[MonitorSession | None], runs: list[Run], now: dat
     )
 
 
-def _active_session_read(session: MonitorSession | None, now: datetime) -> ActiveMonitorSession | None:
+def _session_read(session: MonitorSession | None, now: datetime) -> MonitorSessionDetails | None:
     if session is None:
         return None
-    return ActiveMonitorSession(id=session.id, started_at=session.started_at, duration_seconds=_session_seconds(session, now))
+    return MonitorSessionDetails(
+        id=session.id,
+        started_at=session.started_at,
+        stopped_at=session.stopped_at,
+        stop_reason=session.stop_reason,
+        duration_seconds=_session_seconds(session, now),
+    )
 
 
 def _session_seconds(session: MonitorSession, now: datetime) -> int:
