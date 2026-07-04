@@ -76,13 +76,12 @@ export function useDashboardController() {
 
   const loadMonitorStatsForSources = useCallback(
     async (sourceData: SearchSource[]) => {
-      const activeSources = sourceData.filter((source) => source.is_active);
-      if (activeSources.length === 0) {
+      if (sourceData.length === 0) {
         setMonitorStatsBySource({});
         return;
       }
       const entries = await Promise.all(
-        activeSources.map(async (source) => {
+        sourceData.map(async (source) => {
           const range = monitorStatsRangeBySource[source.id] ?? 'hours';
           return [source.id, await fetchMonitorStats(source.id, range)] as const;
         })
@@ -111,9 +110,8 @@ export function useDashboardController() {
         setSourceDrafts(buildSourceDrafts(sourceData));
         setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
         setSelectedProxyBySource(buildSelectedProxyIds(sourceData));
-        const activeSources = sourceData.filter((source) => source.is_active);
-        if (activeSources.length > 0) {
-          void Promise.all(activeSources.map(async (source) => [source.id, await fetchMonitorStats(source.id, 'hours')] as const)).then(
+        if (sourceData.length > 0) {
+          void Promise.all(sourceData.map(async (source) => [source.id, await fetchMonitorStats(source.id, 'hours')] as const)).then(
             (entries) => setMonitorStatsBySource(Object.fromEntries(entries))
           );
         }
@@ -123,11 +121,11 @@ export function useDashboardController() {
       });
   }, []);
 
-  const refreshRuntime = useCallback(async () => {
+  const refreshRuntime = useCallback(async (sourceData = sources) => {
     const [opportunityData, runData] = await Promise.all([fetchOpportunities(), fetchRuns()]);
     setOpportunityPage(opportunityData);
     setRuns(runData);
-    await loadMonitorStatsForSources(sources);
+    await loadMonitorStatsForSources(sourceData);
   }, [loadMonitorStatsForSources, sources]);
 
   async function loadOpportunities(page = 1, filters = opportunityFilters, pageSize = opportunitiesPageSize) {
@@ -149,6 +147,7 @@ export function useDashboardController() {
       const created = await createSource({ name: sourceName, url: sourceUrl });
       setSources((current) => [created, ...current]);
       setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
+      await loadMonitorStats(created.id, 'hours');
       setSourceName('');
       setSourceUrl('');
     } catch (caught) {
@@ -299,7 +298,8 @@ export function useDashboardController() {
     setSavingSourceId(source.id);
     try {
       await deleteSource(source.id);
-      setSources((current) => current.filter((entry) => entry.id !== source.id));
+      const remainingSources = sources.filter((entry) => entry.id !== source.id);
+      setSources(remainingSources);
       setSourceDrafts((current) => {
         const next = { ...current };
         delete next[source.id];
@@ -315,7 +315,7 @@ export function useDashboardController() {
         delete next[source.id];
         return next;
       });
-      await refreshRuntime();
+      await refreshRuntime(remainingSources);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo archivar el monitor');
     } finally {

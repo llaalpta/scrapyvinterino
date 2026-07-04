@@ -104,12 +104,12 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
 - The PWA Monitors view renders active monitor logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
-- Active monitors appear before inactive monitors in the PWA and show a compact operational summary, accumulated performance card, and a working stop control.
+- Active monitors appear before inactive monitors in the PWA and show a compact operational summary, always-visible performance card, and a working stop control.
 - Active monitor cards do not show an `Ejecutar ahora` button because periodic execution is already configured.
-- The active monitor performance card shows session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket.
+- Every non-archived monitor card, active or inactive, shows session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket so historical and punctual runs remain visible after the monitor stops.
 - The performance chart supports minutes, hours, days, current month, and all-history ranges.
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
-- Inactive monitors appear below active monitors as compact cards with configuration summarized by default and editing available without implying the monitor is running.
+- Inactive monitors appear below active monitors as compact cards with configuration summarized by default, always-visible historical performance, and editing available without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
@@ -132,6 +132,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm run records identify scheduler-triggered executions.
 - Confirm monitor sessions are created, closed, and associated to recurring runs.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
+- Confirm inactive monitor cards still show historical chart and accumulated counts after manual or stopped recurring runs.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
 - Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.

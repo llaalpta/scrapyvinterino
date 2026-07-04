@@ -182,6 +182,7 @@ export function SourcesView({
                   filterRules={filterRules}
                   key={source.id}
                   onDeleteSource={onDeleteSource}
+                  onLoadMonitorStats={onLoadMonitorStats}
                   onSaveSourceSchedule={onSaveSourceSchedule}
                   onStartSession={onStartSession}
                   proxyProfiles={proxyProfiles}
@@ -191,6 +192,8 @@ export function SourcesView({
                   selectedProxy={selectedProxyBySource[source.id] ?? ''}
                   source={source}
                   sourceDraft={sourceDrafts[source.id] ?? buildSourceDraft(source)}
+                  stats={monitorStatsBySource[source.id] ?? null}
+                  statsRange={monitorStatsRangeBySource[source.id] ?? 'hours'}
                   toggleSourceFilter={toggleSourceFilter}
                   updateSourceDraft={updateSourceDraft}
                   updateSourceProxy={updateSourceProxy}
@@ -213,12 +216,24 @@ function MonitorPerformancePanel({
   range: MonitorStatsRange;
   stats: MonitorStats | null;
 }) {
-  const chartData = (stats?.chart_points ?? []).map((point) => ({
+  const baseChartData = (stats?.chart_points ?? []).map((point) => ({
     bucketEndMs: new Date(point.bucket_end).getTime(),
     bucketStartMs: new Date(point.bucket_start).getTime(),
     itemsFound: point.items_found,
     runsCount: point.runs_count
   }));
+  const chartData =
+    baseChartData.length === 1
+      ? [
+          baseChartData[0],
+          {
+            bucketEndMs: baseChartData[0].bucketEndMs + (baseChartData[0].bucketEndMs - baseChartData[0].bucketStartMs),
+            bucketStartMs: baseChartData[0].bucketEndMs,
+            itemsFound: 0,
+            runsCount: 0
+          }
+        ]
+      : baseChartData;
   const chartDomain =
     chartData.length > 0
       ? ([chartData[0].bucketStartMs, chartData[chartData.length - 1].bucketEndMs] as [number, number])
@@ -377,6 +392,7 @@ function MonitorSectionHeading({ count, label }: { count: number; label: string 
 function InactiveMonitorCard({
   filterRules,
   onDeleteSource,
+  onLoadMonitorStats,
   onSaveSourceSchedule,
   onStartSession,
   proxyProfiles,
@@ -386,12 +402,15 @@ function InactiveMonitorCard({
   selectedProxy,
   source,
   sourceDraft,
+  stats,
+  statsRange,
   toggleSourceFilter,
   updateSourceDraft,
   updateSourceProxy
 }: {
   filterRules: FilterRule[];
   onDeleteSource: (source: SearchSource) => void;
+  onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   proxyProfiles: ProxyProfile[];
@@ -401,6 +420,8 @@ function InactiveMonitorCard({
   selectedProxy: string;
   source: SearchSource;
   sourceDraft: SourceDraft;
+  stats: MonitorStats | null;
+  statsRange: MonitorStatsRange;
   toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
   updateSourceProxy: (sourceId: number, value: string) => void;
@@ -530,6 +551,12 @@ function InactiveMonitorCard({
       </details>
 
       {source.last_run_at ? <p className="source-session-line">Ultima consulta {formatDate(source.last_run_at)}</p> : null}
+
+      <MonitorPerformancePanel
+        range={statsRange}
+        stats={stats}
+        onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
+      />
 
       <div className="source-actions">
         <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>

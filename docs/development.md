@@ -35,6 +35,8 @@ Las migraciones Alembic pueden compactarse o romper compatibilidad con datos loc
 - `8000`: API FastAPI.
 - `5432`: Postgres local.
 
+When running Vite outside Docker, set `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` so `/api` and `/health` proxy to the local FastAPI service instead of the Docker Compose service name.
+
 ## Frontend Structure
 
 The PWA should stay modular before new product flows are added. `frontend/src/App.tsx` is only the React root wrapper and should not own feature UI, API orchestration, or reusable components.
