@@ -1,11 +1,12 @@
 import { Play, Save, Square, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, type FormEvent } from 'react';
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, type FormEvent, type ReactNode } from 'react';
 import type { FilterRule, MonitorStats, MonitorStatsRange, ProxyProfile, Run, RunEvent, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { RunActivityList } from '../runs/RunsView';
 import { useRunActivity } from '../runs/runActivity';
 import { buildSourceDraft, type SourceDraft } from './sourceDrafts';
+
+const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
   filterRules,
@@ -304,32 +305,17 @@ function MonitorPerformancePanel({
             {chartData.length === 0 ? (
               <p className="empty-inline compact">Sin datos historicos para graficar.</p>
             ) : (
-              <div className="monitor-chart-canvas">
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart data={chartData} margin={{ top: 14, right: 10, bottom: 4, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis
-                      dataKey="bucketStartMs"
-                      domain={chartDomain}
-                      tickFormatter={(value) => formatChartTick(Number(value), range)}
-                      type="number"
-                    />
-                    <YAxis allowDecimals={false} width={34} />
-                    <Tooltip
-                      formatter={(value, name) => [String(value), name === 'itemsFound' ? 'Encontrados' : 'Runs']}
-                      labelFormatter={(value) => formatChartTooltip(Number(value), range)}
-                    />
-                    <Bar dataKey="itemsFound" fill="#2f7d6d" name="Encontrados" radius={[4, 4, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-                {sessionMarkerPosition !== null ? (
-                  <div className="monitor-plot-overlay" aria-hidden="true">
-                    <div className={sessionMarkerClass} style={{ left: `${sessionMarkerPosition * 100}%` }}>
-                      <span>Inicio sesion</span>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
+              <ChartErrorBoundary key={range}>
+                <Suspense fallback={<div className="monitor-chart-loading" aria-hidden="true" />}>
+                  <MonitorPerformanceChart
+                    chartData={chartData}
+                    chartDomain={chartDomain}
+                    range={range}
+                    sessionMarkerClass={sessionMarkerClass}
+                    sessionMarkerPosition={sessionMarkerPosition}
+                  />
+                </Suspense>
+              </ChartErrorBoundary>
             )}
           </div>
         </>
@@ -345,6 +331,21 @@ function Metric({ label, value }: { label: string; value: string }) {
       <dd>{value}</dd>
     </div>
   );
+}
+
+class ChartErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <p className="empty-inline compact">Grafica no disponible en este momento.</p>;
+    }
+    return this.props.children;
+  }
 }
 
 const rangeOptions: Array<{ label: string; value: MonitorStatsRange }> = [
@@ -369,28 +370,6 @@ function formatSeconds(seconds: number): string {
   }
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
-}
-
-function formatChartTick(value: number, range: MonitorStatsRange): string {
-  const date = new Date(value);
-  if (range === 'minutes' || range === 'hours') {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  if (range === 'all') {
-    return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
-  }
-  return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
-}
-
-function formatChartTooltip(value: number, range: MonitorStatsRange): string {
-  const date = new Date(value);
-  if (range === 'minutes' || range === 'hours') {
-    return date.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-  }
-  if (range === 'all') {
-    return date.toLocaleDateString([], { month: 'long', year: 'numeric' });
-  }
-  return date.toLocaleDateString([], { day: '2-digit', month: 'long', year: 'numeric' });
 }
 
 function MonitorSectionHeading({ count, label }: { count: number; label: string }) {

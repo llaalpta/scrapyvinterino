@@ -442,6 +442,12 @@
   height: 260px;
 }
 
+.monitor-chart-loading {
+  height: 260px;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
 .monitor-plot-overlay {
   position: absolute;
   inset: 14px 10px 30px 34px;
