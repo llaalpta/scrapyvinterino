@@ -505,6 +505,7 @@
 
 .monitor-interval-bar {
   fill: #2f7d6d;
+  pointer-events: none;
   shape-rendering: crispEdges;
 }
 
