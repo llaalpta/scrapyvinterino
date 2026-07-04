@@ -1,7 +1,8 @@
 import { AlertTriangle, Clock3, FileText, Info, RefreshCw, XCircle } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { monitorEventsStreamUrl, type Run, type RunEvent } from '../../api';
+import type { ReactNode } from 'react';
+import type { Run, RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
+import { type RunActivityController, useRunActivity } from './runActivity';
 
 export function RunsView({
   getSourceName,
@@ -12,47 +13,7 @@ export function RunsView({
   runs: Run[];
   onLoadRunEvents: (runId: number) => Promise<RunEvent[]>;
 }) {
-  const [openRunId, setOpenRunId] = useState<number | null>(null);
-  const [eventsByRunId, setEventsByRunId] = useState<Record<number, RunEvent[]>>({});
-  const [loadingRunId, setLoadingRunId] = useState<number | null>(null);
-  const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
-
-  useEffect(() => {
-    if (runs.length === 0) {
-      return undefined;
-    }
-
-    const events = new EventSource(monitorEventsStreamUrl());
-    events.addEventListener('open', () => setStreamStatus('connected'));
-    events.addEventListener('error', () => setStreamStatus('error'));
-    events.addEventListener('monitor_event', (message) => {
-      const event = parseRunEvent(message);
-      if (!event?.run_id) {
-        return;
-      }
-      setEventsByRunId((current) => mergeRunEvent(current, event));
-    });
-
-    return () => events.close();
-  }, [runs.length]);
-
-  async function toggleLogs(runId: number) {
-    if (openRunId === runId) {
-      setOpenRunId(null);
-      return;
-    }
-    setOpenRunId(runId);
-    if (eventsByRunId[runId]) {
-      return;
-    }
-    setLoadingRunId(runId);
-    try {
-      const events = await onLoadRunEvents(runId);
-      setEventsByRunId((current) => ({ ...current, [runId]: events }));
-    } finally {
-      setLoadingRunId(null);
-    }
-  }
+  const activity = useRunActivity(runs, onLoadRunEvents);
 
   return (
     <section className="section-panel">
@@ -60,96 +21,113 @@ export function RunsView({
         <h3>Monitor</h3>
         <span>{runs.length}</span>
       </div>
-      {runs.length === 0 ? (
-        <p className="empty-inline">Sin ejecuciones registradas.</p>
-      ) : (
-        <div className="monitor-grid">
-          {runs.map((run) => {
-            const events = eventsByRunId[run.id] ?? [];
-            return (
-              <article className="monitor-card" key={run.id}>
-                <div className="monitor-card-header">
-                  <div>
-                    <strong>{getSourceName(run.source_id)}</strong>
-                    <span>
-                      Run #{run.id} - {run.trigger}
-                    </span>
-                  </div>
-                  <span className={`run-status ${run.status}`}>{run.status}</span>
-                </div>
-                <dl>
-                  <div>
-                    <dt>Inicio</dt>
-                    <dd>{formatDate(run.started_at)}</dd>
-                  </div>
-                  <div>
-                    <dt>Duracion</dt>
-                    <dd>{formatDuration(run.started_at, run.finished_at)}</dd>
-                  </div>
-                  <div>
-                    <dt>Encontrados</dt>
-                    <dd>{run.items_found}</dd>
-                  </div>
-                  <div>
-                    <dt>Nuevos monitor</dt>
-                    <dd>{run.items_new}</dd>
-                  </div>
-                  <div>
-                    <dt>Pasan</dt>
-                    <dd>{run.items_filter_passed}</dd>
-                  </div>
-                  <div>
-                    <dt>Descartados</dt>
-                    <dd>{run.items_discarded_by_filters}</dd>
-                  </div>
-                  <div>
-                    <dt>Sin detalle</dt>
-                    <dd>{run.items_filter_pending}</dd>
-                  </div>
-                  <div>
-                    <dt>Oportunidades</dt>
-                    <dd>{run.opportunities_created}</dd>
-                  </div>
-                </dl>
-                <div className="runtime-line">
-                  <span>Proxy: {proxyLabel(run.runtime_metadata)}</span>
-                  <span>Auth: {String(run.runtime_metadata.auth_mode ?? 'public_anonymous')}</span>
-                  <span>Filtros: {String(run.runtime_metadata.filter_count ?? 0)}</span>
-                </div>
-                {run.error_message ? <p className="run-error">{run.error_message}</p> : null}
-                <button type="button" onClick={() => void toggleLogs(run.id)}>
-                  <FileText size={16} />
-                  {openRunId === run.id ? 'Cerrar logs' : 'Abrir logs'}
-                </button>
-                {openRunId === run.id ? (
-                  <div className="run-events">
-                    {loadingRunId === run.id ? <p>Cargando logs...</p> : null}
-                    {!loadingRunId && events.length === 0 ? <p>Sin eventos para este run.</p> : null}
-                    <div className={`event-stream-status ${streamStatus}`}>
-                      <RefreshCw size={14} />
-                      <span>{streamLabel(streamStatus)}</span>
-                    </div>
-                    {events.map((event) => (
-                      <RunEventEntry event={event} key={event.id} />
-                    ))}
-                  </div>
-                ) : null}
-              </article>
-            );
-          })}
-        </div>
-      )}
+      <RunActivityList activity={activity} getSourceName={getSourceName} runs={runs} />
     </section>
   );
 }
 
+export function RunActivityList({
+  activity,
+  emptyText = 'Sin ejecuciones registradas.',
+  getSourceName,
+  runs,
+  variant = 'cards'
+}: {
+  activity: RunActivityController;
+  emptyText?: string;
+  getSourceName: (sourceId: number) => string;
+  runs: Run[];
+  variant?: 'cards' | 'inline';
+}) {
+  if (runs.length === 0) {
+    return <p className="empty-inline">{emptyText}</p>;
+  }
+
+  return (
+    <div className={variant === 'inline' ? 'monitor-activity-list' : 'monitor-grid'}>
+      {runs.map((run) => {
+        const events = activity.eventsByRunId[run.id] ?? [];
+        return (
+          <article className={variant === 'inline' ? 'monitor-activity-row' : 'monitor-card'} key={run.id}>
+            <div className="monitor-card-header">
+              <div>
+                <strong>{getSourceName(run.source_id)}</strong>
+                <span>
+                  Run #{run.id} - {run.trigger}
+                </span>
+              </div>
+              <span className={`run-status ${run.status}`}>{run.status}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>Inicio</dt>
+                <dd>{formatDate(run.started_at)}</dd>
+              </div>
+              <div>
+                <dt>Duracion</dt>
+                <dd>{formatDuration(run.started_at, run.finished_at)}</dd>
+              </div>
+              <div>
+                <dt>Encontrados</dt>
+                <dd>{run.items_found}</dd>
+              </div>
+              <div>
+                <dt>Nuevos monitor</dt>
+                <dd>{run.items_new}</dd>
+              </div>
+              <div>
+                <dt>Pasan</dt>
+                <dd>{run.items_filter_passed}</dd>
+              </div>
+              <div>
+                <dt>Descartados</dt>
+                <dd>{run.items_discarded_by_filters}</dd>
+              </div>
+              <div>
+                <dt>Sin detalle</dt>
+                <dd>{run.items_filter_pending}</dd>
+              </div>
+              <div>
+                <dt>Oportunidades</dt>
+                <dd>{run.opportunities_created}</dd>
+              </div>
+            </dl>
+            <div className="runtime-line">
+              <span>Proxy: {proxyLabel(run.runtime_metadata)}</span>
+              <span>Auth: {String(run.runtime_metadata.auth_mode ?? 'public_anonymous')}</span>
+              <span>Filtros: {String(run.runtime_metadata.filter_count ?? 0)}</span>
+            </div>
+            {run.error_message ? <p className="run-error">{run.error_message}</p> : null}
+            <button type="button" onClick={() => void activity.toggleLogs(run.id)}>
+              <FileText size={16} />
+              {activity.openRunId === run.id ? 'Cerrar logs' : 'Abrir logs'}
+            </button>
+            {activity.openRunId === run.id ? (
+              <div className="run-events">
+                {activity.loadingRunId === run.id ? <p>Cargando logs...</p> : null}
+                {!activity.loadingRunId && events.length === 0 ? <p>Sin eventos para este run.</p> : null}
+                <div className={`event-stream-status ${activity.streamStatus}`}>
+                  <RefreshCw size={14} />
+                  <span>{streamLabel(activity.streamStatus)}</span>
+                </div>
+                {events.map((event) => (
+                  <RunEventEntry event={event} key={event.id} />
+                ))}
+              </div>
+            ) : null}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function RunEventEntry({ event }: { event: RunEvent }) {
-  const Icon = eventIcon(event.level);
   const hasDetails = Object.keys(event.details).length > 0;
   return (
     <article className={`run-event-entry ${event.level}`}>
       <div className="event-rail">
-        <Icon size={16} />
+        {eventIcon(event.level)}
       </div>
       <div className="event-body">
         <div className="event-title-row">
@@ -188,39 +166,17 @@ function eventMeta(event: RunEvent): string {
   return parts.join(' - ');
 }
 
-function parseRunEvent(message: MessageEvent): RunEvent | null {
-  try {
-    return JSON.parse(message.data) as RunEvent;
-  } catch {
-    return null;
-  }
-}
-
-function mergeRunEvent(current: Record<number, RunEvent[]>, event: RunEvent): Record<number, RunEvent[]> {
-  if (!event.run_id) {
-    return current;
-  }
-  const existing = current[event.run_id] ?? [];
-  if (existing.some((entry) => entry.id === event.id)) {
-    return current;
-  }
-  return {
-    ...current,
-    [event.run_id]: [...existing, event].sort((left, right) => left.id - right.id)
-  };
-}
-
-function eventIcon(level: RunEvent['level']) {
+function eventIcon(level: RunEvent['level']): ReactNode {
   if (level === 'error') {
-    return XCircle;
+    return <XCircle size={16} />;
   }
   if (level === 'warning') {
-    return AlertTriangle;
+    return <AlertTriangle size={16} />;
   }
   if (level === 'debug') {
-    return Clock3;
+    return <Clock3 size={16} />;
   }
-  return Info;
+  return <Info size={16} />;
 }
 
 function levelLabel(level: RunEvent['level']): string {

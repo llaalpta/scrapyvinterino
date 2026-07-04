@@ -9,7 +9,7 @@ Allow the user to manually execute a configured source and record the execution 
 - Trigger a run for one source.
 - Create a `runs` record with started/finished timestamps.
 - Track status, item counters, opportunity counters, and errors.
-- Expose run history through API and PWA.
+- Expose run history through API and in the PWA monitor view.
 - Execute synchronously from the API for this vertical slice.
 - Use the public Vinted catalog provider contract from spec 002.
 
@@ -27,8 +27,8 @@ Allow the user to manually execute a configured source and record the execution 
   - `POST /api/sources/{source_id}/runs`;
   - `GET /api/runs?limit=50`.
 - PWA:
-  - execute an active source;
-  - show recent run history.
+  - execute a monitor;
+  - show recent run history inside the monitor view.
 - Database:
   - `runs`;
   - `errors`.
@@ -39,7 +39,8 @@ Allow the user to manually execute a configured source and record the execution 
 - Run status moves to success or failed.
 - Errors are persisted and visible.
 - A failed run does not crash the worker.
-- API/PWA can show recent run state.
+- API/PWA can show recent run state from the monitor view.
+- The PWA does not expose a separate Activity navigation item for run history.
 - `items_found` counts provider candidates.
 - `items_new` and `opportunities_created` stay `0` until later specs.
 - Item rows are not inserted or updated by this spec.
@@ -50,7 +51,7 @@ Allow the user to manually execute a configured source and record the execution 
 - Simulate provider failure and confirm persisted error.
 - Confirm worker keeps running after failure.
 - Confirm items table remains unchanged after a run.
-- Confirm PWA can trigger a run and display it.
+- Confirm PWA can trigger a run from `Monitores` and display its activity there.
 
 ## Audit
 

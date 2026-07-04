@@ -99,7 +99,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show operational progress with sanitized URLs, status codes, durations, proxy profile id, auth mode, and safe counts only; they never expose cookie or token values.
 - Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
-- The PWA run monitor renders logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
+- The PWA Monitors view renders active monitor logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
+- Active monitors appear before inactive monitors in the PWA and show a compact operational summary, recent activity, and a working stop control.
+- Inactive monitors appear below active monitors as compact cards with configuration summarized by default and editing available without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.

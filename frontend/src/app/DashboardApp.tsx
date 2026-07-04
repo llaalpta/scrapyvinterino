@@ -1,7 +1,6 @@
 import { DashboardShell } from '../components/layout/DashboardShell';
 import { FiltersView } from '../features/filters/FiltersView';
 import { OpportunitiesView } from '../features/opportunities/OpportunitiesView';
-import { RunsView } from '../features/runs/RunsView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { SourcesView } from '../features/sources/SourcesView';
 import { useDashboardController } from '../hooks/useDashboardController';
@@ -40,11 +39,14 @@ export function DashboardApp() {
           filterRules={dashboard.filterRules}
           onCreateSource={dashboard.onCreateSource}
           onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
+          onLoadRunEvents={dashboard.onLoadRunEvents}
+          onRefreshRuntime={dashboard.refreshRuntime}
           onRunMonitor={(sourceId) => void dashboard.onRunMonitor(sourceId)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
           proxyProfiles={dashboard.proxyProfiles}
+          runs={dashboard.runs}
           runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}
           selectedFilterIdsBySource={dashboard.selectedFilterIdsBySource}
@@ -70,14 +72,6 @@ export function DashboardApp() {
           onCreateFilter={dashboard.onCreateFilter}
           setFilterName={dashboard.setFilterName}
           setFilterTerms={dashboard.setFilterTerms}
-        />
-      ) : null}
-
-      {dashboard.activeSection === 'runs' ? (
-        <RunsView
-          getSourceName={dashboard.getSourceName}
-          runs={dashboard.runs}
-          onLoadRunEvents={dashboard.onLoadRunEvents}
         />
       ) : null}
 

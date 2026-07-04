@@ -43,7 +43,7 @@ Accepted structure:
 
 - `frontend/src/app/`: dashboard-level composition and navigation metadata.
 - `frontend/src/components/`: reusable UI pieces shared by multiple features, such as pagination, item cells, row actions, and layout shells.
-- `frontend/src/features/<feature>/`: feature-owned views and helpers. Current feature folders include `opportunities`, `sources`, `runs`, and `settings`.
+- `frontend/src/features/<feature>/`: feature-owned views and helpers. Current feature folders include `opportunities`, `sources`, `filters`, `settings`, and reusable `runs` activity components embedded in monitors.
 - `frontend/src/hooks/`: reusable React state orchestration hooks, including dashboard controllers that coordinate API calls and feature state.
 - `frontend/src/utils/`: generic formatting and pure helpers that do not know about feature state.
 - `frontend/src/api.ts`: API types and HTTP client functions only.
@@ -56,7 +56,7 @@ Feature work should add or extend a feature module instead of growing the dashbo
 - The app root remains a thin wrapper.
 - Dashboard state orchestration is separated from layout rendering.
 - Cross-feature dashboard state is extracted into a hook instead of living directly in the composition component.
-- Opportunities, sources, runs, and settings have feature-owned view modules.
+- Opportunities, sources, filters, settings, and reusable run activity components have feature-owned modules.
 - Shared item rendering, row actions, and pagination are reusable components.
 - CSS is imported from `styles/index.css` and split into focused files.
 - Existing desktop and mobile dashboard behavior remains unchanged.

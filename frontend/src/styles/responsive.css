@@ -158,6 +158,7 @@
   .source-row,
   .source-card-header,
   .source-schedule,
+  .source-schedule.compact,
   .settings-grid,
   .proxy-form,
   .opportunity-row {
@@ -185,7 +186,8 @@
 
   .run-row,
   .run-row dl,
-  .monitor-card dl {
+  .monitor-card dl,
+  .monitor-activity-row dl {
     grid-template-columns: 1fr;
   }
 

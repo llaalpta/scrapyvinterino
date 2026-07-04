@@ -22,7 +22,6 @@ import {
   type Page,
   type ProxyProfile,
   type Run,
-  type RunEvent,
   type SchedulerState,
   type SearchSource
 } from '../api';
@@ -66,8 +65,8 @@ export function useDashboardController() {
   const [navCollapsed, setNavCollapsed] = useState(false);
   const activeTitle = useMemo(() => navItems.find((item) => item.id === activeSection)?.label ?? 'Oportunidades', [activeSection]);
   const activeSubtitle = useMemo(
-    () => sectionSubtitle(activeSection, opportunityPage.total, sources.length, runs.length),
-    [activeSection, opportunityPage.total, sources.length, runs.length]
+    () => sectionSubtitle(activeSection, opportunityPage.total, sources.length),
+    [activeSection, opportunityPage.total, sources.length]
   );
 
   useEffect(() => {
@@ -192,7 +191,6 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
-      setActiveSection('runs');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
     } finally {
@@ -216,7 +214,6 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
-      setActiveSection('runs');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
@@ -400,6 +397,7 @@ export function useDashboardController() {
     opportunityPage,
     proxyDraft,
     proxyProfiles,
+    refreshRuntime,
     opportunityFilters,
     opportunitiesPageSize,
     runningSessionId,
@@ -456,15 +454,12 @@ export function useDashboardController() {
   }
 }
 
-function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number, runTotal: number): string {
+function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number): string {
   if (section === 'opportunities') {
     return `${opportunityTotal} oportunidades`;
   }
   if (section === 'sources') {
     return `${sourceTotal} monitores configurados`;
-  }
-  if (section === 'runs') {
-    return `${runTotal} ejecuciones registradas`;
   }
   if (section === 'settings') {
     return 'Configuracion local del monitor';
