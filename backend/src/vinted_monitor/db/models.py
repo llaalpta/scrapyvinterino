@@ -94,6 +94,7 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
+    monitor_session_id: Mapped[int | None] = mapped_column(ForeignKey("monitor_sessions.id"))
     status: Mapped[str] = mapped_column(String(40))
     trigger: Mapped[str] = mapped_column(String(40), default="manual")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -106,6 +107,16 @@ class Run(Base):
     opportunities_created: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     runtime_metadata: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
+
+
+class MonitorSession(Base):
+    __tablename__ = "monitor_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stop_reason: Mapped[str | None] = mapped_column(String(80))
 
 
 class FilterRule(Base):

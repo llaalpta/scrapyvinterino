@@ -8,6 +8,7 @@ Allow the user to manually execute a configured source and record the execution 
 
 - Trigger a run for one source.
 - Create a `runs` record with started/finished timestamps.
+- Do not create a monitor session for punctual/manual test runs.
 - Track status, item counters, opportunity counters, and errors.
 - Expose run history through API and in the PWA monitor view.
 - Execute synchronously from the API for this vertical slice.
@@ -44,6 +45,7 @@ Allow the user to manually execute a configured source and record the execution 
 - `items_found` counts provider candidates.
 - `items_new` and `opportunities_created` stay `0` until later specs.
 - Item rows are not inserted or updated by this spec.
+- Punctual/manual test runs do not count as recurring monitor sessions.
 
 ## Verification
 

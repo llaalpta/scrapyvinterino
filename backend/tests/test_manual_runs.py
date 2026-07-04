@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
-from vinted_monitor.db.models import ErrorLog, FilterRule, Item, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
+from vinted_monitor.db.models import ErrorLog, FilterRule, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.filters import create_filter_rule
@@ -173,6 +173,7 @@ def cleanup_source(source_id: int | None) -> None:
             db.query(ErrorLog).filter(ErrorLog.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(Run).filter(Run.id.in_(run_ids)).delete(synchronize_session=False)
         if source_ids:
+            db.query(MonitorSession).filter(MonitorSession.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(Opportunity).filter(Opportunity.source_id.in_(source_ids)).delete(synchronize_session=False)
@@ -332,6 +333,148 @@ def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypat
             assert source.next_run_at is None
     finally:
         app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api recurring start monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
+            filter_rule_ids=[],
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    try:
+        response = client.post(f"/api/monitors/{source_id}/start")
+
+        assert response.status_code == 201
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
+            run = db.get(Run, response.json()["id"])
+            assert source is not None
+            assert source.is_active is True
+            assert session is not None
+            assert session.stopped_at is None
+            assert run is not None
+            assert run.monitor_session_id == session.id
+    finally:
+        app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_monitor_stop_closes_active_session() -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest stop session monitor",
+            url="https://www.vinted.es/catalog?search_text=",
+            normalized_query={"search_text": [""]},
+            is_active=True,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
+            filter_rule_ids=[],
+        )
+        db.add(source)
+        db.flush()
+        session = MonitorSession(source_id=source.id, started_at=datetime.now(UTC) - timedelta(minutes=5))
+        db.add(session)
+        db.commit()
+        source_id = source.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/stop")
+
+        assert response.status_code == 200
+        with SessionLocal() as db:
+            session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
+            assert session is not None
+            assert session.stopped_at is not None
+            assert session.stop_reason == "stopped"
+    finally:
+        cleanup_source(source_id)
+
+
+def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest stats monitor",
+            url="https://www.vinted.es/catalog?search_text=",
+            normalized_query={"search_text": [""]},
+            is_active=True,
+            monitor_mode="continuous",
+            scheduler_config={},
+            filter_rule_ids=[],
+        )
+        db.add(source)
+        db.flush()
+        session = MonitorSession(source_id=source.id, started_at=datetime(2026, 7, 4, 8, 0, tzinfo=UTC))
+        db.add(session)
+        db.flush()
+        db.add_all(
+            [
+                Run(
+                    source_id=source.id,
+                    monitor_session_id=session.id,
+                    status=SUCCESS,
+                    trigger="manual",
+                    started_at=datetime(2026, 7, 4, 8, 15, tzinfo=UTC),
+                    finished_at=datetime(2026, 7, 4, 8, 16, tzinfo=UTC),
+                    items_found=3,
+                    items_new=2,
+                    items_filter_passed=2,
+                    items_discarded_by_filters=1,
+                    items_filter_pending=0,
+                    opportunities_created=2,
+                    runtime_metadata={},
+                ),
+                Run(
+                    source_id=source.id,
+                    monitor_session_id=session.id,
+                    status=SUCCESS,
+                    trigger="scheduler",
+                    started_at=datetime(2026, 7, 4, 9, 5, tzinfo=UTC),
+                    finished_at=datetime(2026, 7, 4, 9, 6, tzinfo=UTC),
+                    items_found=4,
+                    items_new=1,
+                    items_filter_passed=1,
+                    items_discarded_by_filters=0,
+                    items_filter_pending=0,
+                    opportunities_created=1,
+                    runtime_metadata={},
+                ),
+            ]
+        )
+        db.commit()
+        source_id = source.id
+
+    try:
+        response = client.get(f"/api/monitors/{source_id}/stats?range=hours")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["active_session"]["id"] is not None
+        assert body["session_summary"]["sessions_count"] == 1
+        assert body["session_summary"]["runs_count"] == 2
+        assert body["session_summary"]["items_found"] == 7
+        assert body["historical_summary"]["opportunities_created"] == 3
+        chart_hits = [point for point in body["chart_points"] if point["items_found"] > 0]
+        assert [point["items_found"] for point in chart_hits] == [3, 4]
+    finally:
         cleanup_source(source_id)
 
 

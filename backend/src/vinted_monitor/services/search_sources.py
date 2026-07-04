@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.db.models import FilterRule, ProxyProfile, SearchSource
+from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.scheduler import normalize_scheduler_config
 
 ALLOWED_VINTED_CATALOG_HOSTS = {"www.vinted.es", "vinted.es"}
@@ -141,6 +142,8 @@ def start_source_monitor(db: Session, source_id: int) -> SearchSource:
         source.monitor_until = None
     source.next_run_at = now
     source.is_active = source.monitor_mode != "manual"
+    if source.is_active:
+        start_monitor_session(db, source, started_at=now)
     db.commit()
     db.refresh(source)
     return source
@@ -151,6 +154,7 @@ def stop_source_monitor(db: Session, source_id: int) -> SearchSource:
     source.is_active = False
     source.next_run_at = None
     source.monitor_until = None
+    stop_active_monitor_session(db, source.id, reason="stopped")
     db.commit()
     db.refresh(source)
     return source
@@ -168,6 +172,7 @@ def archive_source(db: Session, source_id: int) -> None:
     source.next_run_at = None
     source.monitor_until = None
     source.archived_at = now
+    stop_active_monitor_session(db, source.id, stopped_at=now, reason="archived")
     db.commit()
 
 

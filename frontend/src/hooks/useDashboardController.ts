@@ -1,10 +1,11 @@
-import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   createFilterRule,
   createProxyProfile,
   createSource,
   deleteSource,
   fetchFilterRules,
+  fetchMonitorStats,
   fetchOpportunities,
   fetchProxyProfiles,
   fetchRunEvents,
@@ -18,6 +19,8 @@ import {
   updateScheduler,
   updateSource,
   type FilterRule,
+  type MonitorStats,
+  type MonitorStatsRange,
   type OpportunityResult,
   type Page,
   type ProxyProfile,
@@ -43,6 +46,8 @@ export function useDashboardController() {
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
   const [opportunityPage, setOpportunityPage] = useState<Page<OpportunityResult>>(emptyOpportunityPage);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
+  const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [selectedFilterIdsBySource, setSelectedFilterIdsBySource] = useState<Record<number, number[]>>({});
@@ -69,6 +74,24 @@ export function useDashboardController() {
     [activeSection, opportunityPage.total, sources.length]
   );
 
+  const loadMonitorStatsForSources = useCallback(
+    async (sourceData: SearchSource[]) => {
+      const activeSources = sourceData.filter((source) => source.is_active);
+      if (activeSources.length === 0) {
+        setMonitorStatsBySource({});
+        return;
+      }
+      const entries = await Promise.all(
+        activeSources.map(async (source) => {
+          const range = monitorStatsRangeBySource[source.id] ?? 'hours';
+          return [source.id, await fetchMonitorStats(source.id, range)] as const;
+        })
+      );
+      setMonitorStatsBySource(Object.fromEntries(entries));
+    },
+    [monitorStatsRangeBySource]
+  );
+
   useEffect(() => {
     Promise.all([
       fetchSources(),
@@ -88,17 +111,24 @@ export function useDashboardController() {
         setSourceDrafts(buildSourceDrafts(sourceData));
         setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
         setSelectedProxyBySource(buildSelectedProxyIds(sourceData));
+        const activeSources = sourceData.filter((source) => source.is_active);
+        if (activeSources.length > 0) {
+          void Promise.all(activeSources.map(async (source) => [source.id, await fetchMonitorStats(source.id, 'hours')] as const)).then(
+            (entries) => setMonitorStatsBySource(Object.fromEntries(entries))
+          );
+        }
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
       });
   }, []);
 
-  async function refreshRuntime() {
+  const refreshRuntime = useCallback(async () => {
     const [opportunityData, runData] = await Promise.all([fetchOpportunities(), fetchRuns()]);
     setOpportunityPage(opportunityData);
     setRuns(runData);
-  }
+    await loadMonitorStatsForSources(sources);
+  }, [loadMonitorStatsForSources, sources]);
 
   async function loadOpportunities(page = 1, filters = opportunityFilters, pageSize = opportunitiesPageSize) {
     setLoadingOpportunities(true);
@@ -191,6 +221,7 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
+      await loadMonitorStatsForSources(sourceData);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
     } finally {
@@ -214,6 +245,7 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
+      await loadMonitorStatsForSources(sourceData);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
@@ -359,6 +391,12 @@ export function useDashboardController() {
     void loadOpportunities(1, opportunityFilters, pageSize);
   }
 
+  async function loadMonitorStats(sourceId: number, range = monitorStatsRangeBySource[sourceId] ?? 'hours') {
+    setMonitorStatsRangeBySource((current) => ({ ...current, [sourceId]: range }));
+    const stats = await fetchMonitorStats(sourceId, range);
+    setMonitorStatsBySource((current) => ({ ...current, [sourceId]: stats }));
+  }
+
   function getSourceName(sourceId: number): string {
     return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
   }
@@ -380,6 +418,7 @@ export function useDashboardController() {
     filterTerms,
     getSourceName,
     loadOpportunities,
+    loadMonitorStats,
     loadingOpportunities,
     navCollapsed,
     onCreateFilter,
@@ -394,6 +433,8 @@ export function useDashboardController() {
     onTestProxy,
     onToggleScheduler,
     onToggleSource,
+    monitorStatsBySource,
+    monitorStatsRangeBySource,
     opportunityPage,
     proxyDraft,
     proxyProfiles,

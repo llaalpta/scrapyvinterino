@@ -6,7 +6,8 @@ Tablas principales:
 - `search_sources`: monitores de oportunidad reutilizables; guardan URL, modo, cadencia, filtros/proxy opcionales y estado runtime. `archived_at` oculta un monitor sin borrar historico.
 - `app_settings`: configuracion global mutable desde la PWA, como el estado UI del scheduler.
 - `filter_rules`: filtros excluyentes nombrados y opcionales; determinan oportunidades, no la identidad del monitor.
-- `runs`: ejecuciones de monitor, con `trigger`, contadores de filtrado y metadatos runtime.
+- `monitor_sessions`: periodos historicos en que un monitor recurrente estuvo activo; guardan inicio, parada y motivo de cierre.
+- `runs`: ejecuciones de monitor, con `trigger`, `monitor_session_id` opcional, contadores de filtrado y metadatos runtime.
 - `items`: articulos normalizados de Vinted que llegaron a oportunidad; `vinted_item_id` define identidad de catalogo/cache.
 - `opportunities`: articulos vistos por un monitor que no fueron descartados; es la tabla principal de resultados utiles del producto y su unicidad notificable es por monitor e item.
 - `proxy_profiles`: proxys configurables desde UI con secretos cifrados.

@@ -11,6 +11,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Treat inactive monitors as configured but not launched; active monitors are launched for recurring execution.
 - Treat running/executing as run state, not as persistent monitor state.
 - Start and stop recurring monitor execution using the monitor's current filters, cadence, duration/window mode, and optional proxy profile.
+- Persist each recurring activation as a monitor session until it is stopped, archived, expired, or blocked by a stopping failure.
 - Allow punctual/manual monitor execution from an inactive monitor for testing without activating scheduler state.
 - Start a monitor for a bounded duration from now, with `monitor_until` stored on the monitor.
 - Configure interval seconds per monitor, default `300`, minimum `60`, maximum `3600`.
@@ -50,6 +51,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - API/PWA:
   - scheduler settings persisted in `app_settings`;
   - monitor inactive/start/stop/archive controls;
+  - monitor historical stats endpoint for active monitor performance cards;
   - proxy profile controls.
 - Configuration:
   - deployment scheduler enable flag in `.env` as an operational gate;
@@ -71,8 +73,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - `app_settings`;
   - `search_sources.scheduler_config`;
   - `search_sources.monitor_mode`, `duration_minutes`, `monitor_until`, `next_run_at`, `filter_rule_ids`, and `proxy_profile_id`;
+  - `monitor_sessions`;
   - `proxy_profiles`;
-  - `runs.trigger`;
+  - `runs.trigger` and optional `runs.monitor_session_id`;
   - `items` for opportunity items only;
   - `errors`.
 
@@ -86,6 +89,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA stores the config, marks it active, and immediately executes one run.
+- Launching a recurring monitor creates one active monitor session and associates recurring runs with it.
 - The scheduler only considers active recurring monitors.
 - Expired active monitors are stopped before scheduler planning.
 - Jitter prevents fixed exact polling intervals.
@@ -100,7 +104,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
 - The PWA Monitors view renders active monitor logs as a readable timeline/console with level, label, timestamp, ms, status, URL, message, and collapsible details.
-- Active monitors appear before inactive monitors in the PWA and show a compact operational summary, recent activity, and a working stop control.
+- Active monitors appear before inactive monitors in the PWA and show a compact operational summary, accumulated performance card, and a working stop control.
+- Active monitor cards do not show an `Ejecutar ahora` button because periodic execution is already configured.
+- The active monitor performance card shows session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket.
+- The performance chart supports minutes, hours, days, current month, and all-history ranges.
+- The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
 - Inactive monitors appear below active monitors as compact cards with configuration summarized by default and editing available without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
@@ -122,6 +130,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Unit tests confirming Redis cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
 - Manual check with short interval in local Docker.
 - Confirm run records identify scheduler-triggered executions.
+- Confirm monitor sessions are created, closed, and associated to recurring runs.
+- Confirm monitor stats aggregate session, historical, and chart bucket data.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
 - Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.

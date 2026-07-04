@@ -23,6 +23,7 @@ from vinted_monitor.services.items import (
     get_or_persist_catalog_item,
     record_item_detail_error,
 )
+from vinted_monitor.services.monitor_sessions import get_active_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.proxies import proxy_url_for_profile
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
@@ -84,8 +85,10 @@ def execute_monitor_run(
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
 
+    active_session = get_active_monitor_session(db, source.id) if require_active and source.monitor_mode != "manual" else None
     run = Run(
         source_id=source.id,
+        monitor_session_id=active_session.id if active_session is not None else None,
         status=RUNNING,
         trigger=trigger,
         items_found=0,
@@ -151,6 +154,7 @@ def execute_monitor_run(
         source.monitor_mode = "manual"
         source.monitor_until = None
         source.next_run_at = None
+        stop_active_monitor_session(db, source.id, reason="redis_unavailable")
         return _record_failed_run(db, run, source, exc, kind="redis_unavailable")
     record_run_event(
         db,
@@ -260,6 +264,7 @@ def execute_monitor_run(
         source.monitor_mode = "manual"
         source.monitor_until = None
         source.next_run_at = None
+        stop_active_monitor_session(db, source.id, reason="redis_unavailable")
         if claimed_ids:
             try:
                 cache.release_processing(source.id, policy_hash, list(claimed_ids))
@@ -377,6 +382,8 @@ def _record_failed_run(
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
     run.error_message = message
+    if source.monitor_mode != "manual":
+        stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="failed")
     _clear_manual_monitor_runtime(source)
     db.add(
         ErrorLog(

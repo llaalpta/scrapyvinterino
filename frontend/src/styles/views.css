@@ -336,6 +336,157 @@
   padding-top: 12px;
 }
 
+.monitor-performance {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #e5eaf0;
+  padding-top: 12px;
+}
+
+.monitor-performance-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.monitor-performance-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.monitor-performance-heading h4 {
+  color: #1f2933;
+  font-size: 14px;
+}
+
+.monitor-performance-heading span {
+  color: #697586;
+  font-size: 13px;
+}
+
+.range-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.range-tabs button {
+  min-height: 30px;
+  border-radius: 8px;
+  padding: 5px 9px;
+  color: #52606d;
+  background: #ffffff;
+}
+
+.range-tabs button.active {
+  border-color: #2f7d6d;
+  color: #0f5132;
+  background: #d1e7dd;
+}
+
+.monitor-session-strip,
+.monitor-accumulated-strip {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.monitor-session-strip {
+  grid-template-columns: repeat(6, minmax(100px, 1fr));
+}
+
+.monitor-accumulated-strip {
+  grid-template-columns: repeat(8, minmax(88px, 1fr));
+}
+
+.monitor-session-strip div,
+.monitor-accumulated-strip div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid #e5eaf0;
+  border-radius: 8px;
+  padding: 8px;
+  background: #ffffff;
+}
+
+.monitor-session-strip dt,
+.monitor-accumulated-strip dt {
+  color: #697586;
+  font-size: 12px;
+}
+
+.monitor-session-strip dd,
+.monitor-accumulated-strip dd {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #1f2933;
+  font-weight: 700;
+}
+
+.monitor-chart {
+  position: relative;
+  min-width: 0;
+  height: 280px;
+  border: 1px solid #e5eaf0;
+  border-radius: 8px;
+  padding: 8px;
+  background: #ffffff;
+}
+
+.monitor-chart-canvas {
+  position: relative;
+  height: 260px;
+}
+
+.monitor-plot-overlay {
+  position: absolute;
+  inset: 14px 10px 30px 34px;
+  pointer-events: none;
+}
+
+.monitor-session-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 2px solid #ef4444;
+}
+
+.monitor-session-marker span {
+  position: absolute;
+  top: 0;
+  left: 6px;
+  color: #b42318;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.monitor-session-marker.align-left span {
+  right: 6px;
+  left: auto;
+}
+
+.active-monitor-logs {
+  border-top: 1px solid #e5eaf0;
+  padding-top: 12px;
+}
+
+.active-monitor-logs summary {
+  cursor: pointer;
+  color: #52606d;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.active-monitor-logs[open] {
+  display: grid;
+  gap: 10px;
+}
+
 .runs-list {
   display: grid;
 }

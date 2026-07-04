@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import (
     SCHEDULER_SETTING_KEY,
@@ -183,6 +183,8 @@ def test_schedulable_sources_expires_timed_monitor_before_scheduling() -> None:
             monitor_until=datetime.now(UTC) - timedelta(seconds=1),
         )
         db.add(source)
+        db.flush()
+        db.add(MonitorSession(source_id=source.id, started_at=datetime.now(UTC) - timedelta(minutes=5)))
         db.commit()
         source_id = source.id
 
@@ -195,9 +197,14 @@ def test_schedulable_sources_expires_timed_monitor_before_scheduling() -> None:
             assert stopped is not None
             assert stopped.is_active is False
             assert stopped.next_run_at is None
+            session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
+            assert session is not None
+            assert session.stopped_at is not None
+            assert session.stop_reason == "expired"
     finally:
         with SessionLocal() as db:
             if source_id is not None:
+                db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)
                 source = db.get(SearchSource, source_id)
                 if source is not None:
                     db.delete(source)

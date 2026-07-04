@@ -17,6 +17,7 @@ from vinted_monitor.api.schemas import (
     FilterRuleRead,
     FilterRuleUpdate,
     ItemRead,
+    MonitorStatsRead,
     OpportunityResultPageRead,
     OpportunityResultRead,
     ProxyProfileCreate,
@@ -49,6 +50,7 @@ from vinted_monitor.services.filters import (
     list_filter_rules,
     update_filter_rule,
 )
+from vinted_monitor.services.monitor_stats import MonitorStatsNotFoundError, MonitorStatsRangeError, get_monitor_stats
 from vinted_monitor.services.proxies import (
     ProxyProfileNotFoundError,
     create_proxy_profile,
@@ -336,6 +338,16 @@ def get_opportunities(
 @app.get("/api/runs", response_model=list[RunRead])
 def get_runs(limit: int = 50, db: Session = Depends(get_db)) -> list:
     return list_runs(db, limit=limit)
+
+
+@app.get("/api/monitors/{monitor_id}/stats", response_model=MonitorStatsRead)
+def get_monitor_stats_endpoint(monitor_id: int, range: str = "hours", db: Session = Depends(get_db)):  # noqa: A002
+    try:
+        return get_monitor_stats(db, monitor_id, range_name=range)
+    except MonitorStatsNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MonitorStatsRangeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/runs/{run_id}/events", response_model=list[RunEventRead])

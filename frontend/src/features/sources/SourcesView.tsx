@@ -1,6 +1,7 @@
 import { Play, Save, Square, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, type FormEvent } from 'react';
-import type { FilterRule, ProxyProfile, Run, RunEvent, SearchSource } from '../../api';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import type { FilterRule, MonitorStats, MonitorStatsRange, ProxyProfile, Run, RunEvent, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { RunActivityList } from '../runs/RunsView';
 import { useRunActivity } from '../runs/runActivity';
@@ -8,11 +9,13 @@ import { buildSourceDraft, type SourceDraft } from './sourceDrafts';
 
 export function SourcesView({
   filterRules,
+  monitorStatsBySource,
+  monitorStatsRangeBySource,
   onCreateSource,
   onDeleteSource,
+  onLoadMonitorStats,
   onLoadRunEvents,
   onRefreshRuntime,
-  onRunMonitor,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
@@ -33,11 +36,13 @@ export function SourcesView({
   updateSourceProxy
 }: {
   filterRules: FilterRule[];
+  monitorStatsBySource: Record<number, MonitorStats>;
+  monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
+  onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onLoadRunEvents: (runId: number) => Promise<RunEvent[]>;
   onRefreshRuntime: () => Promise<void>;
-  onRunMonitor: (sourceId: number) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
@@ -139,21 +144,20 @@ export function SourcesView({
                     </div>
 
                     <div className="source-actions">
-                      <button type="button" disabled={runningSessionId !== null} onClick={() => onRunMonitor(source.id)}>
-                        <Play size={17} />
-                        {runningSessionId === source.id ? 'Ejecutando' : 'Ejecutar ahora'}
-                      </button>
                       <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
                         <Square size={16} />
                         Detener monitor
                       </button>
                     </div>
 
-                    <div className="active-monitor-activity">
-                      <div className="subsection-heading">
-                        <h4>Actividad reciente</h4>
-                        <span>{sourceRuns.length}</span>
-                      </div>
+                    <MonitorPerformancePanel
+                      range={monitorStatsRangeBySource[source.id] ?? 'hours'}
+                      stats={monitorStatsBySource[source.id] ?? null}
+                      onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
+                    />
+
+                    <details className="active-monitor-logs">
+                      <summary>Logs de ejecuciones</summary>
                       <RunActivityList
                         activity={activity}
                         emptyText="Sin ejecuciones recientes para este monitor."
@@ -161,7 +165,7 @@ export function SourcesView({
                         runs={sourceRuns}
                         variant="inline"
                       />
-                    </div>
+                    </details>
                   </article>
                 );
               })}
@@ -198,6 +202,167 @@ export function SourcesView({
       ) : null}
     </section>
   );
+}
+
+function MonitorPerformancePanel({
+  onRangeChange,
+  range,
+  stats
+}: {
+  onRangeChange: (range: MonitorStatsRange) => void;
+  range: MonitorStatsRange;
+  stats: MonitorStats | null;
+}) {
+  const chartData = (stats?.chart_points ?? []).map((point) => ({
+    bucketEndMs: new Date(point.bucket_end).getTime(),
+    bucketStartMs: new Date(point.bucket_start).getTime(),
+    itemsFound: point.items_found,
+    runsCount: point.runs_count
+  }));
+  const chartDomain =
+    chartData.length > 0
+      ? ([chartData[0].bucketStartMs, chartData[chartData.length - 1].bucketEndMs] as [number, number])
+      : undefined;
+  const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
+  const sessionMarkerPosition =
+    chartDomain && activeSessionMs !== null && activeSessionMs >= chartDomain[0] && activeSessionMs <= chartDomain[1]
+      ? (activeSessionMs - chartDomain[0]) / (chartDomain[1] - chartDomain[0])
+      : null;
+  const sessionMarkerClass =
+    sessionMarkerPosition !== null && sessionMarkerPosition > 0.86 ? 'monitor-session-marker align-left' : 'monitor-session-marker';
+  const session = stats?.session_summary;
+  const historical = stats?.historical_summary;
+
+  return (
+    <section className="monitor-performance">
+      <div className="monitor-performance-heading">
+        <div>
+          <h4>Rendimiento del monitor</h4>
+          <span>{stats?.active_session ? `Sesion activa desde ${formatDate(stats.active_session.started_at)}` : 'Sin sesion activa'}</span>
+        </div>
+        <div className="range-tabs" aria-label="Rango de grafica">
+          {rangeOptions.map((option) => (
+            <button
+              className={range === option.value ? 'active' : ''}
+              key={option.value}
+              type="button"
+              onClick={() => onRangeChange(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <dl className="monitor-session-strip">
+        <Metric label="Inicio" value={stats?.active_session ? formatDate(stats.active_session.started_at) : '-'} />
+        <Metric label="Duracion activa" value={formatSeconds(stats?.active_session?.duration_seconds ?? 0)} />
+        <Metric label="Runs sesion" value={String(session?.runs_count ?? 0)} />
+        <Metric label="Encontrados sesion" value={String(session?.items_found ?? 0)} />
+        <Metric label="Oportunidades sesion" value={String(session?.opportunities_created ?? 0)} />
+        <Metric label="Errores sesion" value={String(session?.failed_runs ?? 0)} />
+      </dl>
+
+      <div className="monitor-chart">
+        {chartData.length === 0 ? (
+          <p className="empty-inline compact">Sin datos historicos para graficar.</p>
+        ) : (
+          <div className="monitor-chart-canvas">
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={chartData} margin={{ top: 14, right: 10, bottom: 4, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis
+                  dataKey="bucketStartMs"
+                  domain={chartDomain}
+                  tickFormatter={(value) => formatChartTick(Number(value), range)}
+                  type="number"
+                />
+                <YAxis allowDecimals={false} width={34} />
+                <Tooltip
+                  formatter={(value, name) => [String(value), name === 'itemsFound' ? 'Encontrados' : 'Runs']}
+                  labelFormatter={(value) => formatChartTooltip(Number(value), range)}
+                />
+                <Bar dataKey="itemsFound" fill="#2f7d6d" name="Encontrados" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            {sessionMarkerPosition !== null ? (
+              <div className="monitor-plot-overlay" aria-hidden="true">
+                <div className={sessionMarkerClass} style={{ left: `${sessionMarkerPosition * 100}%` }}>
+                  <span>Inicio sesion</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      <dl className="monitor-accumulated-strip">
+        <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
+        <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
+        <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
+        <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
+        <Metric label="Nuevos" value={String(historical?.items_new ?? 0)} />
+        <Metric label="Descartados" value={String(historical?.items_discarded_by_filters ?? 0)} />
+        <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
+        <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
+      </dl>
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+const rangeOptions: Array<{ label: string; value: MonitorStatsRange }> = [
+  { label: 'Minutos', value: 'minutes' },
+  { label: 'Horas', value: 'hours' },
+  { label: 'Dias', value: 'days' },
+  { label: 'Mes', value: 'month' },
+  { label: 'Todo', value: 'all' }
+];
+
+function formatSeconds(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function formatChartTick(value: number, range: MonitorStatsRange): string {
+  const date = new Date(value);
+  if (range === 'minutes' || range === 'hours') {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  if (range === 'all') {
+    return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
+  }
+  return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+}
+
+function formatChartTooltip(value: number, range: MonitorStatsRange): string {
+  const date = new Date(value);
+  if (range === 'minutes' || range === 'hours') {
+    return date.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+  if (range === 'all') {
+    return date.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  }
+  return date.toLocaleDateString([], { day: '2-digit', month: 'long', year: 'numeric' });
 }
 
 function MonitorSectionHeading({ count, label }: { count: number; label: string }) {

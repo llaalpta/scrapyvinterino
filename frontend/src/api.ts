@@ -131,6 +131,7 @@ export type OpportunityQuery = {
 export type Run = {
   id: number;
   source_id: number;
+  monitor_session_id: number | null;
   status: string;
   trigger: string;
   started_at: string;
@@ -143,6 +144,40 @@ export type Run = {
   opportunities_created: number;
   error_message: string | null;
   runtime_metadata: Record<string, unknown>;
+};
+
+export type MonitorStatsRange = 'minutes' | 'hours' | 'days' | 'month' | 'all';
+
+export type MonitorStatsSummary = {
+  sessions_count: number;
+  active_seconds: number;
+  runs_count: number;
+  failed_runs: number;
+  items_found: number;
+  items_new: number;
+  items_discarded_by_filters: number;
+  opportunities_created: number;
+};
+
+export type MonitorActiveSession = {
+  id: number;
+  started_at: string;
+  duration_seconds: number;
+};
+
+export type MonitorChartPoint = {
+  bucket_start: string;
+  bucket_end: string;
+  items_found: number;
+  runs_count: number;
+};
+
+export type MonitorStats = {
+  range: MonitorStatsRange;
+  active_session: MonitorActiveSession | null;
+  session_summary: MonitorStatsSummary;
+  historical_summary: MonitorStatsSummary;
+  chart_points: MonitorChartPoint[];
 };
 
 export type RunEvent = {
@@ -322,6 +357,10 @@ export function fetchOpportunities(query: OpportunityQuery = {}): Promise<Page<O
 
 export function fetchRuns(): Promise<Run[]> {
   return getJson<Run[]>('/api/runs');
+}
+
+export function fetchMonitorStats(sourceId: number, range: MonitorStatsRange = 'hours'): Promise<MonitorStats> {
+  return getJson<MonitorStats>(`/api/monitors/${sourceId}/stats?range=${range}`);
 }
 
 export function fetchRunEvents(runId: number): Promise<RunEvent[]> {

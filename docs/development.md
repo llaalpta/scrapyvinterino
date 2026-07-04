@@ -49,6 +49,8 @@ Accepted structure:
 - `frontend/src/api.ts`: API types and HTTP client functions only.
 - `frontend/src/styles/`: CSS split by responsibility and imported through `styles/index.css`.
 
+Use Recharts for monitor performance charts instead of hand-built SVG charting.
+
 Feature work should add or extend a feature module instead of growing the dashboard root. If a file starts mixing cross-feature state, feature rendering, reusable components, and formatting helpers, split it before adding more behavior.
 
 ### Frontend Baseline Acceptance

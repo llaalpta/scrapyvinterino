@@ -226,6 +226,7 @@ class RunRead(BaseModel):
 
     id: int
     source_id: int
+    monitor_session_id: int | None
     status: str
     trigger: str
     started_at: datetime
@@ -238,6 +239,38 @@ class RunRead(BaseModel):
     opportunities_created: int
     error_message: str | None
     runtime_metadata: dict[str, Any]
+
+
+class MonitorChartPointRead(BaseModel):
+    bucket_start: datetime
+    bucket_end: datetime
+    items_found: int
+    runs_count: int
+
+
+class MonitorSummaryRead(BaseModel):
+    sessions_count: int
+    active_seconds: int
+    runs_count: int
+    failed_runs: int
+    items_found: int
+    items_new: int
+    items_discarded_by_filters: int
+    opportunities_created: int
+
+
+class ActiveMonitorSessionRead(BaseModel):
+    id: int
+    started_at: datetime
+    duration_seconds: int
+
+
+class MonitorStatsRead(BaseModel):
+    range: str
+    active_session: ActiveMonitorSessionRead | None
+    session_summary: MonitorSummaryRead
+    historical_summary: MonitorSummaryRead
+    chart_points: list[MonitorChartPointRead]
 
 
 class RunEventRead(BaseModel):

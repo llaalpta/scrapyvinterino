@@ -184,6 +184,24 @@
     width: 100%;
   }
 
+  .monitor-performance-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .range-tabs {
+    justify-content: stretch;
+  }
+
+  .range-tabs button {
+    flex: 1 1 auto;
+  }
+
+  .monitor-session-strip,
+  .monitor-accumulated-strip {
+    grid-template-columns: 1fr 1fr;
+  }
+
   .run-row,
   .run-row dl,
   .monitor-card dl,

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.services.monitor_sessions import stop_active_monitor_session
 
 SCHEDULER_SETTING_KEY = "scheduler"
 DEFAULT_INTERVAL_SECONDS = 300
@@ -135,6 +136,7 @@ def expire_source_monitors(db: Session, now: datetime | None = None) -> int:
     for source in expired_sources:
         source.is_active = False
         source.next_run_at = None
+        stop_active_monitor_session(db, source.id, stopped_at=current_time, reason="expired")
     db.commit()
     return len(expired_sources)
 
