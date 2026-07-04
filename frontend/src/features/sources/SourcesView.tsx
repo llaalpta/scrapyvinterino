@@ -239,6 +239,15 @@ function MonitorPerformancePanel({
     chartData.length > 0
       ? ([chartData[0].bucketStartMs, chartData[chartData.length - 1].bucketEndMs] as [number, number])
       : undefined;
+  const chartRange =
+    stats !== null
+      ? {
+          bucketLabel: stats.bucket_label,
+          bucketSeconds: stats.bucket_seconds,
+          rangeEndMs: new Date(stats.range_end).getTime(),
+          rangeStartMs: new Date(stats.range_start).getTime()
+        }
+      : null;
   const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
   const sessionMarkerPosition =
     chartDomain && activeSessionMs !== null && activeSessionMs >= chartDomain[0] && activeSessionMs <= chartDomain[1]
@@ -310,6 +319,7 @@ function MonitorPerformancePanel({
                   <MonitorPerformanceChart
                     chartData={chartData}
                     chartDomain={chartDomain}
+                    chartRange={chartRange}
                     range={range}
                     sessionMarkerClass={sessionMarkerClass}
                     sessionMarkerPosition={sessionMarkerPosition}
@@ -349,10 +359,10 @@ class ChartErrorBoundary extends Component<{ children: ReactNode }, { hasError: 
 }
 
 const rangeOptions: Array<{ label: string; value: MonitorStatsRange }> = [
-  { label: 'Minutos', value: 'minutes' },
-  { label: 'Horas', value: 'hours' },
-  { label: 'Dias', value: 'days' },
-  { label: 'Mes', value: 'month' },
+  { label: '5 min', value: 'minutes' },
+  { label: '1 h', value: 'hours' },
+  { label: '24 h', value: 'days' },
+  { label: '30 d', value: 'month' },
   { label: 'Todo', value: 'all' }
 ];
 

@@ -269,6 +269,10 @@ class MonitorSessionRead(BaseModel):
 
 class MonitorStatsRead(BaseModel):
     range: str
+    range_start: datetime
+    range_end: datetime
+    bucket_label: str
+    bucket_seconds: int | None
     active_session: MonitorSessionRead | None
     latest_session: MonitorSessionRead | None
     session_summary: MonitorSummaryRead

@@ -176,6 +176,10 @@ export type MonitorChartPoint = {
 
 export type MonitorStats = {
   range: MonitorStatsRange;
+  range_start: string;
+  range_end: string;
+  bucket_label: string;
+  bucket_seconds: number | null;
   active_session: MonitorSession | null;
   latest_session: MonitorSession | null;
   session_summary: MonitorStatsSummary;

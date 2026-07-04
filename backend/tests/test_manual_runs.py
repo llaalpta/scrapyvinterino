@@ -13,6 +13,7 @@ from vinted_monitor.db.models import ErrorLog, FilterRule, Item, MonitorSession,
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.filters import create_filter_rule
+from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.runs import FAILED, SUCCESS, SearchSourceInactiveError, execute_manual_run, execute_monitor_run
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 
@@ -471,7 +472,6 @@ def test_recurring_monitor_failure_closes_session_and_stops_monitor(monkeypatch:
 
 def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
     cleanup_source(None)
-    client = TestClient(app)
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest stats monitor",
@@ -525,18 +525,133 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
         source_id = source.id
 
     try:
-        response = client.get(f"/api/monitors/{source_id}/stats?range=hours")
+        with SessionLocal() as db:
+            stats = get_monitor_stats(db, source_id, range_name="days", now=datetime(2026, 7, 4, 10, 0, tzinfo=UTC))
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["active_session"]["id"] is not None
-        assert body["latest_session"]["id"] == body["active_session"]["id"]
-        assert body["session_summary"]["sessions_count"] == 1
-        assert body["session_summary"]["runs_count"] == 2
-        assert body["session_summary"]["items_found"] == 7
-        assert body["historical_summary"]["opportunities_created"] == 3
-        chart_hits = [point for point in body["chart_points"] if point["items_found"] > 0]
-        assert [point["items_found"] for point in chart_hits] == [3, 4]
+        assert stats.active_session is not None
+        assert stats.latest_session is not None
+        assert stats.latest_session.id == stats.active_session.id
+        assert stats.session_summary.sessions_count == 1
+        assert stats.session_summary.runs_count == 2
+        assert stats.session_summary.items_found == 7
+        assert stats.historical_summary.opportunities_created == 3
+        assert stats.bucket_label == "1 h"
+        assert stats.bucket_seconds == 3600
+        chart_hits = [point for point in stats.chart_points if point.items_found > 0]
+        assert [point.items_found for point in chart_hits] == [3, 4]
+    finally:
+        cleanup_source(source_id)
+
+
+def test_monitor_stats_range_bucket_granularity() -> None:
+    cleanup_source(None)
+    now = datetime(2026, 7, 4, 12, 34, 56, tzinfo=UTC)
+    client = TestClient(app)
+    response = client.post(
+        "/api/sources",
+        json={"name": "pytest bucket monitor", "url": "https://www.vinted.es/catalog?search_text=bucket"},
+    )
+    assert response.status_code == 201
+    source_id = response.json()["id"]
+
+    try:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            session = MonitorSession(source_id=source.id, started_at=now - timedelta(minutes=30))
+            db.add(session)
+            db.flush()
+            db.add(
+                Run(
+                    source_id=source.id,
+                    monitor_session_id=session.id,
+                    status=SUCCESS,
+                    trigger="manual",
+                    started_at=now - timedelta(minutes=10),
+                    finished_at=now - timedelta(minutes=9),
+                    items_found=3,
+                    items_new=3,
+                    items_filter_passed=3,
+                    items_discarded_by_filters=0,
+                    items_filter_pending=0,
+                    opportunities_created=3,
+                    runtime_metadata={},
+                )
+            )
+            db.commit()
+
+            expected = {
+                "minutes": ("5 s", 5, 60, datetime(2026, 7, 4, 12, 30, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
+                "hours": ("5 min", 300, 12, datetime(2026, 7, 4, 11, 35, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
+                "days": ("1 h", 3600, 24, datetime(2026, 7, 3, 13, 0, tzinfo=UTC), datetime(2026, 7, 4, 13, 0, tzinfo=UTC)),
+                "month": ("1 dia", 86400, 30, datetime(2026, 6, 5, 0, 0, tzinfo=UTC), datetime(2026, 7, 5, 0, 0, tzinfo=UTC)),
+            }
+            for range_name, (bucket_label, bucket_seconds, point_count, range_start, range_end) in expected.items():
+                stats = get_monitor_stats(db, source_id, range_name=range_name, now=now)
+                assert stats.bucket_label == bucket_label
+                assert stats.bucket_seconds == bucket_seconds
+                assert stats.range_start == range_start
+                assert stats.range_end == range_end
+                assert len(stats.chart_points) == point_count
+                assert stats.chart_points[0].bucket_start == range_start
+                assert stats.chart_points[-1].bucket_end == range_end
+    finally:
+        cleanup_source(source_id)
+
+
+@pytest.mark.parametrize(
+    ("age", "bucket_label", "bucket_seconds"),
+    (
+        (timedelta(minutes=30), "5 min", 300),
+        (timedelta(hours=12), "1 h", 3600),
+        (timedelta(days=45), "1 dia", 86400),
+        (timedelta(days=120), "1 mes", None),
+    ),
+)
+def test_monitor_stats_all_range_chooses_automatic_bucket(
+    age: timedelta, bucket_label: str, bucket_seconds: int | None
+) -> None:
+    cleanup_source(None)
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    client = TestClient(app)
+    response = client.post(
+        "/api/sources",
+        json={"name": "pytest all bucket monitor", "url": f"https://www.vinted.es/catalog?search_text=all-{age.total_seconds()}"},
+    )
+    assert response.status_code == 201
+    source_id = response.json()["id"]
+
+    try:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            session = MonitorSession(source_id=source.id, started_at=now - age)
+            db.add(session)
+            db.flush()
+            db.add(
+                Run(
+                    source_id=source.id,
+                    monitor_session_id=session.id,
+                    status=SUCCESS,
+                    trigger="manual",
+                    started_at=now - age,
+                    finished_at=now - age + timedelta(minutes=1),
+                    items_found=1,
+                    items_new=1,
+                    items_filter_passed=1,
+                    items_discarded_by_filters=0,
+                    items_filter_pending=0,
+                    opportunities_created=1,
+                    runtime_metadata={},
+                )
+            )
+            db.commit()
+
+            stats = get_monitor_stats(db, source_id, range_name="all", now=now)
+
+        assert stats.bucket_label == bucket_label
+        assert stats.bucket_seconds == bucket_seconds
+        assert sum(point.items_found for point in stats.chart_points) == 1
     finally:
         cleanup_source(source_id)
 
@@ -612,6 +727,10 @@ def test_monitor_stats_uses_latest_closed_session_when_inactive() -> None:
 
         assert response.status_code == 200
         body = response.json()
+        assert body["range_start"] is not None
+        assert body["range_end"] is not None
+        assert body["bucket_label"] == "5 min"
+        assert body["bucket_seconds"] == 300
         assert body["active_session"] is None
         assert body["latest_session"]["id"] is not None
         assert body["latest_session"]["stop_reason"] == "completed"

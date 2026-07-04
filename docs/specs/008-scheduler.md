@@ -108,7 +108,10 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Active monitor cards do not show an `Ejecutar ahora` button because periodic execution is already configured.
 - Every non-archived monitor card, active or inactive, shows active-session metrics or latest-session metrics, accumulated historical metrics, and a bar chart of `items_found` by time bucket so historical and punctual runs remain visible after the monitor stops.
 - Monitor cards with no sessions yet show no session/acumulated metric rows until the first launch produces data.
-- The performance chart supports minutes, hours, days, current month, and all-history ranges.
+- The performance chart supports fixed operational ranges labeled `5 min`, `1 h`, `24 h`, `30 d`, and `Todo`.
+- Fixed performance chart ranges use deterministic buckets: last 5 minutes by 5-second bucket, last hour by 5-minute bucket, last 24 hours by 1-hour bucket, and last 30 days by 1-day bucket.
+- The all-history performance chart range uses automatic buckets: 5-minute buckets up to 1 hour of history, 1-hour buckets up to 24 hours, 1-day buckets up to 90 days, and 1-month buckets after that.
+- The performance chart labels the X axis as time and the Y axis as found items, and its tooltip shows the exact bucket interval plus found/run counts.
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
 - Inactive monitors appear below active monitors as compact cards with configuration summarized by default, always-visible historical performance, and editing available without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.

@@ -448,6 +448,22 @@
   background: #f8fafc;
 }
 
+.monitor-chart-tooltip {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d9e2ec;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #1f2933;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgb(15 23 42 / 0.12);
+  font-size: 12px;
+}
+
+.monitor-chart-tooltip strong {
+  font-size: 12px;
+}
+
 .monitor-plot-overlay {
   position: absolute;
   inset: 14px 10px 30px 34px;

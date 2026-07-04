@@ -43,11 +43,24 @@ class MonitorSessionDetails:
 @dataclass(frozen=True)
 class MonitorStats:
     range: str
+    range_start: datetime
+    range_end: datetime
+    bucket_label: str
+    bucket_seconds: int | None
     active_session: MonitorSessionDetails | None
     latest_session: MonitorSessionDetails | None
     session_summary: MonitorSummary
     historical_summary: MonitorSummary
     chart_points: list[MonitorChartPoint]
+
+
+@dataclass(frozen=True)
+class MonitorChartConfig:
+    start: datetime
+    end: datetime
+    bucket: str
+    bucket_label: str
+    bucket_seconds: int | None
 
 
 class MonitorStatsNotFoundError(ValueError):
@@ -78,14 +91,19 @@ def get_monitor_stats(db: Session, monitor_id: int, *, range_name: str = "hours"
     active_session = next((session for session in reversed(sessions) if session.stopped_at is None), None)
     latest_session = active_session or next((session for session in reversed(sessions) if session.stopped_at is not None), None)
     session_runs = [run for run in runs if latest_session is not None and run.monitor_session_id == latest_session.id]
+    chart_config = _chart_config(runs, range_name, current_time)
 
     return MonitorStats(
         range=range_name,
+        range_start=chart_config.start,
+        range_end=chart_config.end,
+        bucket_label=chart_config.bucket_label,
+        bucket_seconds=chart_config.bucket_seconds,
         active_session=_session_read(active_session, current_time),
         latest_session=_session_read(latest_session, current_time),
         session_summary=_summary(sessions=[latest_session] if latest_session is not None else [], runs=session_runs, now=current_time),
         historical_summary=_summary(sessions=sessions, runs=runs, now=current_time),
-        chart_points=_chart_points(runs, range_name, current_time),
+        chart_points=_chart_points(runs, chart_config),
     )
 
 
@@ -120,13 +138,13 @@ def _session_seconds(session: MonitorSession, now: datetime) -> int:
     return max(round((end - session.started_at).total_seconds()), 0)
 
 
-def _chart_points(runs: list[Run], range_name: str, now: datetime) -> list[MonitorChartPoint]:
-    start, bucket = _range_start_and_bucket(runs, range_name, now)
-    end = _range_end(range_name, now)
+def _chart_points(runs: list[Run], config: MonitorChartConfig) -> list[MonitorChartPoint]:
+    start = config.start
+    end = config.end
     points: list[MonitorChartPoint] = []
     current = start
     while current < end:
-        bucket_end = _add_bucket(current, bucket)
+        bucket_end = _add_bucket(current, config.bucket)
         points.append(MonitorChartPoint(bucket_start=current, bucket_end=bucket_end, items_found=0, runs_count=0))
         current = bucket_end
 
@@ -136,7 +154,7 @@ def _chart_points(runs: list[Run], range_name: str, now: datetime) -> list[Monit
     for run in runs:
         if run.started_at < start or run.started_at >= end:
             continue
-        index = _bucket_index(start, run.started_at, bucket)
+        index = _bucket_index(start, run.started_at, config.bucket)
         if index < 0 or index >= len(points):
             continue
         point = points[index]
@@ -149,32 +167,67 @@ def _chart_points(runs: list[Run], range_name: str, now: datetime) -> list[Monit
     return points
 
 
-def _range_start_and_bucket(runs: list[Run], range_name: str, now: datetime) -> tuple[datetime, str]:
+def _chart_config(runs: list[Run], range_name: str, now: datetime) -> MonitorChartConfig:
     if range_name == "minutes":
-        return _floor_minute(now - timedelta(hours=2), 5), "5m"
+        end = _floor_second(now, 5) + timedelta(seconds=5)
+        return MonitorChartConfig(
+            start=end - timedelta(minutes=5),
+            end=end,
+            bucket="5s",
+            bucket_label="5 s",
+            bucket_seconds=5,
+        )
     if range_name == "hours":
-        return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=23), "1h"
+        end = _floor_minute(now, 5) + timedelta(minutes=5)
+        return MonitorChartConfig(
+            start=end - timedelta(hours=1),
+            end=end,
+            bucket="5m",
+            bucket_label="5 min",
+            bucket_seconds=300,
+        )
     if range_name == "days":
-        return _start_of_day(now) - timedelta(days=13), "1d"
+        end = _floor_hour(now) + timedelta(hours=1)
+        return MonitorChartConfig(
+            start=end - timedelta(hours=24),
+            end=end,
+            bucket="1h",
+            bucket_label="1 h",
+            bucket_seconds=3600,
+        )
     if range_name == "month":
-        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), "1d"
+        end = _start_of_day(now) + timedelta(days=1)
+        return MonitorChartConfig(
+            start=end - timedelta(days=30),
+            end=end,
+            bucket="1d",
+            bucket_label="1 dia",
+            bucket_seconds=86400,
+        )
+
     first_run = min((run.started_at for run in runs), default=now)
-    return first_run.replace(day=1, hour=0, minute=0, second=0, microsecond=0), "1mo"
+    span = now - first_run
+    if span <= timedelta(hours=1):
+        start = _floor_minute(first_run, 5)
+        end = _floor_minute(now, 5) + timedelta(minutes=5)
+        return MonitorChartConfig(start=start, end=end, bucket="5m", bucket_label="5 min", bucket_seconds=300)
+    if span <= timedelta(hours=24):
+        start = _floor_hour(first_run)
+        end = _floor_hour(now) + timedelta(hours=1)
+        return MonitorChartConfig(start=start, end=end, bucket="1h", bucket_label="1 h", bucket_seconds=3600)
+    if span <= timedelta(days=90):
+        start = _start_of_day(first_run)
+        end = _start_of_day(now) + timedelta(days=1)
+        return MonitorChartConfig(start=start, end=end, bucket="1d", bucket_label="1 dia", bucket_seconds=86400)
 
-
-def _range_end(range_name: str, now: datetime) -> datetime:
-    if range_name == "minutes":
-        return _floor_minute(now, 5) + timedelta(minutes=5)
-    if range_name == "hours":
-        return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    if range_name == "days":
-        return _start_of_day(now) + timedelta(days=1)
-    if range_name == "month":
-        return _add_month(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
-    return _add_month(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+    start = first_run.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = _add_month(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+    return MonitorChartConfig(start=start, end=end, bucket="1mo", bucket_label="1 mes", bucket_seconds=None)
 
 
 def _bucket_index(start: datetime, value: datetime, bucket: str) -> int:
+    if bucket == "5s":
+        return int((value - start).total_seconds() // 5)
     if bucket == "5m":
         return int((value - start).total_seconds() // 300)
     if bucket == "1h":
@@ -187,6 +240,8 @@ def _bucket_index(start: datetime, value: datetime, bucket: str) -> int:
 
 
 def _add_bucket(value: datetime, bucket: str) -> datetime:
+    if bucket == "5s":
+        return value + timedelta(seconds=5)
     if bucket == "5m":
         return value + timedelta(minutes=5)
     if bucket == "1h":
@@ -206,6 +261,15 @@ def _start_of_day(value: datetime) -> datetime:
     return value.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _floor_hour(value: datetime) -> datetime:
+    return value.replace(minute=0, second=0, microsecond=0)
+
+
 def _floor_minute(value: datetime, step: int) -> datetime:
     minute = value.minute - (value.minute % step)
     return value.replace(minute=minute, second=0, microsecond=0)
+
+
+def _floor_second(value: datetime, step: int) -> datetime:
+    second = value.second - (value.second % step)
+    return value.replace(second=second, microsecond=0)
