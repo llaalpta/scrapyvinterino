@@ -1,16 +1,14 @@
 import { FileText } from 'lucide-react';
 import { useState } from 'react';
-import type { MonitorSession, Run, RunEvent } from '../../api';
+import type { Run, RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
 
 export function RunsView({
   getSourceName,
-  monitorSessions,
   runs,
   onLoadRunEvents
 }: {
   getSourceName: (sourceId: number) => string;
-  monitorSessions: MonitorSession[];
   runs: Run[];
   onLoadRunEvents: (runId: number) => Promise<RunEvent[]>;
 }) {
@@ -47,16 +45,14 @@ export function RunsView({
       ) : (
         <div className="monitor-grid">
           {runs.map((run) => {
-            const session = monitorSessions.find((entry) => entry.id === run.session_id);
             const events = eventsByRunId[run.id] ?? [];
             return (
               <article className="monitor-card" key={run.id}>
                 <div className="monitor-card-header">
                   <div>
-                    <strong>{session?.source_name ?? getSourceName(run.source_id)}</strong>
+                    <strong>{getSourceName(run.source_id)}</strong>
                     <span>
-                      Run #{run.id}
-                      {run.session_id ? ` - historico #${run.session_id}` : ''} - {run.trigger}
+                      Run #{run.id} - {run.trigger}
                     </span>
                   </div>
                   <span className={`run-status ${run.status}`}>{run.status}</span>
@@ -96,9 +92,9 @@ export function RunsView({
                   </div>
                 </dl>
                 <div className="runtime-line">
-                  <span>Proxy: {session?.proxy_name ?? proxyLabel(run.runtime_metadata)}</span>
+                  <span>Proxy: {proxyLabel(run.runtime_metadata)}</span>
                   <span>Auth: {String(run.runtime_metadata.auth_mode ?? 'public_anonymous')}</span>
-                  <span>Filtros: {String(run.runtime_metadata.filter_count ?? session?.filter_snapshot.length ?? 0)}</span>
+                  <span>Filtros: {String(run.runtime_metadata.filter_count ?? 0)}</span>
                 </div>
                 {run.error_message ? <p className="run-error">{run.error_message}</p> : null}
                 <button type="button" onClick={() => void toggleLogs(run.id)}>

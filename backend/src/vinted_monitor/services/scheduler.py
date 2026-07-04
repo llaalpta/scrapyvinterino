@@ -10,8 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings
-from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
-from vinted_monitor.services.sessions import expire_monitor_sessions
+from vinted_monitor.db.models import AppSetting, SearchSource
 
 SCHEDULER_SETTING_KEY = "scheduler"
 DEFAULT_INTERVAL_SECONDS = 300
@@ -140,17 +139,6 @@ def expire_source_monitors(db: Session, now: datetime | None = None) -> int:
     return len(expired_sources)
 
 
-def list_schedulable_sessions(db: Session) -> list[MonitorSession]:
-    expire_monitor_sessions(db)
-    statement = (
-        select(MonitorSession)
-        .join(SearchSource, SearchSource.id == MonitorSession.source_id)
-        .where(MonitorSession.status == "active", SearchSource.is_active.is_(True), SearchSource.archived_at.is_(None))
-        .order_by(MonitorSession.id.asc())
-    )
-    return list(db.scalars(statement))
-
-
 def source_config(source: SearchSource) -> SourceSchedulerConfig:
     normalized = normalize_scheduler_config(source.scheduler_config)
     return SourceSchedulerConfig(
@@ -158,16 +146,6 @@ def source_config(source: SearchSource) -> SourceSchedulerConfig:
         jitter_percent=normalized["jitter_percent"],
         allowed_windows=tuple(normalized["allowed_windows"]),
     )
-
-
-def session_config(session: MonitorSession) -> SourceSchedulerConfig:
-    normalized = normalize_scheduler_config(session.cadence_snapshot)
-    return SourceSchedulerConfig(
-        interval_seconds=normalized["interval_seconds"],
-        jitter_percent=normalized["jitter_percent"],
-        allowed_windows=tuple(normalized["allowed_windows"]),
-    )
-
 
 def is_within_allowed_windows(
     now: datetime,

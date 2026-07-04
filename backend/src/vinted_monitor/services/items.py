@@ -67,8 +67,32 @@ def get_items_by_vinted_ids(db: Session, vinted_item_ids: list[str]) -> dict[str
     }
 
 
+def get_or_persist_catalog_item(db: Session, candidate: CatalogItemCandidate) -> Item:
+    existing = db.scalar(select(Item).where(Item.vinted_item_id == candidate.vinted_item_id))
+    now = datetime.now(UTC)
+    if existing is not None:
+        _update_item(existing, candidate, now)
+        db.flush()
+        return existing
+
+    item = Item(**_item_insert_values(candidate, now))
+    db.add(item)
+    db.flush()
+    return item
+
+
+def build_transient_catalog_item(candidate: CatalogItemCandidate) -> Item:
+    return Item(**_item_insert_values(candidate, datetime.now(UTC)))
+
+
 def apply_item_detail(db: Session, item: Item, detail: CatalogItemDetail) -> None:
     now = datetime.now(UTC)
+    apply_item_detail_data(item, detail, now)
+    db.flush()
+
+
+def apply_item_detail_data(item: Item, detail: CatalogItemDetail, now: datetime | None = None) -> None:
+    resolved_now = now or datetime.now(UTC)
     item.description = detail.description
     item.color = detail.color
     item.category = detail.category
@@ -80,10 +104,9 @@ def apply_item_detail(db: Session, item: Item, detail: CatalogItemDetail) -> Non
     item.seller_badges = detail.seller_badges
     item.availability_flags = detail.availability_flags
     item.detail_raw = detail.raw
-    item.detail_last_fetched_at = now
+    item.detail_last_fetched_at = resolved_now
     item.detail_error = None
-    item.last_seen_at = now
-    db.flush()
+    item.last_seen_at = resolved_now
 
 
 def record_item_detail_error(db: Session, item: Item, message: str) -> None:

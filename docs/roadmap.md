@@ -29,19 +29,20 @@ Status values:
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 12 | not-started | Notifications | `docs/spec.md` | PWA push, Telegram, webhook, Discord, or email after web monitoring works. |
+| 12 | done | Fast opportunity pipeline with Redis seen cache | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md`, `docs/specs/007-opportunities-table.md`, `docs/specs/008-scheduler.md` | Make Redis mandatory for monitor seen state, persist only opportunities as product results, and remove seen-results/session legacy. |
+| 13 | not-started | Notifications | `docs/spec.md` | PWA push, Telegram, webhook, Discord, or email after web monitoring works. |
 
 ## Later
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 13 | not-started | Production deployment hardening | `docs/deployment.md` | Traefik and Cloudflare deployment details. |
+| 14 | not-started | Production deployment hardening | `docs/deployment.md` | Traefik and Cloudflare deployment details. |
 
 ## Future Authenticated Actions
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 14 | not-started | Authenticated actions | `docs/specs/009-authenticated-actions.md` | Favorites, checkout discovery, pre-purchase, and explicit purchase. |
+| 15 | not-started | Authenticated actions | `docs/specs/009-authenticated-actions.md` | Favorites, checkout discovery, pre-purchase, and explicit purchase. |
 
 ## Roadmap Rules
 

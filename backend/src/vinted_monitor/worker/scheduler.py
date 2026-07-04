@@ -80,7 +80,7 @@ class SchedulerRunner:
         )
         self.rng = rng or random.Random()
         self.timezone = get_scheduler_timezone(settings)
-        self.next_due_by_session_id: dict[int, datetime] = {}
+        self.next_due_by_source_id: dict[int, datetime] = {}
         self.logger = structlog.get_logger()
 
     def run_once(self, now: datetime | None = None) -> list[int]:
@@ -94,20 +94,20 @@ class SchedulerRunner:
 
             sources = list_schedulable_sources(db)
             source_ids = {source.id for source in sources}
-            self.next_due_by_session_id = {
+            self.next_due_by_source_id = {
                 source_id: due_at
-                for source_id, due_at in self.next_due_by_session_id.items()
+                for source_id, due_at in self.next_due_by_source_id.items()
                 if source_id in source_ids
             }
 
             submitted: list[int] = []
             due_sources = []
             for source in sources:
-                due_at = self.next_due_by_session_id.setdefault(source.id, source.next_run_at or current_time)
+                due_at = self.next_due_by_source_id.setdefault(source.id, source.next_run_at or current_time)
                 config = source_config(source)
                 if due_at <= current_time:
                     if not is_within_allowed_windows(current_time, config.allowed_windows, self.timezone):
-                        self.next_due_by_session_id[source.id] = next_run_after(current_time, config, self.rng, self.timezone)
+                        self.next_due_by_source_id[source.id] = next_run_after(current_time, config, self.rng, self.timezone)
                         continue
                     due_sources.append((due_at, source.id, config))
 
@@ -117,7 +117,7 @@ class SchedulerRunner:
                 if not self.executor.submit(source_id, self._run_source):
                     continue
                 next_due = next_run_after(current_time, config, self.rng, self.timezone)
-                self.next_due_by_session_id[source_id] = next_due
+                self.next_due_by_source_id[source_id] = next_due
                 source = db.get(SearchSource, source_id)
                 if source is not None:
                     source.next_run_at = next_due
@@ -131,7 +131,7 @@ class SchedulerRunner:
             try:
                 submitted = self.run_once()
                 if submitted:
-                    self.logger.info("scheduler_submitted_runs", session_ids=submitted)
+                    self.logger.info("scheduler_submitted_runs", source_ids=submitted)
             except Exception as exc:
                 self.logger.error("scheduler_loop_error", error=str(exc))
             time.sleep(max(self.settings.scheduler_poll_interval_seconds, 1))

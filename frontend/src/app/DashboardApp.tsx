@@ -1,7 +1,6 @@
 import { DashboardShell } from '../components/layout/DashboardShell';
 import { FiltersView } from '../features/filters/FiltersView';
 import { OpportunitiesView } from '../features/opportunities/OpportunitiesView';
-import { ResultsView } from '../features/results/ResultsView';
 import { RunsView } from '../features/runs/RunsView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { SourcesView } from '../features/sources/SourcesView';
@@ -20,27 +19,19 @@ export function DashboardApp() {
       onSelectSection={dashboard.selectSection}
       onToggleNav={() => dashboard.setNavCollapsed((current) => !current)}
     >
-      {dashboard.activeSection === 'results' ? (
-        <ResultsView
-          filters={dashboard.resultFilters}
-          itemPage={dashboard.itemPage}
-          loading={dashboard.loadingResults}
-          pageSize={dashboard.resultsPageSize}
-          sources={dashboard.sources}
-          onApply={() => void dashboard.loadItems(1)}
-          onApplyFilters={(filters) => void dashboard.loadItems(1, filters)}
-          onClear={dashboard.clearResultFilters}
-          onFilterChange={dashboard.updateResultFilter}
-          onPageChange={(page) => void dashboard.loadItems(page)}
-          onPageSizeChange={dashboard.changeResultsPageSize}
-        />
-      ) : null}
-
       {dashboard.activeSection === 'opportunities' ? (
         <OpportunitiesView
+          filters={dashboard.resultFilters}
           loading={dashboard.loadingOpportunities}
           opportunityPage={dashboard.opportunityPage}
+          pageSize={dashboard.opportunitiesPageSize}
+          sources={dashboard.sources}
+          onApply={() => void dashboard.loadOpportunities(1)}
+          onApplyFilters={(filters) => void dashboard.loadOpportunities(1, filters)}
+          onClear={dashboard.clearResultFilters}
+          onFilterChange={dashboard.updateResultFilter}
           onPageChange={(page) => void dashboard.loadOpportunities(page)}
+          onPageSizeChange={dashboard.changeResultsPageSize}
         />
       ) : null}
 
@@ -85,7 +76,6 @@ export function DashboardApp() {
       {dashboard.activeSection === 'runs' ? (
         <RunsView
           getSourceName={dashboard.getSourceName}
-          monitorSessions={dashboard.monitorSessions}
           runs={dashboard.runs}
           onLoadRunEvents={dashboard.onLoadRunEvents}
         />

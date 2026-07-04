@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.db.models import FilterRule, MonitorSession, ProxyProfile, SearchSource
+from vinted_monitor.db.models import FilterRule, ProxyProfile, SearchSource
 from vinted_monitor.services.scheduler import normalize_scheduler_config
 
 ALLOWED_VINTED_CATALOG_HOSTS = {"www.vinted.es", "vinted.es"}
@@ -165,12 +165,6 @@ def archive_source(db: Session, source_id: int) -> None:
     source.next_run_at = None
     source.monitor_until = None
     source.archived_at = now
-    active_sessions = db.scalars(
-        select(MonitorSession).where(MonitorSession.source_id == source_id, MonitorSession.status == "active")
-    )
-    for session in active_sessions:
-        session.status = "stopped"
-        session.stopped_at = now
     db.commit()
 
 

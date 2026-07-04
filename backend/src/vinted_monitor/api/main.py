@@ -17,10 +17,6 @@ from vinted_monitor.api.schemas import (
     FilterRuleRead,
     FilterRuleUpdate,
     ItemRead,
-    ItemResultPageRead,
-    ItemResultRead,
-    MonitorSessionCreate,
-    MonitorSessionRead,
     OpportunityResultPageRead,
     OpportunityResultRead,
     ProxyProfileCreate,
@@ -44,9 +40,7 @@ from vinted_monitor.services.browse import (
     DEFAULT_PAGE,
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
-    ItemResult,
     OpportunityResult,
-    list_item_results,
     list_opportunity_results,
 )
 from vinted_monitor.services.filters import (
@@ -67,7 +61,6 @@ from vinted_monitor.services.proxies import (
 from vinted_monitor.services.run_events import list_run_events
 from vinted_monitor.services.runs import (
     ManualRunProvider,
-    MonitorSessionRunError,
     RunAlreadyActiveError,
     SearchSourceInactiveError,
     SearchSourceNotFoundError,
@@ -87,15 +80,6 @@ from vinted_monitor.services.search_sources import (
 )
 from vinted_monitor.services.search_sources import (
     SearchSourceNotFoundError as SourceUpdateNotFoundError,
-)
-from vinted_monitor.services.sessions import (
-    MonitorSessionConflictError,
-    MonitorSessionNotFoundError,
-    MonitorSessionSourceError,
-    list_monitor_sessions,
-    run_monitor_session,
-    start_monitor_session,
-    stop_monitor_session,
 )
 
 settings = get_settings()
@@ -313,60 +297,8 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
     return ProxyProfileRead(**profile_to_public_fields(updated, settings).__dict__)
 
 
-@app.get("/api/monitor-sessions", response_model=list[MonitorSessionRead])
-def get_monitor_sessions(db: Session = Depends(get_db)) -> list[MonitorSessionRead]:
-    return [
-        MonitorSessionRead.model_validate(
-            {
-                **result.session.__dict__,
-                "source_name": result.source_name,
-                "proxy_name": result.proxy_name,
-            }
-        )
-        for result in list_monitor_sessions(db)
-    ]
-
-
-@app.post("/api/monitor-sessions", response_model=MonitorSessionRead, status_code=201)
-def post_monitor_session(payload: MonitorSessionCreate, db: Session = Depends(get_db)) -> MonitorSessionRead:
-    try:
-        session = start_monitor_session(
-            db,
-            source_id=payload.source_id,
-            filter_rule_ids=payload.filter_rule_ids,
-            proxy_profile_id=payload.proxy_profile_id,
-            duration_minutes=payload.duration_minutes,
-        )
-    except (MonitorSessionSourceError, FilterRuleNotFoundError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except MonitorSessionConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return MonitorSessionRead.model_validate({**session.__dict__, "source_name": None, "proxy_name": None})
-
-
-@app.post("/api/monitor-sessions/{session_id}/stop", response_model=MonitorSessionRead)
-def post_monitor_session_stop(session_id: int, db: Session = Depends(get_db)) -> MonitorSessionRead:
-    try:
-        session = stop_monitor_session(db, session_id)
-    except MonitorSessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return MonitorSessionRead.model_validate({**session.__dict__, "source_name": None, "proxy_name": None})
-
-
-@app.post("/api/monitor-sessions/{session_id}/runs", response_model=RunRead, status_code=201)
-def post_monitor_session_run(session_id: int, db: Session = Depends(get_db)):
-    try:
-        return run_monitor_session(db, session_id, settings=settings)
-    except MonitorSessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (MonitorSessionConflictError, RunAlreadyActiveError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except MonitorSessionRunError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.get("/api/items", response_model=ItemResultPageRead)
-def get_items(
+@app.get("/api/opportunities", response_model=OpportunityResultPageRead)
+def get_opportunities(
     page: int = Query(DEFAULT_PAGE, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     source_id: int | None = Query(None, ge=1),
@@ -374,10 +306,11 @@ def get_items(
     scraped_to: datetime | None = None,
     price_min: Decimal | None = Query(None, ge=0),
     price_max: Decimal | None = Query(None, ge=0),
+    evaluation_status: str | None = None,
     db: Session = Depends(get_db),
-) -> ItemResultPageRead:
+) -> OpportunityResultPageRead:
     try:
-        result_page = list_item_results(
+        result_page = list_opportunity_results(
             db,
             page=page,
             page_size=page_size,
@@ -386,50 +319,8 @@ def get_items(
             scraped_to=scraped_to,
             price_min=price_min,
             price_max=price_max,
+            evaluation_status=evaluation_status,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ItemResultPageRead(
-        items=[_item_result_read(item_result) for item_result in result_page.items],
-        total=result_page.total,
-        page=result_page.page,
-        page_size=result_page.page_size,
-        total_pages=result_page.total_pages,
-    )
-
-
-@app.get("/api/monitors/{monitor_id}/results", response_model=ItemResultPageRead)
-def get_monitor_results(
-    monitor_id: int,
-    page: int = Query(DEFAULT_PAGE, ge=1),
-    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
-    scraped_from: datetime | None = None,
-    scraped_to: datetime | None = None,
-    price_min: Decimal | None = Query(None, ge=0),
-    price_max: Decimal | None = Query(None, ge=0),
-    db: Session = Depends(get_db),
-) -> ItemResultPageRead:
-    return get_items(
-        page=page,
-        page_size=page_size,
-        source_id=monitor_id,
-        scraped_from=scraped_from,
-        scraped_to=scraped_to,
-        price_min=price_min,
-        price_max=price_max,
-        db=db,
-    )
-
-
-@app.get("/api/opportunities", response_model=OpportunityResultPageRead)
-def get_opportunities(
-    page: int = Query(DEFAULT_PAGE, ge=1),
-    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
-    source_id: int | None = Query(None, ge=1),
-    db: Session = Depends(get_db),
-) -> OpportunityResultPageRead:
-    try:
-        result_page = list_opportunity_results(db, page=page, page_size=page_size, source_id=source_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return OpportunityResultPageRead(
@@ -527,25 +418,12 @@ def post_action(payload: ActionRequestCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _item_result_read(result: ItemResult) -> ItemResultRead:
-    return ItemResultRead.model_validate(
-        {
-            **ItemRead.model_validate(result.item).model_dump(),
-            "last_scraped_at": result.last_scraped_at,
-            "last_scraped_source_id": result.last_scraped_source_id,
-            "last_scraped_source_name": result.last_scraped_source_name,
-            "last_run_id": result.last_run_id,
-        }
-    )
-
-
 def _opportunity_result_read(result: OpportunityResult) -> OpportunityResultRead:
     return OpportunityResultRead(
         id=result.opportunity.id,
         item=ItemRead.model_validate(result.item),
         source_id=result.opportunity.source_id,
         source_name=result.source_name,
-        session_id=result.opportunity.session_id,
         rule_id=result.opportunity.rule_id,
         status=result.opportunity.status,
         evaluation_status=result.opportunity.evaluation_status,

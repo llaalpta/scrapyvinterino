@@ -166,31 +166,6 @@ class ProxyProfileRead(BaseModel):
     last_test_error: str | None
 
 
-class MonitorSessionCreate(BaseModel):
-    source_id: int = Field(ge=1)
-    filter_rule_ids: list[int] = Field(default_factory=list)
-    proxy_profile_id: int | None = Field(default=None, ge=1)
-    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
-
-
-class MonitorSessionRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    source_id: int
-    source_name: str | None = None
-    proxy_profile_id: int | None
-    proxy_name: str | None = None
-    status: str
-    filter_snapshot: list[dict[str, Any]]
-    filter_hash: str
-    cadence_snapshot: dict[str, Any]
-    runtime_metadata: dict[str, Any]
-    started_at: datetime
-    stopped_at: datetime | None
-    auto_stop_at: datetime | None
-
-
 class ItemRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -223,27 +198,11 @@ class ItemRead(BaseModel):
     last_seen_at: datetime
 
 
-class ItemResultRead(ItemRead):
-    last_scraped_at: datetime
-    last_scraped_source_id: int
-    last_scraped_source_name: str
-    last_run_id: int
-
-
-class ItemResultPageRead(BaseModel):
-    items: list[ItemResultRead]
-    total: int
-    page: int
-    page_size: int
-    total_pages: int
-
-
 class OpportunityResultRead(BaseModel):
     id: int
     item: ItemRead
     source_id: int
     source_name: str
-    session_id: int | None
     rule_id: int | None
     status: str
     evaluation_status: str
@@ -267,7 +226,6 @@ class RunRead(BaseModel):
 
     id: int
     source_id: int
-    session_id: int | None
     status: str
     trigger: str
     started_at: datetime
@@ -287,7 +245,6 @@ class RunEventRead(BaseModel):
 
     id: int
     run_id: int | None
-    session_id: int | None
     source_id: int | None
     phase: str
     method: str | None

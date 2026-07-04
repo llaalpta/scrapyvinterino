@@ -16,7 +16,6 @@ def record_run_event(
     *,
     phase: str,
     run_id: int | None = None,
-    session_id: int | None = None,
     source_id: int | None = None,
     method: str | None = None,
     url: str | None = None,
@@ -31,7 +30,6 @@ def record_run_event(
 ) -> RunEvent:
     event = RunEvent(
         run_id=run_id,
-        session_id=session_id,
         source_id=source_id,
         phase=phase,
         method=method,

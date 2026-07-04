@@ -5,26 +5,19 @@ import {
   createSource,
   deleteSource,
   fetchFilterRules,
-  fetchItems,
-  fetchMonitorSessions,
   fetchOpportunities,
   fetchProxyProfiles,
   fetchRunEvents,
   fetchRuns,
   fetchScheduler,
   fetchSources,
-  runMonitorSession,
   runMonitor,
   startMonitor,
-  startMonitorSession,
   stopMonitor,
-  stopMonitorSession,
   testProxyProfile,
   updateScheduler,
   updateSource,
   type FilterRule,
-  type ItemResult,
-  type MonitorSession,
   type OpportunityResult,
   type Page,
   type ProxyProfile,
@@ -35,10 +28,9 @@ import {
 } from '../api';
 import { navItems } from '../app/navigation';
 import { type ProxyDraft } from '../features/settings/SettingsView';
-import { buildItemQuery, defaultFilters, type ResultFilters } from '../features/results/resultFilters';
+import { buildOpportunityQuery, defaultFilters, type ResultFilters } from '../features/results/resultFilters';
 import { buildSourceDraft, buildSourceDrafts, type SourceDraft } from '../features/sources/sourceDrafts';
 
-const emptyItemPage: Page<ItemResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
 const emptyProxyDraft: ProxyDraft = { name: '', scheme: 'http', host: '', port: '', username: '', password: '' };
 
@@ -46,8 +38,6 @@ export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [filterRules, setFilterRules] = useState<FilterRule[]>([]);
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
-  const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
-  const [itemPage, setItemPage] = useState<Page<ItemResult>>(emptyItemPage);
   const [opportunityPage, setOpportunityPage] = useState<Page<OpportunityResult>>(emptyOpportunityPage);
   const [runs, setRuns] = useState<Run[]>([]);
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
@@ -55,13 +45,12 @@ export function useDashboardController() {
   const [selectedFilterIdsBySource, setSelectedFilterIdsBySource] = useState<Record<number, number[]>>({});
   const [selectedProxyBySource, setSelectedProxyBySource] = useState<Record<number, string>>({});
   const [resultFilters, setResultFilters] = useState<ResultFilters>(defaultFilters);
-  const [resultsPageSize, setResultsPageSize] = useState(25);
+  const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
   const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
   const [savingScheduler, setSavingScheduler] = useState(false);
   const [savingFilter, setSavingFilter] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
-  const [loadingResults, setLoadingResults] = useState(false);
   const [loadingOpportunities, setLoadingOpportunities] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
@@ -69,35 +58,30 @@ export function useDashboardController() {
   const [filterName, setFilterName] = useState('');
   const [filterTerms, setFilterTerms] = useState('');
   const [proxyDraft, setProxyDraft] = useState<ProxyDraft>(emptyProxyDraft);
-  const [activeSection, setActiveSection] = useState('results');
+  const [activeSection, setActiveSection] = useState('opportunities');
   const [navCollapsed, setNavCollapsed] = useState(false);
-  const activeSession = monitorSessions.find((session) => session.status === 'active');
-  const activeTitle = useMemo(() => navItems.find((item) => item.id === activeSection)?.label ?? 'Resultados', [activeSection]);
+  const activeTitle = useMemo(() => navItems.find((item) => item.id === activeSection)?.label ?? 'Oportunidades', [activeSection]);
   const activeSubtitle = useMemo(
-    () => sectionSubtitle(activeSection, itemPage.total, opportunityPage.total, sources.length, runs.length, monitorSessions.length),
-    [activeSection, itemPage.total, opportunityPage.total, sources.length, runs.length, monitorSessions.length]
+    () => sectionSubtitle(activeSection, opportunityPage.total, sources.length, runs.length),
+    [activeSection, opportunityPage.total, sources.length, runs.length]
   );
 
   useEffect(() => {
     Promise.all([
       fetchSources(),
-      fetchItems(),
       fetchOpportunities(),
       fetchRuns(),
       fetchScheduler(),
       fetchFilterRules(),
-      fetchProxyProfiles(),
-      fetchMonitorSessions()
+      fetchProxyProfiles()
     ])
-      .then(([sourceData, itemData, opportunityData, runData, schedulerData, filterData, proxyData, sessionData]) => {
+      .then(([sourceData, opportunityData, runData, schedulerData, filterData, proxyData]) => {
         setSources(sourceData);
-        setItemPage(itemData);
         setOpportunityPage(opportunityData);
         setRuns(runData);
         setScheduler(schedulerData);
         setFilterRules(filterData);
         setProxyProfiles(proxyData);
-        setMonitorSessions(sessionData);
         setSourceDrafts(buildSourceDrafts(sourceData));
         setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
         setSelectedProxyBySource(buildSelectedProxyIds(sourceData));
@@ -108,29 +92,16 @@ export function useDashboardController() {
   }, []);
 
   async function refreshRuntime() {
-    const [opportunityData, runData, sessionData] = await Promise.all([fetchOpportunities(), fetchRuns(), fetchMonitorSessions()]);
+    const [opportunityData, runData] = await Promise.all([fetchOpportunities(), fetchRuns()]);
     setOpportunityPage(opportunityData);
     setRuns(runData);
-    setMonitorSessions(sessionData);
   }
 
-  async function loadItems(page = 1, filters = resultFilters, pageSize = resultsPageSize) {
-    setLoadingResults(true);
-    setError(null);
-    try {
-      setItemPage(await fetchItems(buildItemQuery(filters, page, pageSize)));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudieron cargar los resultados');
-    } finally {
-      setLoadingResults(false);
-    }
-  }
-
-  async function loadOpportunities(page = 1) {
+  async function loadOpportunities(page = 1, filters = resultFilters, pageSize = opportunitiesPageSize) {
     setLoadingOpportunities(true);
     setError(null);
     try {
-      setOpportunityPage(await fetchOpportunities({ page, page_size: opportunityPage.page_size }));
+      setOpportunityPage(await fetchOpportunities(buildOpportunityQuery(filters, page, pageSize)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudieron cargar las oportunidades');
     } finally {
@@ -203,44 +174,19 @@ export function useDashboardController() {
     }
   }
 
-  async function onRunSession(sessionId: number) {
-    setError(null);
-    setRunningSessionId(sessionId);
-    try {
-      const created = await runMonitorSession(sessionId);
-      const [itemData, opportunityData, runData, sessionData] = await Promise.all([
-        fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)),
-        fetchOpportunities(),
-        fetchRuns(),
-        fetchMonitorSessions()
-      ]);
-      setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
-      setItemPage(itemData);
-      setOpportunityPage(opportunityData);
-      setMonitorSessions(sessionData);
-      setActiveSection('runs');
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar la sesion');
-    } finally {
-      setRunningSessionId(null);
-    }
-  }
-
   async function onRunMonitor(sourceId: number) {
     setError(null);
     setRunningSessionId(sourceId);
     try {
       const created = await runMonitor(sourceId);
-      const [sourceData, itemData, opportunityData, runData] = await Promise.all([
+      const [sourceData, opportunityData, runData] = await Promise.all([
         fetchSources(),
-        fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)),
-        fetchOpportunities(),
+        fetchOpportunities(buildOpportunityQuery(resultFilters, 1, opportunitiesPageSize)),
         fetchRuns()
       ]);
       setSources(sourceData);
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
-      setItemPage(itemData);
       setOpportunityPage(opportunityData);
       setActiveSection('runs');
     } catch (caught) {
@@ -262,34 +208,20 @@ export function useDashboardController() {
     try {
       await saveMonitorConfig(source, draft);
       const run = await startMonitor(source.id);
-      const [sourceData, itemData, opportunityData, runData, sessionData] = await Promise.all([
+      const [sourceData, opportunityData, runData] = await Promise.all([
         fetchSources(),
-        fetchItems(buildItemQuery(resultFilters, 1, resultsPageSize)),
-        fetchOpportunities(),
-        fetchRuns(),
-        fetchMonitorSessions()
+        fetchOpportunities(buildOpportunityQuery(resultFilters, 1, opportunitiesPageSize)),
+        fetchRuns()
       ]);
       setSources(sourceData);
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
-      setItemPage(itemData);
       setOpportunityPage(opportunityData);
-      setMonitorSessions(sessionData);
       setActiveSection('runs');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
       setRunningSessionId(null);
-    }
-  }
-
-  async function onStopSession(sessionId: number) {
-    setError(null);
-    try {
-      const stopped = await stopMonitorSession(sessionId);
-      setMonitorSessions((current) => current.map((session) => (session.id === stopped.id ? stopped : session)));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo detener la sesion');
     }
   }
 
@@ -428,12 +360,12 @@ export function useDashboardController() {
 
   function clearResultFilters() {
     setResultFilters(defaultFilters);
-    void loadItems(1, defaultFilters, resultsPageSize);
+    void loadOpportunities(1, defaultFilters, opportunitiesPageSize);
   }
 
   function changeResultsPageSize(pageSize: number) {
-    setResultsPageSize(pageSize);
-    void loadItems(1, resultFilters, pageSize);
+    setOpportunitiesPageSize(pageSize);
+    void loadOpportunities(1, resultFilters, pageSize);
   }
 
   function getSourceName(sourceId: number): string {
@@ -447,7 +379,6 @@ export function useDashboardController() {
 
   return {
     activeSection,
-    activeSession,
     activeSubtitle,
     activeTitle,
     changeResultsPageSize,
@@ -457,12 +388,8 @@ export function useDashboardController() {
     filterRules,
     filterTerms,
     getSourceName,
-    itemPage,
-    loadItems,
     loadOpportunities,
     loadingOpportunities,
-    loadingResults,
-    monitorSessions,
     navCollapsed,
     onCreateFilter,
     onCreateProxy,
@@ -470,11 +397,9 @@ export function useDashboardController() {
     onDeleteSource,
     onLoadRunEvents: fetchRunEvents,
     onRunMonitor,
-    onRunSession,
     onSaveSourceSchedule,
     onStartSession,
     onStopMonitor,
-    onStopSession,
     onTestProxy,
     onToggleScheduler,
     onToggleSource,
@@ -482,7 +407,7 @@ export function useDashboardController() {
     proxyDraft,
     proxyProfiles,
     resultFilters,
-    resultsPageSize,
+    opportunitiesPageSize,
     runningSessionId,
     savingFilter,
     savingProxy,
@@ -531,14 +456,7 @@ export function useDashboardController() {
   }
 }
 
-function sectionSubtitle(
-  section: string,
-  itemTotal: number,
-  opportunityTotal: number,
-  sourceTotal: number,
-  runTotal: number,
-  sessionTotal: number
-): string {
+function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number, runTotal: number): string {
   if (section === 'opportunities') {
     return `${opportunityTotal} oportunidades`;
   }
@@ -554,7 +472,7 @@ function sectionSubtitle(
   if (section === 'filters') {
     return 'Filtros opcionales para oportunidades';
   }
-  return `${itemTotal} resultados para la consulta actual`;
+  return `${opportunityTotal} oportunidades`;
 }
 
 function buildSelectedFilterIds(sources: SearchSource[]): Record<number, number[]> {

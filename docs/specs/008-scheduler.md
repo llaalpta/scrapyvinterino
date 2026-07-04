@@ -18,9 +18,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Allow at most `2` active monitor runs globally by default.
 - Allow at most `1` active run per monitor.
 - Keep monitor execution fair so one noisy monitor cannot starve others.
-- Maintain a process-local global cache mapping `vinted_item_id -> item_id`.
-- Maintain a process-local per-monitor recent-seen cache for traceability acceleration.
-- Use caches as acceleration only after successful commits; PostgreSQL remains the source of truth for monitor visibility and item identity.
+- Require Redis for per-monitor seen state and processing locks.
+- Do not run a monitor when Redis is unavailable.
 - Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
 - Keep proxy usage optional and disabled by default.
 - Support UI-managed proxy profiles with encrypted credentials.
@@ -41,7 +40,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Worker:
   - scheduler loop;
   - bounded monitor run executor;
-  - process-local item cache;
+  - Redis seen cache client;
   - isolated provider/session factory.
 - API/PWA:
   - scheduler settings persisted in `app_settings`;
@@ -62,11 +61,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - `app_settings`;
   - `search_sources.scheduler_config`;
   - `search_sources.monitor_mode`, `duration_minutes`, `monitor_until`, `next_run_at`, `filter_rule_ids`, and `proxy_profile_id`;
-  - `monitor_sessions` only as legacy history;
   - `proxy_profiles`;
   - `runs.trigger`;
-  - `items`;
-  - `source_seen_items`;
+  - `items` for opportunity items only;
   - `errors`.
 
 ## Acceptance Criteria
@@ -83,13 +80,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
 - No more than `2` monitor runs execute at the same time by default.
 - The same active monitor never has two active runs at the same time.
-- Manual and scheduler-triggered runs share the same item identity, monitor dedupe, detail fetch, source traceability, redaction, and error behavior.
-- Runtime cache stores only safe IDs and minimal timestamps: `vinted_item_id`, `item_id`, and recent monitor visibility metadata.
-- Runtime cache never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
-- Cache hits can avoid unnecessary DB item lookups and detail fetches, but cannot create or suppress `items_new` without committed DB state.
-- Cache hits must not suppress required `source_seen_items` first/last run updates.
-- Cache entries are written or refreshed only after the owning transaction commits.
-- If the process restarts or the cache is empty, scheduler behavior remains correct by falling back to PostgreSQL.
+- Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
+- Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
+- Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
+- Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
+- If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
 - Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.
 - Proxy settings are optional; when disabled, direct requests behave exactly as in manual runs.
 - Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
@@ -103,14 +98,13 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Unit tests for next-run calculation.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
 - Unit tests for concurrency limit and per-source single-flight behavior.
-- Unit tests for cache hit, cache miss, post-commit cache update, and rollback/no-cache-update for both global and per-source caches.
-- Unit test that a cache hit still records or refreshes `source_seen_items`.
-- Unit tests confirming cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
+- Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.
+- Unit tests confirming Redis cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
 - Manual check with short interval in local Docker.
 - Confirm run records identify scheduler-triggered executions.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
-- Confirm repeated overlapping-monitor items use item identity plus monitor-scoped dedupe and do not duplicate opportunities within a monitor.
+- Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.
 - Confirm proxy disabled path uses direct provider behavior.
 - Confirm proxy disabled path passes no proxy config to the provider.
 - Confirm proxy enabled path passes configured outbound Vinted proxy to the provider without returning or logging credentials.

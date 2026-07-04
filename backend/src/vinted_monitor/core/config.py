@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     app_secret_key: str = "change-me"
     database_url: str = "postgresql+psycopg://vinted:vinted@postgres:5432/vinted_monitor"
     backend_cors_origins: str = "http://localhost:5173"
+    redis_url: str = "redis://redis:6379/0"
+    seen_cache_ttl_seconds: int = 86400
+    seen_processing_ttl_seconds: int = 120
+    seen_cache_max_per_monitor: int = 10000
 
     vinted_base_url: AnyHttpUrl = "https://www.vinted.es"
     vinted_proxy_enabled: bool = False

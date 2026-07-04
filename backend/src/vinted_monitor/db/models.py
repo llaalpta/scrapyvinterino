@@ -94,7 +94,6 @@ class Run(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
-    session_id: Mapped[int | None] = mapped_column(ForeignKey("monitor_sessions.id"))
     status: Mapped[str] = mapped_column(String(40))
     trigger: Mapped[str] = mapped_column(String(40), default="manual")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -139,64 +138,22 @@ class ProxyProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class MonitorSession(Base):
-    __tablename__ = "monitor_sessions"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
-    proxy_profile_id: Mapped[int | None] = mapped_column(ForeignKey("proxy_profiles.id"))
-    status: Mapped[str] = mapped_column(String(40), default="active")
-    filter_snapshot: Mapped[list[JsonDict]] = mapped_column(JSONB, default=list)
-    filter_hash: Mapped[str] = mapped_column(String(64))
-    cadence_snapshot: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
-    runtime_metadata: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    auto_stop_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class SessionItemState(Base):
-    __tablename__ = "session_item_state"
-    __table_args__ = (
-        UniqueConstraint("session_id", "item_id", name="uq_session_item_state_session_item"),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("monitor_sessions.id"))
-    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
-    filter_hash: Mapped[str] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(40))
-    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class SourceSeenItem(Base):
-    __tablename__ = "source_seen_items"
-
-    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"), primary_key=True)
-    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), primary_key=True)
-    first_run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"))
-    last_run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"))
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
 class Opportunity(Base):
     __tablename__ = "opportunities"
     __table_args__ = (
-        UniqueConstraint("session_id", "item_id", name="uq_opportunity_session_item"),
+        UniqueConstraint("source_id", "item_id", name="uq_opportunity_monitor_item"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
-    session_id: Mapped[int | None] = mapped_column(ForeignKey("monitor_sessions.id"))
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
     rule_id: Mapped[int | None] = mapped_column(ForeignKey("filter_rules.id"))
     status: Mapped[str] = mapped_column(String(40), default="new")
     evaluation_status: Mapped[str] = mapped_column(String(40), default="passed")
     filter_snapshot: Mapped[list[JsonDict]] = mapped_column(JSONB, default=list)
     score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    last_scraped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_id: Mapped[int | None] = mapped_column(ForeignKey("runs.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -205,7 +162,6 @@ class RunEvent(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[int | None] = mapped_column(ForeignKey("runs.id"))
-    session_id: Mapped[int | None] = mapped_column(ForeignKey("monitor_sessions.id"))
     source_id: Mapped[int | None] = mapped_column(ForeignKey("search_sources.id"))
     phase: Mapped[str] = mapped_column(String(80))
     method: Mapped[str | None] = mapped_column(String(12))

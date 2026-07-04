@@ -8,7 +8,7 @@ from math import ceil
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.db.models import Item, Opportunity, SearchSource, SourceSeenItem
+from vinted_monitor.db.models import Item, Opportunity, SearchSource
 
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 25
@@ -25,15 +25,6 @@ class Page:
 
 
 @dataclass(frozen=True)
-class ItemResult:
-    item: Item
-    last_scraped_at: datetime
-    last_scraped_source_id: int
-    last_scraped_source_name: str
-    last_run_id: int
-
-
-@dataclass(frozen=True)
 class OpportunityResult:
     opportunity: Opportunity
     item: Item
@@ -42,7 +33,7 @@ class OpportunityResult:
     last_run_id: int | None
 
 
-def list_item_results(
+def list_opportunity_results(
     db: Session,
     *,
     page: int = DEFAULT_PAGE,
@@ -52,63 +43,37 @@ def list_item_results(
     scraped_to: datetime | None = None,
     price_min: Decimal | None = None,
     price_max: Decimal | None = None,
+    evaluation_status: str | None = None,
 ) -> Page:
     _validate_page(page, page_size)
     _validate_ranges(scraped_from, scraped_to, price_min, price_max)
-
-    seen_rows = _seen_rows(source_id=source_id, scraped_from=scraped_from, scraped_to=scraped_to).subquery()
-    filtered = _filtered_item_result_statement(seen_rows, price_min=price_min, price_max=price_max)
-    total = _count_rows(db, filtered)
-    rows = db.execute(
-        filtered.order_by(seen_rows.c.last_seen_at.desc(), Item.id.desc()).offset((page - 1) * page_size).limit(page_size)
-    ).all()
-
-    return Page(
-        items=[
-            ItemResult(
-                item=row.Item,
-                last_scraped_at=row.last_seen_at,
-                last_scraped_source_id=row.source_id,
-                last_scraped_source_name=row.source_name,
-                last_run_id=row.last_run_id,
-            )
-            for row in rows
-        ],
-        total=total,
-        page=page,
-        page_size=page_size,
-        total_pages=_total_pages(total, page_size),
-    )
-
-
-def list_opportunity_results(
-    db: Session,
-    *,
-    page: int = DEFAULT_PAGE,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    source_id: int | None = None,
-) -> Page:
-    _validate_page(page, page_size)
     statement = (
         select(
             Opportunity,
             Item,
             SearchSource.name.label("source_name"),
-            SourceSeenItem.last_seen_at.label("last_scraped_at"),
-            SourceSeenItem.last_run_id.label("last_run_id"),
         )
         .join(Item, Item.id == Opportunity.item_id)
         .join(SearchSource, SearchSource.id == Opportunity.source_id)
-        .outerjoin(
-            SourceSeenItem,
-            (SourceSeenItem.source_id == Opportunity.source_id) & (SourceSeenItem.item_id == Opportunity.item_id),
-        )
     )
     if source_id is not None:
         statement = statement.where(Opportunity.source_id == source_id)
+    if scraped_from is not None:
+        statement = statement.where(Opportunity.last_scraped_at >= scraped_from)
+    if scraped_to is not None:
+        statement = statement.where(Opportunity.last_scraped_at <= scraped_to)
+    if price_min is not None:
+        statement = statement.where(Item.price_amount >= price_min)
+    if price_max is not None:
+        statement = statement.where(Item.price_amount <= price_max)
+    if evaluation_status:
+        statement = statement.where(Opportunity.evaluation_status == evaluation_status)
+
     total = _count_rows(db, statement)
     rows = db.execute(
-        statement.order_by(Opportunity.created_at.desc(), Opportunity.id.desc()).offset((page - 1) * page_size).limit(page_size)
+        statement.order_by(Opportunity.last_scraped_at.desc().nullslast(), Opportunity.created_at.desc(), Opportunity.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
     return Page(
         items=[
@@ -116,8 +81,8 @@ def list_opportunity_results(
                 opportunity=row.Opportunity,
                 item=row.Item,
                 source_name=row.source_name,
-                last_scraped_at=row.last_scraped_at,
-                last_run_id=row.last_run_id,
+                last_scraped_at=row.Opportunity.last_scraped_at,
+                last_run_id=row.Opportunity.last_run_id,
             )
             for row in rows
         ],
@@ -126,46 +91,6 @@ def list_opportunity_results(
         page_size=page_size,
         total_pages=_total_pages(total, page_size),
     )
-
-
-def _seen_rows(
-    *,
-    source_id: int | None,
-    scraped_from: datetime | None,
-    scraped_to: datetime | None,
-) -> Select:
-    statement = select(
-        SourceSeenItem.item_id,
-        SourceSeenItem.source_id,
-        SourceSeenItem.last_run_id,
-        SourceSeenItem.last_seen_at,
-    )
-    if source_id is not None:
-        statement = statement.where(SourceSeenItem.source_id == source_id)
-    if scraped_from is not None:
-        statement = statement.where(SourceSeenItem.last_seen_at >= scraped_from)
-    if scraped_to is not None:
-        statement = statement.where(SourceSeenItem.last_seen_at <= scraped_to)
-    return statement
-
-
-def _filtered_item_result_statement(latest_seen, *, price_min: Decimal | None, price_max: Decimal | None) -> Select:
-    statement = (
-        select(
-            Item,
-            latest_seen.c.source_id,
-            latest_seen.c.last_run_id,
-            latest_seen.c.last_seen_at,
-            SearchSource.name.label("source_name"),
-        )
-        .join(latest_seen, latest_seen.c.item_id == Item.id)
-        .join(SearchSource, SearchSource.id == latest_seen.c.source_id)
-    )
-    if price_min is not None:
-        statement = statement.where(Item.price_amount >= price_min)
-    if price_max is not None:
-        statement = statement.where(Item.price_amount <= price_max)
-    return statement
 
 
 def _validate_page(page: int, page_size: int) -> None:

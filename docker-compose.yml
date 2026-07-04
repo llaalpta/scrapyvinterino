@@ -15,6 +15,17 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: ./backend
@@ -23,6 +34,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-vinted}:${POSTGRES_PASSWORD:-vinted}@postgres:5432/${POSTGRES_DB:-vinted_monitor}
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -30,6 +42,8 @@ services:
       - ./backend/alembic:/app/alembic
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   worker:
@@ -40,10 +54,13 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-vinted}:${POSTGRES_PASSWORD:-vinted}@postgres:5432/${POSTGRES_DB:-vinted_monitor}
+      REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend/src:/app/src
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   frontend:

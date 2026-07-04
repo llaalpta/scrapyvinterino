@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from vinted_monitor.api.main import app
 from vinted_monitor.api.schemas import SearchSourceCreate
-from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
+from vinted_monitor.db.models import AppSetting, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
 from vinted_monitor.services.search_sources import (
@@ -222,41 +222,31 @@ def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
                 db.commit()
 
 
-def test_delete_source_api_stops_active_monitor_session() -> None:
+def test_delete_source_api_stops_active_monitor() -> None:
     client = TestClient(app)
     create_response = client.post(
         "/api/sources",
-        json={"name": "pytest archived session source", "url": "https://www.vinted.es/catalog?search_text="},
+        json={"name": "pytest archived monitor source", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
     source_id = create_response.json()["id"]
     with SessionLocal() as db:
-        session = MonitorSession(
-            source_id=source_id,
-            status="active",
-            filter_snapshot=[],
-            filter_hash="pytest-filter-hash",
-            cadence_snapshot={},
-            runtime_metadata={},
-        )
-        db.add(session)
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.is_active = True
         db.commit()
-        session_id = session.id
 
     try:
         response = client.delete(f"/api/sources/{source_id}")
         assert response.status_code == 204
 
         with SessionLocal() as db:
-            session = db.get(MonitorSession, session_id)
-            assert session is not None
-            assert session.status == "stopped"
-            assert session.stopped_at is not None
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+            assert source.archived_at is not None
     finally:
         with SessionLocal() as db:
-            session = db.get(MonitorSession, session_id)
-            if session is not None:
-                db.delete(session)
             source = db.get(SearchSource, source_id)
             if source is not None:
                 db.delete(source)
