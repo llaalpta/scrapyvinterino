@@ -219,26 +219,12 @@ function MonitorPerformancePanel({
 }) {
   const baseChartData = (stats?.chart_points ?? []).map((point) => ({
     bucketEndMs: new Date(point.bucket_end).getTime(),
+    bucketMidMs: (new Date(point.bucket_start).getTime() + new Date(point.bucket_end).getTime()) / 2,
     bucketStartMs: new Date(point.bucket_start).getTime(),
     itemsFound: point.items_found,
     runsCount: point.runs_count
   }));
-  const chartData =
-    baseChartData.length === 1
-      ? [
-          baseChartData[0],
-          {
-            bucketEndMs: baseChartData[0].bucketEndMs + (baseChartData[0].bucketEndMs - baseChartData[0].bucketStartMs),
-            bucketStartMs: baseChartData[0].bucketEndMs,
-            itemsFound: 0,
-            runsCount: 0
-          }
-        ]
-      : baseChartData;
-  const chartDomain =
-    chartData.length > 0
-      ? ([chartData[0].bucketStartMs, chartData[chartData.length - 1].bucketEndMs] as [number, number])
-      : undefined;
+  const chartData = baseChartData;
   const chartRange =
     stats !== null
       ? {
@@ -248,6 +234,7 @@ function MonitorPerformancePanel({
           rangeStartMs: new Date(stats.range_start).getTime()
         }
       : null;
+  const chartDomain = chartRange ? ([chartRange.rangeStartMs, chartRange.rangeEndMs] as [number, number]) : undefined;
   const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
   const sessionMarkerPosition =
     chartDomain && activeSessionMs !== null && activeSessionMs >= chartDomain[0] && activeSessionMs <= chartDomain[1]
@@ -359,10 +346,10 @@ class ChartErrorBoundary extends Component<{ children: ReactNode }, { hasError: 
 }
 
 const rangeOptions: Array<{ label: string; value: MonitorStatsRange }> = [
-  { label: '5 min', value: 'minutes' },
-  { label: '1 h', value: 'hours' },
-  { label: '24 h', value: 'days' },
-  { label: '30 d', value: 'month' },
+  { label: 'Minuto', value: 'minutes' },
+  { label: 'Hora', value: 'hours' },
+  { label: 'Dia', value: 'days' },
+  { label: 'Mes', value: 'month' },
   { label: 'Todo', value: 'all' }
 ];
 

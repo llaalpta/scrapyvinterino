@@ -581,10 +581,10 @@ def test_monitor_stats_range_bucket_granularity() -> None:
             db.commit()
 
             expected = {
-                "minutes": ("5 s", 5, 60, datetime(2026, 7, 4, 12, 30, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
-                "hours": ("5 min", 300, 12, datetime(2026, 7, 4, 11, 35, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
-                "days": ("1 h", 3600, 24, datetime(2026, 7, 3, 13, 0, tzinfo=UTC), datetime(2026, 7, 4, 13, 0, tzinfo=UTC)),
-                "month": ("1 dia", 86400, 30, datetime(2026, 6, 5, 0, 0, tzinfo=UTC), datetime(2026, 7, 5, 0, 0, tzinfo=UTC)),
+                "minutes": ("10 s", 10, 6, datetime(2026, 7, 4, 12, 34, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
+                "hours": ("5 min", 300, 12, datetime(2026, 7, 4, 12, 0, tzinfo=UTC), datetime(2026, 7, 4, 13, 0, tzinfo=UTC)),
+                "days": ("1 h", 3600, 24, datetime(2026, 7, 4, 0, 0, tzinfo=UTC), datetime(2026, 7, 5, 0, 0, tzinfo=UTC)),
+                "month": ("1 dia", 86400, 31, datetime(2026, 7, 1, 0, 0, tzinfo=UTC), datetime(2026, 8, 1, 0, 0, tzinfo=UTC)),
             }
             for range_name, (bucket_label, bucket_seconds, point_count, range_start, range_end) in expected.items():
                 stats = get_monitor_stats(db, source_id, range_name=range_name, now=now)

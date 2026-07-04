@@ -169,37 +169,37 @@ def _chart_points(runs: list[Run], config: MonitorChartConfig) -> list[MonitorCh
 
 def _chart_config(runs: list[Run], range_name: str, now: datetime) -> MonitorChartConfig:
     if range_name == "minutes":
-        end = _floor_second(now, 5) + timedelta(seconds=5)
+        start = _floor_minute(now, 1)
         return MonitorChartConfig(
-            start=end - timedelta(minutes=5),
-            end=end,
-            bucket="5s",
-            bucket_label="5 s",
-            bucket_seconds=5,
+            start=start,
+            end=start + timedelta(minutes=1),
+            bucket="10s",
+            bucket_label="10 s",
+            bucket_seconds=10,
         )
     if range_name == "hours":
-        end = _floor_minute(now, 5) + timedelta(minutes=5)
+        start = _floor_hour(now)
         return MonitorChartConfig(
-            start=end - timedelta(hours=1),
-            end=end,
+            start=start,
+            end=start + timedelta(hours=1),
             bucket="5m",
             bucket_label="5 min",
             bucket_seconds=300,
         )
     if range_name == "days":
-        end = _floor_hour(now) + timedelta(hours=1)
+        start = _start_of_day(now)
         return MonitorChartConfig(
-            start=end - timedelta(hours=24),
-            end=end,
+            start=start,
+            end=start + timedelta(days=1),
             bucket="1h",
             bucket_label="1 h",
             bucket_seconds=3600,
         )
     if range_name == "month":
-        end = _start_of_day(now) + timedelta(days=1)
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         return MonitorChartConfig(
-            start=end - timedelta(days=30),
-            end=end,
+            start=start,
+            end=_add_month(start),
             bucket="1d",
             bucket_label="1 dia",
             bucket_seconds=86400,
@@ -226,8 +226,8 @@ def _chart_config(runs: list[Run], range_name: str, now: datetime) -> MonitorCha
 
 
 def _bucket_index(start: datetime, value: datetime, bucket: str) -> int:
-    if bucket == "5s":
-        return int((value - start).total_seconds() // 5)
+    if bucket == "10s":
+        return int((value - start).total_seconds() // 10)
     if bucket == "5m":
         return int((value - start).total_seconds() // 300)
     if bucket == "1h":
@@ -240,8 +240,8 @@ def _bucket_index(start: datetime, value: datetime, bucket: str) -> int:
 
 
 def _add_bucket(value: datetime, bucket: str) -> datetime:
-    if bucket == "5s":
-        return value + timedelta(seconds=5)
+    if bucket == "10s":
+        return value + timedelta(seconds=10)
     if bucket == "5m":
         return value + timedelta(minutes=5)
     if bucket == "1h":
@@ -268,8 +268,3 @@ def _floor_hour(value: datetime) -> datetime:
 def _floor_minute(value: datetime, step: int) -> datetime:
     minute = value.minute - (value.minute % step)
     return value.replace(minute=minute, second=0, microsecond=0)
-
-
-def _floor_second(value: datetime, step: int) -> datetime:
-    second = value.second - (value.second % step)
-    return value.replace(second=second, microsecond=0)

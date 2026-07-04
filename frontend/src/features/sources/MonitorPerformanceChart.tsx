@@ -3,6 +3,7 @@ import type { MonitorStatsRange } from '../../api';
 
 type MonitorChartPoint = {
   bucketEndMs: number;
+  bucketMidMs: number;
   bucketStartMs: number;
   itemsFound: number;
   runsCount: number;
@@ -50,10 +51,10 @@ export default function MonitorPerformanceChart({
   return (
     <div className="monitor-chart-canvas">
       <ResponsiveContainer width="100%" height={260}>
-        <BarChart data={chartData} margin={{ top: 8, right: 14, bottom: 34, left: 22 }}>
+        <BarChart accessibilityLayer={false} barCategoryGap={0} barGap={0} data={chartData} margin={{ top: 8, right: 14, bottom: 34, left: 22 }}>
           <CartesianGrid strokeDasharray="3 3" vertical />
           <XAxis
-            dataKey="bucketStartMs"
+            dataKey="bucketMidMs"
             domain={chartDomain}
             label={{ value: xAxisLabel, position: 'insideBottom', offset: -24 }}
             tickFormatter={(value) => formatChartTick(Number(value), range, chartRange)}
@@ -90,14 +91,14 @@ function MonitorChartTooltip({
   if (!active || typeof label !== 'number') {
     return null;
   }
-  const point = chartData.find((entry) => entry.bucketStartMs === label);
+  const point = chartData.find((entry) => entry.bucketMidMs === label);
   if (!point) {
     return null;
   }
 
   return (
     <div className="monitor-chart-tooltip">
-      <strong>{formatChartTooltip(label, range, chartData)}</strong>
+      <strong>{formatChartTooltip(point, range)}</strong>
       <span>Encontrados: {point.itemsFound}</span>
       <span>Ejecuciones: {point.runsCount}</span>
     </div>
@@ -105,70 +106,94 @@ function MonitorChartTooltip({
 }
 
 function chartTicks(chartRange: MonitorChartRange, range: MonitorStatsRange): number[] {
-  const stepMs = tickStepMs(range, chartRange);
-  const ticks: number[] = [];
-  let current = alignTickStart(chartRange.rangeStartMs, stepMs);
-  if (current < chartRange.rangeStartMs) {
-    current += stepMs;
-  }
-  while (current <= chartRange.rangeEndMs) {
-    ticks.push(current);
-    current += stepMs;
-  }
-  return ticks.length > 0 ? ticks : [chartRange.rangeStartMs, chartRange.rangeEndMs];
-}
-
-function tickStepMs(range: MonitorStatsRange, chartRange: MonitorChartRange): number {
   if (range === 'minutes') {
-    return 60_000;
+    return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 10_000);
   }
   if (range === 'hours') {
-    return 15 * 60_000;
+    return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 15 * 60_000);
   }
   if (range === 'days') {
-    return 6 * 60 * 60_000;
+    return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 3 * 60 * 60_000);
   }
   if (range === 'month') {
-    return 7 * 24 * 60 * 60_000;
+    return monthTicks(chartRange.rangeStartMs, chartRange.rangeEndMs);
   }
-  if (chartRange.bucketSeconds === 300) {
-    return 15 * 60_000;
-  }
-  if (chartRange.bucketSeconds === 3600) {
-    return 6 * 60 * 60_000;
-  }
-  if (chartRange.bucketSeconds === 86400) {
-    return 14 * 24 * 60 * 60_000;
-  }
-  return 90 * 24 * 60 * 60_000;
+  return allRangeTicks(chartRange);
 }
 
-function alignTickStart(value: number, stepMs: number): number {
-  return Math.floor(value / stepMs) * stepMs;
+function steppedTicks(start: number, end: number, stepMs: number): number[] {
+  const ticks: number[] = [];
+  for (let current = start; current <= end; current += stepMs) {
+    ticks.push(current);
+  }
+  return ticks;
+}
+
+function monthTicks(start: number, end: number): number[] {
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  const days = [1, 5, 10, 15, 20, 25];
+  const ticks = days
+    .map((day) => Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), day))
+    .filter((tick) => tick >= start && tick < end);
+  ticks.push(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
+  return ticks;
+}
+
+function allRangeTicks(chartRange: MonitorChartRange): number[] {
+  if (chartRange.bucketSeconds === 300) {
+    return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 15 * 60_000);
+  }
+  if (chartRange.bucketSeconds === 3600) {
+    return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 6 * 60 * 60_000);
+  }
+  if (chartRange.bucketSeconds === 86400) {
+    return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 14 * 24 * 60 * 60_000);
+  }
+  return steppedTicks(chartRange.rangeStartMs, chartRange.rangeEndMs, 90 * 24 * 60 * 60_000);
 }
 
 function formatChartTick(value: number, range: MonitorStatsRange, chartRange: MonitorChartRange | null): string {
   const date = new Date(value);
-  if (range === 'minutes' || range === 'hours' || range === 'days') {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (range === 'minutes') {
+    if (value === chartRange?.rangeEndMs) {
+      return '60';
+    }
+    return pad2(date.getUTCSeconds());
+  }
+  if (range === 'hours') {
+    return date.getUTCMinutes() === 0 && value === chartRange?.rangeEndMs ? '60' : pad2(date.getUTCMinutes());
+  }
+  if (range === 'days') {
+    return value === chartRange?.rangeEndMs ? '24' : pad2(date.getUTCHours());
+  }
+  if (range === 'month') {
+    return String(date.getUTCDate());
   }
   if (range === 'all') {
     if (chartRange?.bucketSeconds === 300 || chartRange?.bucketSeconds === 3600) {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}`;
     }
     if (chartRange?.bucketSeconds === 86400) {
-      return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+      return `${pad2(date.getUTCDate())} ${monthShortUtc(date)}`;
     }
-    return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
+    return `${monthShortUtc(date)} ${String(date.getUTCFullYear()).slice(2)}`;
   }
-  return date.toLocaleDateString([], { day: '2-digit', month: 'short' });
+  return `${pad2(date.getUTCDate())} ${monthShortUtc(date)}`;
 }
 
-function formatChartTooltip(value: number, range: MonitorStatsRange, chartData: MonitorChartPoint[]): string {
-  const point = chartData.find((entry) => entry.bucketStartMs === value);
-  const start = new Date(value);
-  const end = point ? new Date(point.bucketEndMs) : start;
-  const bucketMs = point ? point.bucketEndMs - point.bucketStartMs : 0;
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function monthShortUtc(date: Date): string {
+  return date.toLocaleDateString([], { month: 'short', timeZone: 'UTC' });
+}
+
+function formatChartTooltip(point: MonitorChartPoint, range: MonitorStatsRange): string {
+  const start = new Date(point.bucketStartMs);
+  const end = new Date(point.bucketEndMs);
+  const bucketMs = point.bucketEndMs - point.bucketStartMs;
   if (range === 'minutes' || range === 'hours') {
     return `${start.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })} - ${end.toLocaleString([], {
       day: '2-digit',
