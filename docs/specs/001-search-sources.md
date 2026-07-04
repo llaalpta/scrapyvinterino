@@ -54,8 +54,10 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Saved monitors are visible after refresh.
 - Multiple saved monitors are shown in one compact selectable table with active monitors first, status chips/styles per row, and one selected monitor detail visible at a time.
 - The monitor detail updates when a different monitor row is selected.
+- The selected monitor detail shows name, URL, session state when available, stopped-only editable configuration, performance chart, and active logs in that order.
 - Archived monitors are hidden from the default monitor list and cannot be scheduled or launched.
 - Archiving a monitor stops it and preserves historical rows for audit and result traceability.
+- Archiving from the PWA uses an in-app confirmation dialog, not a browser alert.
 - Punctual launch executes once for testing and leaves the monitor inactive.
 - Changing a monitor URL keeps the same monitor identity and historical results.
 - The original URL is preserved unchanged except for surrounding whitespace trimming.
@@ -74,6 +76,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
   - valid monitor form submission creates a visible monitor;
   - invalid monitor form submission shows an error and does not persist.
   - selecting a compact monitor table row updates the detail panel.
+  - stopped monitor detail exposes editable configuration and archive confirmation dialog.
   - mobile monitor layout keeps the table above the detail without horizontal overflow and scrolls the selected detail into view.
 - Confirm `search_sources` row includes `url` and `normalized_query`.
 - Confirm archived monitors keep historical runs and disappear from the default PWA monitor list.

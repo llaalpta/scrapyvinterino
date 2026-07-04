@@ -242,24 +242,15 @@ function MonitorPerformancePanel({
       : null;
   const chartDomain = chartRange ? ([chartRange.rangeStartMs, chartRange.rangeEndMs] as [number, number]) : undefined;
   const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
-  const session = stats?.session_summary;
   const historical = stats?.historical_summary;
-  const visibleSession = stats?.active_session ?? stats?.latest_session ?? null;
-  const hasAnySession = (historical?.sessions_count ?? 0) > 0 || visibleSession !== null;
-  const sessionStatus = stats?.active_session ? 'Sesion activa' : 'Ultima sesion';
-  const sessionEndLabel = stats?.active_session ? 'Duracion activa' : 'Fin';
-  const sessionEndValue = stats?.active_session
-    ? formatSeconds(stats.active_session.duration_seconds)
-    : visibleSession?.stopped_at
-      ? formatDate(visibleSession.stopped_at)
-      : '-';
+  const hasAnySession = (historical?.sessions_count ?? 0) > 0 || Boolean(stats?.active_session ?? stats?.latest_session);
 
   return (
     <section className="monitor-performance">
       <div className="monitor-performance-heading">
         <div>
           <h4>Rendimiento del monitor</h4>
-          <span>{visibleSession ? `${sessionStatus} desde ${formatDate(visibleSession.started_at)}` : 'Sin sesiones registradas'}</span>
+          <span>{hasAnySession ? 'Historico acumulado y resultados por intervalo' : 'Sin sesiones registradas'}</span>
         </div>
         <div className="range-tabs" aria-label="Rango de grafica">
           {rangeOptions.map((option) => (
@@ -277,15 +268,6 @@ function MonitorPerformancePanel({
 
       {hasAnySession ? (
         <>
-          <dl className="monitor-session-strip">
-            <Metric label="Inicio" value={visibleSession ? formatDate(visibleSession.started_at) : '-'} />
-            <Metric label={sessionEndLabel} value={sessionEndValue} />
-            <Metric label="Runs sesion" value={String(session?.runs_count ?? 0)} />
-            <Metric label="Encontrados sesion" value={String(session?.items_found ?? 0)} />
-            <Metric label="Oportunidades sesion" value={String(session?.opportunities_created ?? 0)} />
-            <Metric label="Errores sesion" value={String(session?.failed_runs ?? 0)} />
-          </dl>
-
           <dl className="monitor-accumulated-strip">
             <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
             <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
@@ -316,6 +298,36 @@ function MonitorPerformancePanel({
           </div>
         </>
       ) : null}
+    </section>
+  );
+}
+
+function MonitorSessionOverview({ source, stats }: { source: SearchSource; stats: MonitorStats | null }) {
+  const session = stats?.active_session ?? stats?.latest_session ?? null;
+  const summary = stats?.session_summary ?? null;
+
+  if (!session) {
+    return null;
+  }
+
+  const isActiveSession = Boolean(stats?.active_session);
+  const endLabel = isActiveSession ? 'Duracion activa' : 'Fin';
+  const endValue = isActiveSession ? formatSeconds(session.duration_seconds) : session.stopped_at ? formatDate(session.stopped_at) : '-';
+
+  return (
+    <section className="monitor-session-panel" aria-label={isActiveSession ? 'Sesion activa' : 'Ultima sesion'}>
+      <div className="monitor-session-heading">
+        <h4>{isActiveSession ? 'Sesion activa' : 'Ultima sesion'}</h4>
+        {source.next_run_at ? <span>Proxima {formatDate(source.next_run_at)}</span> : null}
+      </div>
+      <dl className="monitor-session-strip">
+        <Metric label="Inicio" value={formatDate(session.started_at)} />
+        <Metric label={endLabel} value={endValue} />
+        <Metric label="Ejecuciones" value={String(summary?.runs_count ?? 0)} />
+        <Metric label="Encontrados" value={String(summary?.items_found ?? 0)} />
+        <Metric label="Oportunidades" value={String(summary?.opportunities_created ?? 0)} />
+        <Metric label="Errores" value={String(summary?.failed_runs ?? 0)} />
+      </dl>
     </section>
   );
 }
@@ -547,6 +559,16 @@ function MonitorDetail({
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
   updateSourceProxy: (sourceId: number, value: string) => void;
 }) {
+  const [archiveSource, setArchiveSource] = useState<SearchSource | null>(null);
+  const archiveDialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!archiveSource) {
+      return;
+    }
+    archiveDialogRef.current?.focus();
+  }, [archiveSource]);
+
   if (!source) {
     return <p className="empty-inline compact">Selecciona un monitor para ver el detalle.</p>;
   }
@@ -567,72 +589,64 @@ function MonitorDetail({
         </div>
         <div className="source-badges">
           <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
-          <span className="status active">{modeLabel(source.monitor_mode)}</span>
         </div>
       </div>
 
-      <div className="source-config-summary">
-        {(source.is_active
-          ? monitorSummary(source, filterRules, proxyProfiles)
-          : draftSummary(source, sourceDraft, selectedFilterIds, selectedProxy, filterRules, proxyProfiles)
-        ).map((entry) => (
-          <span key={entry}>{entry}</span>
-        ))}
-      </div>
+      <MonitorSessionOverview source={source} stats={stats} />
 
-      <div className="source-actions">
-        {source.is_active ? (
-          <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
-            <Square size={16} />
-            Parar sesion
-          </button>
-        ) : (
-          <>
-            <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
-              <Play size={17} />
-              Lanzar sesion
+      <section className={`monitor-config-panel${source.is_active ? ' readonly' : ''}`}>
+        <div className="monitor-config-heading">
+          <h4>Configuracion</h4>
+          {source.is_active ? <span>Deten el monitor para editarla.</span> : <span>Editable con el monitor detenido.</span>}
+        </div>
+        <MonitorConfigEditor
+          disabled={source.is_active}
+          filterRules={filterRules}
+          proxyProfiles={proxyProfiles}
+          selectedFilterIds={selectedFilterIds}
+          selectedProxy={selectedProxy}
+          source={source}
+          sourceDraft={sourceDraft}
+          toggleSourceFilter={toggleSourceFilter}
+          updateSourceDraft={updateSourceDraft}
+          updateSourceProxy={updateSourceProxy}
+        />
+        <div className="monitor-config-actions">
+          {source.is_active ? (
+            <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
+              <Square size={16} />
+              Detener sesion
             </button>
-            <button
-              type="button"
-              disabled={savingSourceId === source.id}
-              title="Archivar monitor"
-              onClick={() => {
-                if (window.confirm(`Archivar el monitor "${source.name}"? Se conservara el historico.`)) {
-                  onDeleteSource(source);
-                }
-              }}
-            >
-              <Trash2 size={16} />
-              Archivar monitor
-            </button>
-          </>
-        )}
-      </div>
+          ) : (
+            <>
+              <button type="button" disabled={savingSourceId === source.id} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
+                <Save size={16} />
+                Guardar
+              </button>
+              <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
+                <Play size={17} />
+                Lanzar sesion
+              </button>
+              <button
+                className="danger-button"
+                type="button"
+                disabled={savingSourceId === source.id}
+                title="Archivar monitor"
+                onClick={() => setArchiveSource(source)}
+              >
+                <Trash2 size={16} />
+                Archivar monitor
+              </button>
+            </>
+          )}
+        </div>
+      </section>
 
       <MonitorPerformancePanel
         range={statsRange}
         stats={stats}
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
-
-      {!source.is_active ? (
-        <section className="monitor-config-panel">
-          <h4>Configuracion</h4>
-          <MonitorConfigEditor
-            filterRules={filterRules}
-            onSaveSourceSchedule={onSaveSourceSchedule}
-            proxyProfiles={proxyProfiles}
-            savingSourceId={savingSourceId}
-            selectedFilterIds={selectedFilterIds}
-            selectedProxy={selectedProxy}
-            source={source}
-            sourceDraft={sourceDraft}
-            toggleSourceFilter={toggleSourceFilter}
-            updateSourceDraft={updateSourceDraft}
-            updateSourceProxy={updateSourceProxy}
-          />
-        </section>
-      ) : null}
 
       {source.is_active ? (
         <details className="active-monitor-logs">
@@ -646,15 +660,57 @@ function MonitorDetail({
           />
         </details>
       ) : null}
+
+      {archiveSource ? (
+        <div className="confirm-dialog-backdrop" role="presentation" onClick={() => setArchiveSource(null)}>
+          <div
+            aria-describedby="archive-monitor-description"
+            aria-labelledby="archive-monitor-title"
+            aria-modal="true"
+            className="confirm-dialog"
+            ref={archiveDialogRef}
+            role="dialog"
+            tabIndex={-1}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setArchiveSource(null);
+              }
+            }}
+          >
+            <h4 id="archive-monitor-title">Archivar monitor</h4>
+            <p id="archive-monitor-description">
+              Se archivara "{archiveSource.name}" y desaparecera de la tabla de monitores. El historico se conservara para auditoria y resultados.
+            </p>
+            <div className="confirm-dialog-actions">
+              <button type="button" onClick={() => setArchiveSource(null)}>
+                Cancelar
+              </button>
+              <button
+                className="danger-button"
+                type="button"
+                disabled={savingSourceId === archiveSource.id}
+                onClick={() => {
+                  const sourceToArchive = archiveSource;
+                  setArchiveSource(null);
+                  onDeleteSource(sourceToArchive);
+                }}
+              >
+                <Trash2 size={16} />
+                Archivar monitor
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </article>
   );
 }
 
 function MonitorConfigEditor({
+  disabled,
   filterRules,
-  onSaveSourceSchedule,
   proxyProfiles,
-  savingSourceId,
   selectedFilterIds,
   selectedProxy,
   source,
@@ -663,10 +719,9 @@ function MonitorConfigEditor({
   updateSourceDraft,
   updateSourceProxy
 }: {
+  disabled: boolean;
   filterRules: FilterRule[];
-  onSaveSourceSchedule: (source: SearchSource) => void;
   proxyProfiles: ProxyProfile[];
-  savingSourceId: number | null;
   selectedFilterIds: number[];
   selectedProxy: string;
   source: SearchSource;
@@ -679,101 +734,107 @@ function MonitorConfigEditor({
 
   return (
     <div className="monitor-config-editor">
-        <div className="source-schedule compact">
-          <label>
-            Modo
-            <select value={sourceDraft.monitorMode} onChange={(event) => updateSourceDraft(source.id, 'monitorMode', event.target.value)}>
-              <option value="manual">Puntual</option>
-              <option value="continuous">Continuo</option>
-              <option value="duration">Durante X minutos</option>
-              <option value="window">Rango horario</option>
-            </select>
-          </label>
-          {isRecurring ? (
-            <>
-              <label>
-                Intervalo
-                <input
-                  type="number"
-                  min="60"
-                  max="3600"
-                  value={sourceDraft.intervalSeconds}
-                  onChange={(event) => updateSourceDraft(source.id, 'intervalSeconds', event.target.value)}
-                />
-              </label>
-              <label>
-                Jitter
-                <input
-                  type="number"
-                  min="0"
-                  max="50"
-                  value={sourceDraft.jitterPercent}
-                  onChange={(event) => updateSourceDraft(source.id, 'jitterPercent', event.target.value)}
-                />
-              </label>
-            </>
-          ) : null}
-          {sourceDraft.monitorMode === 'window' ? (
-            <>
-              <label>
-                Inicio
-                <input
-                  type="time"
-                  value={sourceDraft.windowStart}
-                  onChange={(event) => updateSourceDraft(source.id, 'windowStart', event.target.value)}
-                />
-              </label>
-              <label>
-                Fin
-                <input
-                  type="time"
-                  value={sourceDraft.windowEnd}
-                  onChange={(event) => updateSourceDraft(source.id, 'windowEnd', event.target.value)}
-                />
-              </label>
-            </>
-          ) : null}
-          {sourceDraft.monitorMode === 'duration' ? (
+      <div className="source-schedule compact">
+        <label>
+          Modo
+          <select disabled={disabled} value={sourceDraft.monitorMode} onChange={(event) => updateSourceDraft(source.id, 'monitorMode', event.target.value)}>
+            <option value="manual">Puntual</option>
+            <option value="continuous">Continuo</option>
+            <option value="duration">Durante X minutos</option>
+            <option value="window">Rango horario</option>
+          </select>
+        </label>
+        {isRecurring ? (
+          <>
             <label>
-              Minutos
+              Intervalo
               <input
                 type="number"
-                min="1"
-                max="1440"
-                value={sourceDraft.sessionDurationMinutes}
-                onChange={(event) => updateSourceDraft(source.id, 'sessionDurationMinutes', event.target.value)}
+                min="60"
+                max="3600"
+                disabled={disabled}
+                value={sourceDraft.intervalSeconds}
+                onChange={(event) => updateSourceDraft(source.id, 'intervalSeconds', event.target.value)}
               />
             </label>
-          ) : null}
+            <label>
+              Jitter
+              <input
+                type="number"
+                min="0"
+                max="50"
+                disabled={disabled}
+                value={sourceDraft.jitterPercent}
+                onChange={(event) => updateSourceDraft(source.id, 'jitterPercent', event.target.value)}
+              />
+            </label>
+          </>
+        ) : null}
+        {sourceDraft.monitorMode === 'window' ? (
+          <>
+            <label>
+              Inicio
+              <input
+                type="time"
+                disabled={disabled}
+                value={sourceDraft.windowStart}
+                onChange={(event) => updateSourceDraft(source.id, 'windowStart', event.target.value)}
+              />
+            </label>
+            <label>
+              Fin
+              <input
+                type="time"
+                disabled={disabled}
+                value={sourceDraft.windowEnd}
+                onChange={(event) => updateSourceDraft(source.id, 'windowEnd', event.target.value)}
+              />
+            </label>
+          </>
+        ) : null}
+        {sourceDraft.monitorMode === 'duration' ? (
           <label>
-            Proxy
-            <select value={selectedProxy} onChange={(event) => updateSourceProxy(source.id, event.target.value)}>
-              <option value="">Directo / .env</option>
-              {proxyProfiles.map((proxy) => (
-                <option key={proxy.id} value={proxy.id}>
-                  {proxy.name}
-                </option>
-              ))}
-            </select>
+            Minutos
+            <input
+              type="number"
+              min="1"
+              max="1440"
+              disabled={disabled}
+              value={sourceDraft.sessionDurationMinutes}
+              onChange={(event) => updateSourceDraft(source.id, 'sessionDurationMinutes', event.target.value)}
+            />
           </label>
-          <button type="button" disabled={savingSourceId === source.id} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
-            <Save size={16} />
-            Guardar
-          </button>
-        </div>
+        ) : null}
+        <label>
+          Proxy
+          <select disabled={disabled} value={selectedProxy} onChange={(event) => updateSourceProxy(source.id, event.target.value)}>
+            <option value="">Directo / .env</option>
+            {proxyProfiles.map((proxy) => (
+              <option key={proxy.id} value={proxy.id}>
+                {proxy.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
 
-        <div className="source-filter-picker compact">
-          {filterRules.length === 0 ? (
-            <span>Sin filtros: las oportunidades se marcaran como Sin filtros.</span>
-          ) : (
-            filterRules.map((rule) => (
-              <label key={rule.id}>
-                <input type="checkbox" checked={selectedFilterIds.includes(rule.id)} onChange={() => toggleSourceFilter(source.id, rule.id)} />
-                {rule.name}
-              </label>
-            ))
-          )}
-        </div>
+      <div className="source-filter-picker compact">
+        {filterRules.length === 0 ? (
+          <span>Sin filtros: las oportunidades se marcaran como Sin filtros.</span>
+        ) : (
+          filterRules.map((rule) => (
+            <label key={rule.id}>
+              <input
+                type="checkbox"
+                checked={selectedFilterIds.includes(rule.id)}
+                disabled={disabled}
+                onChange={() => toggleSourceFilter(source.id, rule.id)}
+              />
+              {rule.name}
+            </label>
+          ))
+        )}
+      </div>
     </div>
   );
 }

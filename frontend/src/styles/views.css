@@ -281,14 +281,32 @@
 
 .monitor-config-panel {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   border-top: 1px solid #e5eaf0;
   padding-top: 12px;
 }
 
-.monitor-config-panel h4 {
+.monitor-config-panel.readonly {
+  background: transparent;
+}
+
+.monitor-config-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.monitor-config-heading h4,
+.monitor-session-heading h4 {
   color: #1f2933;
   font-size: 14px;
+}
+
+.monitor-config-heading span,
+.monitor-session-heading span {
+  color: #697586;
+  font-size: 13px;
 }
 
 .monitor-config-editor {
@@ -343,6 +361,7 @@
 
 .source-badges,
 .source-actions,
+.monitor-config-actions,
 .filter-rule-row,
 .proxy-row {
   display: flex;
@@ -369,6 +388,14 @@
   padding: 7px 9px;
   color: #1f2933;
   background: #ffffff;
+}
+
+.source-schedule input:disabled,
+.source-schedule select:disabled,
+.source-filter-picker input:disabled {
+  color: #697586;
+  background: #f8fafc;
+  cursor: not-allowed;
 }
 
 .source-filter-picker {
@@ -399,39 +426,35 @@
   margin: 0;
 }
 
-.source-config-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.source-config-summary.inactive {
-  gap: 6px;
-}
-
-.source-config-summary span {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  border: 1px solid #d8e0e7;
-  border-radius: 999px;
-  padding: 4px 9px;
-  color: #52606d;
-  font-size: 13px;
-  background: #ffffff;
-}
-
-.source-config-summary.inactive span {
-  min-height: 26px;
-  padding: 3px 8px;
-  font-size: 12px;
-}
-
-.active-monitor-activity {
+.monitor-session-panel {
   display: grid;
   gap: 10px;
   border-top: 1px solid #e5eaf0;
   padding-top: 12px;
+}
+
+.monitor-session-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.monitor-config-actions {
+  justify-content: flex-start;
+}
+
+.danger-button {
+  border-color: #f4b4b4;
+  color: #9f1c1c;
+  background: #fff5f5;
+}
+
+.danger-button:hover:not(:disabled),
+.danger-button:focus-visible {
+  border-color: #dc2626;
+  color: #7f1d1d;
+  background: #fee2e2;
 }
 
 .monitor-performance {
@@ -639,6 +662,46 @@
 .active-monitor-logs[open] {
   display: grid;
   gap: 10px;
+}
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(15 23 42 / 0.38);
+}
+
+.confirm-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(440px, 100%);
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  padding: 18px;
+  background: #ffffff;
+  box-shadow: 0 20px 48px rgb(15 23 42 / 0.22);
+}
+
+.confirm-dialog h4 {
+  color: #1f2933;
+  font-size: 16px;
+}
+
+.confirm-dialog p {
+  margin: 0;
+  color: #52606d;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .runs-list {

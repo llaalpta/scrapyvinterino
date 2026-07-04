@@ -201,6 +201,7 @@
   }
 
   .source-actions,
+  .monitor-config-actions,
   .source-badges,
   .proxy-row,
   .filter-rule-row {
@@ -209,12 +210,19 @@
   }
 
   .source-actions button,
+  .monitor-config-actions button,
+  .confirm-dialog-actions button,
   .proxy-row button {
     width: 100%;
   }
 
   .monitor-performance-heading {
     align-items: stretch;
+    flex-direction: column;
+  }
+
+  .monitor-config-heading,
+  .monitor-session-heading {
     flex-direction: column;
   }
 
