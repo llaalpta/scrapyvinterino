@@ -173,9 +173,9 @@ def _chart_config(runs: list[Run], range_name: str, now: datetime) -> MonitorCha
         return MonitorChartConfig(
             start=start,
             end=start + timedelta(minutes=1),
-            bucket="10s",
-            bucket_label="10 s",
-            bucket_seconds=10,
+            bucket="5s",
+            bucket_label="5 s",
+            bucket_seconds=5,
         )
     if range_name == "hours":
         start = _floor_hour(now)
@@ -226,6 +226,8 @@ def _chart_config(runs: list[Run], range_name: str, now: datetime) -> MonitorCha
 
 
 def _bucket_index(start: datetime, value: datetime, bucket: str) -> int:
+    if bucket == "5s":
+        return int((value - start).total_seconds() // 5)
     if bucket == "10s":
         return int((value - start).total_seconds() // 10)
     if bucket == "5m":
@@ -240,6 +242,8 @@ def _bucket_index(start: datetime, value: datetime, bucket: str) -> int:
 
 
 def _add_bucket(value: datetime, bucket: str) -> datetime:
+    if bucket == "5s":
+        return value + timedelta(seconds=5)
     if bucket == "10s":
         return value + timedelta(seconds=10)
     if bucket == "5m":

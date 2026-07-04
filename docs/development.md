@@ -65,7 +65,7 @@ Accepted structure:
 - `frontend/src/api.ts`: API types and HTTP client functions only.
 - `frontend/src/styles/`: CSS split by responsibility and imported through `styles/index.css`.
 
-Use Recharts for monitor performance charts instead of hand-built SVG charting.
+Use Recharts for monitor performance charts instead of hand-built SVG charting. Interval bars should be drawn with Recharts scales when exact `bucket_start` to `bucket_end` geometry is required, because the built-in categorical `<Bar>` width is not exact enough for time buckets. Consider migrating monitor charts to visx only if future requirements add heavier interactions such as zoom, brushing, drill-down, multi-series overlays, or range selection.
 
 Feature work should add or extend a feature module instead of growing the dashboard root. If a file starts mixing cross-feature state, feature rendering, reusable components, and formatting helpers, split it before adding more behavior.
 

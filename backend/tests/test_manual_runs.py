@@ -581,7 +581,7 @@ def test_monitor_stats_range_bucket_granularity() -> None:
             db.commit()
 
             expected = {
-                "minutes": ("10 s", 10, 6, datetime(2026, 7, 4, 12, 34, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
+                "minutes": ("5 s", 5, 12, datetime(2026, 7, 4, 12, 34, tzinfo=UTC), datetime(2026, 7, 4, 12, 35, tzinfo=UTC)),
                 "hours": ("5 min", 300, 12, datetime(2026, 7, 4, 12, 0, tzinfo=UTC), datetime(2026, 7, 4, 13, 0, tzinfo=UTC)),
                 "days": ("1 h", 3600, 24, datetime(2026, 7, 4, 0, 0, tzinfo=UTC), datetime(2026, 7, 5, 0, 0, tzinfo=UTC)),
                 "month": ("1 dia", 86400, 31, datetime(2026, 7, 1, 0, 0, tzinfo=UTC), datetime(2026, 8, 1, 0, 0, tzinfo=UTC)),

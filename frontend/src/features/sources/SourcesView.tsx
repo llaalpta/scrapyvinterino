@@ -219,7 +219,6 @@ function MonitorPerformancePanel({
 }) {
   const baseChartData = (stats?.chart_points ?? []).map((point) => ({
     bucketEndMs: new Date(point.bucket_end).getTime(),
-    bucketMidMs: (new Date(point.bucket_start).getTime() + new Date(point.bucket_end).getTime()) / 2,
     bucketStartMs: new Date(point.bucket_start).getTime(),
     itemsFound: point.items_found,
     runsCount: point.runs_count
@@ -236,12 +235,6 @@ function MonitorPerformancePanel({
       : null;
   const chartDomain = chartRange ? ([chartRange.rangeStartMs, chartRange.rangeEndMs] as [number, number]) : undefined;
   const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
-  const sessionMarkerPosition =
-    chartDomain && activeSessionMs !== null && activeSessionMs >= chartDomain[0] && activeSessionMs <= chartDomain[1]
-      ? (activeSessionMs - chartDomain[0]) / (chartDomain[1] - chartDomain[0])
-      : null;
-  const sessionMarkerClass =
-    sessionMarkerPosition !== null && sessionMarkerPosition > 0.86 ? 'monitor-session-marker align-left' : 'monitor-session-marker';
   const session = stats?.session_summary;
   const historical = stats?.historical_summary;
   const visibleSession = stats?.active_session ?? stats?.latest_session ?? null;
@@ -308,8 +301,7 @@ function MonitorPerformancePanel({
                     chartDomain={chartDomain}
                     chartRange={chartRange}
                     range={range}
-                    sessionMarkerClass={sessionMarkerClass}
-                    sessionMarkerPosition={sessionMarkerPosition}
+                    sessionStartedAtMs={activeSessionMs}
                   />
                 </Suspense>
               </ChartErrorBoundary>

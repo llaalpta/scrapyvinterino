@@ -442,6 +442,27 @@
   height: 260px;
 }
 
+.monitor-chart-legend {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #52606d;
+  font-size: 12px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.monitor-chart-legend span {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #2f7d6d;
+}
+
 .monitor-chart-loading {
   height: 260px;
   border-radius: 6px;
@@ -449,6 +470,8 @@
 }
 
 .monitor-chart-tooltip {
+  position: absolute;
+  z-index: 3;
   display: grid;
   gap: 4px;
   border: 1px solid #d9e2ec;
@@ -458,38 +481,48 @@
   background: #ffffff;
   box-shadow: 0 10px 22px rgb(15 23 42 / 0.12);
   font-size: 12px;
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 10px));
+}
+
+.monitor-chart-tooltip.align-left {
+  transform: translate(calc(-100% + 8px), calc(-100% - 10px));
+}
+
+.monitor-chart-tooltip.align-right {
+  transform: translate(-8px, calc(-100% - 10px));
 }
 
 .monitor-chart-tooltip strong {
   font-size: 12px;
 }
 
-.monitor-plot-overlay {
-  position: absolute;
-  inset: 14px 10px 30px 34px;
-  pointer-events: none;
+.monitor-chart-bucket-boundary {
+  stroke: #dbe4ee;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
 }
 
-.monitor-session-marker {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  border-left: 2px solid #ef4444;
+.monitor-interval-bar {
+  fill: #2f7d6d;
+  shape-rendering: crispEdges;
 }
 
-.monitor-session-marker span {
-  position: absolute;
-  top: 0;
-  left: 6px;
-  color: #b42318;
+.monitor-interval-hit-area {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.monitor-session-marker-svg line {
+  stroke: #ef4444;
+  stroke-width: 2;
+  shape-rendering: crispEdges;
+}
+
+.monitor-session-marker-svg text {
+  fill: #b42318;
   font-size: 11px;
   font-weight: 700;
-  white-space: nowrap;
-}
-
-.monitor-session-marker.align-left span {
-  right: 6px;
-  left: auto;
 }
 
 .active-monitor-logs {
