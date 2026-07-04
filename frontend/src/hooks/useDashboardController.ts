@@ -202,16 +202,11 @@ export function useDashboardController() {
 
   async function onStartSession(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    const durationMinutes = Number(draft.sessionDurationMinutes);
-    if (draft.monitorMode === 'duration' && (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 1440)) {
-      setError('La duracion del monitor debe estar entre 1 y 1440 minutos');
-      return;
-    }
     setError(null);
     setRunningSessionId(source.id);
     try {
       await saveMonitorConfig(source, draft);
-      const run = await startMonitor(source.id);
+      const run = draft.monitorMode === 'manual' ? await runMonitor(source.id) : await startMonitor(source.id);
       const [sourceData, opportunityData, runData] = await Promise.all([
         fetchSources(),
         fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)),
@@ -301,15 +296,10 @@ export function useDashboardController() {
 
   async function onSaveSourceSchedule(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    const allowedWindows = draft.monitorMode === 'window' ? buildAllowedWindows(draft) : [];
-    if (allowedWindows === null) {
-      setError('Configura hora de inicio y hora de fin, o deja ambas vacias');
-      return;
-    }
     setError(null);
     setSavingSourceId(source.id);
     try {
-      const updated = await saveMonitorConfig(source, draft, allowedWindows);
+      const updated = await saveMonitorConfig(source, draft);
       replaceSource(updated);
       setSourceDrafts((current) => ({
         ...current,
@@ -441,14 +431,20 @@ export function useDashboardController() {
   async function saveMonitorConfig(source: SearchSource, draft: SourceDraft, precomputedAllowedWindows?: string[] | null) {
     const allowedWindows = precomputedAllowedWindows ?? (draft.monitorMode === 'window' ? buildAllowedWindows(draft) : []);
     if (allowedWindows === null) {
-      throw new Error('Configura hora de inicio y hora de fin, o deja ambas vacias');
+      throw new Error('Configura una hora de inicio y fin validas');
     }
-    const intervalSeconds = Number(draft.intervalSeconds);
-    const jitterPercent = Number(draft.jitterPercent);
-    const durationMinutes = Number(draft.sessionDurationMinutes);
+    const isRecurring = draft.monitorMode !== 'manual';
+    const intervalSeconds = isRecurring
+      ? parseIntegerInRange(draft.intervalSeconds, 'El intervalo', 60, 3600)
+      : (source.scheduler_config.interval_seconds ?? 300);
+    const jitterPercent = isRecurring
+      ? parseIntegerInRange(draft.jitterPercent, 'El jitter', 0, 50)
+      : (source.scheduler_config.jitter_percent ?? 20);
+    const durationMinutes =
+      draft.monitorMode === 'duration' ? parseIntegerInRange(draft.sessionDurationMinutes, 'La duracion del monitor', 1, 1440) : null;
     return updateSource(source.id, {
       monitor_mode: draft.monitorMode,
-      duration_minutes: draft.monitorMode === 'duration' ? durationMinutes : source.duration_minutes,
+      duration_minutes: durationMinutes,
       filter_rule_ids: selectedFilterIdsBySource[source.id] ?? [],
       proxy_profile_id: selectedProxyBySource[source.id] ? Number(selectedProxyBySource[source.id]) : null,
       scheduler_config: {
@@ -495,8 +491,27 @@ function buildAllowedWindows(draft: SourceDraft): string[] | null {
   if (!start && !end) {
     return [];
   }
-  if (!start || !end) {
+  if (!isValidTimeInput(start) || !isValidTimeInput(end) || start === end) {
     return null;
   }
   return [`${start}-${end}`];
+}
+
+function parseIntegerInRange(value: string, label: string, minimum: number, maximum: number): number {
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`${label} debe ser un numero entero entre ${minimum} y ${maximum}`);
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label} debe estar entre ${minimum} y ${maximum}`);
+  }
+  return parsed;
+}
+
+function isValidTimeInput(value: string): boolean {
+  if (!/^\d{2}:\d{2}$/.test(value)) {
+    return false;
+  }
+  const [hours, minutes] = value.split(':').map(Number);
+  return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
 }

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from vinted_monitor.api.main import app, get_manual_run_provider
 from vinted_monitor.db.models import ErrorLog, FilterRule, Item, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.filters import create_filter_rule
-from vinted_monitor.services.runs import FAILED, SUCCESS, execute_monitor_run
+from vinted_monitor.services.runs import FAILED, SUCCESS, SearchSourceInactiveError, execute_manual_run, execute_monitor_run
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 
 
@@ -183,6 +186,113 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         assert item_count == 2
         assert opportunity_count == 2
         assert sorted(cache.marked_seen) == ["pytest-run-item-0", "pytest-run-item-1"]
+
+
+def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.is_active = False
+        source.monitor_mode = "manual"
+        source.monitor_started_at = datetime(2026, 7, 4, 8, 0, tzinfo=UTC)
+        source.monitor_until = datetime(2026, 7, 4, 9, 0, tzinfo=UTC)
+        source.next_run_at = datetime(2026, 7, 4, 8, 5, tzinfo=UTC)
+        db.commit()
+
+    with SessionLocal() as db:
+        run = execute_manual_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache())
+        source = db.get(SearchSource, source_id)
+
+        assert run.status == SUCCESS
+        assert source is not None
+        assert source.is_active is False
+        assert source.monitor_started_at is None
+        assert source.monitor_until is None
+        assert source.next_run_at is None
+        assert source.last_run_at == run.finished_at
+
+
+def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.is_active = False
+        db.commit()
+
+    with SessionLocal() as db:
+        with pytest.raises(SearchSourceInactiveError):
+            execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache())
+
+
+def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api manual monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+            filter_rule_ids=[],
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    try:
+        response = client.post(f"/api/monitors/{source_id}/runs")
+
+        assert response.status_code == 201
+        assert response.json()["status"] == SUCCESS
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+            assert source.monitor_until is None
+            assert source.next_run_at is None
+    finally:
+        app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api manual start monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+            filter_rule_ids=[],
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    try:
+        response = client.post(f"/api/monitors/{source_id}/start")
+
+        assert response.status_code == 201
+        assert response.json()["status"] == SUCCESS
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+            assert source.monitor_started_at is None
+            assert source.monitor_until is None
+            assert source.next_run_at is None
+    finally:
+        app.dependency_overrides.clear()
+        cleanup_source(source_id)
 
 
 def test_seen_cache_hit_skips_detail_and_database_writes(source_id: int) -> None:

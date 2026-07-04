@@ -186,6 +186,47 @@ def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -
                 db.commit()
 
 
+def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/sources",
+        json={"name": "pytest duration cleanup source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        duration_response = client.patch(
+            f"/api/sources/{source_id}",
+            json={
+                "monitor_mode": "duration",
+                "duration_minutes": 15,
+                "scheduler_config": {"interval_seconds": 120, "jitter_percent": 10, "allowed_windows": []},
+            },
+        )
+        assert duration_response.status_code == 200
+        assert duration_response.json()["duration_minutes"] == 15
+
+        manual_response = client.patch(
+            f"/api/sources/{source_id}",
+            json={"monitor_mode": "manual", "duration_minutes": None},
+        )
+
+        assert manual_response.status_code == 200
+        assert manual_response.json()["monitor_mode"] == "manual"
+        assert manual_response.json()["duration_minutes"] is None
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.duration_minutes is None
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
 def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
     client = TestClient(app)
     create_response = client.post(

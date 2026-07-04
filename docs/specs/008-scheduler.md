@@ -7,8 +7,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 ## Scope
 
 - Enable or disable scheduler globally.
-- Enable, pause, stop, or archive each monitor.
-- Start and stop monitor execution using the monitor's current filters, cadence, duration/window mode, and optional proxy profile.
+- Enable, stop, or archive each monitor.
+- Treat inactive monitors as configured but not launched; active monitors are launched for recurring execution.
+- Treat running/executing as run state, not as persistent monitor state.
+- Start and stop recurring monitor execution using the monitor's current filters, cadence, duration/window mode, and optional proxy profile.
+- Allow punctual/manual monitor execution from an inactive monitor for testing without activating scheduler state.
 - Start a monitor for a bounded duration from now, with `monitor_until` stored on the monitor.
 - Configure interval seconds per monitor, default `300`, minimum `60`, maximum `3600`.
 - Add jitter/randomization between runs, default `20%`, minimum `0%`, maximum `50%`.
@@ -44,7 +47,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - isolated provider/session factory.
 - API/PWA:
   - scheduler settings persisted in `app_settings`;
-  - monitor pause/start/stop/archive controls;
+  - monitor inactive/start/stop/archive controls;
   - proxy profile controls.
 - Configuration:
   - deployment scheduler enable flag in `.env` as an operational gate;
@@ -69,11 +72,14 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 ## Acceptance Criteria
 
 - Scheduler can be disabled completely.
-- A monitor can be paused without deleting it.
+- A monitor can be stopped without deleting it.
+- A new monitor is inactive until launched.
+- Punctual/manual execution can run from inactive state and returns to inactive state after the run.
 - Runs are not triggered outside configured local-time windows.
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
-- Launching a bounded monitor from the PWA stores the config and immediately executes one run.
+- Launching a recurring monitor from the PWA stores the config, marks it active, and immediately executes one run.
+- The scheduler only considers active recurring monitors.
 - Expired active monitors are stopped before scheduler planning.
 - Jitter prevents fixed exact polling intervals.
 - Scheduler failures are logged without stopping the worker.

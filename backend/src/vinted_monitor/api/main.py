@@ -32,7 +32,7 @@ from vinted_monitor.api.schemas import (
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.db.models import RunEvent
+from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal, get_db
 from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
 from vinted_monitor.services.actions import create_action_request
@@ -137,6 +137,7 @@ def patch_source(source_id: int, payload: SearchSourceUpdate, db: Session = Depe
             scheduler_config=payload.scheduler_config,
             monitor_mode=payload.monitor_mode,
             duration_minutes=payload.duration_minutes,
+            clear_duration_minutes="duration_minutes" in payload.model_fields_set and payload.duration_minutes is None,
             filter_rule_ids=payload.filter_rule_ids,
             proxy_profile_id=payload.proxy_profile_id,
             clear_proxy_profile="proxy_profile_id" in payload.model_fields_set and payload.proxy_profile_id is None,
@@ -175,17 +176,17 @@ def post_monitor_start(
     provider: ManualRunProvider = Depends(get_manual_run_provider),
 ):
     try:
+        source = db.get(SearchSource, monitor_id)
+        if source is not None and source.monitor_mode == "manual":
+            return execute_manual_run(db, monitor_id, provider=provider)
         source = start_source_monitor(db, monitor_id)
         run = execute_monitor_run(db, monitor_id, provider=provider)
-        if source.monitor_mode == "manual":
-            stop_source_monitor(db, monitor_id)
-        else:
-            refreshed = db.get(type(source), monitor_id)
-            if refreshed is not None:
-                refreshed.next_run_at = next_run_after(run.finished_at or run.started_at, source_config(refreshed))
-                db.commit()
+        refreshed = db.get(type(source), monitor_id)
+        if refreshed is not None:
+            refreshed.next_run_at = next_run_after(run.finished_at or run.started_at, source_config(refreshed))
+            db.commit()
         return run
-    except SourceUpdateNotFoundError as exc:
+    except (SearchSourceNotFoundError, SourceUpdateNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -384,7 +385,7 @@ def post_monitor_run(
     provider: ManualRunProvider = Depends(get_manual_run_provider),
 ):
     try:
-        return execute_monitor_run(db, monitor_id, provider=provider)
+        return execute_manual_run(db, monitor_id, provider=provider)
     except SearchSourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:

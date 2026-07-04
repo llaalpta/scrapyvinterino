@@ -78,7 +78,7 @@ export function SourcesView({
                     </a>
                   </div>
                   <div className="source-badges">
-                    <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Pausado'}</span>
+                    <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
                     <span className="status active">{modeLabel(source.monitor_mode)}</span>
                   </div>
                 </div>
@@ -185,7 +185,7 @@ export function SourcesView({
 
                 {source.is_active || source.last_run_at ? (
                   <p className="source-session-line">
-                    {source.is_active ? `Activo desde ${source.monitor_started_at ? formatDate(source.monitor_started_at) : 'ahora'}` : 'Pausado'}
+                    {source.is_active ? `Activo desde ${source.monitor_started_at ? formatDate(source.monitor_started_at) : 'ahora'}` : 'Inactivo'}
                     {source.monitor_until ? ` hasta ${formatDate(source.monitor_until)}` : ''}
                     {source.last_run_at ? ` - ultima consulta ${formatDate(source.last_run_at)}` : ''}
                   </p>
@@ -206,7 +206,7 @@ export function SourcesView({
                   ) : (
                     <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
                       <Play size={17} />
-                      {draft.monitorMode === 'manual' ? 'Lanzar puntual' : 'Activar monitor'}
+                      {draft.monitorMode === 'manual' ? 'Ejecutar prueba' : 'Activar monitor'}
                     </button>
                   )}
                   <button

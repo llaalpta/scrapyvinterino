@@ -9,7 +9,8 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Create an opportunity monitor with a display name and original Vinted catalog URL.
 - List configured monitors through API and PWA.
 - Store a normalized representation of query parameters.
-- Keep new monitors paused until the user launches them.
+- Keep new monitors inactive until the user launches them.
+- Treat active/inactive as monitor scheduling state; executing/running belongs to individual runs.
 - Validate that the URL is an anonymous public Vinted catalog URL before saving it.
 - Archive monitors from the PWA as the safe delete behavior while preserving historical runs, seen items, and opportunities.
 - Allow monitor URL, filters, cadence, proxy, and execution mode to change without creating a new monitor identity.
@@ -52,7 +53,8 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - A valid Vinted catalog URL can be saved with a name.
 - Saved monitors are visible after refresh.
 - Archived monitors are hidden from the default monitor list and cannot be scheduled or launched.
-- Archiving a monitor pauses it and preserves historical rows for audit and result traceability.
+- Archiving a monitor stops it and preserves historical rows for audit and result traceability.
+- Punctual launch executes once for testing and leaves the monitor inactive.
 - Changing a monitor URL keeps the same monitor identity and historical results.
 - The original URL is preserved unchanged except for surrounding whitespace trimming.
 - Query parameters are stored in normalized JSON.

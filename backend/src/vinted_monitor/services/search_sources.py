@@ -83,6 +83,7 @@ def update_source(
     scheduler_config: dict | None = None,
     monitor_mode: str | None = None,
     duration_minutes: int | None = None,
+    clear_duration_minutes: bool = False,
     filter_rule_ids: list[int] | None = None,
     proxy_profile_id: int | None = None,
     clear_proxy_profile: bool = False,
@@ -109,6 +110,8 @@ def update_source(
         if duration_minutes < 1 or duration_minutes > 1440:
             raise SearchSourceConfigError("duration_minutes must be between 1 and 1440")
         source.duration_minutes = duration_minutes
+    elif clear_duration_minutes:
+        source.duration_minutes = None
     if filter_rule_ids is not None:
         source.filter_rule_ids = _validate_filter_rule_ids(db, filter_rule_ids)
     if clear_proxy_profile:

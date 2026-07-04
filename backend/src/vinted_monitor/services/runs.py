@@ -64,7 +64,7 @@ def execute_manual_run(
     provider: ManualRunProvider | None = None,
     seen_cache: SeenCache | None = None,
 ) -> Run:
-    return execute_monitor_run(db, source_id, provider=provider, trigger=MANUAL_TRIGGER, seen_cache=seen_cache)
+    return execute_monitor_run(db, source_id, provider=provider, trigger=MANUAL_TRIGGER, seen_cache=seen_cache, require_active=False)
 
 
 def execute_monitor_run(
@@ -73,11 +73,12 @@ def execute_monitor_run(
     provider: ManualRunProvider | None = None,
     trigger: str = MANUAL_TRIGGER,
     seen_cache: SeenCache | None = None,
+    require_active: bool = True,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
-    if not source.is_active:
+    if require_active and not source.is_active:
         raise SearchSourceInactiveError(f"Search source {source_id} is inactive")
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
@@ -170,6 +171,7 @@ def execute_monitor_run(
         run.opportunities_created = monitor_result["opportunities_created"]
         run.error_message = None
         source.last_run_at = run.finished_at
+        _clear_manual_monitor_runtime(source)
         db.commit()
         cache.mark_seen(source.id, policy_hash, processed_ids)
         db.refresh(run)
@@ -256,6 +258,7 @@ def _record_failed_run(
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
     run.error_message = message
+    _clear_manual_monitor_runtime(source)
     db.add(
         ErrorLog(
             run_id=run.id,
@@ -268,6 +271,15 @@ def _record_failed_run(
     db.commit()
     db.refresh(run)
     return run
+
+
+def _clear_manual_monitor_runtime(source: SearchSource) -> None:
+    if source.monitor_mode != "manual":
+        return
+    source.is_active = False
+    source.monitor_started_at = None
+    source.monitor_until = None
+    source.next_run_at = None
 
 
 def _evaluate_monitor_candidates(
