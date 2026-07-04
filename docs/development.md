@@ -16,6 +16,19 @@ copy .env.example .env
 docker compose up --build
 ```
 
+## Base de Datos Local
+
+La base de datos local es descartable mientras el producto siga en desarrollo puro. No hay datos reales que conservar.
+
+Para regenerar el esquema desde cero:
+
+```powershell
+docker compose down -v
+docker compose up -d --build
+```
+
+Las migraciones Alembic pueden compactarse o romper compatibilidad con datos locales anteriores cuando el cambio simplifique el modelo.
+
 ## Puertos
 
 - `5173`: frontend Vite.
@@ -30,7 +43,7 @@ Accepted structure:
 
 - `frontend/src/app/`: dashboard-level composition and navigation metadata.
 - `frontend/src/components/`: reusable UI pieces shared by multiple features, such as pagination, item cells, row actions, and layout shells.
-- `frontend/src/features/<feature>/`: feature-owned views and helpers. Current feature folders include `results`, `opportunities`, `sources`, `runs`, and `settings`.
+- `frontend/src/features/<feature>/`: feature-owned views and helpers. Current feature folders include `opportunities`, `sources`, `runs`, and `settings`.
 - `frontend/src/hooks/`: reusable React state orchestration hooks, including dashboard controllers that coordinate API calls and feature state.
 - `frontend/src/utils/`: generic formatting and pure helpers that do not know about feature state.
 - `frontend/src/api.ts`: API types and HTTP client functions only.
@@ -43,7 +56,7 @@ Feature work should add or extend a feature module instead of growing the dashbo
 - The app root remains a thin wrapper.
 - Dashboard state orchestration is separated from layout rendering.
 - Cross-feature dashboard state is extracted into a hook instead of living directly in the composition component.
-- Results, opportunities, sources, runs, and settings have feature-owned view modules.
+- Opportunities, sources, runs, and settings have feature-owned view modules.
 - Shared item rendering, row actions, and pagination are reusable components.
 - CSS is imported from `styles/index.css` and split into focused files.
 - Existing desktop and mobile dashboard behavior remains unchanged.

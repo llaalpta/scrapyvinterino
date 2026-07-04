@@ -27,8 +27,12 @@ import {
   type SearchSource
 } from '../api';
 import { navItems } from '../app/navigation';
+import {
+  buildOpportunityQuery,
+  defaultOpportunityFilters,
+  type OpportunityFilters
+} from '../features/opportunities/opportunityFilters';
 import { type ProxyDraft } from '../features/settings/SettingsView';
-import { buildOpportunityQuery, defaultFilters, type ResultFilters } from '../features/results/resultFilters';
 import { buildSourceDraft, buildSourceDrafts, type SourceDraft } from '../features/sources/sourceDrafts';
 
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
@@ -44,7 +48,7 @@ export function useDashboardController() {
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [selectedFilterIdsBySource, setSelectedFilterIdsBySource] = useState<Record<number, number[]>>({});
   const [selectedProxyBySource, setSelectedProxyBySource] = useState<Record<number, string>>({});
-  const [resultFilters, setResultFilters] = useState<ResultFilters>(defaultFilters);
+  const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
   const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
@@ -97,7 +101,7 @@ export function useDashboardController() {
     setRuns(runData);
   }
 
-  async function loadOpportunities(page = 1, filters = resultFilters, pageSize = opportunitiesPageSize) {
+  async function loadOpportunities(page = 1, filters = opportunityFilters, pageSize = opportunitiesPageSize) {
     setLoadingOpportunities(true);
     setError(null);
     try {
@@ -181,7 +185,7 @@ export function useDashboardController() {
       const created = await runMonitor(sourceId);
       const [sourceData, opportunityData, runData] = await Promise.all([
         fetchSources(),
-        fetchOpportunities(buildOpportunityQuery(resultFilters, 1, opportunitiesPageSize)),
+        fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)),
         fetchRuns()
       ]);
       setSources(sourceData);
@@ -210,7 +214,7 @@ export function useDashboardController() {
       const run = await startMonitor(source.id);
       const [sourceData, opportunityData, runData] = await Promise.all([
         fetchSources(),
-        fetchOpportunities(buildOpportunityQuery(resultFilters, 1, opportunitiesPageSize)),
+        fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)),
         fetchRuns()
       ]);
       setSources(sourceData);
@@ -354,18 +358,18 @@ export function useDashboardController() {
     });
   }
 
-  function updateResultFilter(field: keyof ResultFilters, value: string) {
-    setResultFilters((current) => ({ ...current, [field]: value }));
+  function updateOpportunityFilter(field: keyof OpportunityFilters, value: string) {
+    setOpportunityFilters((current) => ({ ...current, [field]: value }));
   }
 
-  function clearResultFilters() {
-    setResultFilters(defaultFilters);
-    void loadOpportunities(1, defaultFilters, opportunitiesPageSize);
+  function clearOpportunityFilters() {
+    setOpportunityFilters(defaultOpportunityFilters);
+    void loadOpportunities(1, defaultOpportunityFilters, opportunitiesPageSize);
   }
 
   function changeResultsPageSize(pageSize: number) {
     setOpportunitiesPageSize(pageSize);
-    void loadOpportunities(1, resultFilters, pageSize);
+    void loadOpportunities(1, opportunityFilters, pageSize);
   }
 
   function getSourceName(sourceId: number): string {
@@ -382,7 +386,7 @@ export function useDashboardController() {
     activeSubtitle,
     activeTitle,
     changeResultsPageSize,
-    clearResultFilters,
+    clearOpportunityFilters,
     error,
     filterName,
     filterRules,
@@ -406,7 +410,7 @@ export function useDashboardController() {
     opportunityPage,
     proxyDraft,
     proxyProfiles,
-    resultFilters,
+    opportunityFilters,
     opportunitiesPageSize,
     runningSessionId,
     savingFilter,
@@ -429,7 +433,7 @@ export function useDashboardController() {
     sourceUrl,
     runs,
     toggleSourceFilter,
-    updateResultFilter,
+    updateOpportunityFilter,
     updateSourceDraft,
     updateSourceProxy
   };

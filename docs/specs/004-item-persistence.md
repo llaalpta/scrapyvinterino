@@ -4,22 +4,23 @@
 
 Persist public Vinted catalog items in a normalized format while preserving useful raw data for future parser changes.
 
+This spec is historical. Current monitor execution persists `items` only for candidates that become opportunities; Redis owns seen-state dedupe.
+
 ## Scope
 
 - Normalize item id, title, brand, price, currency, size, condition, seller, favorites, URL, image URL, and raw payload.
-- Upsert by `vinted_item_id`.
-- Update `last_seen_at` when an existing item appears again.
+- Upsert opportunity items by `vinted_item_id`.
+- Update `last_seen_at` when an opportunity item appears again.
 - Keep `first_seen_at` stable.
-- Persist items during manual runs.
-- Later monitor specs reinterpret `items_new` as monitor-new seen items; this spec only owns idempotent `items` upsert behavior.
-- Refresh the PWA item table after a manual run.
+- Persist items only when they are needed for opportunity display.
+- Later monitor specs reinterpret `items_new` as Redis-new monitor candidates; this spec only owns idempotent `items` upsert behavior.
 
 ## Out of Scope
 
-- Monitor-scoped seen dedupe.
+- Monitor-scoped seen dedupe, owned by Redis in spec 005.
 - Opportunity creation.
 - Filters.
-- `source_seen_items`.
+- Persisting discarded or seen-only candidates.
 - Checkout or authenticated item details.
 
 ## Interfaces
@@ -29,25 +30,25 @@ Persist public Vinted catalog items in a normalized format while preserving usef
 - Database:
   - `items`.
 - API/PWA:
-  - existing manual run endpoint persists items;
-  - existing items endpoint returns persisted items.
+- monitor run endpoints persist opportunity items;
+- opportunities endpoint returns item data embedded in opportunity rows.
 
 ## Acceptance Criteria
 
-- New items are inserted once.
+- Opportunity items are inserted once.
 - Existing items are updated without changing their primary identity.
 - Missing optional fields do not fail persistence.
 - Raw payload is stored only if sanitized.
 - URLs are preserved for opening Vinted item pages.
-- Manual runs update `items_found`; monitor specs own the final `items_new` meaning.
+- Monitor runs update `items_found`; monitor specs own the final `items_new` meaning.
 - Running the same result twice does not duplicate items.
-- PWA displays persisted items after a run.
+- PWA displays persisted items through opportunities after a run.
 
 ## Verification
 
 - Persist a fixture item.
 - Persist the same fixture twice and confirm a single item row.
 - Persist an item with missing optional fields.
-- Run a manual search and confirm items are stored.
-- Run the same search twice and confirm item rows are not duplicated.
-- Confirm `source_seen_items`, filters, and opportunities remain unchanged.
+- Run a monitor search and confirm opportunity items are stored.
+- Run the same opportunity item twice and confirm item rows are not duplicated.
+- Confirm discarded candidates are not stored as items.

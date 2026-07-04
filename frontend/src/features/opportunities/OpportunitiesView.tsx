@@ -5,7 +5,7 @@ import { ItemCell } from '../../components/ItemCell';
 import { Pagination } from '../../components/Pagination';
 import { RowActions } from '../../components/RowActions';
 import { formatDate, formatPrice } from '../../utils/format';
-import { countActiveFilters, evaluationLabel, summarizeFilters, type ResultFilters } from '../results/resultFilters';
+import { countActiveFilters, evaluationLabel, summarizeFilters, type OpportunityFilters } from './opportunityFilters';
 
 export function OpportunitiesView({
   filters,
@@ -20,15 +20,15 @@ export function OpportunitiesView({
   onPageChange,
   onPageSizeChange
 }: {
-  filters: ResultFilters;
+  filters: OpportunityFilters;
   loading: boolean;
   opportunityPage: Page<OpportunityResult>;
   pageSize: number;
   sources: SearchSource[];
   onApply: () => void;
-  onApplyFilters: (filters: ResultFilters) => void;
+  onApplyFilters: (filters: OpportunityFilters) => void;
   onClear: () => void;
-  onFilterChange: (field: keyof ResultFilters, value: string) => void;
+  onFilterChange: (field: keyof OpportunityFilters, value: string) => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
 }) {
@@ -46,7 +46,7 @@ export function OpportunitiesView({
     setFiltersOpen(false);
   }
 
-  function removeFilter(field: keyof ResultFilters) {
+  function removeFilter(field: keyof OpportunityFilters) {
     const nextFilters = { ...filters, [field]: '' };
     onFilterChange(field, '');
     setFiltersOpen(false);

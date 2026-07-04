@@ -28,7 +28,7 @@ export function Pagination({
       <div>
         {onPageSizeChange ? (
           <label>
-            Resultados por pagina
+            Elementos por pagina
             <select value={pageSize} disabled={disabled} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
               <option value={25}>25</option>
               <option value={50}>50</option>

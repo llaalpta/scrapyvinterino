@@ -1,7 +1,7 @@
 import type { OpportunityQuery, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 
-export type ResultFilters = {
+export type OpportunityFilters = {
   sourceId: string;
   scrapedFrom: string;
   scrapedTo: string;
@@ -10,7 +10,7 @@ export type ResultFilters = {
   evaluationStatus: string;
 };
 
-export const defaultFilters: ResultFilters = {
+export const defaultOpportunityFilters: OpportunityFilters = {
   sourceId: '',
   scrapedFrom: '',
   scrapedTo: '',
@@ -20,11 +20,11 @@ export const defaultFilters: ResultFilters = {
 };
 
 export type FilterSummary = {
-  field: keyof ResultFilters;
+  field: keyof OpportunityFilters;
   label: string;
 };
 
-export function buildOpportunityQuery(filters: ResultFilters, page: number, pageSize: number): OpportunityQuery {
+export function buildOpportunityQuery(filters: OpportunityFilters, page: number, pageSize: number): OpportunityQuery {
   return {
     page,
     page_size: pageSize,
@@ -37,12 +37,12 @@ export function buildOpportunityQuery(filters: ResultFilters, page: number, page
   };
 }
 
-export function countActiveFilters(filters: ResultFilters): number {
+export function countActiveFilters(filters: OpportunityFilters): number {
   return [filters.sourceId, filters.scrapedFrom, filters.scrapedTo, filters.priceMin, filters.priceMax, filters.evaluationStatus].filter(Boolean)
     .length;
 }
 
-export function summarizeFilters(filters: ResultFilters, sources: SearchSource[]): FilterSummary[] {
+export function summarizeFilters(filters: OpportunityFilters, sources: SearchSource[]): FilterSummary[] {
   const summaries: FilterSummary[] = [];
   if (filters.sourceId) {
     summaries.push({

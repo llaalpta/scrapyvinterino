@@ -21,15 +21,15 @@ export function DashboardApp() {
     >
       {dashboard.activeSection === 'opportunities' ? (
         <OpportunitiesView
-          filters={dashboard.resultFilters}
+          filters={dashboard.opportunityFilters}
           loading={dashboard.loadingOpportunities}
           opportunityPage={dashboard.opportunityPage}
           pageSize={dashboard.opportunitiesPageSize}
           sources={dashboard.sources}
           onApply={() => void dashboard.loadOpportunities(1)}
           onApplyFilters={(filters) => void dashboard.loadOpportunities(1, filters)}
-          onClear={dashboard.clearResultFilters}
-          onFilterChange={dashboard.updateResultFilter}
+          onClear={dashboard.clearOpportunityFilters}
+          onFilterChange={dashboard.updateOpportunityFilter}
           onPageChange={(page) => void dashboard.loadOpportunities(page)}
           onPageSizeChange={dashboard.changeResultsPageSize}
         />
