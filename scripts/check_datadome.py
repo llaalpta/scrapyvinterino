@@ -9,21 +9,26 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from urllib.parse import urljoin
 
 from curl_cffi.requests import Session
 
 from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES, select_random_profile
 from vinted_monitor.providers.datadome import has_datadome_cookie, human_delay, is_datadome_challenge
+from vinted_monitor.providers.vinted_catalog import build_catalog_api_params
+
+
+def _profile_for_impersonate(impersonate: str | None):
+    if not impersonate:
+        return select_random_profile()
+    for profile in BROWSER_PROFILES:
+        if profile.impersonate == impersonate:
+            return profile
+    raise ValueError(f"No browser profile configured for impersonate={impersonate!r}")
 
 
 def smoke_test(url: str, proxy: str | None, impersonate: str | None) -> bool:
-    profile = select_random_profile()
-    if impersonate:
-        # Override impersonate if specified
-        for p in BROWSER_PROFILES:
-            if p.impersonate == impersonate:
-                profile = p
-                break
+    profile = _profile_for_impersonate(impersonate)
 
     print(f"Profile:     {profile.name}")
     print(f"Impersonate: {profile.impersonate}")
@@ -34,46 +39,43 @@ def smoke_test(url: str, proxy: str | None, impersonate: str | None) -> bool:
 
     proxy_dict = {"https": proxy, "http": proxy} if proxy else None
     with Session(impersonate=profile.impersonate, proxies=proxy_dict) as session:
-        # Step 1: Bootstrap
         print("\n[1/3] Bootstrap (HTML page)...")
         headers = dict(profile.build_bootstrap_headers())
         started_at = time.perf_counter()
         try:
             response = session.get(url, headers=headers, timeout=15)
         except Exception as exc:
-            print(f"  ❌ Bootstrap failed: {exc}")
+            print(f"  ERROR: Bootstrap failed: {exc}")
             return False
 
         elapsed = round((time.perf_counter() - started_at) * 1000)
         print(f"  Status:  {response.status_code}")
         print(f"  Latency: {elapsed}ms")
 
-        # Check DataDome
         if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
-            print("  ❌ DataDome CHALLENGE detected!")
+            print("  ERROR: DataDome challenge detected during bootstrap.")
             return False
 
         cookies = dict(session.cookies) if session.cookies else {}
         dd_present = has_datadome_cookie(cookies)
-        print(f"  DataDome cookie: {'YES ✅' if dd_present else 'NO ⚠️'}")
+        print(f"  DataDome cookie: {'YES' if dd_present else 'NO'}")
         print(f"  Cookies: {list(cookies.keys())}")
 
-        # Step 2: Human delay
         print("\n[2/3] Human delay...")
         delay = human_delay(1.2, 3.8)
         print(f"  Delay: {delay:.2f}s")
 
-        # Step 3: Catalog API
         print("\n[3/3] Catalog API (JSON)...")
-        api_url = url.split("/catalog")[0] + "/api/v2/catalog/items"
+        api_url = urljoin(url, "/api/v2/catalog/items")
         api_headers = dict(profile.build_api_headers(referer=url))
-        api_params = {"page": 1, "per_page": 5, "order": "newest_first", "search_text": "nike"}
+        api_params = build_catalog_api_params(url, page=1, per_page=5)
+        print(f"  Params:  {api_params}")
 
         started_at = time.perf_counter()
         try:
             response = session.get(api_url, params=api_params, headers=api_headers, timeout=15)
         except Exception as exc:
-            print(f"  ❌ Catalog API failed: {exc}")
+            print(f"  ERROR: Catalog API failed: {exc}")
             return False
 
         elapsed = round((time.perf_counter() - started_at) * 1000)
@@ -82,7 +84,7 @@ def smoke_test(url: str, proxy: str | None, impersonate: str | None) -> bool:
         print(f"  Content-Type: {response.headers.get('content-type', 'unknown')}")
 
         if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
-            print("  ❌ DataDome CHALLENGE detected on API request!")
+            print("  ERROR: DataDome challenge detected on API request.")
             return False
 
         try:
@@ -91,13 +93,18 @@ def smoke_test(url: str, proxy: str | None, impersonate: str | None) -> bool:
             print(f"  Items returned: {len(items)}")
             if items:
                 first = items[0]
-                print(f"  First item: {first.get('title', 'N/A')} — {first.get('price', {}).get('amount', '?')} {first.get('price', {}).get('currency_code', '')}")
+                price = first.get("price", {})
+                print(
+                    "  First item: "
+                    f"{first.get('title', 'N/A')} - {price.get('amount', '?')} {price.get('currency_code', '')}"
+                )
         except Exception:
-            print(f"  ⚠️ Could not parse JSON (Content-Type: {response.headers.get('content-type')})")
+            print(f"  WARN: Could not parse JSON (Content-Type: {response.headers.get('content-type')})")
             print(f"  Body preview: {response.text[:200]}")
+            return False
 
     print("\n" + "=" * 60)
-    print("✅  Smoke test PASSED — bootstrap + catalog flow works!")
+    print("OK: Smoke test passed; bootstrap + catalog flow works.")
     return True
 
 

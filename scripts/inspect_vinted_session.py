@@ -34,7 +34,7 @@ OUTPUT_FILE = Path(__file__).parent / "browser_reference.json"
 
 
 def inspect_session(url: str) -> bool:
-    print(f"Launching Chrome to capture fingerprint...")
+    print("Launching Chrome to capture fingerprint...")
     print(f"URL: {url}")
     print("=" * 60)
 
@@ -114,7 +114,7 @@ def inspect_session(url: str) -> bool:
         browser.close()
 
     print("\n" + "=" * 60)
-    print("✅  Reference captured. Run scripts/compare_fingerprints.py to compare.")
+    print("OK: Reference captured. Run scripts/compare_fingerprints.py to compare.")
     return True
 
 

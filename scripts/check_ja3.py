@@ -7,10 +7,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 
 from curl_cffi.requests import Session
+
+from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES
 
 
 ECHO_SERVICES = [
@@ -19,19 +20,42 @@ ECHO_SERVICES = [
 ]
 
 
+def _profile_for_impersonate(impersonate: str):
+    for profile in BROWSER_PROFILES:
+        if profile.impersonate == impersonate:
+            return profile
+    raise ValueError(f"No browser profile configured for impersonate={impersonate!r}")
+
+
+def _tls_version_label(value) -> str:
+    if isinstance(value, dict):
+        negotiated = value.get("tls_version_negotiated")
+        if negotiated:
+            return str(negotiated)
+        ja4 = value.get("ja4")
+        if ja4:
+            return str(ja4)
+        return "structured TLS data"
+    return str(value)
+
+
 def check_fingerprint(impersonate: str) -> bool:
     """Check JA3 fingerprint against echo services and print results."""
-    print(f"Checking TLS fingerprint with impersonate='{impersonate}'...")
+    profile = _profile_for_impersonate(impersonate)
+    headers = dict(profile.build_bootstrap_headers())
+    print(f"Checking TLS fingerprint with profile='{profile.name}' impersonate='{impersonate}'...")
     print("=" * 60)
     success = False
+    warnings = 0
 
     with Session(impersonate=impersonate) as session:
         for url in ECHO_SERVICES:
             print(f"\n  Service: {url}")
             try:
-                response = session.get(url, timeout=15)
+                response = session.get(url, headers=headers, timeout=15)
                 if response.status_code != 200:
-                    print(f"  Status: {response.status_code} (skipping)")
+                    print(f"  WARN: Status {response.status_code} (skipping)")
+                    warnings += 1
                     continue
                 data = response.json()
                 ja3 = data.get("ja3_hash") or data.get("ja3") or data.get("ja3_text", "unknown")
@@ -41,16 +65,20 @@ def check_fingerprint(impersonate: str) -> bool:
                 print(f"  JA3 hash:     {ja3}")
                 print(f"  User-Agent:   {ua[:80]}...")
                 print(f"  HTTP version: {http_ver}")
-                print(f"  TLS version:  {tls_ver}")
+                print(f"  TLS version:  {_tls_version_label(tls_ver)}")
                 success = True
             except Exception as exc:
-                print(f"  Error: {exc}")
+                print(f"  WARN: {exc}")
+                warnings += 1
 
     print("\n" + "=" * 60)
-    if success:
-        print("✅  Fingerprint check completed. Compare JA3 hash with real Chrome.")
+    if success and warnings:
+        print("WARN: Fingerprint check completed with partial echo-service failures.")
+        print("OK: At least one echo service responded. Compare JA3 hash with real Chrome.")
+    elif success:
+        print("OK: Fingerprint check completed. Compare JA3 hash with real Chrome.")
     else:
-        print("❌  All echo services failed.")
+        print("ERROR: All echo services failed.")
     return success
 
 

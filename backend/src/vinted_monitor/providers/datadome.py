@@ -75,7 +75,7 @@ def human_delay(
     """
     generator = rng or random.Random()
     # Beta(2, 5) produces values skewed toward the lower end of [0,1]
-    # with mean ~0.286, which maps to a natural 1.2–2.5s center.
+    # with mean ~0.286, which maps to a natural 1.2-2.5s center.
     normalized = generator.betavariate(2, 5)
     delay = normalized * (max_seconds - min_seconds) + min_seconds
     time.sleep(delay)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check HTTP headers sent by curl_cffi and compare with real Chrome reference.
+"""Check HTTP headers sent by curl_cffi using the configured browser profile.
 
 Usage:
     python scripts/check_headers.py [--impersonate chrome136]
@@ -14,23 +14,27 @@ from pathlib import Path
 
 from curl_cffi.requests import Session
 
+from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES
+
 
 ECHO_URL = "https://httpbin.org/headers"
 REFERENCE_FILE = Path(__file__).parent / "browser_reference.json"
+HOP_BY_HOP_HEADERS = {"connection"}
+
+
+def _profile_for_impersonate(impersonate: str):
+    for profile in BROWSER_PROFILES:
+        if profile.impersonate == impersonate:
+            return profile
+    raise ValueError(f"No browser profile configured for impersonate={impersonate!r}")
 
 
 def check_headers(impersonate: str) -> bool:
-    print(f"Checking HTTP headers with impersonate='{impersonate}'...")
+    profile = _profile_for_impersonate(impersonate)
+    print(f"Checking HTTP headers with profile='{profile.name}' impersonate='{impersonate}'...")
     print("=" * 60)
 
-    headers = OrderedDict([
-        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
-        ("Accept-Language", "es-ES,es;q=0.9,en;q=0.8"),
-        ("Accept-Encoding", "gzip, deflate, br, zstd"),
-        ("Cache-Control", "max-age=0"),
-        ("Connection", "keep-alive"),
-    ])
-
+    headers = OrderedDict(profile.build_bootstrap_headers())
     with Session(impersonate=impersonate) as session:
         try:
             response = session.get(ECHO_URL, headers=dict(headers), timeout=15)
@@ -40,11 +44,30 @@ def check_headers(impersonate: str) -> bool:
             return False
 
     received = data.get("headers", {})
-    print("\n  Headers received by server (in order sent):")
+    print("\n  Headers received by server:")
     for key, value in received.items():
-        print(f"    {key}: {value[:80]}")
+        print(f"    {key}: {str(value)[:80]}")
 
-    # Compare with reference if available
+    expected = {key.lower(): value for key, value in headers.items()}
+    received_lower = {key.lower(): value for key, value in received.items()}
+    print("\n  Configured profile header check:")
+    issues = 0
+    for key, expected_value in expected.items():
+        if key in HOP_BY_HOP_HEADERS:
+            print(f"    SKIP: {key} (hop-by-hop header may not be echoed)")
+            continue
+        actual_value = received_lower.get(key)
+        if actual_value is None:
+            print(f"    MISSING: {key}")
+            issues += 1
+        elif actual_value != expected_value:
+            print(f"    DIFF: {key}")
+            print(f"      expected: {expected_value[:80]}")
+            print(f"      actual:   {actual_value[:80]}")
+            issues += 1
+        else:
+            print(f"    OK: {key}")
+
     if REFERENCE_FILE.exists():
         print(f"\n  Comparing with reference: {REFERENCE_FILE}")
         ref_data = json.loads(REFERENCE_FILE.read_text())
@@ -55,18 +78,17 @@ def check_headers(impersonate: str) -> bool:
                 break
 
         if ref_headers:
-            print("\n  Differences:")
+            print("\n  Differences against browser reference:")
             all_keys = set(list(received.keys()) + list(ref_headers.keys()))
             has_diff = False
             for key in sorted(all_keys):
                 in_curl = key in received
                 in_ref = key in ref_headers
-                if in_curl and in_ref:
-                    if received[key] != ref_headers[key]:
-                        print(f"    DIFF {key}:")
-                        print(f"      curl_cffi: {received[key][:60]}")
-                        print(f"      chrome:    {ref_headers[key][:60]}")
-                        has_diff = True
+                if in_curl and in_ref and received[key] != ref_headers[key]:
+                    print(f"    DIFF {key}:")
+                    print(f"      curl_cffi: {str(received[key])[:60]}")
+                    print(f"      chrome:    {str(ref_headers[key])[:60]}")
+                    has_diff = True
                 elif in_curl and not in_ref:
                     print(f"    EXTRA (curl_cffi only): {key}")
                     has_diff = True
@@ -74,14 +96,17 @@ def check_headers(impersonate: str) -> bool:
                     print(f"    MISSING (chrome only):  {key}")
                     has_diff = True
             if not has_diff:
-                print("    ✅  No differences found!")
+                print("    OK: no differences found.")
     else:
         print(f"\n  No reference file found at {REFERENCE_FILE}")
         print("  Run scripts/inspect_vinted_session.py first to capture a reference.")
 
     print("\n" + "=" * 60)
-    print("✅  Header check completed.")
-    return True
+    if issues:
+        print(f"WARN: Header check completed with {issues} configured-profile differences.")
+    else:
+        print("OK: Header check completed.")
+    return issues == 0
 
 
 def main() -> None:
