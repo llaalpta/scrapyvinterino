@@ -40,4 +40,5 @@ La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`
 - `LOG_LEVEL` controla el nivel de esos logs de proceso. Para debugging local puede usarse `DEBUG`; para produccion deberia volver a `INFO` o un nivel mas restrictivo.
 - Los logs operativos de monitores no son ficheros: se guardan como eventos redacted en la tabla `run_events`.
 - La PWA lee esos eventos mediante `/api/runs/{run_id}/events`, `/api/monitors/{monitor_id}/events` y SSE `/api/monitors/events/stream`; el detalle de un monitor muestra la timeline acumulada aunque el monitor este detenido.
+- El boton `Limpiar vista` de la PWA solo oculta eventos ya visibles en esa sesion del navegador; no purga `run_events` ni afecta a la auditoria.
 - Estado actual: no hay logger a fichero, politica de rotacion Docker, exportador externo ni job de retencion/purga de `run_events`.

@@ -54,6 +54,7 @@ export function useDashboardController() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [monitorRunsBySource, setMonitorRunsBySource] = useState<Record<number, Run[]>>({});
   const [monitorEventsBySource, setMonitorEventsBySource] = useState<Record<number, RunEvent[]>>({});
+  const [monitorEventCutoffsBySource, setMonitorEventCutoffsBySource] = useState<Record<number, number>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
@@ -374,6 +375,11 @@ export function useDashboardController() {
         delete next[source.id];
         return next;
       });
+      setMonitorEventCutoffsBySource((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
       await refreshRuntime(remainingSources);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo archivar el monitor');
@@ -483,6 +489,20 @@ export function useDashboardController() {
     });
   }, []);
 
+  const clearMonitorEventsView = useCallback((sourceId: number) => {
+    const currentEvents = monitorEventsBySource[sourceId] ?? [];
+    const cutoff = currentEvents.reduce((highest, event) => Math.max(highest, event.id), 0);
+    if (cutoff === 0) {
+      return;
+    }
+    setMonitorEventCutoffsBySource((current) => {
+      if (current[sourceId] === cutoff) {
+        return current;
+      }
+      return { ...current, [sourceId]: cutoff };
+    });
+  }, [monitorEventsBySource]);
+
   function getSourceName(sourceId: number): string {
     return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
   }
@@ -514,6 +534,7 @@ export function useDashboardController() {
     onCreateSource,
     onDeleteSource,
     onAppendMonitorEvent: appendMonitorEvent,
+    onClearMonitorEventsView: clearMonitorEventsView,
     onLoadRunEvents: fetchRunEvents,
     onRunMonitor,
     onSaveSourceSchedule,
@@ -528,6 +549,7 @@ export function useDashboardController() {
     monitorStatsRangeBySource,
     monitorRunsBySource,
     monitorEventsBySource,
+    monitorEventCutoffsBySource,
     opportunityPage,
     proxyDraft,
     proxyProfiles,

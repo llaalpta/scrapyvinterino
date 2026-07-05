@@ -1,5 +1,5 @@
-import { FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
 import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { Eraser, FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
 import { monitorEventsStreamUrl, type FilterRule, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { RunEventEntry } from '../runs/RunsView';
@@ -9,11 +9,13 @@ const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
   filterRules,
+  monitorEventCutoffsBySource,
   monitorEventsBySource,
   monitorRunsBySource,
   monitorStatsBySource,
   monitorStatsRangeBySource,
   onAppendMonitorEvent,
+  onClearMonitorEventsView,
   onCreateSource,
   onDeleteSource,
   onLoadMonitorEvents,
@@ -36,11 +38,13 @@ export function SourcesView({
   updateSourceDraft,
 }: {
   filterRules: FilterRule[];
+  monitorEventCutoffsBySource: Record<number, number>;
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorRunsBySource: Record<number, Run[]>;
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
   onAppendMonitorEvent: (event: RunEvent) => void;
+  onClearMonitorEventsView: (sourceId: number) => void;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorEvents: (sourceId: number) => Promise<void>;
@@ -220,9 +224,11 @@ export function SourcesView({
         </div>
         <MonitorDetail
           filterRules={filterRules}
+          eventCutoff={selectedSource ? (monitorEventCutoffsBySource[selectedSource.id] ?? 0) : 0}
           loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
           monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
           monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
+          onClearMonitorEventsView={onClearMonitorEventsView}
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
           onSaveSourceSchedule={onSaveSourceSchedule}
@@ -373,11 +379,13 @@ function Metric({ label, value }: { label: string; value: string }) {
 function MonitorEventTimeline({
   events,
   loading,
-  streamStatus
+  streamStatus,
+  viewCleared
 }: {
   events: RunEvent[];
   loading: boolean;
   streamStatus: 'connecting' | 'connected' | 'error' | null;
+  viewCleared: boolean;
 }) {
   const orderedEvents = useMemo(
     () => [...events].sort((left, right) => left.id - right.id),
@@ -391,7 +399,8 @@ function MonitorEventTimeline({
         <span>{streamStatus ? monitorStreamLabel(streamStatus) : 'Historico acumulado'}</span>
       </div>
       {loading ? <p className="event-empty">Cargando logs acumulados...</p> : null}
-      {!loading && orderedEvents.length === 0 ? <p className="event-empty">Sin logs acumulados para este monitor.</p> : null}
+      {!loading && viewCleared ? <p className="event-empty">Vista limpia. Los nuevos eventos apareceran aqui.</p> : null}
+      {!loading && !viewCleared && orderedEvents.length === 0 ? <p className="event-empty">Sin logs acumulados para este monitor.</p> : null}
       {orderedEvents.map((event) => (
         <RunEventEntry event={event} key={event.id} showRunId />
       ))}
@@ -588,10 +597,12 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
+  eventCutoff,
   filterRules,
   loadingMonitorEvents,
   monitorEvents,
   monitorRuns,
+  onClearMonitorEventsView,
   onDeleteSource,
   onLoadMonitorStats,
   onSaveSourceSchedule,
@@ -608,10 +619,12 @@ function MonitorDetail({
   toggleSourceFilter,
   updateSourceDraft
 }: {
+  eventCutoff: number;
   filterRules: FilterRule[];
   loadingMonitorEvents: boolean;
   monitorEvents: RunEvent[];
   monitorRuns: Run[];
+  onClearMonitorEventsView: (sourceId: number) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
@@ -644,6 +657,9 @@ function MonitorDetail({
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
+  const visibleMonitorEvents = eventCutoff > 0 ? monitorEvents.filter((event) => event.id > eventCutoff) : monitorEvents;
+  const logViewCleared = eventCutoff > 0 && visibleMonitorEvents.length === 0;
+  const canClearLogView = !loadingMonitorEvents && visibleMonitorEvents.length > 0;
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -718,10 +734,23 @@ function MonitorDetail({
           Logs acumulados
           <span>{stats?.historical_summary.runs_count ?? monitorRuns.length} ejec.</span>
         </summary>
+        <div className="monitor-log-actions">
+          <p>Oculta los eventos anteriores en esta pantalla; el historico permanece guardado.</p>
+          <button
+            type="button"
+            disabled={!canClearLogView}
+            title="Oculta los logs visibles sin borrar eventos guardados"
+            onClick={() => onClearMonitorEventsView(source.id)}
+          >
+            <Eraser size={15} />
+            Limpiar vista
+          </button>
+        </div>
         <MonitorEventTimeline
-          events={monitorEvents}
+          events={visibleMonitorEvents}
           loading={loadingMonitorEvents}
           streamStatus={source.is_active ? streamStatus : null}
+          viewCleared={logViewCleared}
         />
       </details>
 
