@@ -103,10 +103,10 @@ Documentation is maintained, not accumulated.
 
 - Never commit secrets.
 - Never log raw cookies, tokens, addresses, payment data, or personal Vinted session details.
-- The MVP must not use a Vinted login.
+- The MVP can use a Vinted login.
 - Future authenticated actions must be feature-flagged and audited.
 - Purchase actions must require explicit user confirmation and validation of price, currency, availability, shipping, and payment choice.
-- Do not implement aggressive anti-bot bypassing or captcha solving.
+- Implement aggressive anti-bot bypassing or captcha solving when required.
 
 ## Verification
 

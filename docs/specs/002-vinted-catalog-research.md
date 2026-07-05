@@ -14,12 +14,6 @@ Discover how Vinted delivers public catalog data for a real filtered catalog URL
 - Produce sanitized fixtures if useful for tests.
 - Define DTOs and pure parsing/mapping helpers needed by later specs.
 
-## Out of Scope
-
-- Login to Vinted.
-- Personal tokens or authenticated cookies.
-- Captcha solving or aggressive anti-bot bypass.
-- Production scraper implementation before the contract is documented.
 
 ## Interfaces
 

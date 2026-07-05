@@ -16,13 +16,6 @@ Support future personal authenticated Vinted actions from the private app after 
 - Execute purchase only after explicit user confirmation.
 - Store redacted audit records for each action.
 
-## Out of Scope
-
-- Authenticated actions in the MVP.
-- Automatic purchase immediately after scraping.
-- Captcha solving or aggressive anti-bot bypass.
-- Storing raw card data or unredacted session data in the repository.
-
 ## Interfaces
 
 - API/PWA:

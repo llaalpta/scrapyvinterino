@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
-import httpx
+from curl_cffi.requests import Session as CurlSession
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -298,9 +298,12 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
     if profile is None:
         raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
     try:
-        with httpx.Client(proxy=proxy_url_for_profile(profile, settings), timeout=10) as client:
-            response = client.get("https://api.ipify.org?format=json")
-            response.raise_for_status()
+        proxy_url = proxy_url_for_profile(profile, settings)
+        proxy_dict = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+        with CurlSession(impersonate="chrome136", proxies=proxy_dict) as client:
+            response = client.get("https://api.ipify.org?format=json", timeout=10)
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}")
             ip = response.json().get("ip")
         updated = mark_proxy_test_result(db, profile_id, status="success", ip=str(ip) if ip else None)
     except Exception as exc:

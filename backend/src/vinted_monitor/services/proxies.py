@@ -161,7 +161,21 @@ def mark_proxy_run_failure(db: Session, profile_id: int | None, *, cooldown_minu
     if profile is None:
         return
     profile.failure_count = (profile.failure_count or 0) + 1
-    profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=max(cooldown_minutes, 1))
+    # Exponential backoff capped at 24 hours
+    backoff = min(cooldown_minutes * (2 ** (profile.failure_count - 1)), 1440)
+    profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=max(backoff, 1))
+
+
+def mark_proxy_challenge_detected(db: Session, profile_id: int | None, *, penalty_multiplier: int = 2, cooldown_minutes: int = 10) -> None:
+    """DataDome challenge: apply a multiplied penalty before exponential cooldown."""
+    if profile_id is None:
+        return
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        return
+    profile.failure_count = (profile.failure_count or 0) + penalty_multiplier
+    backoff = min(cooldown_minutes * (2 ** (profile.failure_count - 1)), 1440)
+    profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=max(backoff, 1))
 
 
 def mark_proxy_test_result(db: Session, profile_id: int, *, status: str, ip: str | None = None, error: str | None = None) -> ProxyProfile:
@@ -209,6 +223,28 @@ def proxy_url_for_profile(profile: ProxyProfile | None, settings: Settings | Non
     if profile.username:
         password = _decrypt_password(profile, settings) if profile.password_encrypted else ""
         auth = f"{quote(profile.username)}:{quote(password)}@"
+    return f"{profile.scheme}://{auth}{profile.host}:{profile.port}"
+
+
+def proxy_url_with_sticky_session(
+    profile: ProxyProfile | None,
+    session_id: str,
+    settings: Settings | None = None,
+) -> str | None:
+    """Build a proxy URL with a dynamic sticky session UUID.
+
+    Injects the session_id into the username for residential proxy gateways
+    that support session persistence (e.g. BrightData, Oxylabs, SmartProxy).
+    The format is ``{username}-session-{session_id}``.
+    """
+    if profile is None:
+        return None
+    settings = settings or get_settings()
+    if not profile.username:
+        return proxy_url_for_profile(profile, settings)
+    password = _decrypt_password(profile, settings) if profile.password_encrypted else ""
+    sticky_username = f"{profile.username}-session-{session_id}"
+    auth = f"{quote(sticky_username)}:{quote(password)}@"
     return f"{profile.scheme}://{auth}{profile.host}:{profile.port}"
 
 

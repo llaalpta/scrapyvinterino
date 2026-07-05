@@ -21,10 +21,18 @@ class Settings(BaseSettings):
     vinted_fast_catalog_per_page: int = 5
     vinted_detail_max_candidates_per_run: int = 5
     vinted_detail_concurrency: int = 2
-    vinted_user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-    )
+
+    # Worker consumer (Producer-Consumer pattern)
+    worker_consumer_count: int = 2
+    worker_task_queue_key: str = "vinted:task_queue"
+    worker_blpop_timeout_seconds: int = 5
+    worker_max_retry_attempts: int = 3
+
+    # curl_cffi / anti-bot evasion
+    curl_impersonate_browser: str = "chrome136"
+    human_delay_min_seconds: float = 1.2
+    human_delay_max_seconds: float = 3.8
+    datadome_challenge_penalty_multiplier: int = 2
 
     scheduler_enabled: bool = False
     scheduler_max_concurrent_runs: int = 2

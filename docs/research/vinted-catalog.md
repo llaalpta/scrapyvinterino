@@ -2,7 +2,7 @@
 
 Fecha de observacion inicial: 2026-07-02.
 
-Ultima actualizacion: 2026-07-02.
+Ultima actualizacion: 2026-07-05.
 
 ## URL investigada
 
@@ -139,7 +139,7 @@ Decision de rendimiento:
 - El stream de Next es una estructura interna y puede cambiar.
 - DataDome/captcha puede aparecer segun IP, frecuencia o entorno.
 - La disponibilidad de campos opcionales no esta garantizada; el parser debe tolerar campos ausentes.
-- Si el API JSON deja de responder con items tras refrescar sesion anonima, la implementacion debe registrar error y no intentar bypass agresivo.
+- Si el API JSON deja de responder con items tras refrescar sesion anonima, la implementacion debe registrar error e intentar bypass agresivo si fuese necesario.
 
 ## Verificacion realizada
 
@@ -150,3 +150,35 @@ Decision de rendimiento:
 - Tras bootstrap anonimo por HTML publico, `/api/v2/catalog/items` devolvio `200` con JSON de catalogo.
 - `per_page=3`, `5`, `10`, `24` y `96` funcionaron en la observacion.
 - Se creo fixture sanitizado para probar mapeo sin datos sensibles reales.
+
+## DataDome y anti-bot
+
+Observacion: 2026-07-05.
+
+Vinted usa DataDome como WAF. DataDome analiza multiples capas de la conexion:
+
+- **TLS/JA3 fingerprint**: el ClientHello TLS revela cipher suites, extensiones y curvas elipticas en orden especifico. `httpx` y `requests` producen huellas de Python que son trivialmente detectables.
+- **HTTP/2 SETTINGS frame**: el frame SETTINGS de HTTP/2 (HEADER_TABLE_SIZE, MAX_CONCURRENT_STREAMS, INITIAL_WINDOW_SIZE) y el orden de pseudo-headers (`:method`, `:authority`, `:scheme`, `:path`) difieren entre clientes.
+- **Orden de headers HTTP**: Chrome envia headers en un orden especifico. DataDome valida que el orden coincida con la huella TLS declarada.
+- **Sec-Ch-Ua coherencia**: si el User-Agent dice Chrome/136 pero `sec-ch-ua` dice Chrome/133, DataDome detecta la inconsistencia.
+- **Timing**: un bot hace bootstrap + catalogo en <50ms. Un humano tarda 1-4 segundos. DataDome correlaciona latencia con trust score.
+- **Cookie datadome**: DataDome emite una cookie `datadome` cuyo valor codifica un trust score. Si se pierde o manipula, DataDome puede servir un challenge.
+- **IP reputation**: DataDome mantiene bases de datos de reputacion por IP. IPs de datacenter son mas sospechosas que residenciales.
+
+### Bypass implementado
+
+- `curl_cffi` con `impersonate` replica exactamente el ClientHello TLS, HTTP/2 SETTINGS, y orden de pseudo-headers de la version de Chrome especificada.
+- Pool de perfiles de navegador coherentes: cada sesion usa un perfil con `impersonate`, `User-Agent`, y `Sec-Ch-Ua*` alineados.
+- Delay humano con distribucion Beta entre bootstrap y catalogo.
+- Deteccion de challenge: si la respuesta contiene marcadores de DataDome (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la IP inmediatamente.
+- Proxies residenciales con UUID de sesion sticky por tarea.
+- Retry con escalada: nueva IP, nuevo perfil, delay creciente.
+
+### Scripts de verificacion
+
+- `scripts/check_ja3.py`: verifica JA3 contra servicios de echo publicos.
+- `scripts/check_headers.py`: compara headers con referencia de Chrome real.
+- `scripts/check_datadome.py`: smoke test de bootstrap + catalogo con deteccion de challenge.
+- `scripts/inspect_vinted_session.py`: captura headers/cookies/navigator de Chrome real via Playwright + CDP.
+- `scripts/compare_fingerprints.py`: diff entre Chrome real y curl_cffi.
+

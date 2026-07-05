@@ -14,7 +14,7 @@ from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import ErrorLog, Item, Opportunity, Run, SearchSource
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
-from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
+from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider
 from vinted_monitor.services.filters import evaluate_exclusion_filters, get_filter_snapshot
 from vinted_monitor.services.items import (
     apply_item_detail,
@@ -134,7 +134,7 @@ def execute_monitor_run(
         source_id=source.id,
         phase="run_started",
         proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
-        user_agent=settings.vinted_user_agent,
+        user_agent=None,
         auth_mode="public_anonymous",
         details={
             "trigger": trigger,
@@ -200,7 +200,7 @@ def execute_monitor_run(
         method="GET",
         url=source.url,
         proxy_profile_id=proxy_profile_id,
-        user_agent=settings.vinted_user_agent,
+        user_agent=None,
         auth_mode="public_anonymous",
     )
     try:
@@ -213,7 +213,7 @@ def execute_monitor_run(
             method="GET",
             url=source.url,
             proxy_profile_id=proxy_profile_id,
-            user_agent=settings.vinted_user_agent,
+            user_agent=None,
             auth_mode="public_anonymous",
             details={"provider": result.provider_metadata},
         )
@@ -270,7 +270,7 @@ def execute_monitor_run(
             source_id=source.id,
             phase="run_succeeded",
             proxy_profile_id=proxy_profile_id,
-            user_agent=get_settings().vinted_user_agent,
+            user_agent=None,
             auth_mode="public_anonymous",
             details={
                 "items_found": run.items_found,
@@ -323,8 +323,8 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
     return list(db.scalars(statement))
 
 
-def _provider_for_egress(egress: RunEgress, runtime_config) -> HttpVintedCatalogProvider:
-    return HttpVintedCatalogProvider(
+def _provider_for_egress(egress: RunEgress, runtime_config) -> CurlCffiVintedCatalogProvider:
+    return CurlCffiVintedCatalogProvider(
         proxy_url=egress.proxy_url,
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
@@ -397,7 +397,7 @@ def _attach_provider_event_sink(
             duration_ms=duration_ms,
             level=level,
             proxy_profile_id=proxy_profile_id,
-            user_agent=get_settings().vinted_user_agent,
+            user_agent=None,
             auth_mode="public_anonymous",
             message=message,
             details=details,
@@ -425,7 +425,7 @@ def _record_failed_run(
         level="error",
         message=message,
         proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
-        user_agent=get_settings().vinted_user_agent,
+        user_agent=None,
         auth_mode="public_anonymous",
         details={"kind": kind or exc.__class__.__name__},
     )
@@ -534,7 +534,7 @@ def _evaluate_monitor_candidates(
                     method="GET",
                     url=candidate.url,
                     proxy_profile_id=proxy_profile_id,
-                    user_agent=get_settings().vinted_user_agent,
+                    user_agent=None,
                     auth_mode="public_anonymous",
                     details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
                 )
@@ -551,7 +551,7 @@ def _evaluate_monitor_candidates(
                         url=candidate.url,
                         duration_ms=_elapsed_ms(detail_started_at),
                         proxy_profile_id=proxy_profile_id,
-                        user_agent=get_settings().vinted_user_agent,
+                        user_agent=None,
                         auth_mode="public_anonymous",
                         details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
                     )
@@ -569,7 +569,7 @@ def _evaluate_monitor_candidates(
                         duration_ms=_elapsed_ms(detail_started_at),
                         level="error",
                         proxy_profile_id=proxy_profile_id,
-                        user_agent=get_settings().vinted_user_agent,
+                        user_agent=None,
                         auth_mode="public_anonymous",
                         message=detail_error,
                         details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},

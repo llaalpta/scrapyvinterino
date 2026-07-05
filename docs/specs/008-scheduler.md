@@ -32,16 +32,6 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
 - Use active global proxies before direct outbound access; direct access is allowed only when the global scheduler setting permits it.
 
-## Out of Scope
-
-- Distributed scheduling across multiple workers.
-- Complex priority queues.
-- Authenticated actions.
-- Captcha solving or aggressive anti-bot bypassing.
-- Mandatory residential proxy usage.
-- Persisting Vinted anonymous cookies or tokens.
-- Returning or logging raw proxy credentials, cookies, or tokens.
-
 ## Interfaces
 
 - Worker:

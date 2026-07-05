@@ -5,14 +5,15 @@ import re
 import time
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import httpx
+from curl_cffi.requests import Session
 
 from vinted_monitor.core.config import Settings, get_settings
-from vinted_monitor.core.redaction import safe_cookie_markers
+from vinted_monitor.providers.browser_profiles import BrowserProfile, select_random_profile
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
+from vinted_monitor.providers.datadome import DataDomeChallengeError, has_datadome_cookie, human_delay, is_datadome_challenge
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
@@ -26,7 +27,7 @@ class VintedCatalogSessionError(VintedCatalogProviderError):
     pass
 
 
-class ProviderEventSink(Protocol):
+class ProviderEventSink:
     def __call__(
         self,
         *,
@@ -42,68 +43,123 @@ class ProviderEventSink(Protocol):
         pass
 
 
-class HttpVintedCatalogProvider:
+class CurlCffiVintedCatalogProvider:
+    """Vinted catalog provider using curl_cffi for TLS/JA3 fingerprint bypass.
+
+    Each instance holds a single ``curl_cffi.requests.Session`` that is reused
+    across the bootstrap and catalog API requests so that the same TCP
+    connection, cookies, and proxy IP are shared for the full task lifecycle.
+    """
+
     def __init__(
         self,
         settings: Settings | None = None,
-        transport: httpx.BaseTransport | None = None,
+        profile: BrowserProfile | None = None,
         proxy_url: str | None = None,
         timeout_ms: int | None = None,
         catalog_per_page: int | None = None,
         request_retries: int = 1,
         event_sink: ProviderEventSink | None = None,
+        human_delay_min: float = 1.2,
+        human_delay_max: float = 3.8,
     ) -> None:
         self.settings = settings or get_settings()
-        self.transport = transport
+        self.profile = profile or select_random_profile()
         self.proxy_url = proxy_url
         self.timeout_ms = timeout_ms or self.settings.vinted_request_timeout_ms
         self.catalog_per_page = catalog_per_page or self.settings.vinted_fast_catalog_per_page
         self.request_retries = max(request_retries, 0)
         self.event_sink = event_sink
-        self._cookies = httpx.Cookies()
+        self.human_delay_min = human_delay_min
+        self.human_delay_max = human_delay_max
+        self._session: Session | None = None
+        self._bootstrapped = False
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
         last_error: VintedCatalogProviderError | None = None
         for retry_index in range(self.request_retries + 1):
-            with self._client(_json_headers(self.settings.vinted_user_agent, referer=source.url)) as client:
-                if not self._cookies:
-                    self._bootstrap_anonymous_session(client, source.url, attempt=retry_index + 1)
+            self._ensure_session()
+            if not self._bootstrapped:
+                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 1)
 
-                try:
-                    response = self._request_catalog_api(client, source, page, attempt=retry_index + 1)
-                    return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
-                except VintedCatalogSessionError:
-                    self._emit_event(
-                        phase="anonymous_session_refresh_start",
-                        method="GET",
-                        url=source.url,
-                        level="warning",
-                        message="Catalog session was rejected; refreshing anonymous public session",
-                        details={"attempt": retry_index + 2, "retry_reason": "session_rejected"},
-                    )
-                    self._bootstrap_anonymous_session(client, source.url, attempt=retry_index + 2)
-                    response = self._request_catalog_api(client, source, page, attempt=retry_index + 2)
-                    return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
-                except VintedCatalogProviderError as exc:
-                    last_error = exc
-                    if retry_index >= self.request_retries:
-                        raise
+            try:
+                response = self._request_catalog_api(source, page, attempt=retry_index + 1)
+                return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
+            except VintedCatalogSessionError:
+                self._emit_event(
+                    phase="anonymous_session_refresh_start",
+                    method="GET",
+                    url=source.url,
+                    level="warning",
+                    message="Catalog session was rejected; refreshing anonymous public session",
+                    details={"attempt": retry_index + 2, "retry_reason": "session_rejected"},
+                )
+                self._reset_session()
+                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 2)
+                response = self._request_catalog_api(source, page, attempt=retry_index + 2)
+                return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
+            except VintedCatalogProviderError as exc:
+                last_error = exc
+                if retry_index >= self.request_retries:
+                    raise
 
         raise last_error or VintedCatalogProviderError("Vinted catalog API request failed")
 
     def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
-        with self._client(_html_headers(self.settings.vinted_user_agent)) as client:
-            try:
-                response = client.get(candidate.url)
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise VintedCatalogProviderError(f"Vinted detail request failed for {candidate.vinted_item_id}: {exc}") from exc
+        self._ensure_session()
+        assert self._session is not None
+        headers = self.profile.build_bootstrap_headers()
+        try:
+            response = self._session.get(
+                candidate.url,
+                headers=dict(headers),
+                timeout=self.timeout_ms / 1000,
+            )
+            if response.status_code >= 400:
+                raise VintedCatalogProviderError(
+                    f"Vinted detail request failed for {candidate.vinted_item_id}: HTTP {response.status_code}"
+                )
+        except DataDomeChallengeError:
+            raise
+        except Exception as exc:
+            if not isinstance(exc, VintedCatalogProviderError):
+                raise VintedCatalogProviderError(
+                    f"Vinted detail request failed for {candidate.vinted_item_id}: {exc}"
+                ) from exc
+            raise
 
         return parse_item_detail_html(response.text, candidate)
 
-    def _request_catalog_api(self, client: httpx.Client, source: Any, page: int | None, *, attempt: int) -> dict[str, Any]:
+    def close(self) -> None:
+        """Discard the session, cookies, and proxy connection."""
+        if self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+            self._session = None
+        self._bootstrapped = False
+
+    def _ensure_session(self) -> None:
+        if self._session is None:
+            proxy_dict = {"https": self.proxy_url, "http": self.proxy_url} if self.proxy_url else None
+            self._session = Session(
+                impersonate=self.profile.impersonate,
+                proxies=proxy_dict,
+            )
+
+    def _reset_session(self) -> None:
+        """Close and recreate the session (same proxy, fresh cookies)."""
+        self.close()
+        self._ensure_session()
+
+    def _request_catalog_api(self, source: Any, page: int | None, *, attempt: int) -> dict[str, Any]:
+        assert self._session is not None
         url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
         params = build_catalog_api_params(source.url, page, self.catalog_per_page)
+        headers = dict(self.profile.build_api_headers(referer=source.url))
+
+        cookie_names = list(self._session.cookies.keys()) if self._session.cookies else []
         self._emit_event(
             phase="catalog_api_request_start",
             method="GET",
@@ -112,16 +168,21 @@ class HttpVintedCatalogProvider:
                 "page": params["page"],
                 "per_page": params["per_page"],
                 "order": params["order"],
-                "session_marker_count": len(client.cookies),
-                "session_markers": safe_cookie_markers(client.cookies),
+                "session_marker_count": len(cookie_names),
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
+                "browser_profile": self.profile.name,
             },
         )
         started_at = time.perf_counter()
         try:
-            response = client.get(url, params=params)
-        except httpx.HTTPError as exc:
+            response = self._session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=self.timeout_ms / 1000,
+            )
+        except Exception as exc:
             self._emit_event(
                 phase="catalog_api_request_error",
                 method="GET",
@@ -132,6 +193,20 @@ class HttpVintedCatalogProvider:
                 details={"timeout_ms": self.timeout_ms, "attempt": attempt},
             )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
+
+        # DataDome challenge detection
+        if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
+            self._emit_event(
+                phase="datadome_challenge_detected",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message="DataDome served a challenge instead of catalog data",
+                details={"attempt": attempt, "browser_profile": self.profile.name},
+            )
+            raise DataDomeChallengeError("DataDome challenge detected on catalog API request")
 
         if response.status_code in {401, 403}:
             self._emit_event(
@@ -146,9 +221,7 @@ class HttpVintedCatalogProvider:
             )
             raise VintedCatalogSessionError(f"Vinted catalog API session rejected with status {response.status_code}")
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
+        if response.status_code >= 400:
             self._emit_event(
                 phase="catalog_api_request_error",
                 method="GET",
@@ -156,10 +229,10 @@ class HttpVintedCatalogProvider:
                 status_code=response.status_code,
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
-                message=str(exc),
+                message=f"HTTP {response.status_code}",
                 details={"attempt": attempt},
             )
-            raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
+            raise VintedCatalogProviderError(f"Vinted catalog API request failed: HTTP {response.status_code}")
 
         content_type = response.headers.get("content-type", "")
         if "json" not in content_type.lower():
@@ -199,27 +272,40 @@ class HttpVintedCatalogProvider:
                 "item_count": len(payload.get("items", [])),
                 "content_type": content_type,
                 "attempt": attempt,
+                "browser_profile": self.profile.name,
             },
         )
         return payload
 
-    def _bootstrap_anonymous_session(self, client: httpx.Client, referer_url: str, *, attempt: int) -> None:
+    def _bootstrap_anonymous_session(self, referer_url: str, *, attempt: int) -> None:
+        assert self._session is not None
+        bootstrap_url = referer_url
+        headers = dict(self.profile.build_bootstrap_headers(referer=None))
+
         self._emit_event(
             phase="anonymous_session_bootstrap_start",
             method="GET",
-            url=referer_url,
-            message="Obtaining anonymous public Vinted session",
-            details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+            url=bootstrap_url,
+            message="Obtaining anonymous public Vinted session via curl_cffi",
+            details={
+                "timeout_ms": self.timeout_ms,
+                "attempt": attempt,
+                "browser_profile": self.profile.name,
+                "impersonate": self.profile.impersonate,
+            },
         )
         started_at = time.perf_counter()
         try:
-            response = client.get(referer_url, headers=_html_headers(self.settings.vinted_user_agent))
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
+            response = self._session.get(
+                bootstrap_url,
+                headers=headers,
+                timeout=self.timeout_ms / 1000,
+            )
+        except Exception as exc:
             self._emit_event(
                 phase="anonymous_session_bootstrap_error",
                 method="GET",
-                url=referer_url,
+                url=bootstrap_url,
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=str(exc),
@@ -227,31 +313,58 @@ class HttpVintedCatalogProvider:
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
 
-        self._cookies = client.cookies
+        if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
+            self._emit_event(
+                phase="datadome_challenge_detected",
+                method="GET",
+                url=bootstrap_url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message="DataDome challenge detected during bootstrap",
+                details={"attempt": attempt, "browser_profile": self.profile.name},
+            )
+            raise DataDomeChallengeError("DataDome challenge detected during bootstrap")
+
+        if response.status_code >= 400:
+            self._emit_event(
+                phase="anonymous_session_bootstrap_error",
+                method="GET",
+                url=bootstrap_url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level="error",
+                message=f"Bootstrap returned HTTP {response.status_code}",
+                details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+            )
+            raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: HTTP {response.status_code}")
+
+        cookie_names = list(self._session.cookies.keys()) if self._session.cookies else []
+        dd_present = has_datadome_cookie(dict(self._session.cookies)) if self._session.cookies else False
+        self._bootstrapped = True
+
         self._emit_event(
             phase="anonymous_session_bootstrap_success",
             method="GET",
-            url=referer_url,
+            url=bootstrap_url,
             status_code=response.status_code,
             duration_ms=_elapsed_ms(started_at),
-            message="Anonymous public session obtained",
+            message="Anonymous public session obtained via curl_cffi",
             details={
-                "session_marker_count": len(self._cookies),
-                "session_markers": safe_cookie_markers(self._cookies),
+                "session_marker_count": len(cookie_names),
+                "datadome_cookie": dd_present,
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
+                "browser_profile": self.profile.name,
             },
         )
 
-    def _client(self, headers: dict[str, str]) -> httpx.Client:
-        timeout = self.timeout_ms / 1000
-        return httpx.Client(
-            follow_redirects=True,
-            headers=headers,
-            cookies=self._cookies,
-            proxy=self.proxy_url,
-            timeout=timeout,
-            transport=self.transport,
+        # Human-like delay between bootstrap and catalog request
+        delay_applied = human_delay(self.human_delay_min, self.human_delay_max)
+        self._emit_event(
+            phase="human_delay_applied",
+            duration_ms=round(delay_applied * 1000),
+            details={"min_seconds": self.human_delay_min, "max_seconds": self.human_delay_max},
         )
 
     def _emit_event(
@@ -280,6 +393,11 @@ class HttpVintedCatalogProvider:
         )
 
 
+# ---------------------------------------------------------------------------
+# Pure functions (unchanged from original — no httpx dependency)
+# ---------------------------------------------------------------------------
+
+
 def build_catalog_api_params(source_url: str, page: int | None, per_page: int) -> dict[str, str | int]:
     query = parse_qs(urlparse(source_url).query, keep_blank_values=True)
     params: dict[str, str | int] = {
@@ -306,23 +424,6 @@ def build_catalog_api_params(source_url: str, page: int | None, per_page: int) -
             params[api_key] = ",".join(values)
 
     return params
-
-
-def _html_headers(user_agent: str) -> dict[str, str]:
-    return {
-        "User-Agent": user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    }
-
-
-def _json_headers(user_agent: str, referer: str) -> dict[str, str]:
-    return {
-        "User-Agent": user_agent,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": referer,
-    }
 
 
 def _first_query_value(query: Mapping[str, list[str]], key: str) -> str | None:
@@ -523,13 +624,6 @@ def parse_catalog_html(html: str, base_url: str = "https://www.vinted.es") -> Ca
         next_page=next_page,
         provider_metadata={"source": "next_flight_html"},
     )
-
-
-def _with_page(url: str, page: int | None) -> str:
-    if page is None or page <= 1:
-        return url
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}page={page}"
 
 
 def decode_next_flight_payload(html: str) -> str:

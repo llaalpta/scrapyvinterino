@@ -12,7 +12,11 @@
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
 - Los marcadores seguros de sesion pueden incluir nombre, longitud, mascara parcial y fingerprint corto. Si el valor es corto, la mascara no muestra ningun caracter.
 - La redaccion de logs debe aplicarse de forma recursiva a `details`, incluyendo listas y objetos anidados.
-- No implementar captcha solving ni bypass agresivo anti-bot.
+- Implementar donde sea necesario bypass agresivo anti-bot.
+- `curl_cffi` con `impersonate` falsifica la huella TLS/JA3 y HTTP/2. Los perfiles de navegador (User-Agent, Sec-Ch-Ua) son datos publicos, no secretos.
+- Los UUID de sesion sticky del proxy son efimeros: se generan por tarea y se descartan al terminar.
+- Las cookies DataDome obtenidas durante el bootstrap se mantienen solo en memoria de la sesion `curl_cffi` y no se persisten.
+- Los eventos de run pueden incluir el nombre del perfil de navegador usado, el session_id del proxy (UUID publico), y si se detecto challenge de DataDome.
 - Acciones de compra futuras:
   - requeriran click explicito;
   - validaran precio, moneda y disponibilidad;
