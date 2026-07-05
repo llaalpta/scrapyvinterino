@@ -11,6 +11,7 @@ from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import (
     SCHEDULER_SETTING_KEY,
+    RunEgress,
     SchedulerConfigError,
     SourceSchedulerConfig,
     get_scheduler_state,
@@ -106,9 +107,9 @@ def test_next_run_after_uses_configured_local_timezone_for_allowed_windows() -> 
     assert next_run == datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
 
 
-def test_validate_proxy_settings_requires_url_when_enabled() -> None:
-    with pytest.raises(SchedulerConfigError, match="VINTED_PROXY_URL"):
-        validate_proxy_settings(Settings(vinted_proxy_enabled=True, vinted_proxy_url=None))
+def test_validate_proxy_settings_rejects_invalid_timezone() -> None:
+    with pytest.raises(SchedulerConfigError, match="Invalid scheduler timezone"):
+        validate_proxy_settings(Settings(scheduler_timezone="Not/AZone"))
 
 
 def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> None:
@@ -116,11 +117,16 @@ def test_scheduler_runner_does_not_submit_source_outside_allowed_window() -> Non
 
     class FakeExecutor:
         available_slots = 2
+        active_proxy_counts: dict[int, int] = {}
+        active_direct_count = 0
 
         def reap_completed(self) -> None:
             return None
 
-        def submit(self, source_id: int, task) -> bool:
+        def update_limits(self, *, max_workers: int, per_source_limit: int) -> None:
+            self.available_slots = max_workers
+
+        def submit(self, source_id: int, egress, task) -> bool:
             submitted.append(source_id)
             return True
 
@@ -216,15 +222,17 @@ def test_bounded_source_executor_limits_global_and_per_source_runs() -> None:
     release = Event()
     executor = BoundedSourceExecutor(max_workers=2, per_source_limit=1)
 
-    def task(source_id: int) -> None:
+    egress = RunEgress(mode="direct")
+
+    def task(source_id: int, _egress: RunEgress) -> None:
         submitted.append(source_id)
         release.wait(timeout=2)
 
     try:
-        assert executor.submit(1, task) is True
-        assert executor.submit(1, task) is False
-        assert executor.submit(2, task) is True
-        assert executor.submit(3, task) is False
+        assert executor.submit(1, egress, task) is True
+        assert executor.submit(1, egress, task) is False
+        assert executor.submit(2, egress, task) is True
+        assert executor.submit(3, egress, task) is False
 
         release.set()
         for _ in range(20):
@@ -234,7 +242,7 @@ def test_bounded_source_executor_limits_global_and_per_source_runs() -> None:
             sleep(0.01)
 
         assert sorted(submitted) == [1, 2]
-        assert executor.submit(3, task) is True
+        assert executor.submit(3, egress, task) is True
         for _ in range(20):
             executor.reap_completed()
             if 3 in submitted and executor.available_slots == 2:

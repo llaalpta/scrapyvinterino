@@ -158,6 +158,27 @@ def test_update_source_api_persists_pause_and_scheduler_config() -> None:
                 db.commit()
 
 
+def test_update_source_api_rejects_monitor_level_proxy_field() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/sources",
+        json={"name": "pytest no monitor proxy", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(f"/api/sources/{source_id}", json={"proxy_profile_id": 1})
+
+        assert response.status_code == 422
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
 def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -> None:
     client = TestClient(app)
     create_response = client.post(

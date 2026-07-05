@@ -1,6 +1,6 @@
 import { Play, Save, Square, Trash2 } from 'lucide-react';
 import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import type { FilterRule, MonitorStats, MonitorStatsRange, ProxyProfile, Run, RunEvent, SearchSource } from '../../api';
+import type { FilterRule, MonitorStats, MonitorStatsRange, Run, RunEvent, SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { RunActivityList } from '../runs/RunsView';
 import { useRunActivity } from '../runs/runActivity';
@@ -22,12 +22,10 @@ export function SourcesView({
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
-  proxyProfiles,
   runningSessionId,
   runs,
   savingSourceId,
   selectedFilterIdsBySource,
-  selectedProxyBySource,
   sourceDrafts,
   sourceName,
   sources,
@@ -36,7 +34,6 @@ export function SourcesView({
   setSourceUrl,
   toggleSourceFilter,
   updateSourceDraft,
-  updateSourceProxy
 }: {
   filterRules: FilterRule[];
   monitorRunsBySource: Record<number, Run[]>;
@@ -51,12 +48,10 @@ export function SourcesView({
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
-  proxyProfiles: ProxyProfile[];
   runningSessionId: number | null;
   runs: Run[];
   savingSourceId: number | null;
   selectedFilterIdsBySource: Record<number, number[]>;
-  selectedProxyBySource: Record<number, string>;
   sourceDrafts: Record<number, SourceDraft>;
   sourceName: string;
   sources: SearchSource[];
@@ -65,7 +60,6 @@ export function SourcesView({
   setSourceUrl: (value: string) => void;
   toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
-  updateSourceProxy: (sourceId: number, value: string) => void;
 }) {
   const activeSources = useMemo(() => sources.filter((source) => source.is_active), [sources]);
   const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
@@ -175,10 +169,8 @@ export function SourcesView({
           <MonitorTable
             filterRules={filterRules}
             monitorStatsBySource={monitorStatsBySource}
-            proxyProfiles={proxyProfiles}
             selectedFilterIdsBySource={selectedFilterIdsBySource}
             selectedMonitorId={selectedMonitorId}
-            selectedProxyBySource={selectedProxyBySource}
             sources={orderedSources}
             sourceDrafts={sourceDrafts}
             onSelectMonitor={setSelectedMonitorId}
@@ -195,18 +187,15 @@ export function SourcesView({
               onSaveSourceSchedule={onSaveSourceSchedule}
               onStartSession={onStartSession}
               onStopMonitor={onStopMonitor}
-              proxyProfiles={proxyProfiles}
               runningSessionId={runningSessionId}
               savingSourceId={savingSourceId}
               selectedFilterIdsBySource={selectedFilterIdsBySource}
-              selectedProxyBySource={selectedProxyBySource}
               source={selectedSource}
               sourceDrafts={sourceDrafts}
               stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
               statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'hours') : 'hours'}
               toggleSourceFilter={toggleSourceFilter}
               updateSourceDraft={updateSourceDraft}
-              updateSourceProxy={updateSourceProxy}
             />
           </div>
         </div>
@@ -386,20 +375,16 @@ function MonitorTable({
   filterRules,
   monitorStatsBySource,
   onSelectMonitor,
-  proxyProfiles,
   selectedFilterIdsBySource,
   selectedMonitorId,
-  selectedProxyBySource,
   sources,
   sourceDrafts
 }: {
   filterRules: FilterRule[];
   monitorStatsBySource: Record<number, MonitorStats>;
   onSelectMonitor: (sourceId: number) => void;
-  proxyProfiles: ProxyProfile[];
   selectedFilterIdsBySource: Record<number, number[]>;
   selectedMonitorId: number | null;
-  selectedProxyBySource: Record<number, string>;
   sources: SearchSource[];
   sourceDrafts: Record<number, SourceDraft>;
 }) {
@@ -420,14 +405,12 @@ function MonitorTable({
         {sources.map((source) => {
           const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
           const summary = source.is_active
-            ? monitorSummary(source, filterRules, proxyProfiles)
+            ? monitorSummary(source, filterRules)
             : draftSummary(
                 source,
                 draft,
                 selectedFilterIdsBySource[source.id] ?? [],
-                selectedProxyBySource[source.id] ?? '',
-                filterRules,
-                proxyProfiles
+                filterRules
               );
           return (
             <MonitorTableRow
@@ -458,8 +441,8 @@ function MonitorTableRow({
   stats: MonitorStats | null;
   summary: string[];
 }) {
-  const modeEntries = summary.filter((entry) => !entry.startsWith('Filtros:') && !entry.startsWith('Proxy:')).slice(0, 3);
-  const configEntries = summary.filter((entry) => entry.startsWith('Filtros:') || entry.startsWith('Proxy:'));
+  const modeEntries = summary.filter((entry) => !entry.startsWith('Filtros:')).slice(0, 3);
+  const configEntries = summary.filter((entry) => entry.startsWith('Filtros:'));
   const rowClassName = [
     'monitor-table-row',
     source.is_active ? 'is-active' : '',
@@ -523,18 +506,15 @@ function MonitorDetail({
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
-  proxyProfiles,
   runningSessionId,
   savingSourceId,
   source,
   sourceDrafts,
   selectedFilterIdsBySource,
-  selectedProxyBySource,
   stats,
   statsRange,
   toggleSourceFilter,
-  updateSourceDraft,
-  updateSourceProxy
+  updateSourceDraft
 }: {
   activity: MonitorActivity;
   activeRuns: Run[];
@@ -546,18 +526,15 @@ function MonitorDetail({
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
-  proxyProfiles: ProxyProfile[];
   runningSessionId: number | null;
   savingSourceId: number | null;
   selectedFilterIdsBySource: Record<number, number[]>;
-  selectedProxyBySource: Record<number, string>;
   source: SearchSource | null;
   sourceDrafts: Record<number, SourceDraft>;
   stats: MonitorStats | null;
   statsRange: MonitorStatsRange;
   toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
-  updateSourceProxy: (sourceId: number, value: string) => void;
 }) {
   const [archiveSource, setArchiveSource] = useState<SearchSource | null>(null);
   const archiveDialogRef = useRef<HTMLDivElement | null>(null);
@@ -575,7 +552,6 @@ function MonitorDetail({
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
-  const selectedProxy = selectedProxyBySource[source.id] ?? '';
   const sourceRuns = (monitorRuns.length > 0 ? monitorRuns : activeRuns.filter((run) => run.source_id === source.id)).slice(0, 3);
 
   return (
@@ -602,14 +578,11 @@ function MonitorDetail({
         <MonitorConfigEditor
           disabled={source.is_active}
           filterRules={filterRules}
-          proxyProfiles={proxyProfiles}
           selectedFilterIds={selectedFilterIds}
-          selectedProxy={selectedProxy}
           source={source}
           sourceDraft={sourceDraft}
           toggleSourceFilter={toggleSourceFilter}
           updateSourceDraft={updateSourceDraft}
-          updateSourceProxy={updateSourceProxy}
         />
         <div className="monitor-config-actions">
           {source.is_active ? (
@@ -710,25 +683,19 @@ function MonitorDetail({
 function MonitorConfigEditor({
   disabled,
   filterRules,
-  proxyProfiles,
   selectedFilterIds,
-  selectedProxy,
   source,
   sourceDraft,
   toggleSourceFilter,
-  updateSourceDraft,
-  updateSourceProxy
+  updateSourceDraft
 }: {
   disabled: boolean;
   filterRules: FilterRule[];
-  proxyProfiles: ProxyProfile[];
   selectedFilterIds: number[];
-  selectedProxy: string;
   source: SearchSource;
   sourceDraft: SourceDraft;
   toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
-  updateSourceProxy: (sourceId: number, value: string) => void;
 }) {
   const isRecurring = sourceDraft.monitorMode !== 'manual';
 
@@ -805,17 +772,6 @@ function MonitorConfigEditor({
             />
           </label>
         ) : null}
-        <label>
-          Proxy
-          <select disabled={disabled} value={selectedProxy} onChange={(event) => updateSourceProxy(source.id, event.target.value)}>
-            <option value="">Directo / .env</option>
-            {proxyProfiles.map((proxy) => (
-              <option key={proxy.id} value={proxy.id}>
-                {proxy.name}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
 
       <div className="source-filter-picker compact">
@@ -853,7 +809,7 @@ function monitorListMetrics(stats: MonitorStats | null): string[] {
   ];
 }
 
-function monitorSummary(source: SearchSource, filterRules: FilterRule[], proxyProfiles: ProxyProfile[]): string[] {
+function monitorSummary(source: SearchSource, filterRules: FilterRule[]): string[] {
   const config = source.scheduler_config ?? {};
   const entries = [`Modo: ${modeLabel(source.monitor_mode)}`];
   if (source.monitor_mode !== 'manual') {
@@ -867,7 +823,6 @@ function monitorSummary(source: SearchSource, filterRules: FilterRule[], proxyPr
     entries.push(`Ventana ${config.allowed_windows[0]}`);
   }
   entries.push(`Filtros: ${filterLabel(source.filter_rule_ids, filterRules)}`);
-  entries.push(`Proxy: ${proxyLabel(source.proxy_profile_id, proxyProfiles)}`);
   if (source.monitor_started_at) {
     entries.push(`Activo desde ${formatDate(source.monitor_started_at)}`);
   }
@@ -884,9 +839,7 @@ function draftSummary(
   source: SearchSource,
   draft: SourceDraft,
   selectedFilterIds: number[],
-  selectedProxy: string,
-  filterRules: FilterRule[],
-  proxyProfiles: ProxyProfile[]
+  filterRules: FilterRule[]
 ): string[] {
   const entries = [`Modo: ${modeLabel(draft.monitorMode)}`];
   if (draft.monitorMode !== 'manual') {
@@ -900,7 +853,6 @@ function draftSummary(
     entries.push(`${draft.windowStart}-${draft.windowEnd}`);
   }
   entries.push(`Filtros: ${filterLabel(selectedFilterIds, filterRules)}`);
-  entries.push(`Proxy: ${selectedProxy ? proxyLabel(Number(selectedProxy), proxyProfiles) : 'Directo / .env'}`);
   if (source.last_run_at) {
     entries.push(`Ultima ${formatDate(source.last_run_at)}`);
   }
@@ -917,13 +869,6 @@ function filterLabel(filterIds: number[], filterRules: FilterRule[]): string {
   }
   const names = filterIds.map((filterId) => filterRules.find((rule) => rule.id === filterId)?.name ?? `#${filterId}`);
   return names.join(', ');
-}
-
-function proxyLabel(proxyProfileId: number | null, proxyProfiles: ProxyProfile[]): string {
-  if (!proxyProfileId) {
-    return 'Directo / .env';
-  }
-  return proxyProfiles.find((proxy) => proxy.id === proxyProfileId)?.name ?? `Perfil #${proxyProfileId}`;
 }
 
 function modeLabel(mode: SearchSource['monitor_mode']): string {

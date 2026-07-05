@@ -10,7 +10,6 @@ export type SearchSource = {
   monitor_mode: 'manual' | 'continuous' | 'duration' | 'window';
   duration_minutes: number | null;
   filter_rule_ids: number[];
-  proxy_profile_id: number | null;
   monitor_started_at: string | null;
   monitor_until: string | null;
   last_run_at: string | null;
@@ -34,6 +33,7 @@ export type ProxyProfile = {
   id: number;
   name: string;
   scheme: string;
+  kind: 'own' | 'datacenter' | 'residential';
   host: string;
   port: number;
   username: string | null;
@@ -41,6 +41,10 @@ export type ProxyProfile = {
   has_password: boolean;
   password_fingerprint: string | null;
   is_active: boolean;
+  max_concurrent_runs: number;
+  cooldown_until: string | null;
+  failure_count: number;
+  last_used_at: string | null;
   last_test_status: string | null;
   last_test_ip: string | null;
   last_test_error: string | null;
@@ -60,8 +64,20 @@ export type SchedulerState = {
   per_source_concurrency: number;
   poll_interval_seconds: number;
   timezone: string;
-  proxy_enabled: boolean;
-  proxy_configured: boolean;
+  max_runs_per_proxy: number;
+  allow_direct_without_proxy: boolean;
+  direct_max_concurrent_runs: number;
+  active_proxy_count: number;
+  proxy_capacity: number;
+  direct_capacity: number;
+  effective_capacity: number;
+  active_periodic_monitors: number;
+  catalog_per_page: number;
+  detail_max_candidates_per_run: number;
+  request_timeout_ms: number;
+  request_retries: number;
+  stop_monitor_after_consecutive_failures: number;
+  proxy_cooldown_minutes: number;
 };
 
 export type Item = {
@@ -290,7 +306,6 @@ export function updateSource(
     monitor_mode?: SearchSource['monitor_mode'];
     duration_minutes?: number | null;
     filter_rule_ids?: number[];
-    proxy_profile_id?: number | null;
   }
 ): Promise<SearchSource> {
   return patchJson<SearchSource>(`/api/monitors/${sourceId}`, payload);
@@ -307,7 +322,21 @@ export function fetchScheduler(): Promise<SchedulerState> {
   return getJson<SchedulerState>('/api/scheduler');
 }
 
-export function updateScheduler(payload: { enabled: boolean }): Promise<SchedulerState> {
+export type SchedulerUpdate = Partial<{
+  enabled: boolean;
+  max_concurrent_runs: number;
+  max_runs_per_proxy: number;
+  allow_direct_without_proxy: boolean;
+  direct_max_concurrent_runs: number;
+  catalog_per_page: number;
+  detail_max_candidates_per_run: number;
+  request_timeout_ms: number;
+  request_retries: number;
+  stop_monitor_after_consecutive_failures: number;
+  proxy_cooldown_minutes: number;
+}>;
+
+export function updateScheduler(payload: SchedulerUpdate): Promise<SchedulerState> {
   return patchJson<SchedulerState>('/api/scheduler', payload);
 }
 
@@ -333,13 +362,19 @@ export function fetchProxyProfiles(): Promise<ProxyProfile[]> {
 export function createProxyProfile(payload: {
   name: string;
   scheme: string;
+  kind: ProxyProfile['kind'];
   host: string;
   port: number;
   username?: string;
   password?: string;
+  max_concurrent_runs?: number;
   is_active?: boolean;
 }): Promise<ProxyProfile> {
   return postJson<ProxyProfile>('/api/proxy-profiles', payload);
+}
+
+export function updateProxyProfile(profileId: number, payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind'>>): Promise<ProxyProfile> {
+  return patchJson<ProxyProfile>(`/api/proxy-profiles/${profileId}`, payload);
 }
 
 export function testProxyProfile(profileId: number): Promise<ProxyProfile> {

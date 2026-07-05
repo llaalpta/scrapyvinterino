@@ -17,8 +17,6 @@ class Settings(BaseSettings):
     seen_cache_max_per_monitor: int = 10000
 
     vinted_base_url: AnyHttpUrl = "https://www.vinted.es"
-    vinted_proxy_enabled: bool = False
-    vinted_proxy_url: str | None = None
     vinted_request_timeout_ms: int = 15000
     vinted_fast_catalog_per_page: int = 5
     vinted_detail_max_candidates_per_run: int = 5

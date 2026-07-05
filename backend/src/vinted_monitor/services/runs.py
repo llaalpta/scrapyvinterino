@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text
-from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource
+from vinted_monitor.db.models import ErrorLog, Item, Opportunity, Run, SearchSource
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
 from vinted_monitor.services.filters import evaluate_exclusion_filters, get_filter_snapshot
@@ -24,8 +24,9 @@ from vinted_monitor.services.items import (
     record_item_detail_error,
 )
 from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
-from vinted_monitor.services.proxies import proxy_url_for_profile
+from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success
 from vinted_monitor.services.run_events import record_run_event
+from vinted_monitor.services.scheduler import RunEgress, choose_run_egress, get_scheduler_runtime_config
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
 
 RUNNING = "running"
@@ -90,6 +91,7 @@ def execute_monitor_run(
     require_active: bool = True,
     create_session_for_run: bool = False,
     close_session_on_finish: bool = False,
+    egress: RunEgress | None = None,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
@@ -99,6 +101,9 @@ def execute_monitor_run(
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
 
+    settings = get_settings()
+    runtime_config = get_scheduler_runtime_config(db, settings)
+    selected_egress = egress or choose_run_egress(db, settings)
     run_session = start_monitor_session(db, source, allow_manual=True) if create_session_for_run else None
     active_session = run_session
     if active_session is None and require_active and source.monitor_mode != "manual":
@@ -114,7 +119,7 @@ def execute_monitor_run(
         items_discarded_by_filters=0,
         items_filter_pending=0,
         opportunities_created=0,
-        runtime_metadata=_run_runtime_metadata(db, source),
+        runtime_metadata=_run_runtime_metadata(source, selected_egress, runtime_config),
     )
     db.add(run)
     try:
@@ -129,16 +134,19 @@ def execute_monitor_run(
         source_id=source.id,
         phase="run_started",
         proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
-        user_agent=get_settings().vinted_user_agent,
+        user_agent=settings.vinted_user_agent,
         auth_mode="public_anonymous",
         details={
             "trigger": trigger,
             "monitor_mode": source.monitor_mode,
             "filter_count": len(source.filter_rule_ids or []),
+            "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
+            "proxy_profile_id": (run.runtime_metadata or {}).get("proxy_profile_id"),
+            "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
         },
     )
 
-    run_provider = provider or _provider_for_source(db, source)
+    run_provider = provider or _provider_for_egress(selected_egress, runtime_config)
     cache = seen_cache or get_seen_cache()
     policy_hash = _policy_hash(source, get_filter_snapshot(db, source.filter_rule_ids or []))
     run.runtime_metadata = {**(run.runtime_metadata or {}), "policy_hash": policy_hash}
@@ -173,7 +181,7 @@ def execute_monitor_run(
         source.monitor_until = None
         source.next_run_at = None
         stop_active_monitor_session(db, source.id, reason="redis_unavailable")
-        return _record_failed_run(db, run, source, exc, kind="redis_unavailable")
+        return _record_failed_run(db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True)
     record_run_event(
         db,
         run_id=run.id,
@@ -192,7 +200,7 @@ def execute_monitor_run(
         method="GET",
         url=source.url,
         proxy_profile_id=proxy_profile_id,
-        user_agent=get_settings().vinted_user_agent,
+        user_agent=settings.vinted_user_agent,
         auth_mode="public_anonymous",
     )
     try:
@@ -205,12 +213,12 @@ def execute_monitor_run(
             method="GET",
             url=source.url,
             proxy_profile_id=proxy_profile_id,
-            user_agent=get_settings().vinted_user_agent,
+            user_agent=settings.vinted_user_agent,
             auth_mode="public_anonymous",
             details={"provider": result.provider_metadata},
         )
     except Exception as exc:
-        return _record_failed_run(db, run, source, exc)
+        return _record_failed_run(db, run, source, exc, penalize_proxy=True)
 
     claimed_ids: set[str] = set()
     processed_ids: list[str] = []
@@ -252,6 +260,7 @@ def execute_monitor_run(
         run.opportunities_created = monitor_result["opportunities_created"]
         run.error_message = None
         source.last_run_at = run.finished_at
+        mark_proxy_run_success(db, proxy_profile_id)
         if close_session_on_finish and run.monitor_session_id is not None:
             stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="completed")
         _clear_manual_monitor_runtime(source)
@@ -291,7 +300,11 @@ def execute_monitor_run(
                 cache.release_processing(source.id, policy_hash, list(claimed_ids))
             except SeenCacheUnavailableError:
                 pass
-        return _record_failed_run(db, run, source, exc, kind="redis_unavailable") if run is not None else raise_(exc)
+        return (
+            _record_failed_run(db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True)
+            if run is not None
+            else raise_(exc)
+        )
     except Exception as exc:
         db.rollback()
         run = db.get(Run, run.id)
@@ -299,7 +312,7 @@ def execute_monitor_run(
             cache.release_processing(source.id, policy_hash, list(claimed_ids))
         if run is None:
             raise
-        return _record_failed_run(db, run, source, exc)
+        return _record_failed_run(db, run, source, exc, penalize_proxy=False)
 
 
 def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> list[Run]:
@@ -310,9 +323,13 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
     return list(db.scalars(statement))
 
 
-def _provider_for_source(db: Session, source: SearchSource) -> HttpVintedCatalogProvider:
-    proxy = db.get(ProxyProfile, source.proxy_profile_id) if source.proxy_profile_id else None
-    return HttpVintedCatalogProvider(proxy_url=proxy_url_for_profile(proxy, get_settings()))
+def _provider_for_egress(egress: RunEgress, runtime_config) -> HttpVintedCatalogProvider:
+    return HttpVintedCatalogProvider(
+        proxy_url=egress.proxy_url,
+        timeout_ms=runtime_config.request_timeout_ms,
+        catalog_per_page=runtime_config.catalog_per_page,
+        request_retries=runtime_config.request_retries,
+    )
 
 
 def _active_source_run_exists(db: Session, *, source_id: int) -> bool:
@@ -330,14 +347,21 @@ def _active_source_run_exists(db: Session, *, source_id: int) -> bool:
     )
 
 
-def _run_runtime_metadata(db: Session, source: SearchSource) -> dict:
-    proxy = db.get(ProxyProfile, source.proxy_profile_id) if source.proxy_profile_id else None
+def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_config) -> dict:
     return {
         "filter_count": len(source.filter_rule_ids or []),
         "filter_rule_ids": source.filter_rule_ids or [],
-        "proxy_profile_id": source.proxy_profile_id,
-        "proxy_name": proxy.name if proxy is not None else None,
+        "egress_mode": egress.mode,
+        "proxy_profile_id": egress.proxy_profile_id,
+        "proxy_name": egress.proxy_name,
+        "proxy_kind": egress.proxy_kind,
         "auth_mode": "public_anonymous",
+        "catalog_per_page": runtime_config.catalog_per_page,
+        "detail_max_candidates_per_run": runtime_config.detail_max_candidates_per_run,
+        "request_timeout_ms": runtime_config.request_timeout_ms,
+        "request_retries": runtime_config.request_retries,
+        "proxy_cooldown_minutes": runtime_config.proxy_cooldown_minutes,
+        "stop_monitor_after_consecutive_failures": runtime_config.stop_monitor_after_consecutive_failures,
     }
 
 
@@ -389,6 +413,8 @@ def _record_failed_run(
     exc: Exception,
     *,
     kind: str | None = None,
+    penalize_proxy: bool = False,
+    force_stop_monitor: bool = False,
 ) -> Run:
     message = redact_sensitive_text(str(exc))
     record_run_event(
@@ -406,7 +432,12 @@ def _record_failed_run(
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
     run.error_message = message
-    if run.monitor_session_id is not None:
+    proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+    cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
+    if penalize_proxy:
+        mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
+    should_stop_monitor = _should_stop_monitor_after_failure(db, run, source, force_stop_monitor=force_stop_monitor)
+    if run.monitor_session_id is not None and should_stop_monitor:
         stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="failed")
         source.is_active = False
         source.monitor_started_at = None
@@ -425,6 +456,31 @@ def _record_failed_run(
     db.commit()
     db.refresh(run)
     return run
+
+
+def _should_stop_monitor_after_failure(db: Session, run: Run, source: SearchSource, *, force_stop_monitor: bool) -> bool:
+    if force_stop_monitor or source.monitor_mode == "manual":
+        return True
+    threshold = int((run.runtime_metadata or {}).get("stop_monitor_after_consecutive_failures", 1))
+    if threshold <= 1:
+        return True
+    previous_statuses = list(
+        db.scalars(
+            select(Run.status)
+            .where(
+                Run.source_id == source.id,
+                Run.id != run.id,
+            )
+            .order_by(Run.started_at.desc(), Run.id.desc())
+            .limit(threshold - 1)
+        )
+    )
+    consecutive_failures = 1
+    for status in previous_statuses:
+        if status != FAILED:
+            break
+        consecutive_failures += 1
+    return consecutive_failures >= threshold
 
 
 def _clear_manual_monitor_runtime(source: SearchSource) -> None:
@@ -452,7 +508,12 @@ def _evaluate_monitor_candidates(
     pending = 0
     opportunities_created = 0
     provider_settings = getattr(provider, "settings", get_settings())
-    max_detail_candidates = max(provider_settings.vinted_detail_max_candidates_per_run, 0)
+    runtime_detail_limit = (run.runtime_metadata or {}).get("detail_max_candidates_per_run")
+    configured_detail_limit = (
+        runtime_detail_limit if runtime_detail_limit is not None else provider_settings.vinted_detail_max_candidates_per_run
+    )
+    max_detail_candidates = max(int(configured_detail_limit), 0)
+    proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     detail_attempts = 0
 
     for candidate in candidates:
@@ -472,7 +533,7 @@ def _evaluate_monitor_candidates(
                     phase="detail_fetch_start",
                     method="GET",
                     url=candidate.url,
-                    proxy_profile_id=source.proxy_profile_id,
+                    proxy_profile_id=proxy_profile_id,
                     user_agent=get_settings().vinted_user_agent,
                     auth_mode="public_anonymous",
                     details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
@@ -489,7 +550,7 @@ def _evaluate_monitor_candidates(
                         method="GET",
                         url=candidate.url,
                         duration_ms=_elapsed_ms(detail_started_at),
-                        proxy_profile_id=source.proxy_profile_id,
+                        proxy_profile_id=proxy_profile_id,
                         user_agent=get_settings().vinted_user_agent,
                         auth_mode="public_anonymous",
                         details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
@@ -507,7 +568,7 @@ def _evaluate_monitor_candidates(
                         url=candidate.url,
                         duration_ms=_elapsed_ms(detail_started_at),
                         level="error",
-                        proxy_profile_id=source.proxy_profile_id,
+                        proxy_profile_id=proxy_profile_id,
                         user_agent=get_settings().vinted_user_agent,
                         auth_mode="public_anonymous",
                         message=detail_error,
@@ -523,7 +584,7 @@ def _evaluate_monitor_candidates(
                     phase="detail_fetch_skipped",
                     level="warning",
                     url=candidate.url,
-                    proxy_profile_id=source.proxy_profile_id,
+                    proxy_profile_id=proxy_profile_id,
                     message="Detail fetch limit reached; opportunity can still be created without detail filters",
                     details={
                         "vinted_item_id": candidate.vinted_item_id,
@@ -545,7 +606,7 @@ def _evaluate_monitor_candidates(
                 phase="item_discarded",
                 level="warning",
                 url=candidate.url,
-                proxy_profile_id=source.proxy_profile_id,
+                proxy_profile_id=proxy_profile_id,
                 message=f"Matched blacklist terms: {', '.join(matched_terms)}",
                 details={"vinted_item_id": candidate.vinted_item_id, "matched_terms": matched_terms},
             )
@@ -557,7 +618,7 @@ def _evaluate_monitor_candidates(
             source_id=source.id,
             phase="filter_passed",
             url=candidate.url,
-            proxy_profile_id=source.proxy_profile_id,
+            proxy_profile_id=proxy_profile_id,
             message="Candidate passed monitor filters",
             details={
                 "vinted_item_id": candidate.vinted_item_id,
@@ -579,7 +640,7 @@ def _evaluate_monitor_candidates(
             phase="opportunity_created" if created else "opportunity_skipped",
             level="info" if created else "warning",
             url=candidate.url,
-            proxy_profile_id=source.proxy_profile_id,
+            proxy_profile_id=proxy_profile_id,
             message="Opportunity created" if created else "Opportunity already existed for this monitor item",
             details={
                 "vinted_item_id": candidate.vinted_item_id,

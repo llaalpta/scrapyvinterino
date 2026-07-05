@@ -9,6 +9,8 @@ from vinted_monitor.services.search_sources import validate_search_source_name, 
 
 
 class SearchSourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     url: str
 
@@ -35,7 +37,6 @@ class SearchSourceRead(BaseModel):
     monitor_mode: str
     duration_minutes: int | None
     filter_rule_ids: list[int]
-    proxy_profile_id: int | None
     monitor_started_at: datetime | None
     monitor_until: datetime | None
     last_run_at: datetime | None
@@ -44,6 +45,8 @@ class SearchSourceRead(BaseModel):
 
 
 class SearchSourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
     url: str | None = None
     is_active: bool | None = None
@@ -51,7 +54,6 @@ class SearchSourceUpdate(BaseModel):
     monitor_mode: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=1440)
     filter_rule_ids: list[int] | None = None
-    proxy_profile_id: int | None = Field(default=None, ge=1)
 
     @field_validator("name")
     @classmethod
@@ -88,7 +90,19 @@ class SearchSourceUpdate(BaseModel):
 
 
 class SchedulerUpdate(BaseModel):
-    enabled: bool
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    max_concurrent_runs: int | None = Field(default=None, ge=1, le=20)
+    max_runs_per_proxy: int | None = Field(default=None, ge=1, le=10)
+    allow_direct_without_proxy: bool | None = None
+    direct_max_concurrent_runs: int | None = Field(default=None, ge=0, le=10)
+    catalog_per_page: int | None = Field(default=None, ge=1, le=96)
+    detail_max_candidates_per_run: int | None = Field(default=None, ge=0, le=96)
+    request_timeout_ms: int | None = Field(default=None, ge=1000, le=60000)
+    request_retries: int | None = Field(default=None, ge=0, le=5)
+    stop_monitor_after_consecutive_failures: int | None = Field(default=None, ge=1, le=20)
+    proxy_cooldown_minutes: int | None = Field(default=None, ge=1, le=1440)
 
 
 class SchedulerStateRead(BaseModel):
@@ -101,8 +115,20 @@ class SchedulerStateRead(BaseModel):
     per_source_concurrency: int
     poll_interval_seconds: int
     timezone: str
-    proxy_enabled: bool
-    proxy_configured: bool
+    max_runs_per_proxy: int
+    allow_direct_without_proxy: bool
+    direct_max_concurrent_runs: int
+    active_proxy_count: int
+    proxy_capacity: int
+    direct_capacity: int
+    effective_capacity: int
+    active_periodic_monitors: int
+    catalog_per_page: int
+    detail_max_candidates_per_run: int
+    request_timeout_ms: int
+    request_retries: int
+    stop_monitor_after_consecutive_failures: int
+    proxy_cooldown_minutes: int
 
 
 class FilterRuleCreate(BaseModel):
@@ -130,23 +156,31 @@ class FilterRuleRead(BaseModel):
 
 
 class ProxyProfileCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     scheme: str = "http"
+    kind: str = "own"
     host: str
     port: int = Field(ge=1, le=65535)
     username: str | None = None
     password: str | None = None
+    max_concurrent_runs: int = Field(default=1, ge=1, le=10)
     is_active: bool = True
 
 
 class ProxyProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
     scheme: str | None = None
+    kind: str | None = None
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = None
     password: str | None = None
     clear_password: bool = False
+    max_concurrent_runs: int | None = Field(default=None, ge=1, le=10)
     is_active: bool | None = None
 
 
@@ -154,6 +188,7 @@ class ProxyProfileRead(BaseModel):
     id: int
     name: str
     scheme: str
+    kind: str
     host: str
     port: int
     username: str | None
@@ -161,6 +196,10 @@ class ProxyProfileRead(BaseModel):
     has_password: bool
     password_fingerprint: str | None
     is_active: bool
+    max_concurrent_runs: int
+    cooldown_until: datetime | None
+    failure_count: int
+    last_used_at: datetime | None
     last_test_status: str | None
     last_test_ip: str | None
     last_test_error: str | None

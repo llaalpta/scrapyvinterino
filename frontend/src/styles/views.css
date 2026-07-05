@@ -1019,15 +1019,38 @@
 
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
   gap: 14px;
-  align-items: center;
+  align-items: end;
   padding: 14px;
 }
 
-.settings-grid div {
+.settings-grid div,
+.settings-grid label {
   display: grid;
   gap: 5px;
+}
+
+.settings-grid label {
+  color: #697586;
+  font-size: 12px;
+}
+
+.settings-grid input[type='number'] {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #1f2933;
+  background: #ffffff;
+}
+
+.settings-grid .checkbox-label {
+  align-items: center;
+  grid-template-columns: auto 1fr;
+  min-height: 36px;
+  color: #1f2933;
 }
 
 .settings-grid strong {
@@ -1049,7 +1072,7 @@
 
 .proxy-form {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) 110px minmax(170px, 1.2fr) 100px minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   gap: 10px;
   padding: 0 14px 14px;
 }

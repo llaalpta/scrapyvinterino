@@ -13,7 +13,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Treat active/inactive as monitor scheduling state; executing/running belongs to individual runs.
 - Validate that the URL is an anonymous public Vinted catalog URL before saving it.
 - Archive monitors from the PWA as the safe delete behavior while preserving historical runs, seen items, and opportunities.
-- Allow monitor URL, filters, cadence, proxy, and execution mode to change without creating a new monitor identity.
+- Allow monitor URL, filters, cadence, and execution mode to change without creating a new monitor identity.
 
 ## Out of Scope
 

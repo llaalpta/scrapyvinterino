@@ -49,12 +49,10 @@ export function DashboardApp() {
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
-          proxyProfiles={dashboard.proxyProfiles}
           runs={dashboard.runs}
           runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}
           selectedFilterIdsBySource={dashboard.selectedFilterIdsBySource}
-          selectedProxyBySource={dashboard.selectedProxyBySource}
           sourceDrafts={dashboard.sourceDrafts}
           sourceName={dashboard.sourceName}
           sources={dashboard.sources}
@@ -63,7 +61,6 @@ export function DashboardApp() {
           setSourceUrl={dashboard.setSourceUrl}
           toggleSourceFilter={dashboard.toggleSourceFilter}
           updateSourceDraft={dashboard.updateSourceDraft}
-          updateSourceProxy={dashboard.updateSourceProxy}
         />
       ) : null}
 
@@ -83,7 +80,9 @@ export function DashboardApp() {
         <SettingsView
           onCreateProxy={dashboard.onCreateProxy}
           onTestProxy={(profileId) => void dashboard.onTestProxy(profileId)}
+          onToggleProxy={(profile) => void dashboard.onToggleProxy(profile)}
           onToggleScheduler={() => void dashboard.onToggleScheduler()}
+          onUpdateSchedulerConfig={(payload) => void dashboard.onUpdateSchedulerConfig(payload)}
           proxyDraft={dashboard.proxyDraft}
           proxyProfiles={dashboard.proxyProfiles}
           savingProxy={dashboard.savingProxy}

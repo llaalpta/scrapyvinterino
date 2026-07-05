@@ -17,6 +17,7 @@ import {
   stopMonitor,
   testProxyProfile,
   updateScheduler,
+  updateProxyProfile,
   updateSource,
   type FilterRule,
   type MonitorStats,
@@ -24,6 +25,7 @@ import {
   type OpportunityResult,
   type Page,
   type ProxyProfile,
+  type SchedulerUpdate,
   type Run,
   type SchedulerState,
   type SearchSource
@@ -38,7 +40,7 @@ import { type ProxyDraft } from '../features/settings/SettingsView';
 import { buildSourceDraft, buildSourceDrafts, type SourceDraft } from '../features/sources/sourceDrafts';
 
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
-const emptyProxyDraft: ProxyDraft = { name: '', scheme: 'http', host: '', port: '', username: '', password: '' };
+const emptyProxyDraft: ProxyDraft = { name: '', scheme: 'http', kind: 'own', host: '', port: '', maxConcurrentRuns: '1', username: '', password: '' };
 
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
@@ -52,7 +54,6 @@ export function useDashboardController() {
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [selectedFilterIdsBySource, setSelectedFilterIdsBySource] = useState<Record<number, number[]>>({});
-  const [selectedProxyBySource, setSelectedProxyBySource] = useState<Record<number, string>>({});
   const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
@@ -118,7 +119,6 @@ export function useDashboardController() {
         setProxyProfiles(proxyData);
         setSourceDrafts(buildSourceDrafts(sourceData));
         setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
-        setSelectedProxyBySource(buildSelectedProxyIds(sourceData));
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
@@ -152,7 +152,6 @@ export function useDashboardController() {
       setSources((current) => [created, ...current]);
       setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
       setSelectedFilterIdsBySource((current) => ({ ...current, [created.id]: created.filter_rule_ids ?? [] }));
-      setSelectedProxyBySource((current) => ({ ...current, [created.id]: created.proxy_profile_id ? String(created.proxy_profile_id) : '' }));
       await loadMonitorStats(created.id, 'hours');
       setSourceName('');
       setSourceUrl('');
@@ -188,8 +187,10 @@ export function useDashboardController() {
       const created = await createProxyProfile({
         name: proxyDraft.name,
         scheme: proxyDraft.scheme,
+        kind: proxyDraft.kind,
         host: proxyDraft.host,
         port: Number(proxyDraft.port),
+        max_concurrent_runs: Number(proxyDraft.maxConcurrentRuns),
         username: proxyDraft.username || undefined,
         password: proxyDraft.password || undefined
       });
@@ -209,6 +210,17 @@ export function useDashboardController() {
       setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo probar el proxy');
+    }
+  }
+
+  async function onToggleProxy(profile: ProxyProfile) {
+    setError(null);
+    try {
+      const updated = await updateProxyProfile(profile.id, { is_active: !profile.is_active });
+      setProxyProfiles((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
+      setScheduler(await fetchScheduler());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el proxy');
     }
   }
 
@@ -288,6 +300,18 @@ export function useDashboardController() {
     }
   }
 
+  async function onUpdateSchedulerConfig(payload: SchedulerUpdate) {
+    setError(null);
+    setSavingScheduler(true);
+    try {
+      setScheduler(await updateScheduler(payload));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el scheduler');
+    } finally {
+      setSavingScheduler(false);
+    }
+  }
+
   async function onToggleSource(source: SearchSource) {
     setError(null);
     setSavingSourceId(source.id);
@@ -314,11 +338,6 @@ export function useDashboardController() {
         return next;
       });
       setSelectedFilterIdsBySource((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      setSelectedProxyBySource((current) => {
         const next = { ...current };
         delete next[source.id];
         return next;
@@ -381,10 +400,6 @@ export function useDashboardController() {
         [field]: value
       }
     }));
-  }
-
-  function updateSourceProxy(sourceId: number, value: string) {
-    setSelectedProxyBySource((current) => ({ ...current, [sourceId]: value }));
   }
 
   function toggleSourceFilter(sourceId: number, filterId: number) {
@@ -455,8 +470,10 @@ export function useDashboardController() {
     onStartSession,
     onStopMonitor,
     onTestProxy,
+    onToggleProxy,
     onToggleScheduler,
     onToggleSource,
+    onUpdateSchedulerConfig,
     monitorStatsBySource,
     monitorStatsRangeBySource,
     monitorRunsBySource,
@@ -474,7 +491,6 @@ export function useDashboardController() {
     scheduler,
     selectSection,
     selectedFilterIdsBySource,
-    selectedProxyBySource,
     setFilterName,
     setFilterTerms,
     setNavCollapsed,
@@ -488,8 +504,7 @@ export function useDashboardController() {
     runs,
     toggleSourceFilter,
     updateOpportunityFilter,
-    updateSourceDraft,
-    updateSourceProxy
+    updateSourceDraft
   };
 
   async function saveMonitorConfig(source: SearchSource, draft: SourceDraft, precomputedAllowedWindows?: string[] | null) {
@@ -510,7 +525,6 @@ export function useDashboardController() {
       monitor_mode: draft.monitorMode,
       duration_minutes: durationMinutes,
       filter_rule_ids: selectedFilterIdsBySource[source.id] ?? [],
-      proxy_profile_id: selectedProxyBySource[source.id] ? Number(selectedProxyBySource[source.id]) : null,
       scheduler_config: {
         interval_seconds: intervalSeconds,
         jitter_percent: jitterPercent,
@@ -538,12 +552,6 @@ function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal:
 
 function buildSelectedFilterIds(sources: SearchSource[]): Record<number, number[]> {
   return Object.fromEntries(sources.map((source) => [source.id, source.filter_rule_ids ?? []]));
-}
-
-function buildSelectedProxyIds(sources: SearchSource[]): Record<number, string> {
-  return Object.fromEntries(
-    sources.flatMap((source) => (source.proxy_profile_id ? [[source.id, String(source.proxy_profile_id)]] : []))
-  );
 }
 
 function buildAllowedWindows(draft: SourceDraft): string[] | null {

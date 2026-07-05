@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings
-from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.db.models import AppSetting, ProxyProfile, Run, SearchSource
 from vinted_monitor.services.monitor_sessions import stop_active_monitor_session
 
 SCHEDULER_SETTING_KEY = "scheduler"
@@ -21,9 +21,26 @@ DEFAULT_JITTER_PERCENT = 20
 MIN_JITTER_PERCENT = 0
 MAX_JITTER_PERCENT = 50
 SUPPORTED_SOURCE_CONFIG_KEYS = {"interval_seconds", "jitter_percent", "allowed_windows"}
+RUNTIME_CONFIG_KEYS = {
+    "enabled",
+    "max_concurrent_runs",
+    "max_runs_per_proxy",
+    "allow_direct_without_proxy",
+    "direct_max_concurrent_runs",
+    "catalog_per_page",
+    "detail_max_candidates_per_run",
+    "request_timeout_ms",
+    "request_retries",
+    "stop_monitor_after_consecutive_failures",
+    "proxy_cooldown_minutes",
+}
 
 
 class SchedulerConfigError(ValueError):
+    pass
+
+
+class SchedulerCapacityError(ValueError):
     pass
 
 
@@ -42,6 +59,21 @@ class SourceSchedulerConfig:
 
 
 @dataclass(frozen=True)
+class SchedulerRuntimeConfig:
+    enabled: bool
+    max_concurrent_runs: int
+    max_runs_per_proxy: int
+    allow_direct_without_proxy: bool
+    direct_max_concurrent_runs: int
+    catalog_per_page: int
+    detail_max_candidates_per_run: int
+    request_timeout_ms: int
+    request_retries: int
+    stop_monitor_after_consecutive_failures: int
+    proxy_cooldown_minutes: int
+
+
+@dataclass(frozen=True)
 class SchedulerState:
     enabled: bool
     runtime_enabled: bool
@@ -50,34 +82,170 @@ class SchedulerState:
     per_source_concurrency: int
     poll_interval_seconds: int
     timezone: str
-    proxy_enabled: bool
-    proxy_configured: bool
+    max_runs_per_proxy: int
+    allow_direct_without_proxy: bool
+    direct_max_concurrent_runs: int
+    active_proxy_count: int
+    proxy_capacity: int
+    direct_capacity: int
+    effective_capacity: int
+    active_periodic_monitors: int
+    catalog_per_page: int
+    detail_max_candidates_per_run: int
+    request_timeout_ms: int
+    request_retries: int
+    stop_monitor_after_consecutive_failures: int
+    proxy_cooldown_minutes: int
+
+
+@dataclass(frozen=True)
+class RunEgress:
+    mode: str
+    proxy_profile_id: int | None = None
+    proxy_name: str | None = None
+    proxy_kind: str | None = None
+    proxy_url: str | None = None
 
 
 def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
-    enabled = _read_scheduler_enabled(db)
+    runtime_config = get_scheduler_runtime_config(db, settings)
     runtime_enabled = settings.scheduler_enabled
+    active_proxies = _active_proxy_profiles(db)
+    proxy_capacity = sum(min(max(proxy.max_concurrent_runs, 1), runtime_config.max_runs_per_proxy) for proxy in active_proxies)
+    direct_capacity = runtime_config.direct_max_concurrent_runs if runtime_config.allow_direct_without_proxy else 0
+    effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity + direct_capacity)
     return SchedulerState(
-        enabled=enabled,
+        enabled=runtime_config.enabled,
         runtime_enabled=runtime_enabled,
-        effective_enabled=enabled and runtime_enabled,
-        max_concurrent_runs=max(settings.scheduler_max_concurrent_runs, 1),
+        effective_enabled=runtime_config.enabled and runtime_enabled and effective_capacity > 0,
+        max_concurrent_runs=runtime_config.max_concurrent_runs,
         per_source_concurrency=max(settings.scheduler_per_source_concurrency, 1),
         poll_interval_seconds=max(settings.scheduler_poll_interval_seconds, 1),
         timezone=settings.scheduler_timezone,
-        proxy_enabled=settings.vinted_proxy_enabled,
-        proxy_configured=bool(settings.vinted_proxy_url),
+        max_runs_per_proxy=runtime_config.max_runs_per_proxy,
+        allow_direct_without_proxy=runtime_config.allow_direct_without_proxy,
+        direct_max_concurrent_runs=runtime_config.direct_max_concurrent_runs,
+        active_proxy_count=len(active_proxies),
+        proxy_capacity=proxy_capacity,
+        direct_capacity=direct_capacity,
+        effective_capacity=effective_capacity,
+        active_periodic_monitors=_active_periodic_monitor_count(db),
+        catalog_per_page=runtime_config.catalog_per_page,
+        detail_max_candidates_per_run=runtime_config.detail_max_candidates_per_run,
+        request_timeout_ms=runtime_config.request_timeout_ms,
+        request_retries=runtime_config.request_retries,
+        stop_monitor_after_consecutive_failures=runtime_config.stop_monitor_after_consecutive_failures,
+        proxy_cooldown_minutes=runtime_config.proxy_cooldown_minutes,
     )
 
 
-def update_scheduler_enabled(db: Session, enabled: bool, settings: Settings | None = None) -> SchedulerState:
+def get_scheduler_runtime_config(db: Session, settings: Settings) -> SchedulerRuntimeConfig:
+    return scheduler_runtime_config_from_value(_read_scheduler_value(db), settings)
+
+
+def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Settings) -> SchedulerRuntimeConfig:
+    return SchedulerRuntimeConfig(
+        enabled=bool(value.get("enabled", False)),
+        max_concurrent_runs=_validate_int(
+            value.get("max_concurrent_runs", settings.scheduler_max_concurrent_runs),
+            "max_concurrent_runs",
+            1,
+            20,
+        ),
+        max_runs_per_proxy=_validate_int(value.get("max_runs_per_proxy", 1), "max_runs_per_proxy", 1, 10),
+        allow_direct_without_proxy=bool(value.get("allow_direct_without_proxy", True)),
+        direct_max_concurrent_runs=_validate_int(value.get("direct_max_concurrent_runs", 1), "direct_max_concurrent_runs", 0, 10),
+        catalog_per_page=_validate_int(value.get("catalog_per_page", settings.vinted_fast_catalog_per_page), "catalog_per_page", 1, 96),
+        detail_max_candidates_per_run=_validate_int(
+            value.get("detail_max_candidates_per_run", settings.vinted_detail_max_candidates_per_run),
+            "detail_max_candidates_per_run",
+            0,
+            96,
+        ),
+        request_timeout_ms=_validate_int(
+            value.get("request_timeout_ms", settings.vinted_request_timeout_ms),
+            "request_timeout_ms",
+            1000,
+            60000,
+        ),
+        request_retries=_validate_int(value.get("request_retries", 1), "request_retries", 0, 5),
+        stop_monitor_after_consecutive_failures=_validate_int(
+            value.get("stop_monitor_after_consecutive_failures", 3),
+            "stop_monitor_after_consecutive_failures",
+            1,
+            20,
+        ),
+        proxy_cooldown_minutes=_validate_int(value.get("proxy_cooldown_minutes", 10), "proxy_cooldown_minutes", 1, 1440),
+    )
+
+
+def update_scheduler_config(db: Session, payload: dict[str, Any], settings: Settings | None = None) -> SchedulerState:
+    unsupported_keys = sorted(set(payload) - RUNTIME_CONFIG_KEYS)
+    if unsupported_keys:
+        raise SchedulerConfigError(f"unsupported scheduler fields: {', '.join(unsupported_keys)}")
     setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
     if setting is None:
         setting = AppSetting(key=SCHEDULER_SETTING_KEY, value={})
         db.add(setting)
-    setting.value = {**(setting.value or {}), "enabled": enabled}
+    candidate = {**(setting.value or {}), **payload}
+    scheduler_runtime_config_from_value(candidate, settings or get_settings())
+    setting.value = candidate
     db.commit()
     return get_scheduler_state(db, settings or get_settings())
+
+
+def update_scheduler_enabled(db: Session, enabled: bool, settings: Settings | None = None) -> SchedulerState:
+    return update_scheduler_config(db, {"enabled": enabled}, settings)
+
+
+def ensure_scheduler_can_activate(db: Session, settings: Settings, *, source_id: int | None = None) -> None:
+    state = get_scheduler_state(db, settings)
+    if not state.runtime_enabled:
+        raise SchedulerCapacityError("Scheduler runtime is disabled")
+    if not state.enabled:
+        raise SchedulerCapacityError("Scheduler is disabled in settings")
+    if state.effective_capacity <= 0:
+        raise SchedulerCapacityError("No scheduler egress capacity is available")
+    active_count = state.active_periodic_monitors
+    if source_id is not None:
+        source = db.get(SearchSource, source_id)
+        if source is not None and source.is_active and source.monitor_mode != "manual":
+            active_count -= 1
+    if active_count >= state.effective_capacity:
+        raise SchedulerCapacityError("Scheduler capacity limit reached")
+
+
+def choose_run_egress(
+    db: Session,
+    settings: Settings,
+    *,
+    active_proxy_counts: dict[int, int] | None = None,
+    active_direct_count: int = 0,
+) -> RunEgress:
+    from vinted_monitor.services.proxies import list_available_proxy_profiles, mark_proxy_used, proxy_url_for_profile
+
+    runtime = get_scheduler_runtime_config(db, settings)
+    proxy_counts, direct_count = (
+        (active_proxy_counts, active_direct_count)
+        if active_proxy_counts is not None
+        else _active_run_egress_counts(db)
+    )
+    for proxy in list_available_proxy_profiles(db):
+        proxy_limit = min(max(proxy.max_concurrent_runs, 1), runtime.max_runs_per_proxy)
+        if proxy_counts.get(proxy.id, 0) >= proxy_limit:
+            continue
+        mark_proxy_used(db, proxy.id)
+        db.flush()
+        return RunEgress(
+            mode="proxy",
+            proxy_profile_id=proxy.id,
+            proxy_name=proxy.name,
+            proxy_kind=proxy.kind,
+            proxy_url=proxy_url_for_profile(proxy, settings),
+        )
+    if runtime.allow_direct_without_proxy and direct_count < runtime.direct_max_concurrent_runs:
+        return RunEgress(mode="direct")
+    raise SchedulerCapacityError("No proxy is available and direct access is disabled or saturated")
 
 
 def normalize_scheduler_config(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -150,6 +318,7 @@ def source_config(source: SearchSource) -> SourceSchedulerConfig:
         allowed_windows=tuple(normalized["allowed_windows"]),
     )
 
+
 def is_within_allowed_windows(
     now: datetime,
     allowed_windows: tuple[str, ...],
@@ -178,8 +347,6 @@ def next_run_after(
 
 
 def validate_proxy_settings(settings: Settings) -> None:
-    if settings.vinted_proxy_enabled and not settings.vinted_proxy_url:
-        raise SchedulerConfigError("Vinted proxy is enabled but VINTED_PROXY_URL is not configured")
     get_scheduler_timezone(settings)
 
 
@@ -191,10 +358,60 @@ def get_scheduler_timezone(settings: Settings) -> ZoneInfo:
 
 
 def _read_scheduler_enabled(db: Session) -> bool:
+    return bool(_read_scheduler_value(db).get("enabled", False))
+
+
+def _read_scheduler_value(db: Session) -> dict[str, Any]:
     setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
     if setting is None:
-        return False
-    return bool((setting.value or {}).get("enabled", False))
+        return {}
+    return setting.value or {}
+
+
+def _active_proxy_profiles(db: Session) -> list[ProxyProfile]:
+    current_time = datetime.now(UTC)
+    return list(
+        db.scalars(
+            select(ProxyProfile).where(
+                ProxyProfile.is_active.is_(True),
+                (ProxyProfile.cooldown_until.is_(None) | (ProxyProfile.cooldown_until <= current_time)),
+            )
+        )
+    )
+
+
+def _active_periodic_monitor_count(db: Session) -> int:
+    return len(
+        list(
+            db.scalars(
+                select(SearchSource.id).where(
+                    SearchSource.is_active.is_(True),
+                    SearchSource.archived_at.is_(None),
+                    SearchSource.monitor_mode != "manual",
+                )
+            )
+        )
+    )
+
+
+def _active_run_egress_counts(db: Session) -> tuple[dict[int, int], int]:
+    proxy_counts: dict[int, int] = {}
+    direct_count = 0
+    rows = db.scalars(
+        select(Run.runtime_metadata).where(
+            Run.status == "running",
+            Run.finished_at.is_(None),
+        )
+    )
+    for metadata in rows:
+        if not isinstance(metadata, dict):
+            continue
+        proxy_profile_id = metadata.get("proxy_profile_id")
+        if isinstance(proxy_profile_id, int):
+            proxy_counts[proxy_profile_id] = proxy_counts.get(proxy_profile_id, 0) + 1
+        elif metadata.get("egress_mode") == "direct":
+            direct_count += 1
+    return proxy_counts, direct_count
 
 
 def _validate_int(value: Any, field: str, minimum: int, maximum: int) -> int:

@@ -6,7 +6,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 
 ## Scope
 
-- Treat each configured monitor as the operational context for URL, cadence, optional filters, optional proxy, and runtime metadata.
+- Treat each configured monitor as the operational context for URL, cadence, optional filters, and runtime metadata.
 - Treat Vinted catalog URLs as the primary positive search filter for the monitor.
 - Treat local filters as exclusion filters that discard unwanted candidates, usually by blacklist terms in item detail text.
 - Fetch item detail for Redis-new monitor candidates when filters require detail data.
@@ -30,7 +30,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 - API/PWA:
   - create and edit named exclusion filters;
   - start, stop, and retry monitors;
-  - assign filters, cadence, and proxy profile on the monitor;
+  - assign filters and cadence on the monitor;
   - show evaluation status on opportunities.
 - Worker:
   - evaluate filters during monitor runs;
@@ -41,7 +41,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 
 ## Acceptance Criteria
 
-- A monitor stores its filters, proxy, cadence, and execution mode directly.
+- A monitor stores its filters, cadence, and execution mode directly; outbound proxy selection is global scheduler behavior.
 - Each monitor run fetches the configured fast catalog page and deduplicates candidates by `vinted_item_id`.
 - An item already seen by the same monitor/policy in Redis is skipped without detail, DB writes, or another opportunity.
 - An item already known by another monitor can still create an opportunity in this monitor.

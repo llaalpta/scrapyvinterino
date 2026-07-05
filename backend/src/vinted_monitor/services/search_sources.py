@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.db.models import FilterRule, ProxyProfile, SearchSource
+from vinted_monitor.db.models import FilterRule, SearchSource
 from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.scheduler import normalize_scheduler_config
 
@@ -86,8 +86,6 @@ def update_source(
     duration_minutes: int | None = None,
     clear_duration_minutes: bool = False,
     filter_rule_ids: list[int] | None = None,
-    proxy_profile_id: int | None = None,
-    clear_proxy_profile: bool = False,
 ) -> SearchSource:
     source = db.get(SearchSource, source_id)
     if source is None:
@@ -115,10 +113,6 @@ def update_source(
         source.duration_minutes = None
     if filter_rule_ids is not None:
         source.filter_rule_ids = _validate_filter_rule_ids(db, filter_rule_ids)
-    if clear_proxy_profile:
-        source.proxy_profile_id = None
-    elif proxy_profile_id is not None:
-        source.proxy_profile_id = _validate_proxy_profile_id(db, proxy_profile_id)
     _validate_monitor_runtime_config(source)
 
     db.commit()
@@ -199,15 +193,6 @@ def _validate_filter_rule_ids(db: Session, filter_rule_ids: list[int]) -> list[i
     if missing_ids:
         raise SearchSourceConfigError(f"Filter rules do not exist or are inactive: {', '.join(str(entry) for entry in missing_ids)}")
     return unique_ids
-
-
-def _validate_proxy_profile_id(db: Session, proxy_profile_id: int) -> int:
-    proxy = db.get(ProxyProfile, proxy_profile_id)
-    if proxy is None:
-        raise SearchSourceConfigError(f"Proxy profile {proxy_profile_id} does not exist")
-    if not proxy.is_active:
-        raise SearchSourceConfigError(f"Proxy profile {proxy_profile_id} is inactive")
-    return proxy_profile_id
 
 
 def _validate_monitor_runtime_config(source: SearchSource) -> None:

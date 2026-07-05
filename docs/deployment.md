@@ -16,6 +16,6 @@ Desarrollo usa puertos locales directos. Produccion usara labels de Traefik y re
 
 ## Outbound Vinted Proxy
 
-El monitor debe funcionar sin proxy de salida por defecto. El uso de proxy residencial o de otro proveedor es optativo y se configura operativamente mediante `.env` o secretos locales ignorados.
+El monitor debe funcionar sin proxy de salida por defecto cuando el ajuste global de acceso directo lo permite. El uso de proxy residencial o de otro proveedor es optativo y se configura en el pool global de proxys gestionado por la PWA; las credenciales se almacenan cifradas en base de datos.
 
 La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`; la spec runtime vive en `docs/specs/008-scheduler.md`.

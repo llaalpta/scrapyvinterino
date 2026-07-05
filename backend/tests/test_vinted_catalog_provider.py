@@ -226,7 +226,7 @@ def test_http_provider_emits_safe_session_and_catalog_events() -> None:
     assert "secret" not in json.dumps(events)
 
 
-def test_http_provider_configures_proxy_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_provider_uses_only_explicit_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_proxies: list[str | None] = []
 
     class FakeClient:
@@ -235,12 +235,8 @@ def test_http_provider_configures_proxy_only_when_enabled(monkeypatch: pytest.Mo
 
     monkeypatch.setattr("vinted_monitor.providers.vinted_catalog.httpx.Client", FakeClient)
 
-    HttpVintedCatalogProvider(
-        settings=Settings(vinted_proxy_enabled=False, vinted_proxy_url="http://user:pass@proxy.example:8000")
-    )._client({})
-    HttpVintedCatalogProvider(
-        settings=Settings(vinted_proxy_enabled=True, vinted_proxy_url="http://user:pass@proxy.example:8000")
-    )._client({})
+    HttpVintedCatalogProvider(settings=Settings())._client({})
+    HttpVintedCatalogProvider(settings=Settings(), proxy_url="http://user:pass@proxy.example:8000")._client({})
 
     assert captured_proxies == [None, "http://user:pass@proxy.example:8000"]
 
@@ -314,7 +310,7 @@ def test_http_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
     with pytest.raises(VintedCatalogProviderError):
         provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
 
-    assert calls == ["/catalog", "/api/v2/catalog/items"]
+    assert calls == ["/catalog", "/api/v2/catalog/items", "/api/v2/catalog/items"]
 
 
 def test_parse_item_detail_html_extracts_sanitized_public_detail() -> None:

@@ -9,12 +9,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
+from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import ErrorLog, FilterRule, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.filters import create_filter_rule
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.runs import FAILED, SUCCESS, SearchSourceInactiveError, execute_manual_run, execute_monitor_run
+from vinted_monitor.services.scheduler import update_scheduler_config, update_scheduler_enabled
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 
 
@@ -183,10 +185,6 @@ def cleanup_source(source_id: int | None) -> None:
             db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(Opportunity).filter(Opportunity.source_id.in_(source_ids)).delete(synchronize_session=False)
-            db.query(SearchSource).filter(SearchSource.id.in_(source_ids)).update(
-                {SearchSource.proxy_profile_id: None},
-                synchronize_session=False,
-            )
         db.query(FilterRule).filter(FilterRule.name.like("pytest%")).delete(synchronize_session=False)
         db.query(ProxyProfile).filter(ProxyProfile.name.like("pytest%")).delete(synchronize_session=False)
         db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item%")).delete(synchronize_session=False)
@@ -285,9 +283,11 @@ def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.Mo
             filter_rule_ids=[],
         )
         db.add(source)
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
+    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -313,6 +313,48 @@ def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.Mo
         cleanup_source(source_id)
 
 
+def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        if active_proxy_ids:
+            db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                {ProxyProfile.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_config(db, {"allow_direct_without_proxy": False}, Settings())
+        source = SearchSource(
+            name="pytest no egress capacity",
+            url="https://www.vinted.es/catalog?search_text=no-egress",
+            normalized_query={"search_text": ["no-egress"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+            filter_rule_ids=[],
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    try:
+        response = client.post(f"/api/monitors/{source_id}/runs")
+
+        assert response.status_code == 409
+        assert "No proxy is available" in response.json()["detail"]
+    finally:
+        with SessionLocal() as db:
+            update_scheduler_config(db, {"allow_direct_without_proxy": True}, Settings())
+            if active_proxy_ids:
+                db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                    {ProxyProfile.is_active: True},
+                    synchronize_session=False,
+                )
+                db.commit()
+        cleanup_source(source_id)
+
+
 def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = TestClient(app)
@@ -327,9 +369,11 @@ def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypat
             filter_rule_ids=[],
         )
         db.add(source)
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
+    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -370,9 +414,11 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
             filter_rule_ids=[],
         )
         db.add(source)
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
+    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -427,7 +473,7 @@ def test_monitor_stop_closes_active_session() -> None:
         cleanup_source(source_id)
 
 
-def test_recurring_monitor_failure_closes_session_and_stops_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = TestClient(app)
     with SessionLocal() as db:
@@ -441,9 +487,11 @@ def test_recurring_monitor_failure_closes_session_and_stops_monitor(monkeypatch:
             filter_rule_ids=[],
         )
         db.add(source)
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
+    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSearchFailingProvider()
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -456,13 +504,10 @@ def test_recurring_monitor_failure_closes_session_and_stops_monitor(monkeypatch:
             session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
             run = db.get(Run, response.json()["id"])
             assert source is not None
-            assert source.is_active is False
-            assert source.monitor_started_at is None
-            assert source.monitor_until is None
-            assert source.next_run_at is None
+            assert source.is_active is True
+            assert source.monitor_started_at is not None
             assert session is not None
-            assert session.stopped_at is not None
-            assert session.stop_reason == "failed"
+            assert session.stopped_at is None
             assert run is not None
             assert run.monitor_session_id == session.id
     finally:

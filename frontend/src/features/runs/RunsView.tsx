@@ -233,12 +233,12 @@ function eventLabel(phase: string): string {
 
 function proxyLabel(metadata: Record<string, unknown>): string {
   if (typeof metadata.proxy_name === 'string' && metadata.proxy_name) {
-    return metadata.proxy_name;
+    return typeof metadata.proxy_kind === 'string' && metadata.proxy_kind ? `${metadata.proxy_name} (${metadata.proxy_kind})` : metadata.proxy_name;
   }
   if (typeof metadata.proxy_profile_id === 'number') {
     return `Perfil #${metadata.proxy_profile_id}`;
   }
-  return 'Directo / .env';
+  return metadata.egress_mode === 'direct' ? 'Directo' : 'Sin egress registrado';
 }
 
 function formatDuration(startedAt: string, finishedAt: string | null): string {

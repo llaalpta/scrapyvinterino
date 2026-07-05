@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from sqlalchemy import select
@@ -10,6 +11,8 @@ from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.core.crypto import decrypt_text, encrypt_text, fingerprint_text, mask_text
 from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import ProxyProfile
+
+PROXY_KINDS = {"own", "datacenter", "residential"}
 
 
 class ProxyProfileNotFoundError(ValueError):
@@ -21,6 +24,7 @@ class ProxyPublicFields:
     id: int
     name: str
     scheme: str
+    kind: str
     host: str
     port: int
     username: str | None
@@ -28,6 +32,10 @@ class ProxyPublicFields:
     has_password: bool
     password_fingerprint: str | None
     is_active: bool
+    max_concurrent_runs: int
+    cooldown_until: datetime | None
+    failure_count: int
+    last_used_at: datetime | None
     last_test_status: str | None
     last_test_ip: str | None
     last_test_error: str | None
@@ -37,15 +45,31 @@ def list_proxy_profiles(db: Session) -> list[ProxyProfile]:
     return list(db.scalars(select(ProxyProfile).order_by(ProxyProfile.id.desc())))
 
 
+def list_available_proxy_profiles(db: Session, *, now: datetime | None = None) -> list[ProxyProfile]:
+    current_time = now or datetime.now(UTC)
+    return list(
+        db.scalars(
+            select(ProxyProfile)
+            .where(
+                ProxyProfile.is_active.is_(True),
+                (ProxyProfile.cooldown_until.is_(None) | (ProxyProfile.cooldown_until <= current_time)),
+            )
+            .order_by(ProxyProfile.failure_count.asc(), ProxyProfile.last_used_at.asc().nullsfirst(), ProxyProfile.id.asc())
+        )
+    )
+
+
 def create_proxy_profile(
     db: Session,
     *,
     name: str,
     scheme: str,
+    kind: str = "own",
     host: str,
     port: int,
     username: str | None,
     password: str | None,
+    max_concurrent_runs: int = 1,
     is_active: bool = True,
     settings: Settings | None = None,
 ) -> ProxyProfile:
@@ -53,10 +77,12 @@ def create_proxy_profile(
     profile = ProxyProfile(
         name=_validate_name(name),
         scheme=_validate_scheme(scheme),
+        kind=_validate_kind(kind),
         host=_validate_host(host),
         port=_validate_port(port),
         username=username.strip() if username else None,
         password_encrypted=_encrypt_password(password, settings) if password else None,
+        max_concurrent_runs=_validate_max_concurrent_runs(max_concurrent_runs),
         is_active=is_active,
     )
     db.add(profile)
@@ -71,11 +97,13 @@ def update_proxy_profile(
     *,
     name: str | None = None,
     scheme: str | None = None,
+    kind: str | None = None,
     host: str | None = None,
     port: int | None = None,
     username: str | None = None,
     password: str | None = None,
     clear_password: bool = False,
+    max_concurrent_runs: int | None = None,
     is_active: bool | None = None,
     settings: Settings | None = None,
 ) -> ProxyProfile:
@@ -87,6 +115,8 @@ def update_proxy_profile(
         profile.name = _validate_name(name)
     if scheme is not None:
         profile.scheme = _validate_scheme(scheme)
+    if kind is not None:
+        profile.kind = _validate_kind(kind)
     if host is not None:
         profile.host = _validate_host(host)
     if port is not None:
@@ -97,11 +127,41 @@ def update_proxy_profile(
         profile.password_encrypted = None
     elif password:
         profile.password_encrypted = _encrypt_password(password, settings)
+    if max_concurrent_runs is not None:
+        profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
         profile.is_active = is_active
     db.commit()
     db.refresh(profile)
     return profile
+
+
+def mark_proxy_used(db: Session, profile_id: int) -> None:
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        return
+    profile.last_used_at = datetime.now(UTC)
+    db.flush()
+
+
+def mark_proxy_run_success(db: Session, profile_id: int | None) -> None:
+    if profile_id is None:
+        return
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        return
+    profile.failure_count = 0
+    profile.cooldown_until = None
+
+
+def mark_proxy_run_failure(db: Session, profile_id: int | None, *, cooldown_minutes: int = 10) -> None:
+    if profile_id is None:
+        return
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        return
+    profile.failure_count = (profile.failure_count or 0) + 1
+    profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=max(cooldown_minutes, 1))
 
 
 def mark_proxy_test_result(db: Session, profile_id: int, *, status: str, ip: str | None = None, error: str | None = None) -> ProxyProfile:
@@ -123,6 +183,7 @@ def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = 
         id=profile.id,
         name=profile.name,
         scheme=profile.scheme,
+        kind=profile.kind,
         host=profile.host,
         port=profile.port,
         username=profile.username,
@@ -130,6 +191,10 @@ def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = 
         has_password=bool(profile.password_encrypted),
         password_fingerprint=fingerprint_text(password) if password else None,
         is_active=profile.is_active,
+        max_concurrent_runs=profile.max_concurrent_runs,
+        cooldown_until=profile.cooldown_until,
+        failure_count=profile.failure_count,
+        last_used_at=profile.last_used_at,
         last_test_status=profile.last_test_status,
         last_test_ip=profile.last_test_ip,
         last_test_error=profile.last_test_error,
@@ -171,6 +236,13 @@ def _validate_scheme(scheme: str) -> str:
     return cleaned
 
 
+def _validate_kind(kind: str) -> str:
+    cleaned = kind.strip().lower()
+    if cleaned not in PROXY_KINDS:
+        raise ValueError("Proxy kind must be own, datacenter, or residential")
+    return cleaned
+
+
 def _validate_host(host: str) -> str:
     cleaned = host.strip()
     if not cleaned:
@@ -182,3 +254,9 @@ def _validate_port(port: int) -> int:
     if port < 1 or port > 65535:
         raise ValueError("Proxy port must be between 1 and 65535")
     return port
+
+
+def _validate_max_concurrent_runs(value: int) -> int:
+    if value < 1 or value > 10:
+        raise ValueError("Proxy max_concurrent_runs must be between 1 and 10")
+    return value

@@ -35,7 +35,6 @@ from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
 from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal, get_db
-from vinted_monitor.providers.vinted_catalog import HttpVintedCatalogProvider
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
     DEFAULT_PAGE,
@@ -70,7 +69,13 @@ from vinted_monitor.services.runs import (
     execute_monitor_run,
     list_runs,
 )
-from vinted_monitor.services.scheduler import get_scheduler_state, next_run_after, source_config, update_scheduler_enabled
+from vinted_monitor.services.scheduler import (
+    SchedulerCapacityError,
+    SchedulerConfigError,
+    ensure_scheduler_can_activate,
+    get_scheduler_state,
+    update_scheduler_config,
+)
 from vinted_monitor.services.search_sources import (
     SearchSourceConfigError,
     archive_source,
@@ -103,8 +108,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def get_manual_run_provider() -> ManualRunProvider:
-    return HttpVintedCatalogProvider()
+def get_manual_run_provider() -> ManualRunProvider | None:
+    return None
 
 
 @app.get("/api/sources", response_model=list[SearchSourceRead])
@@ -141,8 +146,6 @@ def patch_source(source_id: int, payload: SearchSourceUpdate, db: Session = Depe
             duration_minutes=payload.duration_minutes,
             clear_duration_minutes="duration_minutes" in payload.model_fields_set and payload.duration_minutes is None,
             filter_rule_ids=payload.filter_rule_ids,
-            proxy_profile_id=payload.proxy_profile_id,
-            clear_proxy_profile="proxy_profile_id" in payload.model_fields_set and payload.proxy_profile_id is None,
         )
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -175,22 +178,20 @@ def delete_monitor(monitor_id: int, db: Session = Depends(get_db)) -> Response:
 def post_monitor_start(
     monitor_id: int,
     db: Session = Depends(get_db),
-    provider: ManualRunProvider = Depends(get_manual_run_provider),
+    provider: ManualRunProvider | None = Depends(get_manual_run_provider),
 ):
     try:
         source = db.get(SearchSource, monitor_id)
         if source is not None and source.monitor_mode == "manual":
             return execute_manual_run(db, monitor_id, provider=provider)
+        ensure_scheduler_can_activate(db, settings, source_id=monitor_id)
         source = start_source_monitor(db, monitor_id)
-        run = execute_monitor_run(db, monitor_id, provider=provider)
-        refreshed = db.get(type(source), monitor_id)
-        if refreshed is not None and refreshed.is_active and run.status == "success":
-            refreshed.next_run_at = next_run_after(run.finished_at or run.started_at, source_config(refreshed))
-            db.commit()
-        return run
+        return execute_monitor_run(db, monitor_id, provider=provider)
     except (SearchSourceNotFoundError, SourceUpdateNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SearchSourceConfigError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -211,7 +212,10 @@ def get_scheduler(db: Session = Depends(get_db)):
 
 @app.patch("/api/scheduler", response_model=SchedulerStateRead)
 def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
-    return update_scheduler_enabled(db, payload.enabled, settings)
+    try:
+        return update_scheduler_config(db, payload.model_dump(exclude_unset=True), settings)
+    except SchedulerConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/filter-rules", response_model=list[FilterRuleRead])
@@ -249,10 +253,12 @@ def post_proxy_profile(payload: ProxyProfileCreate, db: Session = Depends(get_db
             db,
             name=payload.name,
             scheme=payload.scheme,
+            kind=payload.kind,
             host=payload.host,
             port=payload.port,
             username=payload.username,
             password=payload.password,
+            max_concurrent_runs=payload.max_concurrent_runs,
             is_active=payload.is_active,
             settings=settings,
         )
@@ -269,11 +275,13 @@ def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Sessio
             profile_id,
             name=payload.name,
             scheme=payload.scheme,
+            kind=payload.kind,
             host=payload.host,
             port=payload.port,
             username=payload.username,
             password=payload.password,
             clear_password=payload.clear_password,
+            max_concurrent_runs=payload.max_concurrent_runs,
             is_active=payload.is_active,
             settings=settings,
         )
@@ -404,7 +412,7 @@ def stream_monitor_events(last_event_id: int = Query(0, ge=0)):
 def post_monitor_run(
     monitor_id: int,
     db: Session = Depends(get_db),
-    provider: ManualRunProvider = Depends(get_manual_run_provider),
+    provider: ManualRunProvider | None = Depends(get_manual_run_provider),
 ):
     try:
         return execute_manual_run(db, monitor_id, provider=provider)
@@ -412,13 +420,15 @@ def post_monitor_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/sources/{source_id}/runs", response_model=RunRead, status_code=201)
 def post_source_run(
     source_id: int,
     db: Session = Depends(get_db),
-    provider: ManualRunProvider = Depends(get_manual_run_provider),
+    provider: ManualRunProvider | None = Depends(get_manual_run_provider),
 ):
     try:
         return execute_manual_run(db, source_id, provider=provider)
@@ -427,6 +437,8 @@ def post_source_run(
     except SearchSourceInactiveError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
