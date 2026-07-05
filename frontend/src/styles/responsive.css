@@ -162,8 +162,7 @@
   .settings-grid,
   .settings-summary-grid,
   .proxy-form,
-  .proxy-form-group,
-  .proxy-form-group.wide,
+  .proxy-form-fields,
   .opportunity-row {
     grid-template-columns: 1fr;
     align-items: start;
@@ -176,6 +175,14 @@
 
   .settings-section-heading button,
   .proxy-form-actions > button {
+    width: 100%;
+  }
+
+  .proxy-form-fields .wide-field {
+    grid-column: auto;
+  }
+
+  .proxy-form-actions {
     width: 100%;
   }
 

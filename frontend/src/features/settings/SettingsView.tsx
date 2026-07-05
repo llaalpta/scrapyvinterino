@@ -187,12 +187,15 @@ export function SettingsView({
           <span>{proxyProfiles.length}</span>
         </div>
         <form className="proxy-form" onSubmit={onCreateProxy}>
-          <div className="proxy-form-group">
-            <div className="proxy-form-group-heading">
-              <strong>Identidad</strong>
-              <HelpTooltip text="Nombre interno y clase del proxy dentro del pool global." />
+          <div className="proxy-form-intro">
+            <div>
+              <strong>Nuevo proxy</strong>
+              <p>Pool global opcional. Si hay proxys activos, el scheduler los prioriza antes de salir directo.</p>
             </div>
-            <label>
+            <HelpTooltip text="Credenciales cifradas en reposo. La API no devuelve passwords ni se asignan proxys manualmente por monitor." />
+          </div>
+          <div className="proxy-form-fields">
+            <label className="wide-field">
               Nombre
               <input value={proxyDraft.name} onChange={(event) => setProxyDraft({ ...proxyDraft, name: event.target.value })} required />
             </label>
@@ -212,14 +215,7 @@ export function SettingsView({
                 <option value="socks5">socks5</option>
               </select>
             </label>
-          </div>
-
-          <div className="proxy-form-group wide">
-            <div className="proxy-form-group-heading">
-              <strong>Conexion</strong>
-              <HelpTooltip text="Endpoint y credenciales del proxy. La password no se devuelve nunca desde la API." />
-            </div>
-            <label>
+            <label className="wide-field">
               Host
               <input value={proxyDraft.host} onChange={(event) => setProxyDraft({ ...proxyDraft, host: event.target.value })} required />
             </label>
@@ -235,22 +231,7 @@ export function SettingsView({
               />
             </label>
             <label>
-              Usuario
-              <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} />
-            </label>
-            <label>
-              Password
-              <input value={proxyDraft.password} type="password" onChange={(event) => setProxyDraft({ ...proxyDraft, password: event.target.value })} />
-            </label>
-          </div>
-
-          <div className="proxy-form-group proxy-form-actions">
-            <div className="proxy-form-group-heading">
-              <strong>Capacidad</strong>
-              <HelpTooltip text="Runs simultaneos maximos para este proxy, siempre acotados por la concurrencia global." />
-            </div>
-            <label>
-              Max runs proxy
+              Max runs
               <input
                 value={proxyDraft.maxConcurrentRuns}
                 type="number"
@@ -260,6 +241,16 @@ export function SettingsView({
                 required
               />
             </label>
+            <label>
+              Usuario
+              <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} />
+            </label>
+            <label>
+              Password
+              <input value={proxyDraft.password} type="password" onChange={(event) => setProxyDraft({ ...proxyDraft, password: event.target.value })} />
+            </label>
+          </div>
+          <div className="proxy-form-actions">
             <button type="submit" disabled={savingProxy}>
               <Save size={16} />
               Guardar proxy

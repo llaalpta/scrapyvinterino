@@ -1074,7 +1074,7 @@
 }
 
 .settings-summary-item strong,
-.proxy-form-group-heading strong {
+.proxy-form-intro strong {
   color: #1f2933;
   font-size: 13px;
 }
@@ -1100,7 +1100,7 @@
 }
 
 .field-heading,
-.proxy-form-group-heading {
+.proxy-form-intro {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1212,37 +1212,53 @@
 
 .proxy-form {
   display: grid;
-  grid-template-columns: minmax(200px, 0.9fr) minmax(280px, 1.4fr) minmax(180px, 0.7fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
+  align-items: end;
   padding: 0 14px 14px;
 }
 
-.proxy-form-group {
+.proxy-form-intro {
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-top: 1px solid #edf2f7;
+  padding-top: 12px;
+}
+
+.proxy-form-intro > div {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 3px;
+  min-width: 0;
+}
+
+.proxy-form-intro p {
+  margin: 0;
+  color: #697586;
+  font-size: 13px;
+}
+
+.proxy-form-fields {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(104px, 1fr));
   gap: 10px;
   min-width: 0;
-  border: 1px solid #cbd5df;
-  border-radius: 8px;
-  padding: 12px;
-  background: #fbfdff;
 }
 
-.proxy-form-group-heading {
-  grid-column: 1 / -1;
-  justify-content: space-between;
-}
-
-.proxy-form-group.wide {
-  grid-template-columns: repeat(4, minmax(108px, 1fr));
+.proxy-form-fields .wide-field {
+  grid-column: span 2;
 }
 
 .proxy-form-actions {
-  align-content: start;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  min-width: 160px;
 }
 
 .proxy-form-actions > button {
-  align-self: end;
+  width: 100%;
+  min-height: 38px;
 }
 
 .proxy-list,
