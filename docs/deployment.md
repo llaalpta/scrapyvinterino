@@ -20,7 +20,7 @@ La configuracion no debe tener dos fuentes de verdad activas:
 
 | Dueño | Uso |
 | --- | --- |
-| `.env` | Infraestructura, secretos, kill-switches, workers y evasion anti-bot: DB/Redis, CORS, `APP_SECRET_KEY`, `SCHEDULER_ENABLED`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
+| `.env` | Infraestructura, secretos, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS, `APP_SECRET_KEY`, `SCHEDULER_ENABLED`, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
 | PWA | Operacion diaria: habilitar scheduler en app, runs simultaneos, salida directa, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. |
 | Backend | Limites duros de validacion y defaults seguros cuando no hay override operativo. |
 
@@ -33,3 +33,11 @@ Algunos valores `.env` tambien sirven como defaults cuando aun no existe overrid
 El monitor debe funcionar sin proxy de salida por defecto cuando el ajuste global de acceso directo lo permite. El uso de proxy residencial o de otro proveedor es optativo y se configura en el pool global de proxys gestionado por la PWA; las credenciales se almacenan cifradas en base de datos.
 
 La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`; la spec runtime vive en `docs/specs/008-scheduler.md`.
+
+## Logs
+
+- Backend y worker escriben logs de proceso a stdout/stderr; en desarrollo se consultan con `docker compose logs api worker`.
+- `LOG_LEVEL` controla el nivel de esos logs de proceso. Para debugging local puede usarse `DEBUG`; para produccion deberia volver a `INFO` o un nivel mas restrictivo.
+- Los logs operativos de monitores no son ficheros: se guardan como eventos redacted en la tabla `run_events`.
+- La PWA lee esos eventos mediante `/api/runs/{run_id}/events`, `/api/monitors/{monitor_id}/events` y SSE `/api/monitors/events/stream`.
+- Estado actual: no hay logger a fichero, politica de rotacion Docker, exportador externo ni job de retencion/purga de `run_events`.

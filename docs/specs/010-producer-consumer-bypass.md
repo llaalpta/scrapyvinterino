@@ -35,6 +35,7 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - Run events expose safe diagnostics: `browser_profile`, `proxy_session_id_prefix`, `datadome_cookie`, `bootstrap_duration_ms`, attempt number and navigation flow.
 - Before wiring a new ephemeral HTTP client into Redis workers or live Vinted catalog traffic, `scripts/verify_impersonation.py` exits successfully with exact Chrome 120 `User-Agent`, `sec-ch-ua`, and `Accept-Encoding` echoes, no Python/curl/cffi/requests leak markers in header values or non-browser header names, and expected BrowserLeaks TLS 1.3 / HTTP/2 fields. The standard Chrome header name `Upgrade-Insecure-Requests` is allowed.
 - Manual and worker-owned catalog runs use the configured browser profile; the default is `chrome120`. Direct runs without a proxy remain supported and must pass before residential proxy validation.
+- Runtime browser profiles define ordered request headers for bootstrap and catalog API calls, but do not force hop-by-hop headers such as `Connection` or `TE`; HTTP/2 pseudo-header order and SETTINGS are owned by `curl_cffi` impersonation.
 
 ## Verification
 

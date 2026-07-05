@@ -96,6 +96,48 @@ def test_curl_provider_defaults_to_configured_chrome120_profile() -> None:
     assert captured_sessions == [{"impersonate": "chrome120", "proxies": None}]
 
 
+def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_headers() -> None:
+    profile = get_profile_by_name("chrome_120_win10")
+    assert profile is not None
+
+    bootstrap_headers = profile.build_bootstrap_headers(referer="https://www.vinted.es/")
+    api_headers = profile.build_api_headers("https://www.vinted.es/catalog?search_text=tommy")
+
+    assert list(bootstrap_headers) == [
+        "sec-ch-ua",
+        "sec-ch-ua-mobile",
+        "sec-ch-ua-platform",
+        "Upgrade-Insecure-Requests",
+        "User-Agent",
+        "Accept",
+        "Sec-Fetch-Site",
+        "Sec-Fetch-Mode",
+        "Sec-Fetch-User",
+        "Sec-Fetch-Dest",
+        "Accept-Encoding",
+        "Accept-Language",
+        "Cache-Control",
+        "Referer",
+    ]
+    assert list(api_headers) == [
+        "sec-ch-ua",
+        "Accept",
+        "sec-ch-ua-mobile",
+        "User-Agent",
+        "sec-ch-ua-platform",
+        "Sec-Fetch-Site",
+        "Sec-Fetch-Mode",
+        "Sec-Fetch-Dest",
+        "Accept-Encoding",
+        "Accept-Language",
+        "Referer",
+    ]
+    assert "Connection" not in bootstrap_headers
+    assert "TE" not in bootstrap_headers
+    assert "Connection" not in api_headers
+    assert "TE" not in api_headers
+
+
 @pytest.fixture(autouse=True)
 def no_provider_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("vinted_monitor.providers.vinted_catalog.human_delay", lambda *args, **kwargs: 0.0)

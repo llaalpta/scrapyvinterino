@@ -68,7 +68,6 @@ def _chrome_bootstrap_headers(
             ("Accept-Encoding", accept_encoding),
             ("Accept-Language", accept_language),
             ("Cache-Control", "max-age=0"),
-            ("Connection", "keep-alive"),
         ])
     )
 
