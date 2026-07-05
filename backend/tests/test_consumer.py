@@ -38,7 +38,7 @@ def test_consumer_retries_datadome_challenge_with_new_proxy_session(monkeypatch)
         session_ids.append(session_id)
         return f"http://proxy.example/{session_id}"
 
-    monkeypatch.setattr("vinted_monitor.worker.consumer.select_random_profile", lambda _rng: profile)
+    monkeypatch.setattr("vinted_monitor.worker.consumer.profile_for_impersonate", lambda _impersonate: profile)
     monkeypatch.setattr("vinted_monitor.worker.consumer.CurlCffiVintedCatalogProvider", FakeProvider)
     monkeypatch.setattr(TaskConsumer, "_execute_run", fake_execute)
     monkeypatch.setattr(TaskConsumer, "_proxy_url_for_attempt", fake_proxy_url)

@@ -2,7 +2,7 @@
 """Verify JA3/TLS fingerprint produced by curl_cffi against public echo services.
 
 Usage:
-    python scripts/check_ja3.py [--impersonate chrome136]
+    python scripts/check_ja3.py [--impersonate chrome120]
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import sys
 from curl_cffi.requests import Session
 
 from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES
-
 
 ECHO_SERVICES = [
     "https://tls.browserleaks.com/json",
@@ -84,7 +83,7 @@ def check_fingerprint(impersonate: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check TLS/JA3 fingerprint via curl_cffi")
-    parser.add_argument("--impersonate", default="chrome136", help="Browser to impersonate (default: chrome136)")
+    parser.add_argument("--impersonate", default="chrome120", help="Browser to impersonate (default: chrome120)")
     args = parser.parse_args()
     ok = check_fingerprint(args.impersonate)
     sys.exit(0 if ok else 1)

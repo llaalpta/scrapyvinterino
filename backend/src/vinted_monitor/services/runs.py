@@ -388,6 +388,7 @@ def _provider_for_egress(
         metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
 
     return CurlCffiVintedCatalogProvider(
+        settings=settings,
         proxy_url=proxy_url,
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,

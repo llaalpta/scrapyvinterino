@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     worker_max_retry_attempts: int = 3
 
     # curl_cffi / anti-bot evasion
-    curl_impersonate_browser: str = "chrome136"
+    curl_impersonate_browser: str = "chrome120"
     human_delay_min_seconds: float = 1.2
     human_delay_max_seconds: float = 3.8
     datadome_challenge_penalty_multiplier: int = 2

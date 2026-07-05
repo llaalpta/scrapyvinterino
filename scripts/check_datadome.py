@@ -2,7 +2,7 @@
 """Smoke test: bootstrap + catalog request against Vinted with DataDome detection.
 
 Usage:
-    python scripts/check_datadome.py --url "https://www.vinted.es/catalog?search_text=nike" [--proxy socks5://...] [--impersonate chrome136]
+    python scripts/check_datadome.py --url "https://www.vinted.es/catalog?search_text=nike" [--proxy socks5://...] [--impersonate chrome120]
 """
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from urllib.parse import urljoin
 
 from curl_cffi.requests import Session
 
-from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES, select_random_profile
+from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES, profile_for_impersonate
 from vinted_monitor.providers.datadome import has_datadome_cookie, human_delay, is_datadome_challenge
 from vinted_monitor.providers.vinted_catalog import build_catalog_api_params
 
 
 def _profile_for_impersonate(impersonate: str | None):
     if not impersonate:
-        return select_random_profile()
+        return profile_for_impersonate("chrome120")
     for profile in BROWSER_PROFILES:
         if profile.impersonate == impersonate:
             return profile
@@ -112,7 +112,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke test: Vinted bootstrap + catalog with DataDome detection")
     parser.add_argument("--url", required=True, help="Vinted catalog URL")
     parser.add_argument("--proxy", default=None, help="Proxy URL (e.g. socks5://user:pass@host:port)")
-    parser.add_argument("--impersonate", default=None, help="Override impersonate value")
+    parser.add_argument("--impersonate", default=None, help="Override impersonate value (default: chrome120)")
     args = parser.parse_args()
     ok = smoke_test(args.url, args.proxy, args.impersonate)
     sys.exit(0 if ok else 1)

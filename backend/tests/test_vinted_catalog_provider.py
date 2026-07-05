@@ -8,6 +8,7 @@ import pytest
 from vinted_monitor.core.config import Settings
 from vinted_monitor.providers.browser_profiles import NavigationFlow, get_profile_by_name
 from vinted_monitor.providers.datadome import DataDomeChallengeError
+from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
     VintedCatalogProviderError,
@@ -72,6 +73,27 @@ def fake_session_factory(handler, calls: list[dict]):
         return FakeCurlSession(handler, calls, impersonate=impersonate, proxies=proxies)
 
     return factory
+
+
+def test_curl_provider_defaults_to_configured_chrome120_profile() -> None:
+    captured_sessions: list[dict] = []
+
+    def factory(*, impersonate=None, proxies=None):
+        captured_sessions.append({"impersonate": impersonate, "proxies": proxies})
+        return FakeCurlSession(lambda _call: FakeResponse(200), [], impersonate=impersonate, proxies=proxies)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(curl_impersonate_browser="chrome120"),
+        session_factory=factory,
+    )
+    provider._ensure_session()
+
+    assert provider.profile.name == "chrome_120_win10"
+    assert provider.profile.user_agent == CHROME120_UA
+    assert provider.profile.sec_ch_ua == CHROME120_SEC_CH_UA
+    assert provider.profile.build_bootstrap_headers()["Accept-Encoding"] == CHROME120_ACCEPT_ENCODING
+    assert provider.profile.build_api_headers("https://www.vinted.es/catalog")["Accept-Encoding"] == CHROME120_ACCEPT_ENCODING
+    assert captured_sessions == [{"impersonate": "chrome120", "proxies": None}]
 
 
 @pytest.fixture(autouse=True)

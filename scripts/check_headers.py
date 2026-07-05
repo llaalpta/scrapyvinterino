@@ -2,7 +2,7 @@
 """Check HTTP headers sent by curl_cffi using the configured browser profile.
 
 Usage:
-    python scripts/check_headers.py [--impersonate chrome136]
+    python scripts/check_headers.py [--impersonate chrome120]
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from pathlib import Path
 from curl_cffi.requests import Session
 
 from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES
-
 
 ECHO_URL = "https://httpbin.org/headers"
 REFERENCE_FILE = Path(__file__).parent / "browser_reference.json"
@@ -111,7 +110,7 @@ def check_headers(impersonate: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check HTTP headers via curl_cffi")
-    parser.add_argument("--impersonate", default="chrome136", help="Browser to impersonate")
+    parser.add_argument("--impersonate", default="chrome120", help="Browser to impersonate")
     args = parser.parse_args()
     ok = check_headers(args.impersonate)
     sys.exit(0 if ok else 1)

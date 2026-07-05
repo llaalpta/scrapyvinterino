@@ -5,7 +5,7 @@ Reads scripts/browser_reference.json (captured by inspect_vinted_session.py)
 and compares field by field with curl_cffi output.
 
 Usage:
-    python scripts/compare_fingerprints.py [--impersonate chrome136]
+    python scripts/compare_fingerprints.py [--impersonate chrome120]
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from pathlib import Path
 from curl_cffi.requests import Session
 
 from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES
-
 
 REFERENCE_FILE = Path(__file__).parent / "browser_reference.json"
 ECHO_URL = "https://httpbin.org/headers"
@@ -103,7 +102,7 @@ def compare_fingerprints(impersonate: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare curl_cffi with Chrome reference")
-    parser.add_argument("--impersonate", default="chrome136", help="Browser to impersonate")
+    parser.add_argument("--impersonate", default="chrome120", help="Browser to impersonate")
     args = parser.parse_args()
     ok = compare_fingerprints(args.impersonate)
     sys.exit(0 if ok else 1)

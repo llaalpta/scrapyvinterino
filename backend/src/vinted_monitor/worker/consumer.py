@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 import uuid
 
 import structlog
@@ -8,7 +7,7 @@ import structlog
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import ProxyProfile, Run
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.providers.browser_profiles import select_random_profile
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider
 from vinted_monitor.services.proxies import mark_proxy_challenge_detected, mark_proxy_run_failure, proxy_url_with_sticky_session
@@ -22,19 +21,18 @@ class TaskConsumer:
     """Consumer worker: dequeues tasks from Redis and processes them with anti-bot evasion.
 
     Each consumed task goes through the full evasion lifecycle:
-    1. Select a random browser profile (coherent impersonate + UA + headers)
+    1. Select the configured browser profile (coherent impersonate + UA + headers)
     2. Generate a unique UUID for proxy sticky session
     3. Create a curl_cffi provider with the profile and proxy
     4. Execute the monitor run (bootstrap -> delay -> catalog -> dedup -> filters -> opportunities)
     5. Discard the session, proxy, and cookies
 
-    On DataDome challenge detection, retries with escalation: new IP, new profile, longer delay.
+    On DataDome challenge detection, retries with escalation: same browser profile, new proxy session/IP, longer delay.
     """
 
     def __init__(self, settings: Settings, consumer_id: int = 0) -> None:
         self.settings = settings
         self.consumer_id = consumer_id
-        self.rng = random.Random()
         self.logger = structlog.get_logger().bind(consumer_id=consumer_id)
 
     def run_forever(self) -> None:
@@ -80,7 +78,7 @@ class TaskConsumer:
         max_attempts = self.settings.worker_max_retry_attempts
 
         for attempt in range(1, max_attempts + 1):
-            profile = select_random_profile(self.rng)
+            profile = profile_for_impersonate(self.settings.curl_impersonate_browser)
             session_id = str(uuid.uuid4())
             proxy_url = self._proxy_url_for_attempt(task, session_id)
 

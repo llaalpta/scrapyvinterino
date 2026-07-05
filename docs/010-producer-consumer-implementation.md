@@ -17,6 +17,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Asocks is treated as ephemeral sticky-by-username egress: each task attempt gets a fresh UUID in the proxy username, and the UUID is discarded after the attempt.
 - Do not call the Asocks refresh API from runtime scraping code; rotation is achieved by using a new session UUID per attempt.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
+- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome120`. Direct no-proxy runs remain the first validation path before Asocks is configured.
 - Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
 - Redis task payloads carry `proxy_profile_id` only; the consumer resolves the profile and builds the sticky URL inside the attempt.
 - Treat `403` and `429` from Vinted as DataDome-style challenge responses for retry purposes.
@@ -63,3 +64,12 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - Focused checks passed: `ruff check src alembic tests/test_ephemeral_http.py tests/test_verify_impersonation_script.py ..\scripts\verify_impersonation.py`, `python -m pytest tests/test_ephemeral_http.py tests/test_verify_impersonation_script.py`, `python -m py_compile scripts/verify_impersonation.py`, and `python scripts/verify_impersonation.py`.
 - The broader 010 pytest command passed from the Windows host after overriding service URLs for host access: `DATABASE_URL=postgresql+psycopg://vinted:vinted@localhost:5432/vinted_monitor` and `REDIS_URL=redis://localhost:6379/0`; result: `79 passed`.
 - Asocks/sticky proxy preflight remains pending until credentials are configured; run `python scripts/verify_impersonation.py --proxy-url "<sticky proxy url>"`.
+
+## Chrome 120 Runtime Direct Validation 2026-07-06
+
+- Added `chrome_120_win10` as the default runtime browser profile and set `CURL_IMPERSONATE_BROWSER=chrome120` in defaults and example environment.
+- `CurlCffiVintedCatalogProvider`, worker-owned runs, manual owned-provider runs, and diagnostics now use the configured browser profile instead of random profile selection by default.
+- Direct no-proxy validation passed through the API: temporary manual monitor `1106`, run `900`, status `success`, `items_found=5`, `items_new=5`, `opportunities_created=5`, `browser_profile=chrome_120_win10`, and 25 safe run events. The temporary monitor was archived after the check.
+- Direct Vinted smoke passed with `scripts/check_datadome.py --url "https://www.vinted.es/catalog?search_text=nike"` using `chrome_120_win10`; bootstrap `200`, catalog API `200`, no DataDome challenge, and 5 items returned.
+- Verification passed: `ruff check`, focused Chrome/runtime tests (`31 passed`), full 010 pytest suite with host DB/Redis URLs (`80 passed`), and `python scripts/verify_impersonation.py`.
+- Asocks/sticky proxy validation remains pending and is the next blocker before marking 010 `done`.

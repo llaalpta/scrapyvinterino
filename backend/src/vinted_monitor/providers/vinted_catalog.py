@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from curl_cffi.requests import Session
 
 from vinted_monitor.core.config import Settings, get_settings
-from vinted_monitor.providers.browser_profiles import BrowserProfile, NavigationFlow, select_navigation_flow, select_random_profile
+from vinted_monitor.providers.browser_profiles import BrowserProfile, NavigationFlow, profile_for_impersonate, select_navigation_flow
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
 from vinted_monitor.providers.datadome import DataDomeChallengeError, has_datadome_cookie, human_delay, is_datadome_challenge
 
@@ -66,7 +66,7 @@ class CurlCffiVintedCatalogProvider:
         session_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.profile = profile or select_random_profile()
+        self.profile = profile or profile_for_impersonate(self.settings.curl_impersonate_browser)
         self.proxy_url = proxy_url
         self.timeout_ms = timeout_ms or self.settings.vinted_request_timeout_ms
         self.catalog_per_page = catalog_per_page or self.settings.vinted_fast_catalog_per_page

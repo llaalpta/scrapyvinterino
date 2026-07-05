@@ -45,6 +45,7 @@ def _chrome_bootstrap_headers(
     sec_ch_ua: str,
     sec_ch_ua_platform: str,
     accept_language: str,
+    accept_encoding: str = "gzip, deflate, br, zstd",
 ) -> dict[str, str]:
     """Chrome-ordered headers for a top-level navigation (document) request."""
     return dict(
@@ -64,7 +65,7 @@ def _chrome_bootstrap_headers(
             ("Sec-Fetch-Mode", "navigate"),
             ("Sec-Fetch-User", "?1"),
             ("Sec-Fetch-Dest", "document"),
-            ("Accept-Encoding", "gzip, deflate, br, zstd"),
+            ("Accept-Encoding", accept_encoding),
             ("Accept-Language", accept_language),
             ("Cache-Control", "max-age=0"),
             ("Connection", "keep-alive"),
@@ -77,6 +78,7 @@ def _chrome_api_headers(
     sec_ch_ua: str,
     sec_ch_ua_platform: str,
     accept_language: str,
+    accept_encoding: str = "gzip, deflate, br, zstd",
 ) -> dict[str, str]:
     """Chrome-ordered headers for an XHR/fetch JSON API request."""
     return dict(
@@ -89,7 +91,7 @@ def _chrome_api_headers(
             ("Sec-Fetch-Site", "same-origin"),
             ("Sec-Fetch-Mode", "cors"),
             ("Sec-Fetch-Dest", "empty"),
-            ("Accept-Encoding", "gzip, deflate, br, zstd"),
+            ("Accept-Encoding", accept_encoding),
             ("Accept-Language", accept_language),
         ])
     )
@@ -104,8 +106,38 @@ def _chrome_api_headers(
 # headers as reference.
 
 _LANG_ES = "es-ES,es;q=0.9,en;q=0.8"
+_CHROME120_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+_CHROME120_SEC_CH_UA = '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
+_CHROME120_ACCEPT_ENCODING = "gzip, deflate, br"
 
 BROWSER_PROFILES: list[BrowserProfile] = [
+    BrowserProfile(
+        name="chrome_120_win10",
+        impersonate="chrome120",
+        user_agent=_CHROME120_UA,
+        sec_ch_ua=_CHROME120_SEC_CH_UA,
+        sec_ch_ua_mobile="?0",
+        sec_ch_ua_platform='"Windows"',
+        accept_language=_LANG_ES,
+        bootstrap_headers=_chrome_bootstrap_headers(
+            user_agent=_CHROME120_UA,
+            sec_ch_ua=_CHROME120_SEC_CH_UA,
+            sec_ch_ua_platform='"Windows"',
+            accept_language=_LANG_ES,
+            accept_encoding=_CHROME120_ACCEPT_ENCODING,
+        ),
+        api_headers=_chrome_api_headers(
+            user_agent=_CHROME120_UA,
+            sec_ch_ua=_CHROME120_SEC_CH_UA,
+            sec_ch_ua_platform='"Windows"',
+            accept_language=_LANG_ES,
+            accept_encoding=_CHROME120_ACCEPT_ENCODING,
+        ),
+    ),
     BrowserProfile(
         name="chrome_136_win10",
         impersonate="chrome136",
@@ -220,6 +252,23 @@ def get_profile_by_name(name: str) -> BrowserProfile | None:
         if profile.name == name:
             return profile
     return None
+
+
+def get_profile_by_impersonate(impersonate: str) -> BrowserProfile | None:
+    """Look up a profile by curl_cffi impersonate target."""
+    for profile in BROWSER_PROFILES:
+        if profile.impersonate == impersonate:
+            return profile
+    return None
+
+
+def profile_for_impersonate(impersonate: str) -> BrowserProfile:
+    """Return the configured profile or fail clearly for invalid deployments."""
+    profile = get_profile_by_impersonate(impersonate)
+    if profile is None:
+        supported = ", ".join(profile.impersonate for profile in BROWSER_PROFILES)
+        raise ValueError(f"No browser profile configured for impersonate={impersonate!r}. Supported: {supported}")
+    return profile
 
 
 # ---------------------------------------------------------------------------
