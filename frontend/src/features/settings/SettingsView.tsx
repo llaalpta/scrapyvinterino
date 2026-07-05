@@ -71,21 +71,12 @@ export function SettingsView({
             <div className="settings-grid">
               <NumberSetting
                 id="max-concurrent-runs"
-                label="Concurrencia global"
+                label="Runs simultaneos"
                 help="Maximo de runs de monitores que pueden ejecutarse a la vez."
                 min="1"
                 max="20"
                 value={scheduler.max_concurrent_runs}
                 onBlur={(value) => updateNumber('max_concurrent_runs', value)}
-              />
-              <NumberSetting
-                id="max-runs-per-proxy"
-                label="Max por proxy"
-                help="Maximo de runs simultaneos que puede usar cada perfil de proxy."
-                min="1"
-                max="10"
-                value={scheduler.max_runs_per_proxy}
-                onBlur={(value) => updateNumber('max_runs_per_proxy', value)}
               />
               <div className="settings-field settings-checkbox-field">
                 <FieldHeading help="Permite ejecutar runs sin proxy cuando no hay proxy disponible.">Permitir directo</FieldHeading>
@@ -100,7 +91,7 @@ export function SettingsView({
               </div>
               <NumberSetting
                 id="direct-max-concurrent-runs"
-                label="Directos max"
+                label="Runs directos"
                 help="Limite de runs simultaneos que pueden salir sin proxy."
                 min="0"
                 max="10"
@@ -108,23 +99,14 @@ export function SettingsView({
                 disabled={!scheduler.allow_direct_without_proxy}
                 onBlur={(value) => updateNumber('direct_max_concurrent_runs', value)}
               />
-              <NumberSetting
-                id="proxy-cooldown-minutes"
-                label="Cooldown proxy min"
-                help="Minutos que un proxy fallido queda fuera de rotacion."
-                min="1"
-                max="1440"
-                value={scheduler.proxy_cooldown_minutes}
-                onBlur={(value) => updateNumber('proxy_cooldown_minutes', value)}
-              />
             </div>
           </section>
 
           <section className="settings-section">
             <div className="settings-section-heading compact">
               <div>
-                <h4>Limites de ejecucion</h4>
-                <p>Acota cuanto lee cada run y como reacciona ante fallos temporales.</p>
+                <h4>Limites por run</h4>
+                <p>Acota cuanto lee cada ejecucion de monitor.</p>
               </div>
             </div>
             <div className="settings-grid">
@@ -146,9 +128,20 @@ export function SettingsView({
                 value={scheduler.detail_max_candidates_per_run}
                 onBlur={(value) => updateNumber('detail_max_candidates_per_run', value)}
               />
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-heading compact">
+              <div>
+                <h4>Avanzado operativo</h4>
+                <p>Ajustes de resiliencia para errores temporales y proxys fallidos.</p>
+              </div>
+            </div>
+            <div className="settings-grid">
               <NumberSetting
                 id="request-timeout-ms"
-                label="Timeout ms"
+                label="Timeout HTTP"
                 help="Tiempo maximo por peticion HTTP antes de considerarla fallida."
                 min="1000"
                 max="60000"
@@ -157,17 +150,17 @@ export function SettingsView({
                 onBlur={(value) => updateNumber('request_timeout_ms', value)}
               />
               <NumberSetting
-                id="request-retries"
-                label="Reintentos"
-                help="Intentos extra tras un fallo temporal de peticion."
-                min="0"
-                max="5"
-                value={scheduler.request_retries}
-                onBlur={(value) => updateNumber('request_retries', value)}
+                id="proxy-cooldown-minutes"
+                label="Pausa fallo proxy"
+                help="Minutos que un proxy fallido queda fuera de rotacion."
+                min="1"
+                max="1440"
+                value={scheduler.proxy_cooldown_minutes}
+                onBlur={(value) => updateNumber('proxy_cooldown_minutes', value)}
               />
               <NumberSetting
                 id="stop-after-failures"
-                label="Fallos antes de parar"
+                label="Parar tras fallos"
                 help="Fallos consecutivos permitidos antes de detener el monitor."
                 min="1"
                 max="20"

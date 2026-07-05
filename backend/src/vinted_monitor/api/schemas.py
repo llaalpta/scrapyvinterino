@@ -94,13 +94,11 @@ class SchedulerUpdate(BaseModel):
 
     enabled: bool | None = None
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=20)
-    max_runs_per_proxy: int | None = Field(default=None, ge=1, le=10)
     allow_direct_without_proxy: bool | None = None
     direct_max_concurrent_runs: int | None = Field(default=None, ge=0, le=10)
     catalog_per_page: int | None = Field(default=None, ge=1, le=96)
     detail_max_candidates_per_run: int | None = Field(default=None, ge=0, le=96)
     request_timeout_ms: int | None = Field(default=None, ge=1000, le=60000)
-    request_retries: int | None = Field(default=None, ge=0, le=5)
     stop_monitor_after_consecutive_failures: int | None = Field(default=None, ge=1, le=20)
     proxy_cooldown_minutes: int | None = Field(default=None, ge=1, le=1440)
 
@@ -115,7 +113,6 @@ class SchedulerStateRead(BaseModel):
     per_source_concurrency: int
     poll_interval_seconds: int
     timezone: str
-    max_runs_per_proxy: int
     allow_direct_without_proxy: bool
     direct_max_concurrent_runs: int
     active_proxy_count: int
@@ -126,7 +123,6 @@ class SchedulerStateRead(BaseModel):
     catalog_per_page: int
     detail_max_candidates_per_run: int
     request_timeout_ms: int
-    request_retries: int
     stop_monitor_after_consecutive_failures: int
     proxy_cooldown_minutes: int
 

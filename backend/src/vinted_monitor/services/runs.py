@@ -391,7 +391,7 @@ def _provider_for_egress(
         proxy_url=proxy_url,
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
-        request_retries=runtime_config.request_retries,
+        request_retries=settings.vinted_request_retries,
     ), metadata
 
 
@@ -430,7 +430,6 @@ def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_confi
         "catalog_per_page": runtime_config.catalog_per_page,
         "detail_max_candidates_per_run": runtime_config.detail_max_candidates_per_run,
         "request_timeout_ms": runtime_config.request_timeout_ms,
-        "request_retries": runtime_config.request_retries,
         "proxy_cooldown_minutes": runtime_config.proxy_cooldown_minutes,
         "stop_monitor_after_consecutive_failures": runtime_config.stop_monitor_after_consecutive_failures,
     }

@@ -3,8 +3,10 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from vinted_monitor.api.main import app
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import AppSetting, MonitorSession, ProxyProfile, SearchSource
 from vinted_monitor.db.session import SessionLocal
@@ -17,6 +19,7 @@ from vinted_monitor.services.scheduler import (
     list_schedulable_sources,
     next_run_after,
     normalize_scheduler_config,
+    update_scheduler_config,
     update_scheduler_enabled,
     validate_proxy_settings,
 )
@@ -61,6 +64,102 @@ def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
 
         assert state.enabled is True
         assert state.effective_enabled is True
+
+
+def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/scheduler")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "max_runs_per_proxy" not in payload
+    assert "request_retries" not in payload
+
+
+def test_scheduler_api_rejects_removed_runtime_fields() -> None:
+    client = TestClient(app)
+
+    response = client.patch("/api/scheduler", json={"max_runs_per_proxy": 2, "request_retries": 2})
+
+    assert response.status_code == 422
+
+
+def test_scheduler_config_prunes_legacy_runtime_fields_on_update() -> None:
+    with SessionLocal() as db:
+        setting = AppSetting(
+            key=SCHEDULER_SETTING_KEY,
+            value={
+                "enabled": True,
+                "max_concurrent_runs": 4,
+                "max_runs_per_proxy": 1,
+                "request_retries": 5,
+            },
+        )
+        db.add(setting)
+        db.commit()
+
+        state = update_scheduler_config(db, {"direct_max_concurrent_runs": 2}, Settings(scheduler_enabled=True))
+        db.refresh(setting)
+
+        assert state.max_concurrent_runs == 4
+        assert state.direct_max_concurrent_runs == 2
+        assert "max_runs_per_proxy" not in setting.value
+        assert "request_retries" not in setting.value
+
+
+def test_scheduler_proxy_capacity_uses_proxy_profile_limits() -> None:
+    proxy_ids: list[int] = []
+    active_proxy_ids: list[int] = []
+    with SessionLocal() as db:
+        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        if active_proxy_ids:
+            db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                {ProxyProfile.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_config(
+            db,
+            {"enabled": True, "max_concurrent_runs": 20, "allow_direct_without_proxy": False},
+            Settings(scheduler_enabled=True),
+        )
+        for index, limit in enumerate((3, 2)):
+            proxy = ProxyProfile(
+                name=f"pytest capacity proxy {index}",
+                scheme="http",
+                kind="residential",
+                host=f"proxy-{index}.example",
+                port=7000 + index,
+                max_concurrent_runs=limit,
+                is_active=True,
+            )
+            db.add(proxy)
+            db.flush()
+            proxy_ids.append(proxy.id)
+        db.commit()
+
+    try:
+        with SessionLocal() as db:
+            state = get_scheduler_state(db, Settings(scheduler_enabled=True))
+
+            assert state.proxy_capacity == 5
+            assert state.direct_capacity == 0
+            assert state.effective_capacity == 5
+    finally:
+        with SessionLocal() as db:
+            for proxy_id in proxy_ids:
+                proxy = db.get(ProxyProfile, proxy_id)
+                if proxy is not None:
+                    db.delete(proxy)
+            if active_proxy_ids:
+                db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                    {ProxyProfile.is_active: True},
+                    synchronize_session=False,
+                )
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+            db.commit()
 
 
 def test_normalize_scheduler_config_applies_defaults() -> None:

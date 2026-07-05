@@ -17,6 +17,7 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - HTTP provider: `CurlCffiVintedCatalogProvider` with one `curl_cffi.requests.Session` per task attempt; bootstrap, catalog API and detail fetches share cookies and proxy.
 - Browser profiles: coherent `impersonate`, `User-Agent`, `Sec-Ch-Ua*`, ordered bootstrap headers and ordered API headers.
 - Proxy sticky sessions: `PROXY_STICKY_USERNAME_TEMPLATE` defaults to `{username}-session-{session_id}`. Use provider-specific values such as `{username}-sessid-{session_id}` for providers that require `sessid`.
+- Worker retry attempts are deployment-owned through `WORKER_MAX_RETRY_ATTEMPTS`; the PWA does not expose request retry controls for producer-consumer runs.
 - Task payloads include only `proxy_profile_id`; full proxy URLs, usernames, passwords and cookies are never written to Redis or run metadata.
 - Runtime metadata: consumer runs include `task_id`, `consumer_id`, `browser_profile`, `proxy_session_id_prefix` and `attempt`; full proxy credentials and cookies are never persisted.
 

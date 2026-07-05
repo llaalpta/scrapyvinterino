@@ -24,13 +24,11 @@ SUPPORTED_SOURCE_CONFIG_KEYS = {"interval_seconds", "jitter_percent", "allowed_w
 RUNTIME_CONFIG_KEYS = {
     "enabled",
     "max_concurrent_runs",
-    "max_runs_per_proxy",
     "allow_direct_without_proxy",
     "direct_max_concurrent_runs",
     "catalog_per_page",
     "detail_max_candidates_per_run",
     "request_timeout_ms",
-    "request_retries",
     "stop_monitor_after_consecutive_failures",
     "proxy_cooldown_minutes",
 }
@@ -62,13 +60,11 @@ class SourceSchedulerConfig:
 class SchedulerRuntimeConfig:
     enabled: bool
     max_concurrent_runs: int
-    max_runs_per_proxy: int
     allow_direct_without_proxy: bool
     direct_max_concurrent_runs: int
     catalog_per_page: int
     detail_max_candidates_per_run: int
     request_timeout_ms: int
-    request_retries: int
     stop_monitor_after_consecutive_failures: int
     proxy_cooldown_minutes: int
 
@@ -82,7 +78,6 @@ class SchedulerState:
     per_source_concurrency: int
     poll_interval_seconds: int
     timezone: str
-    max_runs_per_proxy: int
     allow_direct_without_proxy: bool
     direct_max_concurrent_runs: int
     active_proxy_count: int
@@ -93,7 +88,6 @@ class SchedulerState:
     catalog_per_page: int
     detail_max_candidates_per_run: int
     request_timeout_ms: int
-    request_retries: int
     stop_monitor_after_consecutive_failures: int
     proxy_cooldown_minutes: int
 
@@ -111,7 +105,7 @@ def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
     runtime_config = get_scheduler_runtime_config(db, settings)
     runtime_enabled = settings.scheduler_enabled
     active_proxies = _active_proxy_profiles(db)
-    proxy_capacity = sum(min(max(proxy.max_concurrent_runs, 1), runtime_config.max_runs_per_proxy) for proxy in active_proxies)
+    proxy_capacity = sum(max(proxy.max_concurrent_runs, 1) for proxy in active_proxies)
     direct_capacity = runtime_config.direct_max_concurrent_runs if runtime_config.allow_direct_without_proxy else 0
     effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity + direct_capacity)
     return SchedulerState(
@@ -122,7 +116,6 @@ def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
         per_source_concurrency=max(settings.scheduler_per_source_concurrency, 1),
         poll_interval_seconds=max(settings.scheduler_poll_interval_seconds, 1),
         timezone=settings.scheduler_timezone,
-        max_runs_per_proxy=runtime_config.max_runs_per_proxy,
         allow_direct_without_proxy=runtime_config.allow_direct_without_proxy,
         direct_max_concurrent_runs=runtime_config.direct_max_concurrent_runs,
         active_proxy_count=len(active_proxies),
@@ -133,7 +126,6 @@ def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
         catalog_per_page=runtime_config.catalog_per_page,
         detail_max_candidates_per_run=runtime_config.detail_max_candidates_per_run,
         request_timeout_ms=runtime_config.request_timeout_ms,
-        request_retries=runtime_config.request_retries,
         stop_monitor_after_consecutive_failures=runtime_config.stop_monitor_after_consecutive_failures,
         proxy_cooldown_minutes=runtime_config.proxy_cooldown_minutes,
     )
@@ -152,7 +144,6 @@ def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Setting
             1,
             20,
         ),
-        max_runs_per_proxy=_validate_int(value.get("max_runs_per_proxy", 1), "max_runs_per_proxy", 1, 10),
         allow_direct_without_proxy=bool(value.get("allow_direct_without_proxy", True)),
         direct_max_concurrent_runs=_validate_int(value.get("direct_max_concurrent_runs", 1), "direct_max_concurrent_runs", 0, 10),
         catalog_per_page=_validate_int(value.get("catalog_per_page", settings.vinted_fast_catalog_per_page), "catalog_per_page", 1, 96),
@@ -168,7 +159,6 @@ def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Setting
             1000,
             60000,
         ),
-        request_retries=_validate_int(value.get("request_retries", 1), "request_retries", 0, 5),
         stop_monitor_after_consecutive_failures=_validate_int(
             value.get("stop_monitor_after_consecutive_failures", 3),
             "stop_monitor_after_consecutive_failures",
@@ -187,7 +177,8 @@ def update_scheduler_config(db: Session, payload: dict[str, Any], settings: Sett
     if setting is None:
         setting = AppSetting(key=SCHEDULER_SETTING_KEY, value={})
         db.add(setting)
-    candidate = {**(setting.value or {}), **payload}
+    current = {key: value for key, value in (setting.value or {}).items() if key in RUNTIME_CONFIG_KEYS}
+    candidate = {**current, **payload}
     scheduler_runtime_config_from_value(candidate, settings or get_settings())
     setting.value = candidate
     db.commit()
@@ -231,7 +222,7 @@ def choose_run_egress(
         else _active_run_egress_counts(db)
     )
     for proxy in list_available_proxy_profiles(db):
-        proxy_limit = min(max(proxy.max_concurrent_runs, 1), runtime.max_runs_per_proxy)
+        proxy_limit = max(proxy.max_concurrent_runs, 1)
         if proxy_counts.get(proxy.id, 0) >= proxy_limit:
             continue
         mark_proxy_used(db, proxy.id)

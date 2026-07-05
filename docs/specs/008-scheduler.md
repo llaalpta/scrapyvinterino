@@ -45,13 +45,14 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - monitor historical stats endpoint for active monitor performance cards;
   - global proxy pool and scheduler runtime controls.
 - Configuration:
+  - ownership rule: `.env` owns deployment, secrets, worker and anti-bot defaults; UI `app_settings` owns daily operation only;
   - deployment scheduler enable flag in `.env` as an operational gate;
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
   - direct-without-proxy enable flag and direct concurrency limit;
-  - per-proxy run concurrency limit;
-  - catalog results per run, detail fetch candidate limit, request timeout, request retries, and stop-after-failures settings;
+  - per-proxy run concurrency limit stored on each proxy profile;
+  - catalog results per run, detail fetch candidate limit, request timeout, proxy cooldown, and stop-after-failures settings;
   - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
   - monitor jitter percent: default `20`, minimum `0`, maximum `50`;
   - optional allowed windows as local `HH:MM-HH:MM` ranges;
@@ -92,6 +93,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - No more than `2` monitor runs execute at the same time by default.
 - The same active monitor never has two active runs at the same time.
 - The scheduler uses active healthy proxies from the global pool before direct access.
+- Proxy capacity is the sum of active healthy proxy profile `max_concurrent_runs` values; there is no separate UI-level global per-proxy cap.
 - When no proxy is available, direct access is used only if the global setting allows it.
 - If neither proxy nor direct capacity is available, a periodic monitor is not activated or run.
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
@@ -119,6 +121,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
 - Direct requests behave exactly as monitor runs only when global direct fallback is enabled and no proxy is available.
+- Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
 - Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
 - Proxy pool entries can be `own`, `datacenter`, or `residential`; target-specific/special proxy classes are not exposed for Vinted.
 - If a proxy request fails, only the affected run/source is failed and logged with redacted details.

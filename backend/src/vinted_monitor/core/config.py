@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     vinted_base_url: AnyHttpUrl = "https://www.vinted.es"
     vinted_request_timeout_ms: int = 15000
+    vinted_request_retries: int = 1
     vinted_fast_catalog_per_page: int = 5
     vinted_detail_max_candidates_per_run: int = 5
     vinted_detail_concurrency: int = 2
