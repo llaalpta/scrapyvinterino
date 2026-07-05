@@ -160,10 +160,32 @@
   .source-schedule,
   .source-schedule.compact,
   .settings-grid,
+  .settings-summary-grid,
   .proxy-form,
+  .proxy-form-group,
+  .proxy-form-group.wide,
   .opportunity-row {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .settings-section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-section-heading button,
+  .proxy-form-actions > button {
+    width: 100%;
+  }
+
+  .tooltip-bubble {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    left: 18px;
+    width: auto;
+    max-width: none;
   }
 
   .monitor-table-header {
