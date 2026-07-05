@@ -6,7 +6,7 @@
 - `api`: FastAPI para REST, login local y eventos.
 - `worker`: productor (scheduler), consumidores (task workers), scraping, deduplicacion, filtros y acciones pendientes.
 - `postgres`: persistencia.
-- `redis`: cola de tareas (patron productor-consumidor), cache de vistos/procesamiento por monitor.
+- `redis`: cola de tareas (patron productor-consumidor con LPUSH/BRPOP), cache de vistos/procesamiento por monitor.
 
 ## Modulos backend
 
@@ -22,9 +22,9 @@
 1. El usuario crea un monitor con una URL de Vinted.
 2. La API guarda el monitor.
 3. El scheduler (productor) evalua tiempos, jitter y ventanas, y encola tareas en Redis.
-4. Los workers consumidores escuchan la cola Redis via BLPOP.
+4. Los workers consumidores escuchan la cola Redis via BRPOP.
 5. Cada tarea selecciona un perfil de navegador aleatorio coherente.
-6. Se genera un UUID de sesion sticky para el proxy residencial.
+6. Se genera un UUID de sesion sticky para el proxy residencial y se inyecta con `PROXY_STICKY_USERNAME_TEMPLATE`.
 7. Se crea una sesion `curl_cffi` con `impersonate` para falsificar TLS/JA3.
 8. Se realiza un bootstrap anonimo para obtener cookies/tokens publicos (incluyendo datadome).
 9. Se aplica un delay humano y se verifica que no haya challenge de DataDome.

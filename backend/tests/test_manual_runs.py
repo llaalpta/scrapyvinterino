@@ -15,8 +15,9 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.filters import create_filter_rule
 from vinted_monitor.services.monitor_stats import get_monitor_stats
+from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.runs import FAILED, SUCCESS, SearchSourceInactiveError, execute_manual_run, execute_monitor_run
-from vinted_monitor.services.scheduler import update_scheduler_config, update_scheduler_enabled
+from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 
 
@@ -231,6 +232,62 @@ def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
         redis_event = next(event for event in events if event.phase == "redis_seen_result")
         assert redis_event.details["seen_miss_count"] == 1
         assert next(event for event in events if event.phase == "run_succeeded").level == "info"
+
+
+def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
+    monkeypatch: pytest.MonkeyPatch, source_id: int
+) -> None:
+    created_providers: list[FakeOwnedProvider] = []
+
+    class FakeOwnedProvider(FakeSuccessProvider):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(item_count=1)
+            self.kwargs = kwargs
+            self.closed = False
+            created_providers.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeOwnedProvider)
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.get_settings",
+        lambda: Settings(proxy_sticky_username_template="{username}-sessid-{session_id}"),
+    )
+
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest sticky owned provider",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8000,
+            username="customer",
+            password=None,
+        )
+        run = execute_monitor_run(
+            db,
+            source_id,
+            egress=RunEgress(
+                mode="proxy",
+                proxy_profile_id=proxy.id,
+                proxy_name=proxy.name,
+                proxy_kind=proxy.kind,
+            ),
+            seen_cache=FakeSeenCache(),
+        )
+
+        assert run.status == SUCCESS
+        assert len(created_providers) == 1
+        assert created_providers[0].closed is True
+        assert created_providers[0].kwargs["proxy_url"].startswith("http://customer-sessid-")
+        assert created_providers[0].kwargs["proxy_url"].endswith(":@proxy.example:8000")
+        assert run.runtime_metadata["proxy_profile_id"] == proxy.id
+        assert run.runtime_metadata["proxy_session_id_prefix"]
+        run_started = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "run_started"))
+        assert run_started is not None
+        assert run_started.details["proxy_session_id_prefix"] == run.runtime_metadata["proxy_session_id_prefix"]
 
 
 def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:

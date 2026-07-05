@@ -11,6 +11,7 @@ from vinted_monitor.db.models import SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
+    active_run_egress_counts,
     choose_run_egress,
     get_scheduler_state,
     get_scheduler_timezone,
@@ -28,7 +29,7 @@ class SchedulerRunner:
 
     The scheduler no longer executes HTTP requests or monitor runs directly.
     It builds ``MonitorTask`` payloads and pushes them into the Redis task
-    queue.  The ``TaskConsumer`` workers pick them up via BLPOP.
+    queue.  The ``TaskConsumer`` workers pick them up via BRPOP.
     """
 
     def __init__(
@@ -73,19 +74,19 @@ class SchedulerRunner:
                     due_sources.append((due_at, source.id, source, config))
 
             cache = get_seen_cache()
+            active_proxy_counts, active_direct_count = active_run_egress_counts(db)
             for _, source_id, source, config in sorted(due_sources, key=lambda e: (e[0], e[1])):
+                if sum(active_proxy_counts.values()) + active_direct_count >= state.max_concurrent_runs:
+                    break
                 try:
                     egress = choose_run_egress(
                         db,
                         self.settings,
-                        active_proxy_counts={},
-                        active_direct_count=0,
+                        active_proxy_counts=active_proxy_counts,
+                        active_direct_count=active_direct_count,
                     )
                 except SchedulerCapacityError:
                     break
-
-                # Build proxy URL template for the consumer to inject UUID
-                proxy_url_template = egress.proxy_url
 
                 task = MonitorTask(
                     source_id=source_id,
@@ -98,7 +99,6 @@ class SchedulerRunner:
                         "jitter_percent": config.jitter_percent,
                     },
                     proxy_profile_id=egress.proxy_profile_id,
-                    proxy_url_template=proxy_url_template,
                 )
                 try:
                     redis_client = cache.client
@@ -117,6 +117,10 @@ class SchedulerRunner:
                 source_obj = db.get(SearchSource, source_id)
                 if source_obj is not None:
                     source_obj.next_run_at = next_due
+                if egress.proxy_profile_id is not None:
+                    active_proxy_counts[egress.proxy_profile_id] = active_proxy_counts.get(egress.proxy_profile_id, 0) + 1
+                elif egress.mode == "direct":
+                    active_direct_count += 1
                 submitted.append(source_id)
 
             db.commit()

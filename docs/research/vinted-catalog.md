@@ -171,7 +171,7 @@ Vinted usa DataDome como WAF. DataDome analiza multiples capas de la conexion:
 - Pool de perfiles de navegador coherentes: cada sesion usa un perfil con `impersonate`, `User-Agent`, y `Sec-Ch-Ua*` alineados.
 - Delay humano con distribucion Beta entre bootstrap y catalogo.
 - Deteccion de challenge: si la respuesta contiene marcadores de DataDome (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la IP inmediatamente.
-- Proxies residenciales con UUID de sesion sticky por tarea.
+- Proxies residenciales con UUID de sesion sticky por intento. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`.
 - Retry con escalada: nueva IP, nuevo perfil, delay creciente.
 
 ### Scripts de verificacion
@@ -181,4 +181,3 @@ Vinted usa DataDome como WAF. DataDome analiza multiples capas de la conexion:
 - `scripts/check_datadome.py`: smoke test de bootstrap + catalogo con deteccion de challenge.
 - `scripts/inspect_vinted_session.py`: captura headers/cookies/navigator de Chrome real via Playwright + CDP.
 - `scripts/compare_fingerprints.py`: diff entre Chrome real y curl_cffi.
-

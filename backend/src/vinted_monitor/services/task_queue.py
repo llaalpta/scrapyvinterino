@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 
 from redis import Redis
@@ -27,7 +27,6 @@ class MonitorTask:
     filter_rule_ids: list[int] = field(default_factory=list)
     scheduler_config: dict = field(default_factory=dict)
     proxy_profile_id: int | None = None
-    proxy_url_template: str | None = None
     enqueued_at: str = ""
     task_id: str = ""
 
@@ -38,10 +37,13 @@ class MonitorTask:
             self.enqueued_at = datetime.now(UTC).isoformat()
 
 
+MONITOR_TASK_FIELD_NAMES = {task_field.name for task_field in fields(MonitorTask)}
+
+
 def enqueue_task(client: Redis, task: MonitorTask, queue_key: str = TASK_QUEUE_KEY) -> None:
     """Push a task to the left of the Redis list (LPUSH).
 
-    The consumer pops from the right (BRPOP/BLPOP) to maintain FIFO order.
+    The consumer pops from the right (BRPOP) to maintain FIFO order.
     """
     try:
         payload = json.dumps(asdict(task), default=str, separators=(",", ":"))
@@ -58,7 +60,7 @@ def dequeue_task(client: Redis, timeout: int = 0, queue_key: str = TASK_QUEUE_KE
     try:
         result = client.brpop(queue_key, timeout=timeout)
     except RedisTimeoutError:
-        # BRPOP timeout expired — empty queue, not an error
+        # BRPOP timeout expired; empty queue, not an error
         return None
     except RedisError as exc:
         raise TaskQueueError(f"Failed to dequeue task: {exc}") from exc
@@ -69,7 +71,9 @@ def dequeue_task(client: Redis, timeout: int = 0, queue_key: str = TASK_QUEUE_KE
         data = json.loads(raw_payload)
     except (json.JSONDecodeError, TypeError) as exc:
         raise TaskQueueError(f"Failed to deserialize task: {exc}") from exc
-    return MonitorTask(**data)
+    if not isinstance(data, dict):
+        raise TaskQueueError("Failed to deserialize task: payload must be an object")
+    return MonitorTask(**{key: value for key, value in data.items() if key in MONITOR_TASK_FIELD_NAMES})
 
 
 def queue_length(client: Redis, queue_key: str = TASK_QUEUE_KEY) -> int:

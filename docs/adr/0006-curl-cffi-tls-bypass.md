@@ -17,13 +17,14 @@ Migrar todo el trafico HTTP a `curl_cffi` con `impersonate` para falsificar la h
 Adicionalmente:
 - Cada sesion usa un perfil de navegador coherente (impersonate + User-Agent + Sec-Ch-Ua alineados).
 - Se implementa deteccion de challenges de DataDome para descartar IPs comprometidas.
-- Los proxies residenciales usan sesiones sticky con UUID dinamico por tarea.
+- Los proxies residenciales usan sesiones sticky con UUID dinamico por intento y username configurable mediante `PROXY_STICKY_USERNAME_TEMPLATE`.
 - Se aplica timing humano entre requests para evitar deteccion por cadencia.
 
 ## Consequences
 
 - `httpx` se elimina del proyecto. Los tests que usen `httpx.MockTransport` deben migrarse.
 - `curl_cffi` requiere `libcurl` nativo; el Dockerfile necesita dependencias del sistema.
+- `curl-cffi>=0.15.0` se usa como minimo para disponer de fingerprints modernos y CLI de inspeccion local.
 - La version de `impersonate` debe actualizarse periodicamente cuando Chrome sube de version.
 - El pool de perfiles de navegador es un dato estatico que debe mantenerse coherente con las versiones de `curl_cffi`.
 - El codigo de parsing (funciones puras) no cambia; solo la capa de transporte HTTP.

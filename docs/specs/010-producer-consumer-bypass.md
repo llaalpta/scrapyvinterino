@@ -2,70 +2,39 @@
 
 ## Goal
 
-Migrate the worker from a synchronous-coupled model (scheduler → `execute_monitor_run` → `httpx`) to a **Producer-Consumer** pattern with Redis queue, using `curl_cffi` for TLS fingerprint bypass and residential proxies with dynamic sticky sessions (UUID per task), with multi-layer anti-bot evasion.
+Move scheduled monitor execution from an in-process scheduler/executor to a Redis-backed producer-consumer flow, and make every public Vinted catalog request use the `curl_cffi` browser impersonation stack with per-attempt proxy sticky sessions.
 
 ## Scope
 
-- Scheduler acts as Producer: evaluates timing, jitter, time windows, and enqueues `MonitorTask` to Redis.
-- Workers act as Consumers: listen on Redis queue via `BLPOP`, process tasks with full evasion lifecycle.
-- All HTTP traffic migrated from `httpx` to `curl_cffi` with `impersonate` for TLS/JA3 and HTTP/2 fingerprint spoofing.
-- Browser profile pool with coherent `impersonate` + `User-Agent` + `Sec-Ch-Ua*` per session.
-- Residential proxy sticky sessions with dynamic UUID injection per task.
-- DataDome challenge detection and response with escalation retry.
-- Human-like micro-timing between bootstrap and catalog requests.
-- Realistic navigation flow selection (Google referral, home navigation, internal referral).
-- Proxy quality scoring with exponential cooldown on failures.
-- Proactive degradation metrics emitted as run events.
+- `SchedulerRunner` is a producer: it evaluates active monitors, windows and jitter, then enqueues `MonitorTask` payloads in Redis.
+- `TaskConsumer` workers are consumers: they block on the Redis task queue, create a per-attempt browser profile and proxy session, and call `execute_monitor_run()` with a configured provider.
+- Manual runs stay synchronous/direct from the API, but use the same `CurlCffiVintedCatalogProvider` stack.
+- Existing business logic remains unchanged: Redis seen cache, deduplication, filters, item persistence, opportunities, run events and monitor sessions.
 
 ## Interfaces
 
-- Worker:
-  - `SchedulerRunner` (producer): enqueues `MonitorTask` to Redis.
-  - `TaskConsumer` (consumer): dequeues tasks, manages evasion lifecycle, calls `execute_monitor_run`.
-  - `CurlCffiVintedCatalogProvider`: replaces `HttpVintedCatalogProvider`.
-  - `BrowserProfile` pool: coherent browser identity per session.
-  - `datadome` module: challenge detection and response.
-- Redis:
-  - Task queue: `vinted:task_queue` (LPUSH/BLPOP).
-  - Seen cache: unchanged.
-- Configuration:
-  - `worker_consumer_count`: number of concurrent consumers.
-  - `worker_blpop_timeout_seconds`: BLPOP timeout.
-  - `worker_max_retry_attempts`: escalation retry limit.
-  - `curl_impersonate_browser`: default impersonate value.
-  - `human_delay_min_seconds`, `human_delay_max_seconds`: timing range.
-  - Proxy sticky session format configurable via proxy profile username template.
+- Redis task queue: `vinted:task_queue`, `LPUSH` producer and blocking `BRPOP` consumer for FIFO processing.
+- HTTP provider: `CurlCffiVintedCatalogProvider` with one `curl_cffi.requests.Session` per task attempt; bootstrap, catalog API and detail fetches share cookies and proxy.
+- Browser profiles: coherent `impersonate`, `User-Agent`, `Sec-Ch-Ua*`, ordered bootstrap headers and ordered API headers.
+- Proxy sticky sessions: `PROXY_STICKY_USERNAME_TEMPLATE` defaults to `{username}-session-{session_id}`. Use provider-specific values such as `{username}-sessid-{session_id}` for providers that require `sessid`.
+- Task payloads include only `proxy_profile_id`; full proxy URLs, usernames, passwords and cookies are never written to Redis or run metadata.
+- Runtime metadata: consumer runs include `task_id`, `consumer_id`, `browser_profile`, `proxy_session_id_prefix` and `attempt`; full proxy credentials and cookies are never persisted.
 
 ## Acceptance Criteria
 
-- No `httpx` import exists anywhere in the codebase.
-- `curl_cffi` is the only HTTP client library used.
-- Every HTTP request to Vinted uses `impersonate` with a browser profile.
-- Bootstrap and catalog requests share the same `curl_cffi.Session`, same proxy IP, same cookies.
-- Each task generates a unique UUID for the proxy sticky session.
-- The proxy session UUID is discarded after the task completes.
-- DataDome challenges are detected before processing catalog results.
-- Challenge detection triggers IP discard, new UUID, and retry with escalation.
-- Human-like delay (1.2-3.8s, non-uniform distribution) is applied between bootstrap and catalog.
-- Navigation flow is randomly selected per task (Google/home/internal referer).
-- `Sec-Ch-Ua*` headers match the `impersonate` version exactly.
-- Header order matches real Chrome browser order.
-- Proxy failures use exponential cooldown instead of linear.
-- Scheduler enqueues tasks to Redis instead of executing them directly.
-- Workers consume tasks via BLPOP.
-- Manual runs bypass the queue but use the same evasion stack.
-- Run events include `browser_profile`, `session_id`, `datadome_cookie`, and `bootstrap_duration_ms`.
-- Degradation metrics are emitted as run events.
-- All existing business logic (deduplication, filters, opportunities) is preserved.
+- No runtime code imports or depends on `httpx`; provider tests use an injected fake `curl_cffi` session instead of `httpx.MockTransport`.
+- Scheduler enqueues due monitors and does not execute HTTP or run business logic directly.
+- Consumers generate a new UUID per attempt, inject it into the proxy username through the configured template, and discard the session after the attempt.
+- DataDome challenges from bootstrap, catalog API or detail fetch are recorded as run events, fail the current run, bubble to the consumer, and trigger retry with a new browser profile/proxy session until `worker_max_retry_attempts` is exhausted.
+- Completed runs are marked successful only when `execute_monitor_run()` returns `success`; failed runs do not reset proxy health.
+- Bootstrap and catalog API requests share the same `curl_cffi.Session`, proxy and cookie jar, with a human delay between them.
+- Navigation flow is selected per provider instance: Google referral, home navigation, or internal Vinted referral.
+- Proxy failures use exponential cooldown; DataDome challenges use the configured challenge penalty multiplier.
+- Run events expose safe diagnostics: `browser_profile`, `proxy_session_id_prefix`, `datadome_cookie`, `bootstrap_duration_ms`, attempt number and navigation flow.
 
 ## Verification
 
-- `ruff check backend/src backend/alembic` passes.
-- `scripts/check_ja3.py` confirms correct JA3 fingerprint.
-- `scripts/check_datadome.py` confirms bootstrap + catalog flow works.
-- `scripts/inspect_vinted_session.py` captures real Chrome reference.
-- `scripts/compare_fingerprints.py` shows no critical differences.
-- Docker build succeeds with `curl-cffi` installed.
-- Manual run from PWA uses `curl_cffi` (visible in run event logs).
-- Scheduler enqueues and consumers process tasks (Redis queue drains to 0).
-- Exponential cooldown on proxy failures verified.
+- `ruff check backend/src backend/alembic`
+- `python -m pytest backend/tests/test_vinted_catalog_provider.py backend/tests/test_scheduler.py backend/tests/test_task_queue.py backend/tests/test_proxies.py backend/tests/test_consumer.py backend/tests/test_manual_runs.py`
+- Docker smoke: `docker compose ps`, API health, Redis queue drain after scheduled work.
+- Optional live diagnostics when credentials/proxies are available: `scripts/check_ja3.py`, `scripts/check_headers.py`, `scripts/check_datadome.py`, `scripts/inspect_vinted_session.py`, and `scripts/compare_fingerprints.py`.

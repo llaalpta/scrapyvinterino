@@ -217,7 +217,8 @@ def select_random_profile(rng: random.Random | None = None) -> BrowserProfile:
 def get_profile_by_name(name: str) -> BrowserProfile | None:
     """Look up a profile by its unique name."""
     for profile in BROWSER_PROFILES:
-        return profile if profile.name == name else None
+        if profile.name == name:
+            return profile
     return None
 
 

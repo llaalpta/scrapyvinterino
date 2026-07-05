@@ -300,7 +300,7 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
     try:
         proxy_url = proxy_url_for_profile(profile, settings)
         proxy_dict = {"https": proxy_url, "http": proxy_url} if proxy_url else None
-        with CurlSession(impersonate="chrome136", proxies=proxy_dict) as client:
+        with CurlSession(impersonate=settings.curl_impersonate_browser, proxies=proxy_dict) as client:
             response = client.get("https://api.ipify.org?format=json", timeout=10)
             if response.status_code != 200:
                 raise RuntimeError(f"HTTP {response.status_code}")

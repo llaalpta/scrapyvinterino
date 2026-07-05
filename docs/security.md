@@ -16,7 +16,7 @@
 - `curl_cffi` con `impersonate` falsifica la huella TLS/JA3 y HTTP/2. Los perfiles de navegador (User-Agent, Sec-Ch-Ua) son datos publicos, no secretos.
 - Los UUID de sesion sticky del proxy son efimeros: se generan por tarea y se descartan al terminar.
 - Las cookies DataDome obtenidas durante el bootstrap se mantienen solo en memoria de la sesion `curl_cffi` y no se persisten.
-- Los eventos de run pueden incluir el nombre del perfil de navegador usado, el session_id del proxy (UUID publico), y si se detecto challenge de DataDome.
+- Los eventos de run pueden incluir el nombre del perfil de navegador usado, un prefijo del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.
 - Acciones de compra futuras:
   - requeriran click explicito;
   - validaran precio, moneda y disponibilidad;

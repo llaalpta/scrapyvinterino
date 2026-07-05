@@ -414,6 +414,10 @@ def _active_run_egress_counts(db: Session) -> tuple[dict[int, int], int]:
     return proxy_counts, direct_count
 
 
+def active_run_egress_counts(db: Session) -> tuple[dict[int, int], int]:
+    return _active_run_egress_counts(db)
+
+
 def _validate_int(value: Any, field: str, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)

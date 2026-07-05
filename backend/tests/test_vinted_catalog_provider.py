@@ -1,13 +1,15 @@
 import json
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlparse
 
-import httpx
 import pytest
 
 from vinted_monitor.core.config import Settings
+from vinted_monitor.providers.browser_profiles import NavigationFlow, get_profile_by_name
+from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
-    HttpVintedCatalogProvider,
+    CurlCffiVintedCatalogProvider,
     VintedCatalogProviderError,
     build_catalog_api_params,
     decode_next_flight_payload,
@@ -19,6 +21,62 @@ from vinted_monitor.providers.vinted_catalog import (
 )
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "vinted_catalog_payload.json"
+INTERNAL_FLOW = NavigationFlow(name="internal_referral", bootstrap_referer=None, needs_home_visit=False)
+
+
+class FakeResponse:
+    def __init__(self, status_code: int = 200, *, text: str = "", json_data: dict | None = None, headers: dict | None = None) -> None:
+        self.status_code = status_code
+        self.text = text
+        self._json_data = json_data
+        self.headers = headers or {}
+
+    def json(self) -> dict:
+        return self._json_data or {}
+
+
+class FakeCurlSession:
+    def __init__(self, handler, calls: list[dict], *, impersonate=None, proxies=None) -> None:
+        self.handler = handler
+        self.calls = calls
+        self.impersonate = impersonate
+        self.proxies = proxies
+        self.cookies: dict[str, str] = {}
+        self.closed = False
+
+    def get(self, url, *, params=None, headers=None, timeout=None):
+        call = {
+            "url": url,
+            "params": params or {},
+            "headers": headers or {},
+            "timeout": timeout,
+            "impersonate": self.impersonate,
+            "proxies": self.proxies,
+            "cookies": dict(self.cookies),
+        }
+        self.calls.append(call)
+        response = self.handler(call)
+        set_cookie = response.headers.get("set-cookie") or response.headers.get("Set-Cookie")
+        if set_cookie:
+            name, _, remainder = set_cookie.partition("=")
+            value = remainder.split(";", 1)[0]
+            self.cookies[name] = value
+        return response
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def fake_session_factory(handler, calls: list[dict]):
+    def factory(*, impersonate=None, proxies=None):
+        return FakeCurlSession(handler, calls, impersonate=impersonate, proxies=proxies)
+
+    return factory
+
+
+@pytest.fixture(autouse=True)
+def no_provider_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vinted_monitor.providers.vinted_catalog.human_delay", lambda *args, **kwargs: 0.0)
 
 
 def load_fixture() -> dict:
@@ -43,6 +101,14 @@ def build_next_flight_html(payload: dict) -> str:
 def build_next_flight_chunk(payload: str) -> str:
     escaped_payload = json.dumps(payload, ensure_ascii=False)[1:-1]
     return f'<script>self.__next_f.push([1,"{escaped_payload}"])</script>'
+
+
+def source(url: str = "https://www.vinted.es/catalog?catalog[]=76&order=newest_first"):
+    return type("Source", (), {"url": url})()
+
+
+def path(call: dict) -> str:
+    return urlparse(call["url"]).path
 
 
 def test_parse_catalog_html_maps_items_and_pagination() -> None:
@@ -160,164 +226,221 @@ def test_sanitize_catalog_item_keeps_only_safe_public_fields() -> None:
     assert "profile_url" not in sanitized["user"]
 
 
-def test_http_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
-    calls: list[str] = []
+def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
+    calls: list[dict] = []
     fixture = load_fixture()
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(str(request.url))
-        if request.url.path == "/catalog":
-            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=anon; Path=/;"})
-        if request.url.path == "/api/v2/catalog/items":
-            assert request.url.params["per_page"] == "5"
-            assert request.url.params["order"] == "newest_first"
-            assert request.headers["accept"] == "application/json, text/plain, */*"
-            assert request.headers.get("cookie")
-            return httpx.Response(200, json=fixture, headers={"content-type": "application/json"})
-        return httpx.Response(404)
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=anon; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
+            assert call["params"]["per_page"] == 5
+            assert call["params"]["order"] == "newest_first"
+            assert call["headers"]["Accept"] == "application/json, text/plain, */*"
+            assert call["cookies"]["access_token_web"] == "anon"
+            return FakeResponse(200, json_data=fixture, headers={"content-type": "application/json"})
+        return FakeResponse(404)
 
-    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
-    result = provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76&order=newest_first"})())
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        navigation_flow=NavigationFlow(name="internal_referral", bootstrap_referer=None, needs_home_visit=False),
+        session_factory=fake_session_factory(handler, calls),
+    )
+    result = provider.search(source())
 
     assert len(result.items) == 2
-    assert [httpx.URL(call).path for call in calls] == ["/catalog", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
+    assert calls[0]["headers"]["Referer"] == "https://www.vinted.es/"
 
 
-def test_http_provider_emits_safe_session_and_catalog_events() -> None:
+def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
+    calls: list[dict] = []
     events: list[dict] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/catalog":
-            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=secret; Path=/;"})
-        if request.url.path == "/api/v2/catalog/items":
-            return httpx.Response(200, json=load_fixture(), headers={"content-type": "application/json"})
-        return httpx.Response(404)
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=public-marker; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+        return FakeResponse(404)
 
-    provider = HttpVintedCatalogProvider(
+    provider = CurlCffiVintedCatalogProvider(
         settings=Settings(),
-        transport=httpx.MockTransport(handler),
+        navigation_flow=NavigationFlow(name="google_referral", bootstrap_referer="https://www.google.com/", needs_home_visit=False),
+        session_factory=fake_session_factory(handler, calls),
         event_sink=lambda **event: events.append(event),
     )
 
-    provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+    provider.search(source())
 
     phases = [event["phase"] for event in events]
     assert phases == [
         "anonymous_session_bootstrap_start",
         "anonymous_session_bootstrap_success",
+        "human_delay_applied",
         "catalog_api_request_start",
         "catalog_api_request_success",
     ]
-    assert events[1]["details"]["session_marker_count"] == 1
-    assert events[1]["details"]["session_markers"] == [
-        {
-            "kind": "cookie",
-            "name": "access_token_web",
-            "masked": "<masked>",
-            "length": 6,
-            "fingerprint": "sha256:2bb80d537b1d",
-            "domain": "www.vinted.es",
-        }
-    ]
-    assert events[2]["details"]["session_marker_count"] == 1
-    assert events[2]["details"]["timeout_ms"] == 15000
-    assert events[2]["details"]["attempt"] == 1
-    assert events[3]["details"]["item_count"] == 2
-    assert "secret" not in json.dumps(events)
+    assert events[0]["details"]["navigation_flow"] == "google_referral"
+    assert events[1]["details"]["datadome_cookie"] is True
+    assert "bootstrap_duration_ms" in events[1]["details"]
+    assert events[3]["details"]["browser_profile"] == provider.profile.name
+    assert "public-marker" not in json.dumps(events)
 
 
-def test_http_provider_uses_only_explicit_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_proxies: list[str | None] = []
+def test_curl_provider_uses_only_explicit_proxy() -> None:
+    captured_proxies: list[dict | None] = []
 
-    class FakeClient:
-        def __init__(self, *args, proxy=None, **kwargs) -> None:
-            captured_proxies.append(proxy)
+    def factory(*, impersonate=None, proxies=None):
+        captured_proxies.append(proxies)
+        return FakeCurlSession(lambda _call: FakeResponse(200), [], impersonate=impersonate, proxies=proxies)
 
-    monkeypatch.setattr("vinted_monitor.providers.vinted_catalog.httpx.Client", FakeClient)
+    CurlCffiVintedCatalogProvider(settings=Settings(), session_factory=factory)._ensure_session()
+    CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        proxy_url="http://user:pass@proxy.example:8000",
+        session_factory=factory,
+    )._ensure_session()
 
-    HttpVintedCatalogProvider(settings=Settings())._client({})
-    HttpVintedCatalogProvider(settings=Settings(), proxy_url="http://user:pass@proxy.example:8000")._client({})
-
-    assert captured_proxies == [None, "http://user:pass@proxy.example:8000"]
+    assert captured_proxies == [None, {"https": "http://user:pass@proxy.example:8000", "http": "http://user:pass@proxy.example:8000"}]
 
 
-def test_http_provider_refreshes_anonymous_session_once_after_auth_failure() -> None:
+def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> None:
+    calls: list[dict] = []
     api_calls = 0
     bootstrap_calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
-        if request.url.path == "/catalog":
+        if path(call) == "/catalog":
             bootstrap_calls += 1
-            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
-        if request.url.path == "/api/v2/catalog/items":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
             api_calls += 1
             if api_calls == 1:
-                return httpx.Response(401, json={"error": "invalid_authentication_token"}, headers={"content-type": "application/json"})
-            return httpx.Response(200, json=load_fixture(), headers={"content-type": "application/json"})
-        return httpx.Response(404)
+                return FakeResponse(401, json_data={"error": "invalid_authentication_token"}, headers={"content-type": "application/json"})
+            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+        return FakeResponse(404)
 
-    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
-    provider._cookies.set("access_token_web", "expired", domain="www.vinted.es")
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        navigation_flow=INTERNAL_FLOW,
+        session_factory=fake_session_factory(handler, calls),
+    )
 
-    result = provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+    result = provider.search(source())
 
     assert len(result.items) == 2
     assert api_calls == 2
-    assert bootstrap_calls == 1
+    assert bootstrap_calls == 2
 
 
-def test_http_provider_raises_after_second_session_failure() -> None:
+def test_curl_provider_raises_after_second_session_failure() -> None:
+    calls: list[dict] = []
     api_calls = 0
     bootstrap_calls = 0
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
-        if request.url.path == "/catalog":
+        if path(call) == "/catalog":
             bootstrap_calls += 1
-            return httpx.Response(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
-        if request.url.path == "/api/v2/catalog/items":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
             api_calls += 1
-            return httpx.Response(403, json={"error": "invalid_authentication_token"}, headers={"content-type": "application/json"})
-        return httpx.Response(404)
+            return FakeResponse(401, json_data={"error": "invalid_authentication_token"}, headers={"content-type": "application/json"})
+        return FakeResponse(404)
 
-    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        navigation_flow=INTERNAL_FLOW,
+        session_factory=fake_session_factory(handler, calls),
+    )
 
     with pytest.raises(VintedCatalogProviderError):
-        provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+        provider.search(source())
 
     assert api_calls == 2
     assert bootstrap_calls == 2
 
 
-def test_http_provider_does_not_use_catalog_html_fallback_after_api_failure() -> None:
-    calls: list[str] = []
+def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() -> None:
+    calls: list[dict] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        if request.url.path == "/catalog":
-            return httpx.Response(
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(
                 200,
                 text=build_next_flight_html(load_fixture()),
                 headers={"set-cookie": "access_token_web=anon; Path=/;"},
             )
-        if request.url.path == "/api/v2/catalog/items":
-            return httpx.Response(500, json={"error": "boom"}, headers={"content-type": "application/json"})
-        return httpx.Response(404)
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(500, json_data={"error": "boom"}, headers={"content-type": "application/json"})
+        return FakeResponse(404)
 
-    provider = HttpVintedCatalogProvider(settings=Settings(), transport=httpx.MockTransport(handler))
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        navigation_flow=INTERNAL_FLOW,
+        session_factory=fake_session_factory(handler, calls),
+    )
 
     with pytest.raises(VintedCatalogProviderError):
-        provider.search(type("Source", (), {"url": "https://www.vinted.es/catalog?catalog[]=76"})())
+        provider.search(source())
 
-    assert calls == ["/catalog", "/api/v2/catalog/items", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items", "/api/v2/catalog/items"]
+
+
+def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(200, text="<html>geo.captcha-delivery.com</html>", headers={"content-type": "text/html"})
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        navigation_flow=INTERNAL_FLOW,
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    with pytest.raises(DataDomeChallengeError):
+        provider.search(source())
+
+
+def test_curl_provider_home_navigation_visits_home_then_catalog() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) in {"/", "/catalog"}:
+            return FakeResponse(200, text="<html>ok</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(),
+        navigation_flow=NavigationFlow(name="home_navigation", bootstrap_referer=None, needs_home_visit=True),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    provider.search(source())
+
+    assert [path(call) for call in calls] == ["/", "/catalog", "/api/v2/catalog/items"]
+    assert calls[1]["headers"]["Referer"] == "https://www.vinted.es/"
+
+
+def test_get_profile_by_name_scans_all_profiles() -> None:
+    assert get_profile_by_name("chrome_142_win10").name == "chrome_142_win10"
+    assert get_profile_by_name("missing") is None
 
 
 def test_parse_item_detail_html_extracts_sanitized_public_detail() -> None:
     candidate = map_catalog_item(load_fixture()["items"][0])
     product_json = {
         "@type": "Product",
-        "description": "Tiene una mancha pequeña en la manga",
+        "description": "Tiene una mancha pequena en la manga",
         "color": "Azul",
         "category": "Polos",
         "image": ["https://images.example.test/full-1.webp", "https://images.example.test/full-2.webp"],
@@ -343,7 +466,7 @@ def test_parse_item_detail_html_extracts_sanitized_public_detail() -> None:
 
     detail = parse_item_detail_html(html, candidate)
 
-    assert detail.description == "Tiene una mancha pequeña en la manga"
+    assert detail.description == "Tiene una mancha pequena en la manga"
     assert detail.color == "Azul"
     assert detail.category == "Polos"
     assert detail.shipping_price_amount == Decimal("2.99")

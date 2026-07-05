@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -12,8 +13,9 @@ from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text
-from vinted_monitor.db.models import ErrorLog, Item, Opportunity, Run, SearchSource
+from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
+from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider
 from vinted_monitor.services.filters import evaluate_exclusion_filters, get_filter_snapshot
 from vinted_monitor.services.items import (
@@ -24,7 +26,7 @@ from vinted_monitor.services.items import (
     record_item_detail_error,
 )
 from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
-from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success
+from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success, proxy_url_with_sticky_session
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.scheduler import RunEgress, choose_run_egress, get_scheduler_runtime_config
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
@@ -92,6 +94,7 @@ def execute_monitor_run(
     create_session_for_run: bool = False,
     close_session_on_finish: bool = False,
     egress: RunEgress | None = None,
+    runtime_metadata_extra: dict[str, Any] | None = None,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
@@ -104,6 +107,12 @@ def execute_monitor_run(
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
+    owned_provider = provider is None
+    provider_runtime_metadata: dict[str, Any] = {}
+    if provider is None:
+        run_provider, provider_runtime_metadata = _provider_for_egress(db, selected_egress, runtime_config, settings)
+    else:
+        run_provider = provider
     run_session = start_monitor_session(db, source, allow_manual=True) if create_session_for_run else None
     active_session = run_session
     if active_session is None and require_active and source.monitor_mode != "manual":
@@ -119,13 +128,18 @@ def execute_monitor_run(
         items_discarded_by_filters=0,
         items_filter_pending=0,
         opportunities_created=0,
-        runtime_metadata=_run_runtime_metadata(source, selected_egress, runtime_config),
+        runtime_metadata={
+            **_run_runtime_metadata(source, selected_egress, runtime_config),
+            **provider_runtime_metadata,
+            **(runtime_metadata_extra or {}),
+        },
     )
     db.add(run)
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
     record_run_event(
@@ -143,10 +157,12 @@ def execute_monitor_run(
             "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
             "proxy_profile_id": (run.runtime_metadata or {}).get("proxy_profile_id"),
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
+            "proxy_session_id_prefix": (run.runtime_metadata or {}).get("proxy_session_id_prefix"),
+            "task_id": (run.runtime_metadata or {}).get("task_id"),
         },
     )
 
-    run_provider = provider or _provider_for_egress(selected_egress, runtime_config)
     cache = seen_cache or get_seen_cache()
     policy_hash = _policy_hash(source, get_filter_snapshot(db, source.filter_rule_ids or []))
     run.runtime_metadata = {**(run.runtime_metadata or {}), "policy_hash": policy_hash}
@@ -181,7 +197,11 @@ def execute_monitor_run(
         source.monitor_until = None
         source.next_run_at = None
         stop_active_monitor_session(db, source.id, reason="redis_unavailable")
-        return _record_failed_run(db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True)
+        failed_run = _record_failed_run(
+            db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True
+        )
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
     record_run_event(
         db,
         run_id=run.id,
@@ -217,8 +237,16 @@ def execute_monitor_run(
             auth_mode="public_anonymous",
             details={"provider": result.provider_metadata},
         )
+    except DataDomeChallengeError as exc:
+        try:
+            _record_failed_run(db, run, source, exc, kind="datadome_challenge", penalize_proxy=False)
+        finally:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+        raise
     except Exception as exc:
-        return _record_failed_run(db, run, source, exc, penalize_proxy=True)
+        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=True)
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
 
     claimed_ids: set[str] = set()
     processed_ids: list[str] = []
@@ -284,6 +312,7 @@ def execute_monitor_run(
         db.commit()
         cache.mark_seen(source.id, policy_hash, processed_ids)
         db.refresh(run)
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
         return run
     except SeenCacheUnavailableError as exc:
         db.rollback()
@@ -300,19 +329,38 @@ def execute_monitor_run(
                 cache.release_processing(source.id, policy_hash, list(claimed_ids))
             except SeenCacheUnavailableError:
                 pass
-        return (
-            _record_failed_run(db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True)
-            if run is not None
-            else raise_(exc)
+        if run is None:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+            raise_(exc)
+        failed_run = _record_failed_run(
+            db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True
         )
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
+    except DataDomeChallengeError as exc:
+        db.rollback()
+        run = db.get(Run, run.id)
+        if claimed_ids:
+            cache.release_processing(source.id, policy_hash, list(claimed_ids))
+        if run is None:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+            raise
+        try:
+            _record_failed_run(db, run, source, exc, kind="datadome_challenge", penalize_proxy=False)
+        finally:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+        raise
     except Exception as exc:
         db.rollback()
         run = db.get(Run, run.id)
         if claimed_ids:
             cache.release_processing(source.id, policy_hash, list(claimed_ids))
         if run is None:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
-        return _record_failed_run(db, run, source, exc, penalize_proxy=False)
+        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=False)
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
 
 
 def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> list[Run]:
@@ -323,13 +371,36 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
     return list(db.scalars(statement))
 
 
-def _provider_for_egress(egress: RunEgress, runtime_config) -> CurlCffiVintedCatalogProvider:
+def _provider_for_egress(
+    db: Session,
+    egress: RunEgress,
+    runtime_config,
+    settings,
+) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any]]:
+    proxy_url = egress.proxy_url
+    metadata: dict[str, Any] = {}
+    if egress.proxy_profile_id is not None:
+        profile = db.get(ProxyProfile, egress.proxy_profile_id)
+        if profile is None:
+            raise RuntimeError(f"Proxy profile {egress.proxy_profile_id} no longer exists")
+        proxy_session_id = str(uuid.uuid4())
+        proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
+        metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
+
     return CurlCffiVintedCatalogProvider(
-        proxy_url=egress.proxy_url,
+        proxy_url=proxy_url,
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
         request_retries=runtime_config.request_retries,
-    )
+    ), metadata
+
+
+def _close_owned_provider(provider: ManualRunProvider, *, owned_provider: bool) -> None:
+    if not owned_provider:
+        return
+    close = getattr(provider, "close", None)
+    if callable(close):
+        close()
 
 
 def _active_source_run_exists(db: Session, *, source_id: int) -> bool:
@@ -555,6 +626,23 @@ def _evaluate_monitor_candidates(
                         auth_mode="public_anonymous",
                         details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
                     )
+                except DataDomeChallengeError as exc:
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_fetch_error",
+                        method="GET",
+                        url=candidate.url,
+                        duration_ms=_elapsed_ms(detail_started_at),
+                        level="error",
+                        proxy_profile_id=proxy_profile_id,
+                        user_agent=None,
+                        auth_mode="public_anonymous",
+                        message=redact_sensitive_text(str(exc)),
+                        details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "kind": "datadome_challenge"},
+                    )
+                    raise
                 except Exception as exc:
                     pending += 1
                     evaluation_status = SESSION_ITEM_DETAIL_ERROR

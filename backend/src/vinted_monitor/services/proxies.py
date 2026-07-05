@@ -230,12 +230,14 @@ def proxy_url_with_sticky_session(
     profile: ProxyProfile | None,
     session_id: str,
     settings: Settings | None = None,
+    username_template: str | None = None,
 ) -> str | None:
     """Build a proxy URL with a dynamic sticky session UUID.
 
     Injects the session_id into the username for residential proxy gateways
-    that support session persistence (e.g. BrightData, Oxylabs, SmartProxy).
-    The format is ``{username}-session-{session_id}``.
+    that support session persistence. The default template is
+    ``{username}-session-{session_id}``; providers such as Oxylabs can use
+    ``{username}-sessid-{session_id}``.
     """
     if profile is None:
         return None
@@ -243,7 +245,13 @@ def proxy_url_with_sticky_session(
     if not profile.username:
         return proxy_url_for_profile(profile, settings)
     password = _decrypt_password(profile, settings) if profile.password_encrypted else ""
-    sticky_username = f"{profile.username}-session-{session_id}"
+    template = username_template or settings.proxy_sticky_username_template
+    try:
+        sticky_username = template.format(username=profile.username, session_id=session_id)
+    except KeyError as exc:
+        raise ValueError("Proxy sticky username template only supports {username} and {session_id}") from exc
+    if profile.username not in sticky_username or session_id not in sticky_username:
+        raise ValueError("Proxy sticky username template must include {username} and {session_id}")
     auth = f"{quote(sticky_username)}:{quote(password)}@"
     return f"{profile.scheme}://{auth}{profile.host}:{profile.port}"
 
