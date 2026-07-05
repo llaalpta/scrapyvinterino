@@ -79,7 +79,7 @@ export function SourcesView({
   const loadingStatsRef = useRef<Set<string>>(new Set());
   const loadingRunsRef = useRef<Set<number>>(new Set());
   const loadingEventsRef = useRef<Set<number>>(new Set());
-  const detailRef = useRef<HTMLDivElement | null>(null);
+  const detailRef = useRef<HTMLElement | null>(null);
   const [loadingMonitorEventsBySource, setLoadingMonitorEventsBySource] = useState<Record<number, boolean>>({});
   const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const handleRunEvent = useCallback(
@@ -184,55 +184,62 @@ export function SourcesView({
   }, [requestedSelectedMonitorId]);
 
   return (
-    <section className="sources-panel">
-      <div className="panel-heading">
-        <h3>Monitores de oportunidad</h3>
-        <span>{sources.length}</span>
-      </div>
-      <form className="source-form" onSubmit={onCreateSource}>
-        <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
-        <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
-        <button type="submit">Guardar URL</button>
-      </form>
-
-      {sources.length === 0 ? <p className="empty-inline">No hay monitores configurados.</p> : null}
-
-      {sources.length > 0 ? (
-        <div className="monitor-workspace">
-          <MonitorTable
-            filterRules={filterRules}
-            monitorStatsBySource={monitorStatsBySource}
-            selectedFilterIdsBySource={selectedFilterIdsBySource}
-            selectedMonitorId={selectedMonitorId}
-            sources={orderedSources}
-            sourceDrafts={sourceDrafts}
-            onSelectMonitor={setSelectedMonitorId}
-          />
-          <div className="monitor-detail-shell" ref={detailRef}>
-            <MonitorDetail
-              filterRules={filterRules}
-              loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
-              monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
-              monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
-              onDeleteSource={onDeleteSource}
-              onLoadMonitorStats={onLoadMonitorStats}
-              onSaveSourceSchedule={onSaveSourceSchedule}
-              onStartSession={onStartSession}
-              onStopMonitor={onStopMonitor}
-              runningSessionId={runningSessionId}
-              savingSourceId={savingSourceId}
-              selectedFilterIdsBySource={selectedFilterIdsBySource}
-              source={selectedSource}
-              sourceDrafts={sourceDrafts}
-              stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
-              statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'all') : 'all'}
-              streamStatus={streamStatus}
-              toggleSourceFilter={toggleSourceFilter}
-              updateSourceDraft={updateSourceDraft}
-            />
+    <section className="sources-panel monitor-page">
+      <section className="monitor-page-card monitor-create-card" aria-label="Configurar nuevo monitor">
+        <div className="monitor-section-heading">
+          <div>
+            <h3>Nuevo monitor</h3>
+            <p>Guarda una URL publica de catalogo Vinted para ejecutarla de forma puntual o continua.</p>
           </div>
+          <span>{sources.length} configurados</span>
         </div>
-      ) : null}
+        <form className="source-form" onSubmit={onCreateSource}>
+          <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
+          <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
+          <button type="submit">Guardar URL</button>
+        </form>
+      </section>
+
+      <MonitorTable
+        filterRules={filterRules}
+        monitorStatsBySource={monitorStatsBySource}
+        selectedFilterIdsBySource={selectedFilterIdsBySource}
+        selectedMonitorId={selectedMonitorId}
+        sources={orderedSources}
+        sourceDrafts={sourceDrafts}
+        onSelectMonitor={setSelectedMonitorId}
+      />
+
+      <section className="monitor-page-card monitor-detail-shell" ref={detailRef} aria-label="Detalle del monitor seleccionado">
+        <div className="monitor-section-heading compact">
+          <div>
+            <h3>Detalle del monitor seleccionado</h3>
+            <p>{selectedSource ? 'Configuracion, rendimiento y logs acumulados.' : 'Selecciona un monitor del listado para ver su detalle.'}</p>
+          </div>
+          {selectedSource ? <span>{selectedSource.is_active ? 'Activo' : 'Inactivo'}</span> : <span>Sin seleccion</span>}
+        </div>
+        <MonitorDetail
+          filterRules={filterRules}
+          loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
+          monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
+          monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
+          onDeleteSource={onDeleteSource}
+          onLoadMonitorStats={onLoadMonitorStats}
+          onSaveSourceSchedule={onSaveSourceSchedule}
+          onStartSession={onStartSession}
+          onStopMonitor={onStopMonitor}
+          runningSessionId={runningSessionId}
+          savingSourceId={savingSourceId}
+          selectedFilterIdsBySource={selectedFilterIdsBySource}
+          source={selectedSource}
+          sourceDrafts={sourceDrafts}
+          stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
+          statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'all') : 'all'}
+          streamStatus={streamStatus}
+          toggleSourceFilter={toggleSourceFilter}
+          updateSourceDraft={updateSourceDraft}
+        />
+      </section>
     </section>
   );
 }
@@ -467,41 +474,48 @@ function MonitorTable({
   sourceDrafts: Record<number, SourceDraft>;
 }) {
   return (
-    <section className="monitor-table-panel" aria-label="Monitores configurados">
-      <div className="monitor-table-heading">
-        <h4>Monitores</h4>
+    <section className="monitor-page-card monitor-table-panel" aria-label="Monitores configurados">
+      <div className="monitor-section-heading compact">
+        <div>
+          <h3>Monitores configurados</h3>
+          <p>Activos primero; selecciona una fila para revisar o editar el monitor.</p>
+        </div>
         <span>{sources.length}</span>
       </div>
-      <div className="monitor-table">
-        <div className="monitor-table-header" aria-hidden="true">
-          <span>Monitor</span>
-          <span>Estado</span>
-          <span>Modo</span>
-          <span>Configuracion</span>
-          <span>Metricas</span>
+      {sources.length === 0 ? (
+        <p className="empty-inline compact">No hay monitores configurados.</p>
+      ) : (
+        <div className="monitor-table">
+          <div className="monitor-table-header" aria-hidden="true">
+            <span>Monitor</span>
+            <span>Estado</span>
+            <span>Modo</span>
+            <span>Configuracion</span>
+            <span>Metricas</span>
+          </div>
+          {sources.map((source) => {
+            const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+            const summary = source.is_active
+              ? monitorSummary(source, filterRules)
+              : draftSummary(
+                  source,
+                  draft,
+                  selectedFilterIdsBySource[source.id] ?? [],
+                  filterRules
+                );
+            return (
+              <MonitorTableRow
+                isSelected={source.id === selectedMonitorId}
+                key={source.id}
+                source={source}
+                stats={monitorStatsBySource[source.id] ?? null}
+                summary={summary}
+                onSelect={() => onSelectMonitor(source.id)}
+              />
+            );
+          })}
         </div>
-        {sources.map((source) => {
-          const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-          const summary = source.is_active
-            ? monitorSummary(source, filterRules)
-            : draftSummary(
-                source,
-                draft,
-                selectedFilterIdsBySource[source.id] ?? [],
-                filterRules
-              );
-          return (
-            <MonitorTableRow
-              isSelected={source.id === selectedMonitorId}
-              key={source.id}
-              source={source}
-              stats={monitorStatsBySource[source.id] ?? null}
-              summary={summary}
-              onSelect={() => onSelectMonitor(source.id)}
-            />
-          );
-        })}
-      </div>
+      )}
     </section>
   );
 }
@@ -632,7 +646,7 @@ function MonitorDetail({
   const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
 
   return (
-    <article className={`source-card monitor-detail-card${source.is_active ? ' active-monitor-card' : ' inactive-monitor-card'}`}>
+    <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
       <div className="source-card-header">
         <div className="source-main">
           <strong>{source.name}</strong>
@@ -753,7 +767,7 @@ function MonitorDetail({
           </div>
         </div>
       ) : null}
-    </article>
+    </div>
   );
 }
 

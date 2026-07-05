@@ -103,6 +103,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
 - The PWA Monitors view renders selected monitor accumulated logs as a readable timeline/console with run id, level, label, timestamp, ms, status, URL, message, and collapsible details, whether the monitor is active or stopped.
+- The PWA Monitors view is organized as three top-level cards: new monitor configuration, the single compact monitor table, and the selected-monitor detail. The table and detail are stacked instead of nested inside a parent card.
 - Active monitors appear before inactive monitors in the PWA's single compact monitor table, using status chips and row styling instead of separate active/inactive sections, and show a selected-monitor detail with session summary, read-only configuration, performance card, logs, and a working stop control.
 - Active monitor detail does not show an `Ejecutar ahora` button because periodic execution is already configured.
 - Every non-archived monitor can be selected from the compact monitor table to show active-session metrics or latest-session metrics above configuration, stopped-only editable configuration, accumulated historical metrics, a default all-history full-width bar chart of `items_found` by time bucket, and accumulated logs so historical and punctual runs remain visible after the monitor stops.
@@ -140,6 +141,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm monitor sessions are created, closed, and associated to punctual runs, and created/associated/stopped for recurring runs.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
 - Confirm selecting inactive monitors still shows the all-history chart, accumulated counts, and accumulated log timeline after manual or stopped recurring runs.
+- Confirm the Monitors view renders three top-level cards for creation, list, and selected detail without nesting the table or detail inside another card.
 - Confirm the compact monitor table selects active and inactive monitors, updates the full-width detail panel, and scrolls the detail into view on mobile without horizontal overflow.
 - Confirm active monitor details show read-only configuration, stop/log controls, and do not show save, archive, or punctual launch controls.
 - Confirm inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog.

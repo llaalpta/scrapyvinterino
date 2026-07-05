@@ -28,10 +28,69 @@
   background: #ffffff;
 }
 
-.sources-panel .source-form {
-  margin-bottom: 0;
-  border-bottom: 1px solid #e5eaf0;
+.sources-panel.monitor-page {
+  display: grid;
+  gap: 14px;
+  border: 0;
+  background: transparent;
+}
+
+.monitor-page-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
   padding: 14px;
+  background: #ffffff;
+}
+
+.monitor-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.monitor-section-heading > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.monitor-section-heading h3 {
+  color: #1f2933;
+  font-size: 16px;
+}
+
+.monitor-section-heading p {
+  margin: 0;
+  color: #697586;
+  font-size: 13px;
+}
+
+.monitor-section-heading span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-height: 26px;
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: #52606d;
+  font-size: 12px;
+  background: #edf2f7;
+}
+
+.monitor-create-card .source-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  margin-bottom: 0;
+  padding: 0;
+}
+
+.monitor-create-card .source-form button {
+  min-height: 40px;
 }
 
 .panel-heading {
@@ -279,6 +338,12 @@
   min-width: 0;
 }
 
+.monitor-detail-content {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
 .monitor-config-panel {
   display: grid;
   gap: 12px;
@@ -342,6 +407,7 @@
 }
 
 .source-card .source-main strong,
+.monitor-detail-content .source-main strong,
 .monitor-card strong,
 .filter-rule-row strong,
 .proxy-row strong {
@@ -349,6 +415,7 @@
 }
 
 .source-card .source-main a,
+.monitor-detail-content .source-main a,
 .monitor-card span,
 .filter-rule-row span,
 .proxy-row span,
