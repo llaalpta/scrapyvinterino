@@ -122,7 +122,7 @@ export function RunActivityList({
   );
 }
 
-function RunEventEntry({ event }: { event: RunEvent }) {
+export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; showRunId?: boolean }) {
   const hasDetails = Object.keys(event.details).length > 0;
   return (
     <article className={`run-event-entry ${event.level}`}>
@@ -135,6 +135,7 @@ function RunEventEntry({ event }: { event: RunEvent }) {
           <span className={`event-level ${event.level}`}>{levelLabel(event.level)}</span>
         </div>
         <div className="event-meta-row">
+          {showRunId && event.run_id ? <span>Run #{event.run_id}</span> : null}
           <span>{formatDate(event.created_at)}</span>
           {eventMeta(event) ? <span>{eventMeta(event)}</span> : null}
           {event.auth_mode ? <span>{event.auth_mode}</span> : null}

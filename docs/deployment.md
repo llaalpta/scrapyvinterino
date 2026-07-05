@@ -39,5 +39,5 @@ La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`
 - Backend y worker escriben logs de proceso a stdout/stderr; en desarrollo se consultan con `docker compose logs api worker`.
 - `LOG_LEVEL` controla el nivel de esos logs de proceso. Para debugging local puede usarse `DEBUG`; para produccion deberia volver a `INFO` o un nivel mas restrictivo.
 - Los logs operativos de monitores no son ficheros: se guardan como eventos redacted en la tabla `run_events`.
-- La PWA lee esos eventos mediante `/api/runs/{run_id}/events`, `/api/monitors/{monitor_id}/events` y SSE `/api/monitors/events/stream`.
+- La PWA lee esos eventos mediante `/api/runs/{run_id}/events`, `/api/monitors/{monitor_id}/events` y SSE `/api/monitors/events/stream`; el detalle de un monitor muestra la timeline acumulada aunque el monitor este detenido.
 - Estado actual: no hay logger a fichero, politica de rotacion Docker, exportador externo ni job de retencion/purga de `run_events`.

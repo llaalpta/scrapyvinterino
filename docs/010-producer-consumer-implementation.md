@@ -87,3 +87,10 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - Playwright MCP was used only for request inventory because the browser context already had user tabs/cookies. A Vinted catalog navigation returned `GET /catalog?...` status `200`; no raw request headers or cookies were printed or persisted. The observed browser context reports a current Chrome family, so it is not a direct Chrome 120 fingerprint reference.
 - Current log storage: process logs are JSON/plain stdout visible with `docker compose logs`; monitor/run diagnostics are persisted in the `run_events` table and exposed through `/api/runs/{run_id}/events`, `/api/monitors/{monitor_id}/events`, SSE `/api/monitors/events/stream`, and the PWA. There is still no file logger, Docker log rotation policy, or run-event retention job.
 - Local Redis emits noisy client messages about unsupported `MAINT_NOTIFICATIONS` under the current Redis image/client combination. This did not block runs, but should be cleaned before production logging is considered final.
+
+## Accumulated Monitor UI 2026-07-06
+
+- The monitor detail now defaults its performance range to `Todo`, so the chart opens on the all-history view instead of the current hour.
+- The monitor detail always shows accumulated historical metrics and an accumulated log timeline for the selected monitor, including stopped monitors.
+- The timeline uses `/api/monitors/{monitor_id}/events` for persisted history and the existing SSE stream to append live events for active monitors. Each event shows the run id, level, timestamp, method/status/duration, sanitized URL, message, and collapsible redacted details.
+- The per-run log expansion remains available in the global runs view through `/api/runs/{run_id}/events`.

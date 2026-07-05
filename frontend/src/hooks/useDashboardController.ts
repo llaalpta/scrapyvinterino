@@ -5,6 +5,7 @@ import {
   createSource,
   deleteSource,
   fetchFilterRules,
+  fetchMonitorEvents,
   fetchMonitorStats,
   fetchOpportunities,
   fetchProxyProfiles,
@@ -27,6 +28,7 @@ import {
   type ProxyProfile,
   type SchedulerUpdate,
   type Run,
+  type RunEvent,
   type SchedulerState,
   type SearchSource
 } from '../api';
@@ -41,6 +43,8 @@ import { buildSourceDraft, buildSourceDrafts, type SourceDraft } from '../featur
 
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
 const emptyProxyDraft: ProxyDraft = { name: '', scheme: 'http', kind: 'own', host: '', port: '', maxConcurrentRuns: '1', username: '', password: '' };
+const DEFAULT_MONITOR_STATS_RANGE: MonitorStatsRange = 'all';
+const MONITOR_RUN_HISTORY_LIMIT = 1000;
 
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
@@ -49,6 +53,7 @@ export function useDashboardController() {
   const [opportunityPage, setOpportunityPage] = useState<Page<OpportunityResult>>(emptyOpportunityPage);
   const [runs, setRuns] = useState<Run[]>([]);
   const [monitorRunsBySource, setMonitorRunsBySource] = useState<Record<number, Run[]>>({});
+  const [monitorEventsBySource, setMonitorEventsBySource] = useState<Record<number, RunEvent[]>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
@@ -92,7 +97,7 @@ export function useDashboardController() {
       }
       const entries = await Promise.all(
         loadedIds.map(async (sourceId) => {
-          const range = monitorStatsRangeBySource[sourceId] ?? 'hours';
+          const range = monitorStatsRangeBySource[sourceId] ?? DEFAULT_MONITOR_STATS_RANGE;
           return [sourceId, await fetchMonitorStats(sourceId, range)] as const;
         })
       );
@@ -152,7 +157,7 @@ export function useDashboardController() {
       setSources((current) => [created, ...current]);
       setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
       setSelectedFilterIdsBySource((current) => ({ ...current, [created.id]: created.filter_rule_ids ?? [] }));
-      await loadMonitorStats(created.id, 'hours');
+      await loadMonitorStats(created.id, DEFAULT_MONITOR_STATS_RANGE);
       setSourceName('');
       setSourceUrl('');
     } catch (caught) {
@@ -238,8 +243,14 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
-      setMonitorRunsBySource((current) => ({ ...current, [sourceId]: [created, ...(current[sourceId] ?? []).filter((run) => run.id !== created.id)].slice(0, 10) }));
+      setMonitorRunsBySource((current) => ({
+        ...current,
+        [sourceId]: [created, ...(current[sourceId] ?? []).filter((run) => run.id !== created.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+      }));
       await loadMonitorStats(sourceId);
+      if (monitorEventsBySource[sourceId]) {
+        await loadMonitorEvents(sourceId);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
     } finally {
@@ -263,8 +274,14 @@ export function useDashboardController() {
       setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
       setOpportunityPage(opportunityData);
-      setMonitorRunsBySource((current) => ({ ...current, [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, 10) }));
+      setMonitorRunsBySource((current) => ({
+        ...current,
+        [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+      }));
       await loadMonitorStats(source.id);
+      if (monitorEventsBySource[source.id]) {
+        await loadMonitorEvents(source.id);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
@@ -352,6 +369,11 @@ export function useDashboardController() {
         delete next[source.id];
         return next;
       });
+      setMonitorEventsBySource((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
       await refreshRuntime(remainingSources);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo archivar el monitor');
@@ -424,16 +446,42 @@ export function useDashboardController() {
     void loadOpportunities(1, opportunityFilters, pageSize);
   }
 
-  async function loadMonitorStats(sourceId: number, range = monitorStatsRangeBySource[sourceId] ?? 'hours') {
+  async function loadMonitorStats(sourceId: number, range = monitorStatsRangeBySource[sourceId] ?? DEFAULT_MONITOR_STATS_RANGE) {
     setMonitorStatsRangeBySource((current) => ({ ...current, [sourceId]: range }));
     const stats = await fetchMonitorStats(sourceId, range);
     setMonitorStatsBySource((current) => ({ ...current, [sourceId]: stats }));
   }
 
-  async function loadMonitorRuns(sourceId: number, limit = 10) {
+  async function loadMonitorRuns(sourceId: number, limit = MONITOR_RUN_HISTORY_LIMIT) {
     const sourceRuns = await fetchRuns({ source_id: sourceId, limit });
     setMonitorRunsBySource((current) => ({ ...current, [sourceId]: sourceRuns }));
   }
+
+  const loadMonitorEvents = useCallback(async (sourceId: number) => {
+    try {
+      const events = await fetchMonitorEvents(sourceId);
+      setMonitorEventsBySource((current) => ({ ...current, [sourceId]: events }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudieron cargar los logs acumulados');
+    }
+  }, []);
+
+  const appendMonitorEvent = useCallback((event: RunEvent) => {
+    const sourceId = event.source_id;
+    if (!sourceId) {
+      return;
+    }
+    setMonitorEventsBySource((current) => {
+      const existing = current[sourceId];
+      if (!existing || existing.some((entry) => entry.id === event.id)) {
+        return current;
+      }
+      return {
+        ...current,
+        [sourceId]: [...existing, event].sort((left, right) => left.id - right.id)
+      };
+    });
+  }, []);
 
   function getSourceName(sourceId: number): string {
     return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
@@ -456,6 +504,7 @@ export function useDashboardController() {
     filterTerms,
     getSourceName,
     loadOpportunities,
+    loadMonitorEvents,
     loadMonitorStats,
     loadMonitorRuns,
     loadingOpportunities,
@@ -464,6 +513,7 @@ export function useDashboardController() {
     onCreateProxy,
     onCreateSource,
     onDeleteSource,
+    onAppendMonitorEvent: appendMonitorEvent,
     onLoadRunEvents: fetchRunEvents,
     onRunMonitor,
     onSaveSourceSchedule,
@@ -477,6 +527,7 @@ export function useDashboardController() {
     monitorStatsBySource,
     monitorStatsRangeBySource,
     monitorRunsBySource,
+    monitorEventsBySource,
     opportunityPage,
     proxyDraft,
     proxyProfiles,

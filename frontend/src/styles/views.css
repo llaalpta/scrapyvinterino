@@ -647,19 +647,32 @@
   font-weight: 700;
 }
 
-.active-monitor-logs {
+.active-monitor-logs,
+.monitor-logs {
   border-top: 1px solid #e5eaf0;
   padding-top: 12px;
 }
 
-.active-monitor-logs summary {
+.active-monitor-logs summary,
+.monitor-logs summary {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   cursor: pointer;
   color: #52606d;
   font-size: 13px;
   font-weight: 650;
 }
 
-.active-monitor-logs[open] {
+.monitor-logs summary span {
+  color: #697586;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.active-monitor-logs[open],
+.monitor-logs[open] {
   display: grid;
   gap: 10px;
 }
@@ -872,6 +885,18 @@
   border: 1px solid #e5eaf0;
   border-radius: 8px;
   background: #0f172a;
+}
+
+.monitor-event-timeline {
+  max-height: 520px;
+}
+
+.event-empty {
+  margin: 0;
+  border-bottom: 1px solid rgb(148 163 184 / 0.22);
+  padding: 12px;
+  color: #cbd5e1;
+  font-size: 13px;
 }
 
 .event-stream-status {

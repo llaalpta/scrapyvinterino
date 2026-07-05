@@ -1,29 +1,29 @@
-import { Play, Save, Square, Trash2 } from 'lucide-react';
+import { FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
 import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import type { FilterRule, MonitorStats, MonitorStatsRange, Run, RunEvent, SearchSource } from '../../api';
+import { monitorEventsStreamUrl, type FilterRule, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
-import { RunActivityList } from '../runs/RunsView';
-import { useRunActivity } from '../runs/runActivity';
+import { RunEventEntry } from '../runs/RunsView';
 import { buildSourceDraft, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
   filterRules,
+  monitorEventsBySource,
   monitorRunsBySource,
   monitorStatsBySource,
   monitorStatsRangeBySource,
+  onAppendMonitorEvent,
   onCreateSource,
   onDeleteSource,
+  onLoadMonitorEvents,
   onLoadMonitorRuns,
   onLoadMonitorStats,
-  onLoadRunEvents,
   onRefreshRuntime,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
   runningSessionId,
-  runs,
   savingSourceId,
   selectedFilterIdsBySource,
   sourceDrafts,
@@ -36,20 +36,21 @@ export function SourcesView({
   updateSourceDraft,
 }: {
   filterRules: FilterRule[];
+  monitorEventsBySource: Record<number, RunEvent[]>;
   monitorRunsBySource: Record<number, Run[]>;
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
+  onAppendMonitorEvent: (event: RunEvent) => void;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
+  onLoadMonitorEvents: (sourceId: number) => Promise<void>;
   onLoadMonitorRuns: (sourceId: number) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
-  onLoadRunEvents: (runId: number) => Promise<RunEvent[]>;
   onRefreshRuntime: () => Promise<void>;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
   runningSessionId: number | null;
-  runs: Run[];
   savingSourceId: number | null;
   selectedFilterIdsBySource: Record<number, number[]>;
   sourceDrafts: Record<number, SourceDraft>;
@@ -65,7 +66,6 @@ export function SourcesView({
   const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
   const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
   const activeSourceIds = useMemo(() => new Set(activeSources.map((source) => source.id)), [activeSources]);
-  const activeRuns = useMemo(() => runs.filter((run) => activeSourceIds.has(run.source_id)), [activeSourceIds, runs]);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
   const [requestedSelectedMonitorId, setSelectedMonitorId] = useState<number | null>(null);
   const selectedMonitorId = sources.some((source) => source.id === requestedSelectedMonitorId)
@@ -78,9 +78,13 @@ export function SourcesView({
   const refreshTimerRef = useRef<number | null>(null);
   const loadingStatsRef = useRef<Set<string>>(new Set());
   const loadingRunsRef = useRef<Set<number>>(new Set());
+  const loadingEventsRef = useRef<Set<number>>(new Set());
   const detailRef = useRef<HTMLDivElement | null>(null);
+  const [loadingMonitorEventsBySource, setLoadingMonitorEventsBySource] = useState<Record<number, boolean>>({});
+  const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const handleRunEvent = useCallback(
     (event: RunEvent) => {
+      onAppendMonitorEvent(event);
       if (!event.source_id || !activeSourceIds.has(event.source_id) || !shouldRefreshRuns(event.phase)) {
         return;
       }
@@ -92,12 +96,25 @@ export function SourcesView({
         void onRefreshRuntime();
       }, 400);
     },
-    [activeSourceIds, onRefreshRuntime]
+    [activeSourceIds, onAppendMonitorEvent, onRefreshRuntime]
   );
-  const activity = useRunActivity(activeRuns, onLoadRunEvents, {
-    onRunEvent: handleRunEvent,
-    streamEnabled: activeSources.length > 0
-  });
+
+  useEffect(() => {
+    if (activeSources.length === 0) {
+      setStreamStatus('connecting');
+      return undefined;
+    }
+    const events = new EventSource(monitorEventsStreamUrl());
+    events.addEventListener('open', () => setStreamStatus('connected'));
+    events.addEventListener('error', () => setStreamStatus('error'));
+    events.addEventListener('monitor_event', (message) => {
+      const event = parseRunEvent(message);
+      if (event) {
+        handleRunEvent(event);
+      }
+    });
+    return () => events.close();
+  }, [activeSources.length, handleRunEvent]);
 
   useEffect(() => {
     return () => {
@@ -111,7 +128,7 @@ export function SourcesView({
     if (!selectedSource) {
       return;
     }
-    const range = monitorStatsRangeBySource[selectedSource.id] ?? 'hours';
+    const range = monitorStatsRangeBySource[selectedSource.id] ?? 'all';
     const loadingKey = `${selectedSource.id}:${range}`;
     if (monitorStatsBySource[selectedSource.id]) {
       loadingStatsRef.current.delete(loadingKey);
@@ -125,7 +142,7 @@ export function SourcesView({
   }, [monitorStatsBySource, monitorStatsRangeBySource, onLoadMonitorStats, selectedSource]);
 
   useEffect(() => {
-    if (!selectedSource?.is_active) {
+    if (!selectedSource) {
       return;
     }
     if (monitorRunsBySource[selectedSource.id]) {
@@ -140,15 +157,31 @@ export function SourcesView({
   }, [monitorRunsBySource, onLoadMonitorRuns, selectedSource]);
 
   useEffect(() => {
+    if (!selectedSource) {
+      return;
+    }
+    if (monitorEventsBySource[selectedSource.id]) {
+      loadingEventsRef.current.delete(selectedSource.id);
+      setLoadingMonitorEventsBySource((current) => ({ ...current, [selectedSource.id]: false }));
+      return;
+    }
+    if (loadingEventsRef.current.has(selectedSource.id)) {
+      return;
+    }
+    loadingEventsRef.current.add(selectedSource.id);
+    setLoadingMonitorEventsBySource((current) => ({ ...current, [selectedSource.id]: true }));
+    onLoadMonitorEvents(selectedSource.id).finally(() => {
+      loadingEventsRef.current.delete(selectedSource.id);
+      setLoadingMonitorEventsBySource((current) => ({ ...current, [selectedSource.id]: false }));
+    });
+  }, [monitorEventsBySource, onLoadMonitorEvents, selectedSource]);
+
+  useEffect(() => {
     if (requestedSelectedMonitorId === null || !window.matchMedia('(max-width: 820px)').matches) {
       return;
     }
     window.setTimeout(() => detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }, [requestedSelectedMonitorId]);
-
-  function getSourceName(sourceId: number): string {
-    return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
-  }
 
   return (
     <section className="sources-panel">
@@ -177,10 +210,9 @@ export function SourcesView({
           />
           <div className="monitor-detail-shell" ref={detailRef}>
             <MonitorDetail
-              activity={activity}
-              activeRuns={activeRuns}
               filterRules={filterRules}
-              getSourceName={getSourceName}
+              loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
+              monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
               monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
               onDeleteSource={onDeleteSource}
               onLoadMonitorStats={onLoadMonitorStats}
@@ -193,7 +225,8 @@ export function SourcesView({
               source={selectedSource}
               sourceDrafts={sourceDrafts}
               stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
-              statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'hours') : 'hours'}
+              statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'all') : 'all'}
+              streamStatus={streamStatus}
               toggleSourceFilter={toggleSourceFilter}
               updateSourceDraft={updateSourceDraft}
             />
@@ -330,6 +363,45 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function MonitorEventTimeline({
+  events,
+  loading,
+  streamStatus
+}: {
+  events: RunEvent[];
+  loading: boolean;
+  streamStatus: 'connecting' | 'connected' | 'error' | null;
+}) {
+  const orderedEvents = useMemo(
+    () => [...events].sort((left, right) => left.id - right.id),
+    [events]
+  );
+
+  return (
+    <div className="run-events monitor-event-timeline">
+      <div className={`event-stream-status ${streamStatus ?? 'connected'}`}>
+        <RefreshCw size={14} />
+        <span>{streamStatus ? monitorStreamLabel(streamStatus) : 'Historico acumulado'}</span>
+      </div>
+      {loading ? <p className="event-empty">Cargando logs acumulados...</p> : null}
+      {!loading && orderedEvents.length === 0 ? <p className="event-empty">Sin logs acumulados para este monitor.</p> : null}
+      {orderedEvents.map((event) => (
+        <RunEventEntry event={event} key={event.id} showRunId />
+      ))}
+    </div>
+  );
+}
+
+function monitorStreamLabel(status: 'connecting' | 'connected' | 'error'): string {
+  if (status === 'connected') {
+    return 'Logs en vivo';
+  }
+  if (status === 'error') {
+    return 'Stream no disponible; historico cargado';
+  }
+  return 'Conectando stream';
+}
+
 class ChartErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
 
@@ -353,6 +425,14 @@ const rangeOptions: Array<{ label: string; value: MonitorStatsRange }> = [
   { label: 'Todo', value: 'all' }
 ];
 
+function parseRunEvent(message: MessageEvent): RunEvent | null {
+  try {
+    return JSON.parse(message.data) as RunEvent;
+  } catch {
+    return null;
+  }
+}
+
 function formatSeconds(seconds: number): string {
   if (seconds < 60) {
     return `${seconds}s`;
@@ -368,8 +448,6 @@ function formatSeconds(seconds: number): string {
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
 }
-
-type MonitorActivity = ReturnType<typeof useRunActivity>;
 
 function MonitorTable({
   filterRules,
@@ -496,10 +574,9 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
-  activity,
-  activeRuns,
   filterRules,
-  getSourceName,
+  loadingMonitorEvents,
+  monitorEvents,
   monitorRuns,
   onDeleteSource,
   onLoadMonitorStats,
@@ -513,13 +590,13 @@ function MonitorDetail({
   selectedFilterIdsBySource,
   stats,
   statsRange,
+  streamStatus,
   toggleSourceFilter,
   updateSourceDraft
 }: {
-  activity: MonitorActivity;
-  activeRuns: Run[];
   filterRules: FilterRule[];
-  getSourceName: (sourceId: number) => string;
+  loadingMonitorEvents: boolean;
+  monitorEvents: RunEvent[];
   monitorRuns: Run[];
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
@@ -533,6 +610,7 @@ function MonitorDetail({
   sourceDrafts: Record<number, SourceDraft>;
   stats: MonitorStats | null;
   statsRange: MonitorStatsRange;
+  streamStatus: 'connecting' | 'connected' | 'error';
   toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
@@ -552,7 +630,6 @@ function MonitorDetail({
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
-  const sourceRuns = (monitorRuns.length > 0 ? monitorRuns : activeRuns.filter((run) => run.source_id === source.id)).slice(0, 3);
 
   return (
     <article className={`source-card monitor-detail-card${source.is_active ? ' active-monitor-card' : ' inactive-monitor-card'}`}>
@@ -621,18 +698,18 @@ function MonitorDetail({
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
 
-      {source.is_active ? (
-        <details className="active-monitor-logs">
-          <summary>Logs de ejecuciones</summary>
-          <RunActivityList
-            activity={activity}
-            emptyText="Sin ejecuciones recientes para este monitor."
-            getSourceName={getSourceName}
-            runs={sourceRuns}
-            variant="inline"
-          />
-        </details>
-      ) : null}
+      <details className="monitor-logs" open>
+        <summary>
+          <FileText size={15} />
+          Logs acumulados
+          <span>{stats?.historical_summary.runs_count ?? monitorRuns.length} ejec.</span>
+        </summary>
+        <MonitorEventTimeline
+          events={monitorEvents}
+          loading={loadingMonitorEvents}
+          streamStatus={source.is_active ? streamStatus : null}
+        />
+      </details>
 
       {archiveSource ? (
         <div className="confirm-dialog-backdrop" role="presentation" onClick={() => setArchiveSource(null)}>
