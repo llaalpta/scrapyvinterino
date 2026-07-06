@@ -85,7 +85,7 @@ def test_scheduler_api_rejects_removed_runtime_fields() -> None:
     assert response.status_code == 422
 
 
-def test_scheduler_config_prunes_legacy_runtime_fields_on_update() -> None:
+def test_scheduler_config_rejects_unknown_persisted_runtime_fields() -> None:
     with SessionLocal() as db:
         setting = AppSetting(
             key=SCHEDULER_SETTING_KEY,
@@ -99,13 +99,8 @@ def test_scheduler_config_prunes_legacy_runtime_fields_on_update() -> None:
         db.add(setting)
         db.commit()
 
-        state = update_scheduler_config(db, {"direct_max_concurrent_runs": 2}, Settings(scheduler_enabled=True))
-        db.refresh(setting)
-
-        assert state.max_concurrent_runs == 4
-        assert state.direct_max_concurrent_runs == 2
-        assert "max_runs_per_proxy" not in setting.value
-        assert "request_retries" not in setting.value
+        with pytest.raises(SchedulerConfigError, match="unsupported scheduler fields: max_runs_per_proxy, request_retries"):
+            update_scheduler_config(db, {"direct_max_concurrent_runs": 2}, Settings(scheduler_enabled=True))
 
 
 def test_scheduler_proxy_capacity_uses_proxy_profile_limits() -> None:

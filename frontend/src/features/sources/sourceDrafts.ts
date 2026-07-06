@@ -7,6 +7,7 @@ export type SourceDraft = {
   windowStart: string;
   windowEnd: string;
   sessionDurationMinutes: string;
+  filterTerms: string;
 };
 
 export function buildSourceDrafts(sources: SearchSource[]): Record<number, SourceDraft> {
@@ -22,8 +23,67 @@ export function buildSourceDraft(source: SearchSource): SourceDraft {
     jitterPercent: String(config.jitter_percent ?? 20),
     windowStart,
     windowEnd,
-    sessionDurationMinutes: String(source.duration_minutes ?? 60)
+    sessionDurationMinutes: String(source.duration_minutes ?? 60),
+    filterTerms: filterTermsToInput(source.filter_definition?.blacklist_terms ?? [])
   };
+}
+
+export function parseFilterTerms(value: string): string[] {
+  return normalizeFilterTerms(value.split(/[\n,]+/));
+}
+
+export function filterTermsToInput(terms: string[]): string {
+  return normalizeFilterTerms(terms).join('\n');
+}
+
+export function sourceDraftHasChanges(source: SearchSource, draft: SourceDraft): boolean {
+  return draftFingerprint(draft) !== draftFingerprint(buildSourceDraft(source));
+}
+
+export function filterTermLabelFromDraft(draft: SourceDraft): string {
+  return filterTermLabel(parseFilterTerms(draft.filterTerms));
+}
+
+export function filterTermLabelFromSource(source: SearchSource): string {
+  return filterTermLabel(source.filter_definition?.blacklist_terms ?? []);
+}
+
+function draftFingerprint(draft: SourceDraft): string {
+  const payload: Record<string, string | string[]> = {
+    mode: draft.monitorMode,
+    filters: parseFilterTerms(draft.filterTerms)
+  };
+  if (draft.monitorMode !== 'manual') {
+    payload.intervalSeconds = draft.intervalSeconds.trim();
+    payload.jitterPercent = draft.jitterPercent.trim();
+  }
+  if (draft.monitorMode === 'duration') {
+    payload.sessionDurationMinutes = draft.sessionDurationMinutes.trim();
+  }
+  if (draft.monitorMode === 'window') {
+    payload.windowStart = draft.windowStart.trim();
+    payload.windowEnd = draft.windowEnd.trim();
+  }
+  return JSON.stringify(payload);
+}
+
+function normalizeFilterTerms(terms: string[]): string[] {
+  return listUnique(terms.map((term) => String(term).trim()).filter(Boolean));
+}
+
+function listUnique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function filterTermLabel(terms: string[]): string {
+  const normalized = normalizeFilterTerms(terms);
+  if (normalized.length === 0) {
+    return 'sin filtros';
+  }
+  if (normalized.length <= 3) {
+    return normalized.join(', ');
+  }
+  return `${normalized.slice(0, 3).join(', ')} +${normalized.length - 3}`;
 }
 
 function splitWindow(value: string | undefined): [string, string] {

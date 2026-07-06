@@ -9,24 +9,14 @@ export type SearchSource = {
   scheduler_config: SourceSchedulerConfig;
   monitor_mode: 'manual' | 'continuous' | 'duration' | 'window';
   duration_minutes: number | null;
-  filter_rule_ids: number[];
+  filter_definition: {
+    blacklist_terms?: string[];
+  };
   monitor_started_at: string | null;
   monitor_until: string | null;
   last_run_at: string | null;
   next_run_at: string | null;
   archived_at: string | null;
-};
-
-export type FilterRule = {
-  id: number;
-  source_id: number | null;
-  name: string;
-  definition: {
-    blacklist_terms?: string[];
-  };
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
 };
 
 export type ProxyProfile = {
@@ -113,10 +103,9 @@ export type OpportunityResult = {
   item: Item;
   source_id: number;
   source_name: string;
-  rule_id: number | null;
   status: string;
   evaluation_status: string;
-  filter_snapshot: Array<{ id: number; name: string; definition: Record<string, unknown> }>;
+  filter_snapshot: Array<{ name: string; definition: Record<string, unknown> }>;
   score: string | null;
   created_at: string;
   last_scraped_at: string;
@@ -299,11 +288,10 @@ export function updateSource(
   payload: {
     name?: string;
     url?: string;
-    is_active?: boolean;
     scheduler_config?: SourceSchedulerConfig;
     monitor_mode?: SearchSource['monitor_mode'];
     duration_minutes?: number | null;
-    filter_rule_ids?: number[];
+    filter_definition?: { blacklist_terms: string[] };
   }
 ): Promise<SearchSource> {
   return patchJson<SearchSource>(`/api/monitors/${sourceId}`, payload);
@@ -334,21 +322,6 @@ export type SchedulerUpdate = Partial<{
 
 export function updateScheduler(payload: SchedulerUpdate): Promise<SchedulerState> {
   return patchJson<SchedulerState>('/api/scheduler', payload);
-}
-
-export function fetchFilterRules(): Promise<FilterRule[]> {
-  return getJson<FilterRule[]>('/api/filter-rules');
-}
-
-export function createFilterRule(payload: { name: string; definition: { blacklist_terms: string[] }; is_active?: boolean }): Promise<FilterRule> {
-  return postJson<FilterRule>('/api/filter-rules', payload);
-}
-
-export function updateFilterRule(
-  ruleId: number,
-  payload: { name?: string; definition?: { blacklist_terms: string[] }; is_active?: boolean }
-): Promise<FilterRule> {
-  return patchJson<FilterRule>(`/api/filter-rules/${ruleId}`, payload);
 }
 
 export function fetchProxyProfiles(): Promise<ProxyProfile[]> {
@@ -414,7 +387,7 @@ export function monitorEventsStreamUrl(lastEventId = 0): string {
 }
 
 export function runSource(sourceId: number): Promise<Run> {
-  return postJson<Run>(`/api/sources/${sourceId}/runs`);
+  return postJson<Run>(`/api/monitors/${sourceId}/runs`);
 }
 
 function toQueryString(query: Record<string, string | number | null | undefined>): string {

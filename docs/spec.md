@@ -12,7 +12,7 @@ Construir una aplicacion personal para monitorizar catalogos publicos de Vinted,
 - Persistencia de articulos, ejecuciones y errores.
 - Deteccion global de articulos nuevos con trazabilidad por fuente.
 - Scheduler concurrente acotado con cache runtime para velocidad de alertas.
-- Reglas de filtrado propias.
+- Terminos excluyentes propios por monitor.
 - Tabla de oportunidades en la web.
 - Docker Compose local sin Traefik.
 
@@ -45,3 +45,4 @@ Specs MVP iniciales:
 - El MVP no usa login de Vinted.
 - Las compras futuras requeriran accion explicita del usuario.
 - No se guardaran secretos en el repositorio.
+- Hasta la primera version de produccion no se mantiene compatibilidad con contratos, datos o flujos legacy de desarrollo.

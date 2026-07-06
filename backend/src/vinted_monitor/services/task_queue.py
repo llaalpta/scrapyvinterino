@@ -24,7 +24,6 @@ class MonitorTask:
     source_url: str
     monitor_mode: str
     trigger: str
-    filter_rule_ids: list[int] = field(default_factory=list)
     scheduler_config: dict = field(default_factory=dict)
     proxy_profile_id: int | None = None
     enqueued_at: str = ""
@@ -73,7 +72,10 @@ def dequeue_task(client: Redis, timeout: int = 0, queue_key: str = TASK_QUEUE_KE
         raise TaskQueueError(f"Failed to deserialize task: {exc}") from exc
     if not isinstance(data, dict):
         raise TaskQueueError("Failed to deserialize task: payload must be an object")
-    return MonitorTask(**{key: value for key, value in data.items() if key in MONITOR_TASK_FIELD_NAMES})
+    unknown_fields = sorted(set(data) - MONITOR_TASK_FIELD_NAMES)
+    if unknown_fields:
+        raise TaskQueueError(f"Failed to deserialize task: unknown fields: {', '.join(unknown_fields)}")
+    return MonitorTask(**data)
 
 
 def queue_length(client: Redis, queue_key: str = TASK_QUEUE_KEY) -> int:

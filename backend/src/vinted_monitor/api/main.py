@@ -13,9 +13,6 @@ from sqlalchemy.orm import Session
 from vinted_monitor.api.schemas import (
     ActionRequestCreate,
     ActionRequestRead,
-    FilterRuleCreate,
-    FilterRuleRead,
-    FilterRuleUpdate,
     ItemRead,
     MonitorStatsRead,
     OpportunityResultPageRead,
@@ -43,12 +40,6 @@ from vinted_monitor.services.browse import (
     OpportunityResult,
     list_opportunity_results,
 )
-from vinted_monitor.services.filters import (
-    FilterRuleNotFoundError,
-    create_filter_rule,
-    list_filter_rules,
-    update_filter_rule,
-)
 from vinted_monitor.services.monitor_stats import MonitorStatsNotFoundError, MonitorStatsRangeError, get_monitor_stats
 from vinted_monitor.services.proxies import (
     ProxyProfileNotFoundError,
@@ -63,7 +54,6 @@ from vinted_monitor.services.run_events import list_run_events
 from vinted_monitor.services.runs import (
     ManualRunProvider,
     RunAlreadyActiveError,
-    SearchSourceInactiveError,
     SearchSourceNotFoundError,
     execute_manual_run,
     execute_monitor_run,
@@ -77,6 +67,7 @@ from vinted_monitor.services.scheduler import (
     update_scheduler_config,
 )
 from vinted_monitor.services.search_sources import (
+    SearchSourceActiveError,
     SearchSourceConfigError,
     archive_source,
     create_source,
@@ -112,19 +103,9 @@ def get_manual_run_provider() -> ManualRunProvider | None:
     return None
 
 
-@app.get("/api/sources", response_model=list[SearchSourceRead])
-def get_sources(db: Session = Depends(get_db)) -> list:
-    return list_sources(db)
-
-
 @app.get("/api/monitors", response_model=list[SearchSourceRead])
 def get_monitors(db: Session = Depends(get_db)) -> list:
     return list_sources(db)
-
-
-@app.post("/api/sources", response_model=SearchSourceRead, status_code=201)
-def post_source(payload: SearchSourceCreate, db: Session = Depends(get_db)):
-    return create_source(db, payload.name, payload.url)
 
 
 @app.post("/api/monitors", response_model=SearchSourceRead, status_code=201)
@@ -132,46 +113,37 @@ def post_monitor(payload: SearchSourceCreate, db: Session = Depends(get_db)):
     return create_source(db, payload.name, payload.url)
 
 
-@app.patch("/api/sources/{source_id}", response_model=SearchSourceRead)
-def patch_source(source_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
+@app.patch("/api/monitors/{monitor_id}", response_model=SearchSourceRead)
+def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
     try:
         return update_source(
             db,
-            source_id,
+            monitor_id,
             name=payload.name,
             url=payload.url,
-            is_active=payload.is_active,
             scheduler_config=payload.scheduler_config,
             monitor_mode=payload.monitor_mode,
             duration_minutes=payload.duration_minutes,
             clear_duration_minutes="duration_minutes" in payload.model_fields_set and payload.duration_minutes is None,
-            filter_rule_ids=payload.filter_rule_ids,
+            filter_definition=payload.filter_definition,
         )
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SearchSourceConfigError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.patch("/api/monitors/{monitor_id}", response_model=SearchSourceRead)
-def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
-    return patch_source(monitor_id, payload, db)
-
-
-@app.delete("/api/sources/{source_id}", status_code=204)
-def delete_source(source_id: int, db: Session = Depends(get_db)) -> Response:
+@app.delete("/api/monitors/{monitor_id}", status_code=204)
+def delete_monitor(monitor_id: int, db: Session = Depends(get_db)) -> Response:
     try:
-        archive_source(db, source_id)
+        archive_source(db, monitor_id)
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(status_code=204)
-
-
-@app.delete("/api/monitors/{monitor_id}", status_code=204)
-def delete_monitor(monitor_id: int, db: Session = Depends(get_db)) -> Response:
-    return delete_source(monitor_id, db)
 
 
 @app.post("/api/monitors/{monitor_id}/start", response_model=RunRead, status_code=201)
@@ -207,7 +179,10 @@ def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/scheduler", response_model=SchedulerStateRead)
 def get_scheduler(db: Session = Depends(get_db)):
-    return get_scheduler_state(db, settings)
+    try:
+        return get_scheduler_state(db, settings)
+    except SchedulerConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.patch("/api/scheduler", response_model=SchedulerStateRead)
@@ -215,29 +190,6 @@ def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
     try:
         return update_scheduler_config(db, payload.model_dump(exclude_unset=True), settings)
     except SchedulerConfigError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.get("/api/filter-rules", response_model=list[FilterRuleRead])
-def get_filter_rules(db: Session = Depends(get_db)) -> list:
-    return list_filter_rules(db)
-
-
-@app.post("/api/filter-rules", response_model=FilterRuleRead, status_code=201)
-def post_filter_rule(payload: FilterRuleCreate, db: Session = Depends(get_db)):
-    try:
-        return create_filter_rule(db, name=payload.name, definition=payload.definition, is_active=payload.is_active)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.patch("/api/filter-rules/{rule_id}", response_model=FilterRuleRead)
-def patch_filter_rule(rule_id: int, payload: FilterRuleUpdate, db: Session = Depends(get_db)):
-    try:
-        return update_filter_rule(db, rule_id, name=payload.name, definition=payload.definition, is_active=payload.is_active)
-    except FilterRuleNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -427,24 +379,6 @@ def post_monitor_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.post("/api/sources/{source_id}/runs", response_model=RunRead, status_code=201)
-def post_source_run(
-    source_id: int,
-    db: Session = Depends(get_db),
-    provider: ManualRunProvider | None = Depends(get_manual_run_provider),
-):
-    try:
-        return execute_manual_run(db, source_id, provider=provider)
-    except SearchSourceNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except SearchSourceInactiveError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RunAlreadyActiveError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except SchedulerCapacityError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
 @app.post("/api/actions", response_model=ActionRequestRead, status_code=201)
 def post_action(payload: ActionRequestCreate, db: Session = Depends(get_db)):
     if not settings.action_requests_enabled:
@@ -462,7 +396,6 @@ def _opportunity_result_read(result: OpportunityResult) -> OpportunityResultRead
         item=ItemRead.model_validate(result.item),
         source_id=result.opportunity.source_id,
         source_name=result.source_name,
-        rule_id=result.opportunity.rule_id,
         status=result.opportunity.status,
         evaluation_status=result.opportunity.evaluation_status,
         filter_snapshot=result.opportunity.filter_snapshot,

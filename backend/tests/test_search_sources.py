@@ -71,7 +71,7 @@ def test_search_source_create_schema_rejects_invalid_url() -> None:
 def test_create_source_api_persists_normalized_query() -> None:
     client = TestClient(app)
     response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={
             "name": "  pytest source  ",
             "url": "https://www.vinted.es/catalog?search_text=&brand_ids[]=88&brand_ids[]=364&order=newest_first",
@@ -87,7 +87,7 @@ def test_create_source_api_persists_normalized_query() -> None:
         assert created["normalized_query"]["brand_ids[]"] == ["88", "364"]
         assert created["normalized_query"]["search_text"] == [""]
 
-        list_response = client.get("/api/sources")
+        list_response = client.get("/api/monitors")
         assert list_response.status_code == 200
         assert any(source["id"] == created_id for source in list_response.json())
 
@@ -107,17 +107,17 @@ def test_create_source_api_persists_normalized_query() -> None:
 def test_create_source_api_rejects_invalid_url() -> None:
     client = TestClient(app)
     response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "bad source", "url": "https://example.com/catalog"},
     )
 
     assert response.status_code == 422
 
 
-def test_update_source_api_persists_pause_and_scheduler_config() -> None:
+def test_update_source_api_persists_scheduler_config() -> None:
     client = TestClient(app)
     create_response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest scheduler source", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
@@ -125,9 +125,8 @@ def test_update_source_api_persists_pause_and_scheduler_config() -> None:
 
     try:
         response = client.patch(
-            f"/api/sources/{source_id}",
+            f"/api/monitors/{source_id}",
             json={
-                "is_active": False,
                 "scheduler_config": {
                     "interval_seconds": 120,
                     "jitter_percent": 10,
@@ -158,17 +157,123 @@ def test_update_source_api_persists_pause_and_scheduler_config() -> None:
                 db.commit()
 
 
+def test_update_source_api_persists_monitor_filter_definition() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/monitors",
+        json={"name": "pytest filter source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(
+            f"/api/monitors/{source_id}",
+            json={"filter_definition": {"blacklist_terms": [" roto ", "manchas", "roto", ""]}},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["filter_definition"] == {"blacklist_terms": ["roto", "manchas"]}
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.filter_definition == {"blacklist_terms": ["roto", "manchas"]}
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+def test_update_source_api_rejects_legacy_filter_rule_ids_field() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/monitors",
+        json={"name": "pytest legacy filter source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(f"/api/monitors/{source_id}", json={"filter_rule_ids": []})
+
+        assert response.status_code == 422
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+def test_update_source_api_rejects_legacy_is_active_field() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/monitors",
+        json={"name": "pytest no legacy active patch", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(f"/api/monitors/{source_id}", json={"is_active": True})
+
+        assert response.status_code == 422
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+def test_update_source_api_rejects_active_monitor_configuration_change() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/monitors",
+        json={"name": "pytest active edit source", "url": "https://www.vinted.es/catalog?search_text="},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.is_active = True
+        source.monitor_mode = "continuous"
+        db.commit()
+
+    try:
+        response = client.patch(f"/api/monitors/{source_id}", json={"filter_definition": {"blacklist_terms": ["roto"]}})
+
+        assert response.status_code == 409
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.filter_definition == {"blacklist_terms": []}
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
 def test_update_source_api_rejects_monitor_level_proxy_field() -> None:
     client = TestClient(app)
     create_response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest no monitor proxy", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
     source_id = create_response.json()["id"]
 
     try:
-        response = client.patch(f"/api/sources/{source_id}", json={"proxy_profile_id": 1})
+        response = client.patch(f"/api/monitors/{source_id}", json={"proxy_profile_id": 1})
 
         assert response.status_code == 422
     finally:
@@ -182,7 +287,7 @@ def test_update_source_api_rejects_monitor_level_proxy_field() -> None:
 def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -> None:
     client = TestClient(app)
     create_response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest invalid scheduler source", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
@@ -190,7 +295,7 @@ def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -
 
     try:
         response = client.patch(
-            f"/api/sources/{source_id}",
+            f"/api/monitors/{source_id}",
             json={"scheduler_config": {"interval_seconds": 30}},
         )
 
@@ -210,7 +315,7 @@ def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -
 def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
     client = TestClient(app)
     create_response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest duration cleanup source", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
@@ -218,7 +323,7 @@ def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
 
     try:
         duration_response = client.patch(
-            f"/api/sources/{source_id}",
+            f"/api/monitors/{source_id}",
             json={
                 "monitor_mode": "duration",
                 "duration_minutes": 15,
@@ -229,7 +334,7 @@ def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
         assert duration_response.json()["duration_minutes"] == 15
 
         manual_response = client.patch(
-            f"/api/sources/{source_id}",
+            f"/api/monitors/{source_id}",
             json={"monitor_mode": "manual", "duration_minutes": None},
         )
 
@@ -251,24 +356,24 @@ def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
 def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
     client = TestClient(app)
     create_response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest archived source", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
     source_id = create_response.json()["id"]
 
     try:
-        response = client.delete(f"/api/sources/{source_id}")
+        response = client.delete(f"/api/monitors/{source_id}")
         assert response.status_code == 204
 
-        second_response = client.delete(f"/api/sources/{source_id}")
+        second_response = client.delete(f"/api/monitors/{source_id}")
         assert second_response.status_code == 204
 
-        list_response = client.get("/api/sources")
+        list_response = client.get("/api/monitors")
         assert list_response.status_code == 200
         assert all(source["id"] != source_id for source in list_response.json())
 
-        patch_response = client.patch(f"/api/sources/{source_id}", json={"is_active": True})
+        patch_response = client.patch(f"/api/monitors/{source_id}", json={"name": "pytest archived source renamed"})
         assert patch_response.status_code == 404
 
         with SessionLocal() as db:
@@ -287,7 +392,7 @@ def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
 def test_delete_source_api_stops_active_monitor() -> None:
     client = TestClient(app)
     create_response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest archived monitor source", "url": "https://www.vinted.es/catalog?search_text="},
     )
     assert create_response.status_code == 201
@@ -299,7 +404,7 @@ def test_delete_source_api_stops_active_monitor() -> None:
         db.commit()
 
     try:
-        response = client.delete(f"/api/sources/{source_id}")
+        response = client.delete(f"/api/monitors/{source_id}")
         assert response.status_code == 204
 
         with SessionLocal() as db:

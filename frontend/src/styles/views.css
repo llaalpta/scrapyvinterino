@@ -459,7 +459,8 @@
 
 .source-schedule input:disabled,
 .source-schedule select:disabled,
-.source-filter-picker input:disabled {
+.source-filter-picker input:disabled,
+.source-filter-picker textarea:disabled {
   color: #697586;
   background: #f8fafc;
   cursor: not-allowed;
@@ -489,6 +490,37 @@
   background: #ffffff;
 }
 
+.monitor-filter-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.monitor-filter-editor label {
+  display: grid;
+  align-items: stretch;
+  width: 100%;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.monitor-filter-editor textarea {
+  width: 100%;
+  min-height: 86px;
+  margin-top: 6px;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  padding: 8px 9px;
+  resize: vertical;
+  color: #1f2933;
+  font: inherit;
+  line-height: 1.4;
+  background: #ffffff;
+}
+
+.monitor-filter-editor span {
+  width: fit-content;
+}
+
 .source-session-line {
   margin: 0;
 }
@@ -509,6 +541,18 @@
 
 .monitor-config-actions {
   justify-content: flex-start;
+}
+
+.monitor-config-dirty {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid #f6d58f;
+  border-radius: 999px;
+  padding: 0 10px;
+  color: #7a4b00;
+  font-size: 13px;
+  background: #fff8e6;
 }
 
 .danger-button {

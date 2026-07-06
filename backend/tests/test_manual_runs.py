@@ -10,10 +10,9 @@ from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import ErrorLog, FilterRule, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
+from vinted_monitor.db.models import ErrorLog, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
-from vinted_monitor.services.filters import create_filter_rule
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.runs import FAILED, SUCCESS, SearchSourceInactiveError, execute_manual_run, execute_monitor_run
@@ -150,7 +149,6 @@ def source_id() -> int:
             normalized_query={"order": ["newest_first"]},
             is_active=True,
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(source)
         db.commit()
@@ -171,12 +169,9 @@ def cleanup_source(source_id: int | None) -> None:
             else list(db.scalars(select(SearchSource.id).where(SearchSource.name.like("pytest%"))))
         )
         run_ids = list(db.scalars(select(Run.id).where(Run.source_id.in_(source_ids)))) if source_ids else []
-        rule_ids = list(db.scalars(select(FilterRule.id).where(FilterRule.name.like("pytest%"))))
         item_ids = list(db.scalars(select(Item.id).where(Item.vinted_item_id.like("pytest-run-item%"))))
         if item_ids:
             db.query(Opportunity).filter(Opportunity.item_id.in_(item_ids)).delete(synchronize_session=False)
-        if rule_ids:
-            db.query(Opportunity).filter(Opportunity.rule_id.in_(rule_ids)).delete(synchronize_session=False)
         if run_ids:
             db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.run_id.in_(run_ids)).delete(synchronize_session=False)
@@ -186,7 +181,6 @@ def cleanup_source(source_id: int | None) -> None:
             db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(Opportunity).filter(Opportunity.source_id.in_(source_ids)).delete(synchronize_session=False)
-        db.query(FilterRule).filter(FilterRule.name.like("pytest%")).delete(synchronize_session=False)
         db.query(ProxyProfile).filter(ProxyProfile.name.like("pytest%")).delete(synchronize_session=False)
         db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item%")).delete(synchronize_session=False)
         if source_id is not None:
@@ -337,7 +331,6 @@ def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.Mo
             is_active=False,
             monitor_mode="manual",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(source)
         update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
@@ -388,7 +381,6 @@ def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: p
             is_active=False,
             monitor_mode="manual",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(source)
         db.commit()
@@ -423,7 +415,6 @@ def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypat
             is_active=False,
             monitor_mode="manual",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(source)
         update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
@@ -468,7 +459,6 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
             is_active=False,
             monitor_mode="continuous",
             scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
-            filter_rule_ids=[],
         )
         db.add(source)
         update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
@@ -508,7 +498,6 @@ def test_monitor_stop_closes_active_session() -> None:
             is_active=True,
             monitor_mode="continuous",
             scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
-            filter_rule_ids=[],
         )
         db.add(source)
         db.flush()
@@ -541,7 +530,6 @@ def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypa
             is_active=False,
             monitor_mode="continuous",
             scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
-            filter_rule_ids=[],
         )
         db.add(source)
         update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
@@ -582,7 +570,6 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
             is_active=True,
             monitor_mode="continuous",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(source)
         db.flush()
@@ -656,7 +643,6 @@ def test_runs_endpoint_filters_by_source_id() -> None:
             is_active=False,
             monitor_mode="manual",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         source_b = SearchSource(
             name="pytest runs filter b",
@@ -665,7 +651,6 @@ def test_runs_endpoint_filters_by_source_id() -> None:
             is_active=False,
             monitor_mode="manual",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add_all([source_a, source_b])
         db.flush()
@@ -696,7 +681,7 @@ def test_monitor_stats_range_bucket_granularity() -> None:
     now = datetime(2026, 7, 4, 12, 34, 56, tzinfo=UTC)
     client = TestClient(app)
     response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest bucket monitor", "url": "https://www.vinted.es/catalog?search_text=bucket"},
     )
     assert response.status_code == 201
@@ -763,7 +748,7 @@ def test_monitor_stats_all_range_chooses_automatic_bucket(
     now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
     client = TestClient(app)
     response = client.post(
-        "/api/sources",
+        "/api/monitors",
         json={"name": "pytest all bucket monitor", "url": f"https://www.vinted.es/catalog?search_text=all-{age.total_seconds()}"},
     )
     assert response.status_code == 201
@@ -815,7 +800,6 @@ def test_monitor_stats_uses_latest_closed_session_when_inactive() -> None:
             is_active=False,
             monitor_mode="manual",
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(source)
         db.flush()
@@ -908,15 +892,9 @@ def test_seen_cache_hit_skips_detail_and_database_writes(source_id: int) -> None
 
 def test_discarded_item_is_not_persisted(source_id: int) -> None:
     with SessionLocal() as db:
-        rule = create_filter_rule(
-            db,
-            name="pytest discard",
-            definition={"blacklist_terms": ["descarte"]},
-            is_active=True,
-        )
         source = db.get(SearchSource, source_id)
         assert source is not None
-        source.filter_rule_ids = [rule.id]
+        source.filter_definition = {"blacklist_terms": ["descarte"]}
         db.commit()
 
     cache = FakeSeenCache()
@@ -935,10 +913,9 @@ def test_discarded_item_is_not_persisted(source_id: int) -> None:
 
 def test_detail_failure_creates_opportunity_with_redacted_error(source_id: int) -> None:
     with SessionLocal() as db:
-        rule = create_filter_rule(db, name="pytest filter", definition={"blacklist_terms": ["nunca"]}, is_active=True)
         source = db.get(SearchSource, source_id)
         assert source is not None
-        source.filter_rule_ids = [rule.id]
+        source.filter_definition = {"blacklist_terms": ["nunca"]}
         db.commit()
 
     with SessionLocal() as db:
@@ -978,7 +955,6 @@ def test_same_item_can_create_opportunity_in_different_monitor(source_id: int) -
             normalized_query={"search_text": ["second"]},
             is_active=True,
             scheduler_config={},
-            filter_rule_ids=[],
         )
         db.add(second)
         db.commit()

@@ -4,7 +4,8 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.db.models import FilterRule, SearchSource
+from vinted_monitor.db.models import SearchSource
+from vinted_monitor.services.filters import normalize_filter_definition
 from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.scheduler import normalize_scheduler_config
 
@@ -18,6 +19,10 @@ class SearchSourceNotFoundError(ValueError):
 
 
 class SearchSourceConfigError(ValueError):
+    pass
+
+
+class SearchSourceActiveError(ValueError):
     pass
 
 
@@ -62,7 +67,7 @@ def create_source(db: Session, name: str, url: str) -> SearchSource:
         normalized_query=normalize_vinted_catalog_url(validated_url),
         is_active=False,
         monitor_mode="manual",
-        filter_rule_ids=[],
+        filter_definition={"blacklist_terms": []},
     )
     db.add(source)
     db.commit()
@@ -80,18 +85,19 @@ def update_source(
     *,
     name: str | None = None,
     url: str | None = None,
-    is_active: bool | None = None,
     scheduler_config: dict | None = None,
     monitor_mode: str | None = None,
     duration_minutes: int | None = None,
     clear_duration_minutes: bool = False,
-    filter_rule_ids: list[int] | None = None,
+    filter_definition: dict | None = None,
 ) -> SearchSource:
     source = db.get(SearchSource, source_id)
     if source is None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.is_active:
+        raise SearchSourceActiveError(f"Monitor {source_id} is active; stop it before editing configuration")
 
     if name is not None:
         source.name = validate_search_source_name(name)
@@ -99,8 +105,6 @@ def update_source(
         validated_url = validate_vinted_catalog_url(url)
         source.url = validated_url
         source.normalized_query = normalize_vinted_catalog_url(validated_url)
-    if is_active is not None:
-        source.is_active = is_active
     if scheduler_config is not None:
         source.scheduler_config = normalize_scheduler_config(scheduler_config)
     if monitor_mode is not None:
@@ -111,8 +115,8 @@ def update_source(
         source.duration_minutes = duration_minutes
     elif clear_duration_minutes:
         source.duration_minutes = None
-    if filter_rule_ids is not None:
-        source.filter_rule_ids = _validate_filter_rule_ids(db, filter_rule_ids)
+    if filter_definition is not None:
+        source.filter_definition = normalize_filter_definition(filter_definition)
     _validate_monitor_runtime_config(source)
 
     db.commit()
@@ -182,17 +186,6 @@ def _get_live_source(db: Session, source_id: int) -> SearchSource:
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     return source
-
-
-def _validate_filter_rule_ids(db: Session, filter_rule_ids: list[int]) -> list[int]:
-    unique_ids = list(dict.fromkeys(int(rule_id) for rule_id in filter_rule_ids))
-    if not unique_ids:
-        return []
-    found_ids = set(db.scalars(select(FilterRule.id).where(FilterRule.id.in_(unique_ids), FilterRule.is_active.is_(True))))
-    missing_ids = sorted(set(unique_ids) - found_ids)
-    if missing_ids:
-        raise SearchSourceConfigError(f"Filter rules do not exist or are inactive: {', '.join(str(entry) for entry in missing_ids)}")
-    return unique_ids
 
 
 def _validate_monitor_runtime_config(source: SearchSource) -> None:

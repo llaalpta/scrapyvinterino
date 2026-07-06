@@ -1,10 +1,8 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  createFilterRule,
   createProxyProfile,
   createSource,
   deleteSource,
-  fetchFilterRules,
   fetchMonitorEvents,
   fetchMonitorStats,
   fetchOpportunities,
@@ -20,7 +18,6 @@ import {
   updateScheduler,
   updateProxyProfile,
   updateSource,
-  type FilterRule,
   type MonitorStats,
   type MonitorStatsRange,
   type OpportunityResult,
@@ -39,7 +36,7 @@ import {
   type OpportunityFilters
 } from '../features/opportunities/opportunityFilters';
 import { type ProxyDraft } from '../features/settings/SettingsView';
-import { buildSourceDraft, buildSourceDrafts, type SourceDraft } from '../features/sources/sourceDrafts';
+import { buildSourceDraft, buildSourceDrafts, parseFilterTerms, sourceDraftHasChanges, type SourceDraft } from '../features/sources/sourceDrafts';
 
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
 const emptyProxyDraft: ProxyDraft = { name: '', scheme: 'http', kind: 'own', host: '', port: '', maxConcurrentRuns: '1', username: '', password: '' };
@@ -48,7 +45,6 @@ const MONITOR_RUN_HISTORY_LIMIT = 1000;
 
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
-  const [filterRules, setFilterRules] = useState<FilterRule[]>([]);
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
   const [opportunityPage, setOpportunityPage] = useState<Page<OpportunityResult>>(emptyOpportunityPage);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -59,20 +55,16 @@ export function useDashboardController() {
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
-  const [selectedFilterIdsBySource, setSelectedFilterIdsBySource] = useState<Record<number, number[]>>({});
   const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
   const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
   const [savingScheduler, setSavingScheduler] = useState(false);
-  const [savingFilter, setSavingFilter] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [loadingOpportunities, setLoadingOpportunities] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
-  const [filterName, setFilterName] = useState('');
-  const [filterTerms, setFilterTerms] = useState('');
   const [proxyDraft, setProxyDraft] = useState<ProxyDraft>(emptyProxyDraft);
   const [activeSection, setActiveSection] = useState('opportunities');
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -113,18 +105,15 @@ export function useDashboardController() {
       fetchOpportunities(),
       fetchRuns(),
       fetchScheduler(),
-      fetchFilterRules(),
       fetchProxyProfiles()
     ])
-      .then(([sourceData, opportunityData, runData, schedulerData, filterData, proxyData]) => {
+      .then(([sourceData, opportunityData, runData, schedulerData, proxyData]) => {
         setSources(sourceData);
         setOpportunityPage(opportunityData);
         setRuns(runData);
         setScheduler(schedulerData);
-        setFilterRules(filterData);
         setProxyProfiles(proxyData);
         setSourceDrafts(buildSourceDrafts(sourceData));
-        setSelectedFilterIdsBySource(buildSelectedFilterIds(sourceData));
       })
       .catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : 'Error cargando datos');
@@ -157,31 +146,11 @@ export function useDashboardController() {
       const created = await createSource({ name: sourceName, url: sourceUrl });
       setSources((current) => [created, ...current]);
       setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
-      setSelectedFilterIdsBySource((current) => ({ ...current, [created.id]: created.filter_rule_ids ?? [] }));
       await loadMonitorStats(created.id, DEFAULT_MONITOR_STATS_RANGE);
       setSourceName('');
       setSourceUrl('');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo crear el monitor');
-    }
-  }
-
-  async function onCreateFilter(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError(null);
-    setSavingFilter(true);
-    try {
-      const created = await createFilterRule({
-        name: filterName,
-        definition: { blacklist_terms: filterTerms.split(',').map((entry) => entry.trim()).filter(Boolean) }
-      });
-      setFilterRules((current) => [created, ...current]);
-      setFilterName('');
-      setFilterTerms('');
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo guardar el filtro');
-    } finally {
-      setSavingFilter(false);
     }
   }
 
@@ -230,42 +199,16 @@ export function useDashboardController() {
     }
   }
 
-  async function onRunMonitor(sourceId: number) {
-    setError(null);
-    setRunningSessionId(sourceId);
-    try {
-      const created = await runMonitor(sourceId);
-      const [sourceData, opportunityData, runData] = await Promise.all([
-        fetchSources(),
-        fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)),
-        fetchRuns()
-      ]);
-      setSources(sourceData);
-      setSourceDrafts(buildSourceDrafts(sourceData));
-      setRuns([created, ...runData.filter((run) => run.id !== created.id)].slice(0, 50));
-      setOpportunityPage(opportunityData);
-      setMonitorRunsBySource((current) => ({
-        ...current,
-        [sourceId]: [created, ...(current[sourceId] ?? []).filter((run) => run.id !== created.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
-      }));
-      await loadMonitorStats(sourceId);
-      if (monitorEventsBySource[sourceId]) {
-        await loadMonitorEvents(sourceId);
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
-    } finally {
-      setRunningSessionId(null);
-    }
-  }
-
   async function onStartSession(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
     setError(null);
+    if (sourceDraftHasChanges(source, draft)) {
+      setError('Guarda los cambios antes de lanzar la sesion');
+      return;
+    }
     setRunningSessionId(source.id);
     try {
-      await saveMonitorConfig(source, draft);
-      const run = draft.monitorMode === 'manual' ? await runMonitor(source.id) : await startMonitor(source.id);
+      const run = source.monitor_mode === 'manual' ? await runMonitor(source.id) : await startMonitor(source.id);
       const [sourceData, opportunityData, runData] = await Promise.all([
         fetchSources(),
         fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)),
@@ -330,19 +273,6 @@ export function useDashboardController() {
     }
   }
 
-  async function onToggleSource(source: SearchSource) {
-    setError(null);
-    setSavingSourceId(source.id);
-    try {
-      replaceSource(await updateSource(source.id, { is_active: !source.is_active }));
-      await refreshRuntime();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el monitor');
-    } finally {
-      setSavingSourceId(null);
-    }
-  }
-
   async function onDeleteSource(source: SearchSource) {
     setError(null);
     setSavingSourceId(source.id);
@@ -351,11 +281,6 @@ export function useDashboardController() {
       const remainingSources = sources.filter((entry) => entry.id !== source.id);
       setSources(remainingSources);
       setSourceDrafts((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      setSelectedFilterIdsBySource((current) => {
         const next = { ...current };
         delete next[source.id];
         return next;
@@ -403,7 +328,7 @@ export function useDashboardController() {
         }
       }));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo guardar la cadencia');
+      setError(caught instanceof Error ? caught.message : 'No se pudo guardar el monitor');
     } finally {
       setSavingSourceId(null);
     }
@@ -423,19 +348,12 @@ export function useDashboardController() {
           jitterPercent: '20',
           windowStart: '',
           windowEnd: '',
-          sessionDurationMinutes: '60'
+          sessionDurationMinutes: '60',
+          filterTerms: ''
         }),
         [field]: value
       }
     }));
-  }
-
-  function toggleSourceFilter(sourceId: number, filterId: number) {
-    setSelectedFilterIdsBySource((current) => {
-      const selected = current[sourceId] ?? [];
-      const next = selected.includes(filterId) ? selected.filter((entry) => entry !== filterId) : [...selected, filterId];
-      return { ...current, [sourceId]: next };
-    });
   }
 
   function updateOpportunityFilter(field: keyof OpportunityFilters, value: string) {
@@ -525,9 +443,6 @@ export function useDashboardController() {
     changeResultsPageSize,
     clearOpportunityFilters,
     error,
-    filterName,
-    filterRules,
-    filterTerms,
     getSourceName,
     loadOpportunities,
     loadMonitorEvents,
@@ -535,21 +450,18 @@ export function useDashboardController() {
     loadMonitorRuns,
     loadingOpportunities,
     navCollapsed,
-    onCreateFilter,
     onCreateProxy,
     onCreateSource,
     onDeleteSource,
     onAppendMonitorEvent: appendMonitorEvent,
     onClearMonitorEventsView: clearMonitorEventsView,
     onLoadRunEvents: fetchRunEvents,
-    onRunMonitor,
     onSaveSourceSchedule,
     onStartSession,
     onStopMonitor,
     onTestProxy,
     onToggleProxy,
     onToggleScheduler,
-    onToggleSource,
     onUpdateSchedulerConfig,
     monitorStatsBySource,
     monitorStatsRangeBySource,
@@ -563,15 +475,11 @@ export function useDashboardController() {
     opportunityFilters,
     opportunitiesPageSize,
     runningSessionId,
-    savingFilter,
     savingProxy,
     savingScheduler,
     savingSourceId,
     scheduler,
     selectSection,
-    selectedFilterIdsBySource,
-    setFilterName,
-    setFilterTerms,
     setNavCollapsed,
     setProxyDraft,
     setSourceName,
@@ -581,7 +489,6 @@ export function useDashboardController() {
     sources,
     sourceUrl,
     runs,
-    toggleSourceFilter,
     updateOpportunityFilter,
     updateSourceDraft
   };
@@ -603,7 +510,7 @@ export function useDashboardController() {
     return updateSource(source.id, {
       monitor_mode: draft.monitorMode,
       duration_minutes: durationMinutes,
-      filter_rule_ids: selectedFilterIdsBySource[source.id] ?? [],
+      filter_definition: { blacklist_terms: parseFilterTerms(draft.filterTerms) },
       scheduler_config: {
         interval_seconds: intervalSeconds,
         jitter_percent: jitterPercent,
@@ -623,14 +530,7 @@ function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal:
   if (section === 'settings') {
     return 'Configuracion local del monitor';
   }
-  if (section === 'filters') {
-    return 'Filtros opcionales para oportunidades';
-  }
   return `${opportunityTotal} oportunidades`;
-}
-
-function buildSelectedFilterIds(sources: SearchSource[]): Record<number, number[]> {
-  return Object.fromEntries(sources.map((source) => [source.id, source.filter_rule_ids ?? []]));
 }
 
 function buildAllowedWindows(draft: SourceDraft): string[] | null {

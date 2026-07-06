@@ -1,14 +1,13 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Eraser, FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
-import { monitorEventsStreamUrl, type FilterRule, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
+import { monitorEventsStreamUrl, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { RunEventEntry } from '../runs/RunsView';
-import { buildSourceDraft, type SourceDraft } from './sourceDrafts';
+import { buildSourceDraft, filterTermLabelFromDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
-  filterRules,
   monitorEventsBySource,
   monitorHiddenEventIdsBySource,
   monitorRunsBySource,
@@ -27,17 +26,14 @@ export function SourcesView({
   onStopMonitor,
   runningSessionId,
   savingSourceId,
-  selectedFilterIdsBySource,
   sourceDrafts,
   sourceName,
   sources,
   sourceUrl,
   setSourceName,
   setSourceUrl,
-  toggleSourceFilter,
   updateSourceDraft,
 }: {
-  filterRules: FilterRule[];
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorHiddenEventIdsBySource: Record<number, number[]>;
   monitorRunsBySource: Record<number, Run[]>;
@@ -56,14 +52,12 @@ export function SourcesView({
   onStopMonitor: (sourceId: number) => void;
   runningSessionId: number | null;
   savingSourceId: number | null;
-  selectedFilterIdsBySource: Record<number, number[]>;
   sourceDrafts: Record<number, SourceDraft>;
   sourceName: string;
   sources: SearchSource[];
   sourceUrl: string;
   setSourceName: (value: string) => void;
   setSourceUrl: (value: string) => void;
-  toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
   const activeSources = useMemo(() => sources.filter((source) => source.is_active), [sources]);
@@ -208,9 +202,7 @@ export function SourcesView({
       </section>
 
       <MonitorTable
-        filterRules={filterRules}
         monitorStatsBySource={monitorStatsBySource}
-        selectedFilterIdsBySource={selectedFilterIdsBySource}
         selectedMonitorId={selectedMonitorId}
         sources={orderedSources}
         sourceDrafts={sourceDrafts}
@@ -226,7 +218,6 @@ export function SourcesView({
           {selectedSource ? <span>{selectedSource.is_active ? 'Activo' : 'Inactivo'}</span> : <span>Sin seleccion</span>}
         </div>
         <MonitorDetail
-          filterRules={filterRules}
           hiddenEventIds={selectedSource ? (monitorHiddenEventIdsBySource[selectedSource.id] ?? []) : []}
           loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
           monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
@@ -239,13 +230,11 @@ export function SourcesView({
           onStopMonitor={onStopMonitor}
           runningSessionId={runningSessionId}
           savingSourceId={savingSourceId}
-          selectedFilterIdsBySource={selectedFilterIdsBySource}
           source={selectedSource}
           sourceDrafts={sourceDrafts}
           stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
           statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'all') : 'all'}
           streamStatus={streamStatus}
-          toggleSourceFilter={toggleSourceFilter}
           updateSourceDraft={updateSourceDraft}
         />
       </section>
@@ -469,18 +458,14 @@ function formatSeconds(seconds: number): string {
 }
 
 function MonitorTable({
-  filterRules,
   monitorStatsBySource,
   onSelectMonitor,
-  selectedFilterIdsBySource,
   selectedMonitorId,
   sources,
   sourceDrafts
 }: {
-  filterRules: FilterRule[];
   monitorStatsBySource: Record<number, MonitorStats>;
   onSelectMonitor: (sourceId: number) => void;
-  selectedFilterIdsBySource: Record<number, number[]>;
   selectedMonitorId: number | null;
   sources: SearchSource[];
   sourceDrafts: Record<number, SourceDraft>;
@@ -507,14 +492,7 @@ function MonitorTable({
           </div>
           {sources.map((source) => {
             const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-            const summary = source.is_active
-              ? monitorSummary(source, filterRules)
-              : draftSummary(
-                  source,
-                  draft,
-                  selectedFilterIdsBySource[source.id] ?? [],
-                  filterRules
-                );
+            const summary = source.is_active ? monitorSummary(source) : draftSummary(source, draft);
             return (
               <MonitorTableRow
                 isSelected={source.id === selectedMonitorId}
@@ -600,7 +578,6 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
-  filterRules,
   hiddenEventIds,
   loadingMonitorEvents,
   monitorEvents,
@@ -615,14 +592,11 @@ function MonitorDetail({
   savingSourceId,
   source,
   sourceDrafts,
-  selectedFilterIdsBySource,
   stats,
   statsRange,
   streamStatus,
-  toggleSourceFilter,
   updateSourceDraft
 }: {
-  filterRules: FilterRule[];
   hiddenEventIds: number[];
   loadingMonitorEvents: boolean;
   monitorEvents: RunEvent[];
@@ -635,13 +609,11 @@ function MonitorDetail({
   onStopMonitor: (sourceId: number) => void;
   runningSessionId: number | null;
   savingSourceId: number | null;
-  selectedFilterIdsBySource: Record<number, number[]>;
   source: SearchSource | null;
   sourceDrafts: Record<number, SourceDraft>;
   stats: MonitorStats | null;
   statsRange: MonitorStatsRange;
   streamStatus: 'connecting' | 'connected' | 'error';
-  toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
   const [archiveSource, setArchiveSource] = useState<SearchSource | null>(null);
@@ -668,7 +640,7 @@ function MonitorDetail({
   }
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-  const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
+  const hasUnsavedChanges = sourceDraftHasChanges(source, sourceDraft);
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -693,11 +665,8 @@ function MonitorDetail({
         </div>
         <MonitorConfigEditor
           disabled={source.is_active}
-          filterRules={filterRules}
-          selectedFilterIds={selectedFilterIds}
           source={source}
           sourceDraft={sourceDraft}
-          toggleSourceFilter={toggleSourceFilter}
           updateSourceDraft={updateSourceDraft}
         />
         <div className="monitor-config-actions">
@@ -708,11 +677,16 @@ function MonitorDetail({
             </button>
           ) : (
             <>
-              <button type="button" disabled={savingSourceId === source.id} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
+              <button type="button" disabled={savingSourceId === source.id || !hasUnsavedChanges} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
                 <Save size={16} />
                 Guardar
               </button>
-              <button type="button" disabled={runningSessionId !== null} onClick={() => onStartSession(source)}>
+              <button
+                type="button"
+                disabled={runningSessionId !== null || savingSourceId === source.id || hasUnsavedChanges}
+                title={hasUnsavedChanges ? 'Guarda los cambios antes de lanzar la sesion' : 'Lanzar sesion'}
+                onClick={() => onStartSession(source)}
+              >
                 <Play size={17} />
                 Lanzar sesion
               </button>
@@ -726,6 +700,7 @@ function MonitorDetail({
                 <Trash2 size={16} />
                 Archivar monitor
               </button>
+              {hasUnsavedChanges ? <span className="monitor-config-dirty">Cambios sin guardar</span> : null}
             </>
           )}
         </div>
@@ -811,19 +786,13 @@ function MonitorDetail({
 
 function MonitorConfigEditor({
   disabled,
-  filterRules,
-  selectedFilterIds,
   source,
   sourceDraft,
-  toggleSourceFilter,
   updateSourceDraft
 }: {
   disabled: boolean;
-  filterRules: FilterRule[];
-  selectedFilterIds: number[];
   source: SearchSource;
   sourceDraft: SourceDraft;
-  toggleSourceFilter: (sourceId: number, filterId: number) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
   const isRecurring = sourceDraft.monitorMode !== 'manual';
@@ -903,22 +872,18 @@ function MonitorConfigEditor({
         ) : null}
       </div>
 
-      <div className="source-filter-picker compact">
-        {filterRules.length === 0 ? (
-          <span>Sin filtros: las oportunidades se marcaran como Sin filtros.</span>
-        ) : (
-          filterRules.map((rule) => (
-            <label key={rule.id}>
-              <input
-                type="checkbox"
-                checked={selectedFilterIds.includes(rule.id)}
-                disabled={disabled}
-                onChange={() => toggleSourceFilter(source.id, rule.id)}
-              />
-              {rule.name}
-            </label>
-          ))
-        )}
+      <div className="source-filter-picker compact monitor-filter-editor">
+        <label>
+          Terminos excluyentes
+          <textarea
+            disabled={disabled}
+            value={sourceDraft.filterTerms}
+            rows={4}
+            placeholder="manchas, roto, destenido"
+            onChange={(event) => updateSourceDraft(source.id, 'filterTerms', event.target.value)}
+          />
+        </label>
+        <span>Solo se aplican a este monitor.</span>
       </div>
     </div>
   );
@@ -938,7 +903,7 @@ function monitorListMetrics(stats: MonitorStats | null): string[] {
   ];
 }
 
-function monitorSummary(source: SearchSource, filterRules: FilterRule[]): string[] {
+function monitorSummary(source: SearchSource): string[] {
   const config = source.scheduler_config ?? {};
   const entries = [`Modo: ${modeLabel(source.monitor_mode)}`];
   if (source.monitor_mode !== 'manual') {
@@ -951,7 +916,7 @@ function monitorSummary(source: SearchSource, filterRules: FilterRule[]): string
   if (source.monitor_mode === 'window' && config.allowed_windows?.[0]) {
     entries.push(`Ventana ${config.allowed_windows[0]}`);
   }
-  entries.push(`Filtros: ${filterLabel(source.filter_rule_ids, filterRules)}`);
+  entries.push(`Filtros: ${filterTermLabelFromSource(source)}`);
   if (source.monitor_started_at) {
     entries.push(`Activo desde ${formatDate(source.monitor_started_at)}`);
   }
@@ -966,9 +931,7 @@ function monitorSummary(source: SearchSource, filterRules: FilterRule[]): string
 
 function draftSummary(
   source: SearchSource,
-  draft: SourceDraft,
-  selectedFilterIds: number[],
-  filterRules: FilterRule[]
+  draft: SourceDraft
 ): string[] {
   const entries = [`Modo: ${modeLabel(draft.monitorMode)}`];
   if (draft.monitorMode !== 'manual') {
@@ -981,7 +944,7 @@ function draftSummary(
   if (draft.monitorMode === 'window' && draft.windowStart && draft.windowEnd) {
     entries.push(`${draft.windowStart}-${draft.windowEnd}`);
   }
-  entries.push(`Filtros: ${filterLabel(selectedFilterIds, filterRules)}`);
+  entries.push(`Filtros: ${filterTermLabelFromDraft(draft)}`);
   if (source.last_run_at) {
     entries.push(`Ultima ${formatDate(source.last_run_at)}`);
   }
@@ -990,14 +953,6 @@ function draftSummary(
 
 function shouldRefreshRuns(phase: string): boolean {
   return phase === 'run_started' || phase === 'run_succeeded' || phase === 'run_failed';
-}
-
-function filterLabel(filterIds: number[], filterRules: FilterRule[]): string {
-  if (filterIds.length === 0) {
-    return 'sin filtros';
-  }
-  const names = filterIds.map((filterId) => filterRules.find((rule) => rule.id === filterId)?.name ?? `#${filterId}`);
-  return names.join(', ');
 }
 
 function modeLabel(mode: SearchSource['monitor_mode']): string {

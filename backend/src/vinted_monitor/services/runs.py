@@ -17,7 +17,12 @@ from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, 
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider
-from vinted_monitor.services.filters import evaluate_exclusion_filters, get_filter_snapshot
+from vinted_monitor.services.filters import (
+    evaluate_exclusion_filters,
+    filter_snapshot_term_count,
+    filter_term_count,
+    monitor_filter_snapshot,
+)
 from vinted_monitor.services.items import (
     apply_item_detail,
     apply_item_detail_data,
@@ -153,7 +158,7 @@ def execute_monitor_run(
         details={
             "trigger": trigger,
             "monitor_mode": source.monitor_mode,
-            "filter_count": len(source.filter_rule_ids or []),
+            "filter_count": filter_term_count(source.filter_definition),
             "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
             "proxy_profile_id": (run.runtime_metadata or {}).get("proxy_profile_id"),
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
@@ -164,7 +169,8 @@ def execute_monitor_run(
     )
 
     cache = seen_cache or get_seen_cache()
-    policy_hash = _policy_hash(source, get_filter_snapshot(db, source.filter_rule_ids or []))
+    filter_snapshot = monitor_filter_snapshot(source.filter_definition)
+    policy_hash = _policy_hash(source, filter_snapshot)
     run.runtime_metadata = {**(run.runtime_metadata or {}), "policy_hash": policy_hash}
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
@@ -275,7 +281,7 @@ def execute_monitor_run(
             source,
             run,
             monitor_new_candidates,
-            get_filter_snapshot(db, source.filter_rule_ids or []),
+            filter_snapshot,
         )
         processed_ids = [candidate.vinted_item_id for candidate in monitor_new_candidates]
         run.status = SUCCESS
@@ -421,8 +427,7 @@ def _active_source_run_exists(db: Session, *, source_id: int) -> bool:
 
 def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_config) -> dict:
     return {
-        "filter_count": len(source.filter_rule_ids or []),
-        "filter_rule_ids": source.filter_rule_ids or [],
+        "filter_count": filter_term_count(source.filter_definition),
         "egress_mode": egress.mode,
         "proxy_profile_id": egress.proxy_profile_id,
         "proxy_name": egress.proxy_name,
@@ -711,7 +716,7 @@ def _evaluate_monitor_candidates(
             details={
                 "vinted_item_id": candidate.vinted_item_id,
                 "evaluation_status": evaluation_status,
-                "filter_count": len(filters),
+                "filter_count": filter_snapshot_term_count(filters),
             },
         )
 
@@ -768,7 +773,6 @@ def _get_or_create_monitor_opportunity(
     opportunity = Opportunity(
         source_id=source.id,
         item_id=item.id,
-        rule_id=None,
         status="new",
         evaluation_status=evaluation_status,
         filter_snapshot=filters,
@@ -791,7 +795,6 @@ def _policy_hash(source: SearchSource, filters: list[dict]) -> str:
     payload = {
         "url": source.url,
         "normalized_query": source.normalized_query or {},
-        "filter_rule_ids": source.filter_rule_ids or [],
         "filters": filters,
     }
     serialized = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))

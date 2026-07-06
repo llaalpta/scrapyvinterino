@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from vinted_monitor.api.main import app
-from vinted_monitor.db.models import FilterRule, Item, Opportunity, Run, RunEvent, SearchSource
+from vinted_monitor.db.models import Item, Opportunity, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
 
 PREFIX = "pytest-browser-"
@@ -17,13 +17,9 @@ def cleanup_browser_data() -> None:
         item_ids = list(db.scalars(select(Item.id).where(Item.vinted_item_id.like(f"{PREFIX}%"))))
         source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.name.like(f"{PREFIX}%"))))
         run_ids = list(db.scalars(select(Run.id).where(Run.source_id.in_(source_ids)))) if source_ids else []
-        rule_ids = list(db.scalars(select(FilterRule.id).where(FilterRule.source_id.in_(source_ids)))) if source_ids else []
         if item_ids:
             db.query(Opportunity).filter(Opportunity.item_id.in_(item_ids)).delete(synchronize_session=False)
             db.query(Item).filter(Item.id.in_(item_ids)).delete(synchronize_session=False)
-        if rule_ids:
-            db.query(Opportunity).filter(Opportunity.rule_id.in_(rule_ids)).delete(synchronize_session=False)
-            db.query(FilterRule).filter(FilterRule.id.in_(rule_ids)).delete(synchronize_session=False)
         if run_ids:
             db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
             db.query(Run).filter(Run.id.in_(run_ids)).delete(synchronize_session=False)
@@ -61,9 +57,6 @@ def seed_browser_data() -> dict[str, int]:
         db.add_all([item_a, item_b])
         db.flush()
 
-        rule = FilterRule(source_id=source_b.id, name=f"{PREFIX}rule", definition={}, is_active=True)
-        db.add(rule)
-        db.flush()
         db.add_all(
             [
                 Opportunity(
@@ -78,7 +71,6 @@ def seed_browser_data() -> dict[str, int]:
                 Opportunity(
                     source_id=source_b.id,
                     item_id=item_b.id,
-                    rule_id=rule.id,
                     status="new",
                     evaluation_status="passed",
                     filter_snapshot=[],

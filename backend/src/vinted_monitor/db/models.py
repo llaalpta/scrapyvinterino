@@ -36,7 +36,7 @@ class SearchSource(Base):
     scheduler_config: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
     monitor_mode: Mapped[str] = mapped_column(String(40), default="manual")
     duration_minutes: Mapped[int | None] = mapped_column(Integer)
-    filter_rule_ids: Mapped[list[int]] = mapped_column(JSONB, default=list)
+    filter_definition: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
     monitor_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     monitor_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -118,18 +118,6 @@ class MonitorSession(Base):
     stop_reason: Mapped[str | None] = mapped_column(String(80))
 
 
-class FilterRule(Base):
-    __tablename__ = "filter_rules"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    source_id: Mapped[int | None] = mapped_column(ForeignKey("search_sources.id"))
-    name: Mapped[str] = mapped_column(String(160))
-    definition: Mapped[JsonDict] = mapped_column(JSONB, default=dict)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
 class ProxyProfile(Base):
     __tablename__ = "proxy_profiles"
 
@@ -162,7 +150,6 @@ class Opportunity(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
-    rule_id: Mapped[int | None] = mapped_column(ForeignKey("filter_rules.id"))
     status: Mapped[str] = mapped_column(String(40), default="new")
     evaluation_status: Mapped[str] = mapped_column(String(40), default="passed")
     filter_snapshot: Mapped[list[JsonDict]] = mapped_column(JSONB, default=list)

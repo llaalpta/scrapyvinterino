@@ -30,6 +30,10 @@ Before implementing a non-trivial change:
 
 Small mechanical fixes can skip a formal spec update, but they must not contradict existing docs.
 
+## Compatibility Policy
+
+Until the first production release, do not preserve backward compatibility with previous development-only contracts, data, endpoints, or UI flows. When a pre-production model changes, update the owning docs/tests and remove obsolete legacy adapters instead of maintaining parallel behavior.
+
 ## Post-Implementation Audit Gate
 
 Non-trivial changes must be audited before a spec is marked `done` or a final implementation response is given.

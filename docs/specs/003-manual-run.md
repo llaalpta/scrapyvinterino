@@ -2,11 +2,11 @@
 
 ## Goal
 
-Allow the user to manually execute a configured source and record the execution lifecycle.
+Allow the user to manually execute a configured monitor and record the execution lifecycle.
 
 ## Scope
 
-- Trigger a run for one source.
+- Trigger a run for one monitor.
 - Create a `runs` record with started/finished timestamps.
 - Create and close a `monitor_sessions` record for punctual/manual launches.
 - Track status, item counters, opportunity counters, and errors.
@@ -25,7 +25,7 @@ Allow the user to manually execute a configured source and record the execution 
 ## Interfaces
 
 - API:
-  - `POST /api/sources/{source_id}/runs`;
+  - `POST /api/monitors/{monitor_id}/runs`;
   - `GET /api/runs?limit=50`.
 - PWA:
   - execute a monitor;
@@ -37,7 +37,7 @@ Allow the user to manually execute a configured source and record the execution 
 
 ## Acceptance Criteria
 
-- A manual run can be requested for an inactive source.
+- A manual run can be requested for an inactive monitor.
 - A manual run creates a session, associates the run with it, and closes the session after success or failure.
 - Run status moves to success or failed.
 - Errors are persisted and visible.
@@ -51,7 +51,7 @@ Allow the user to manually execute a configured source and record the execution 
 
 ## Verification
 
-- Run one source manually.
+- Run one monitor manually.
 - Confirm the manual run has `monitor_session_id` and the session has `stopped_at`.
 - Simulate provider failure and confirm persisted error.
 - Confirm worker keeps running after failure.

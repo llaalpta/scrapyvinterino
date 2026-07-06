@@ -10,7 +10,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Enable, stop, or archive each monitor.
 - Treat inactive monitors as configured but not launched; active monitors are launched for recurring execution.
 - Treat running/executing as run state, not as persistent monitor state.
-- Start and stop recurring monitor execution using the monitor's current filters, cadence, and duration/window mode.
+- Start and stop recurring monitor execution using the monitor's persisted filter definition, cadence, and duration/window mode.
 - Persist each recurring activation as a monitor session until it is stopped, archived, expired, or blocked by a stopping failure.
 - Allow punctual/manual monitor execution from an inactive monitor for testing without activating scheduler state.
 - Start a monitor for a bounded duration from now, with `monitor_until` stored on the monitor.
@@ -42,6 +42,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - API/PWA:
   - scheduler settings persisted in `app_settings`;
   - monitor inactive/start/stop/archive controls;
+  - monitor configuration save control separated from launch;
   - monitor historical stats endpoint for active monitor performance cards;
   - global proxy pool and scheduler runtime controls.
 - Configuration:
@@ -66,7 +67,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Database:
   - `app_settings`;
   - `search_sources.scheduler_config`;
-  - `search_sources.monitor_mode`, `duration_minutes`, `monitor_until`, `next_run_at`, and `filter_rule_ids`;
+  - `search_sources.monitor_mode`, `duration_minutes`, `monitor_until`, `next_run_at`, and `filter_definition`;
   - `monitor_sessions`;
   - `proxy_profiles`;
   - `runs.trigger` and optional `runs.monitor_session_id`;
@@ -82,7 +83,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Runs are not triggered outside configured local-time windows.
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
-- Launching a recurring monitor from the PWA stores the config, marks it active, and immediately executes one run.
+- Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
+- `Guardar` is the only PWA action that persists monitor configuration.
+- `Lanzar sesion` is disabled when the selected monitor has unsaved configuration changes and must not send `PATCH /api/monitors/{id}`.
+- Monitor active state is controlled only by `POST /api/monitors/{id}/start` and `POST /api/monitors/{id}/stop`; monitor configuration `PATCH` rejects legacy `is_active` payloads.
+- Active monitor configuration is read-only until the monitor is stopped; direct monitor configuration `PATCH` while active is rejected.
 - Launching a recurring monitor is rejected when the effective scheduler is disabled or no scheduler capacity is available.
 - Launching any monitor creates a monitor session; recurring sessions remain active until stopped/expired/failed, while punctual sessions close after the run.
 - The scheduler only considers active recurring monitors.
@@ -146,6 +151,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm the Monitors view renders three top-level cards for creation, list, and selected detail without nesting the table or detail inside another card.
 - Confirm the compact monitor table selects active and inactive monitors, updates the full-width detail panel, and scrolls the detail into view on mobile without horizontal overflow.
 - Confirm active monitor details show read-only configuration, stop/log controls, and do not show save, archive, or punctual launch controls.
+- Confirm inactive monitor launch is blocked while there are unsaved changes, save persists the configuration, and launch then starts using that persisted configuration without another PATCH.
 - Confirm inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.

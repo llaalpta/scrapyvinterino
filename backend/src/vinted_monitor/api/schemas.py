@@ -36,7 +36,7 @@ class SearchSourceRead(BaseModel):
     scheduler_config: dict[str, Any]
     monitor_mode: str
     duration_minutes: int | None
-    filter_rule_ids: list[int]
+    filter_definition: dict[str, Any]
     monitor_started_at: datetime | None
     monitor_until: datetime | None
     last_run_at: datetime | None
@@ -49,11 +49,10 @@ class SearchSourceUpdate(BaseModel):
 
     name: str | None = None
     url: str | None = None
-    is_active: bool | None = None
     scheduler_config: dict[str, Any] | None = None
     monitor_mode: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=1440)
-    filter_rule_ids: list[int] | None = None
+    filter_definition: dict[str, Any] | None = None
 
     @field_validator("name")
     @classmethod
@@ -87,6 +86,15 @@ class SearchSourceUpdate(BaseModel):
             return normalize_scheduler_config(value)
         except SchedulerConfigError as exc:
             raise ValueError(str(exc)) from exc
+
+    @field_validator("filter_definition")
+    @classmethod
+    def validate_filter_definition(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        from vinted_monitor.services.filters import normalize_filter_definition
+
+        return normalize_filter_definition(value)
 
 
 class SchedulerUpdate(BaseModel):
@@ -125,30 +133,6 @@ class SchedulerStateRead(BaseModel):
     request_timeout_ms: int
     stop_monitor_after_consecutive_failures: int
     proxy_cooldown_minutes: int
-
-
-class FilterRuleCreate(BaseModel):
-    name: str
-    definition: dict[str, Any]
-    is_active: bool = True
-
-
-class FilterRuleUpdate(BaseModel):
-    name: str | None = None
-    definition: dict[str, Any] | None = None
-    is_active: bool | None = None
-
-
-class FilterRuleRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    source_id: int | None
-    name: str
-    definition: dict[str, Any]
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
 
 
 class ProxyProfileCreate(BaseModel):
@@ -238,7 +222,6 @@ class OpportunityResultRead(BaseModel):
     item: ItemRead
     source_id: int
     source_name: str
-    rule_id: int | None
     status: str
     evaluation_status: str
     filter_snapshot: list[dict[str, Any]]

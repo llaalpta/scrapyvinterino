@@ -31,7 +31,6 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
   - `POST /api/monitors/{monitor_id}/start`
   - `POST /api/monitors/{monitor_id}/stop`
   - `DELETE /api/monitors/{monitor_id}`
-  - legacy `/api/sources` aliases during migration.
 - PWA:
   - monitor creation form;
   - monitor count and visible monitor table with a selected monitor detail panel;

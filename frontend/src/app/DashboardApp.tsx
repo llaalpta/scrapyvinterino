@@ -1,5 +1,4 @@
 import { DashboardShell } from '../components/layout/DashboardShell';
-import { FiltersView } from '../features/filters/FiltersView';
 import { OpportunitiesView } from '../features/opportunities/OpportunitiesView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { SourcesView } from '../features/sources/SourcesView';
@@ -36,7 +35,6 @@ export function DashboardApp() {
 
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
-          filterRules={dashboard.filterRules}
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
           monitorRunsBySource={dashboard.monitorRunsBySource}
@@ -55,27 +53,13 @@ export function DashboardApp() {
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
           runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}
-          selectedFilterIdsBySource={dashboard.selectedFilterIdsBySource}
           sourceDrafts={dashboard.sourceDrafts}
           sourceName={dashboard.sourceName}
           sources={dashboard.sources}
           sourceUrl={dashboard.sourceUrl}
           setSourceName={dashboard.setSourceName}
           setSourceUrl={dashboard.setSourceUrl}
-          toggleSourceFilter={dashboard.toggleSourceFilter}
           updateSourceDraft={dashboard.updateSourceDraft}
-        />
-      ) : null}
-
-      {dashboard.activeSection === 'filters' ? (
-        <FiltersView
-          filterName={dashboard.filterName}
-          filterRules={dashboard.filterRules}
-          filterTerms={dashboard.filterTerms}
-          saving={dashboard.savingFilter}
-          onCreateFilter={dashboard.onCreateFilter}
-          setFilterName={dashboard.setFilterName}
-          setFilterTerms={dashboard.setFilterTerms}
         />
       ) : null}
 

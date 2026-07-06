@@ -136,6 +136,7 @@ def get_scheduler_runtime_config(db: Session, settings: Settings) -> SchedulerRu
 
 
 def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Settings) -> SchedulerRuntimeConfig:
+    _validate_scheduler_runtime_keys(value)
     return SchedulerRuntimeConfig(
         enabled=bool(value.get("enabled", False)),
         max_concurrent_runs=_validate_int(
@@ -170,14 +171,13 @@ def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Setting
 
 
 def update_scheduler_config(db: Session, payload: dict[str, Any], settings: Settings | None = None) -> SchedulerState:
-    unsupported_keys = sorted(set(payload) - RUNTIME_CONFIG_KEYS)
-    if unsupported_keys:
-        raise SchedulerConfigError(f"unsupported scheduler fields: {', '.join(unsupported_keys)}")
+    _validate_scheduler_runtime_keys(payload)
     setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
     if setting is None:
         setting = AppSetting(key=SCHEDULER_SETTING_KEY, value={})
         db.add(setting)
-    current = {key: value for key, value in (setting.value or {}).items() if key in RUNTIME_CONFIG_KEYS}
+    current = setting.value or {}
+    _validate_scheduler_runtime_keys(current)
     candidate = {**current, **payload}
     scheduler_runtime_config_from_value(candidate, settings or get_settings())
     setting.value = candidate
@@ -356,7 +356,15 @@ def _read_scheduler_value(db: Session) -> dict[str, Any]:
     setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
     if setting is None:
         return {}
-    return setting.value or {}
+    value = setting.value or {}
+    _validate_scheduler_runtime_keys(value)
+    return value
+
+
+def _validate_scheduler_runtime_keys(value: dict[str, Any]) -> None:
+    unsupported_keys = sorted(set(value) - RUNTIME_CONFIG_KEYS)
+    if unsupported_keys:
+        raise SchedulerConfigError(f"unsupported scheduler fields: {', '.join(unsupported_keys)}")
 
 
 def _active_proxy_profiles(db: Session) -> list[ProxyProfile]:

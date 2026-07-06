@@ -93,7 +93,6 @@ class SchedulerRunner:
                     source_url=source.url,
                     monitor_mode=source.monitor_mode,
                     trigger="scheduler",
-                    filter_rule_ids=list(source.filter_rule_ids or []),
                     scheduler_config={
                         "interval_seconds": config.interval_seconds,
                         "jitter_percent": config.jitter_percent,

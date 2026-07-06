@@ -27,7 +27,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Authenticated actions.
 - HTML catalog fallback in the fast path.
 - Checkout, pickup point selection, payment methods, or authenticated purchase actions.
-- Full filter-management UI.
+- Reusable/global filter-management UI.
 - Persisting non-opportunity catalog candidates.
 
 ## Interfaces
@@ -55,7 +55,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - First time an item appears in a monitor/policy, it is considered new for that monitor.
 - Re-running the same monitor with the same top items does not create another opportunity.
 - The same item appearing under another monitor can be considered new for that other monitor.
-- Changing the monitor URL or assigned filters changes the policy hash and can reevaluate visible items.
+- Changing the monitor URL or monitor-owned filter definition changes the policy hash and can reevaluate visible items.
 - Non-opportunity candidates are not persisted as `items`.
 - Details are fetched only for monitor-new candidates that need detail and are bounded by the configured per-run limit.
 - Detail failures are recorded without crashing the service.

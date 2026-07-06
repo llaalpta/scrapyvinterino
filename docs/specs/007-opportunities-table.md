@@ -35,7 +35,7 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - API:
   - paginated opportunities endpoint.
 - PWA:
-  - tabbed Opportunities, Monitors, Filters, and Settings views;
+  - tabbed Opportunities, Monitors, and Settings views;
   - monitor activity is shown inside the Monitors view.
   - collapsible dashboard navigation on desktop;
   - sticky horizontal dashboard navigation on mobile.
@@ -50,7 +50,7 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - Opportunities appear as cards/list items on mobile widths.
 - No infinite-scroll behavior is needed to inspect results.
 - Opportunity rows include monitor name and scrape date/time.
-- Dashboard navigation exposes Opportunities, Monitors, Filters, and Settings; Activity is not a separate top-level view.
+- Dashboard navigation exposes Opportunities, Monitors, and Settings; Activity is not a separate top-level view.
 - Date/time, price, monitor, and status filters update the backend query.
 - Active filter chips can clear individual filters without opening the panel.
 - Pagination controls request new pages from the backend.
@@ -73,4 +73,4 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - Backend tests for invalid filter ranges.
 - Backend tests for paginated opportunities empty and seeded data.
 - Frontend build.
-- Playwright check against the running app for tabs, collapsible desktop navigation, sticky mobile navigation, collapsed filters, mobile filter drawer, pagination page size, desktop table, mobile cards, no page-level horizontal scroll, and disabled future actions.
+- Playwright check against the running app for tabs, collapsible desktop navigation, sticky mobile navigation, collapsed opportunity-result filters, mobile filter drawer, pagination page size, desktop table, mobile cards, no page-level horizontal scroll, and disabled future actions.
