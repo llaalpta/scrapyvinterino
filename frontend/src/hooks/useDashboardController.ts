@@ -54,7 +54,7 @@ export function useDashboardController() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [monitorRunsBySource, setMonitorRunsBySource] = useState<Record<number, Run[]>>({});
   const [monitorEventsBySource, setMonitorEventsBySource] = useState<Record<number, RunEvent[]>>({});
-  const [monitorEventCutoffsBySource, setMonitorEventCutoffsBySource] = useState<Record<number, number>>({});
+  const [monitorHiddenEventIdsBySource, setMonitorHiddenEventIdsBySource] = useState<Record<number, number[]>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
@@ -375,7 +375,7 @@ export function useDashboardController() {
         delete next[source.id];
         return next;
       });
-      setMonitorEventCutoffsBySource((current) => {
+      setMonitorHiddenEventIdsBySource((current) => {
         const next = { ...current };
         delete next[source.id];
         return next;
@@ -489,19 +489,25 @@ export function useDashboardController() {
     });
   }, []);
 
-  const clearMonitorEventsView = useCallback((sourceId: number) => {
-    const currentEvents = monitorEventsBySource[sourceId] ?? [];
-    const cutoff = currentEvents.reduce((highest, event) => Math.max(highest, event.id), 0);
-    if (cutoff === 0) {
+  const clearMonitorEventsView = useCallback((sourceId: number, visibleEventIds: number[]) => {
+    if (visibleEventIds.length === 0) {
       return;
     }
-    setMonitorEventCutoffsBySource((current) => {
-      if (current[sourceId] === cutoff) {
+    setMonitorHiddenEventIdsBySource((current) => {
+      const hiddenIds = new Set(current[sourceId] ?? []);
+      let changed = false;
+      visibleEventIds.forEach((eventId) => {
+        if (!hiddenIds.has(eventId)) {
+          hiddenIds.add(eventId);
+          changed = true;
+        }
+      });
+      if (!changed) {
         return current;
       }
-      return { ...current, [sourceId]: cutoff };
+      return { ...current, [sourceId]: [...hiddenIds].sort((left, right) => left - right) };
     });
-  }, [monitorEventsBySource]);
+  }, []);
 
   function getSourceName(sourceId: number): string {
     return sources.find((source) => source.id === sourceId)?.name ?? `Monitor ${sourceId}`;
@@ -549,7 +555,7 @@ export function useDashboardController() {
     monitorStatsRangeBySource,
     monitorRunsBySource,
     monitorEventsBySource,
-    monitorEventCutoffsBySource,
+    monitorHiddenEventIdsBySource,
     opportunityPage,
     proxyDraft,
     proxyProfiles,

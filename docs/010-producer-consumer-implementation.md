@@ -93,4 +93,5 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - The monitor detail now defaults its performance range to `Todo`, so the chart opens on the all-history view instead of the current hour.
 - The monitor detail always shows accumulated historical metrics and an accumulated log timeline for the selected monitor, including stopped monitors.
 - The timeline uses `/api/monitors/{monitor_id}/events` for persisted history and the existing SSE stream to append live events for active monitors. Each event shows the run id, level, timestamp, method/status/duration, sanitized URL, message, and collapsible redacted details.
+- `Limpiar vista` hides only the currently visible event IDs in the browser session, so persisted history and later event IDs remain visible.
 - The per-run log expansion remains available in the global runs view through `/api/runs/{run_id}/events`.

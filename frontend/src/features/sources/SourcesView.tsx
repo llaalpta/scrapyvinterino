@@ -9,8 +9,8 @@ const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
   filterRules,
-  monitorEventCutoffsBySource,
   monitorEventsBySource,
+  monitorHiddenEventIdsBySource,
   monitorRunsBySource,
   monitorStatsBySource,
   monitorStatsRangeBySource,
@@ -38,13 +38,13 @@ export function SourcesView({
   updateSourceDraft,
 }: {
   filterRules: FilterRule[];
-  monitorEventCutoffsBySource: Record<number, number>;
   monitorEventsBySource: Record<number, RunEvent[]>;
+  monitorHiddenEventIdsBySource: Record<number, number[]>;
   monitorRunsBySource: Record<number, Run[]>;
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
   onAppendMonitorEvent: (event: RunEvent) => void;
-  onClearMonitorEventsView: (sourceId: number) => void;
+  onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorEvents: (sourceId: number) => Promise<void>;
@@ -70,6 +70,7 @@ export function SourcesView({
   const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
   const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
   const activeSourceIds = useMemo(() => new Set(activeSources.map((source) => source.id)), [activeSources]);
+  const activeSourceKey = useMemo(() => activeSources.map((source) => source.id).join(','), [activeSources]);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
   const [requestedSelectedMonitorId, setSelectedMonitorId] = useState<number | null>(null);
   const selectedMonitorId = sources.some((source) => source.id === requestedSelectedMonitorId)
@@ -85,7 +86,11 @@ export function SourcesView({
   const loadingEventsRef = useRef<Set<number>>(new Set());
   const detailRef = useRef<HTMLElement | null>(null);
   const [loadingMonitorEventsBySource, setLoadingMonitorEventsBySource] = useState<Record<number, boolean>>({});
-  const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
+  const [streamState, setStreamState] = useState<{ sourceKey: string; status: 'connecting' | 'connected' | 'error' }>({
+    sourceKey: '',
+    status: 'connecting'
+  });
+  const streamStatus = activeSourceKey === '' || streamState.sourceKey !== activeSourceKey ? 'connecting' : streamState.status;
   const handleRunEvent = useCallback(
     (event: RunEvent) => {
       onAppendMonitorEvent(event);
@@ -104,13 +109,12 @@ export function SourcesView({
   );
 
   useEffect(() => {
-    if (activeSources.length === 0) {
-      setStreamStatus('connecting');
+    if (activeSourceKey === '') {
       return undefined;
     }
     const events = new EventSource(monitorEventsStreamUrl());
-    events.addEventListener('open', () => setStreamStatus('connected'));
-    events.addEventListener('error', () => setStreamStatus('error'));
+    events.addEventListener('open', () => setStreamState({ sourceKey: activeSourceKey, status: 'connected' }));
+    events.addEventListener('error', () => setStreamState({ sourceKey: activeSourceKey, status: 'error' }));
     events.addEventListener('monitor_event', (message) => {
       const event = parseRunEvent(message);
       if (event) {
@@ -118,7 +122,7 @@ export function SourcesView({
       }
     });
     return () => events.close();
-  }, [activeSources.length, handleRunEvent]);
+  }, [activeSourceKey, handleRunEvent]);
 
   useEffect(() => {
     return () => {
@@ -166,7 +170,6 @@ export function SourcesView({
     }
     if (monitorEventsBySource[selectedSource.id]) {
       loadingEventsRef.current.delete(selectedSource.id);
-      setLoadingMonitorEventsBySource((current) => ({ ...current, [selectedSource.id]: false }));
       return;
     }
     if (loadingEventsRef.current.has(selectedSource.id)) {
@@ -224,7 +227,7 @@ export function SourcesView({
         </div>
         <MonitorDetail
           filterRules={filterRules}
-          eventCutoff={selectedSource ? (monitorEventCutoffsBySource[selectedSource.id] ?? 0) : 0}
+          hiddenEventIds={selectedSource ? (monitorHiddenEventIdsBySource[selectedSource.id] ?? []) : []}
           loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
           monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
           monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
@@ -597,8 +600,8 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
-  eventCutoff,
   filterRules,
+  hiddenEventIds,
   loadingMonitorEvents,
   monitorEvents,
   monitorRuns,
@@ -619,12 +622,12 @@ function MonitorDetail({
   toggleSourceFilter,
   updateSourceDraft
 }: {
-  eventCutoff: number;
   filterRules: FilterRule[];
+  hiddenEventIds: number[];
   loadingMonitorEvents: boolean;
   monitorEvents: RunEvent[];
   monitorRuns: Run[];
-  onClearMonitorEventsView: (sourceId: number) => void;
+  onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
@@ -651,15 +654,21 @@ function MonitorDetail({
     archiveDialogRef.current?.focus();
   }, [archiveSource]);
 
+  const hiddenEventIdSet = useMemo(() => new Set(hiddenEventIds), [hiddenEventIds]);
+  const visibleMonitorEvents = useMemo(
+    () => monitorEvents.filter((event) => !hiddenEventIdSet.has(event.id)),
+    [hiddenEventIdSet, monitorEvents]
+  );
+  const logViewCleared = hiddenEventIds.length > 0 && visibleMonitorEvents.length === 0;
+  const canClearLogView = !loadingMonitorEvents && visibleMonitorEvents.length > 0;
+  const historicalRunCountLabel = `${stats?.historical_summary.runs_count ?? monitorRuns.length} ejec.`;
+
   if (!source) {
     return <p className="empty-inline compact">Selecciona un monitor para ver el detalle.</p>;
   }
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const selectedFilterIds = selectedFilterIdsBySource[source.id] ?? [];
-  const visibleMonitorEvents = eventCutoff > 0 ? monitorEvents.filter((event) => event.id > eventCutoff) : monitorEvents;
-  const logViewCleared = eventCutoff > 0 && visibleMonitorEvents.length === 0;
-  const canClearLogView = !loadingMonitorEvents && visibleMonitorEvents.length > 0;
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -728,31 +737,31 @@ function MonitorDetail({
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
 
-      <details className="monitor-logs" open>
-        <summary>
-          <FileText size={15} />
-          Logs acumulados
-          <span>{stats?.historical_summary.runs_count ?? monitorRuns.length} ejec.</span>
-        </summary>
-        <div className="monitor-log-actions">
-          <p>Oculta los eventos anteriores en esta pantalla; el historico permanece guardado.</p>
+      <section className="monitor-logs" aria-label="Logs acumulados">
+        <div className="monitor-logs-header">
+          <div className="monitor-logs-title">
+            <FileText size={15} />
+            <h4>Logs acumulados</h4>
+            <span>{historicalRunCountLabel}</span>
+          </div>
           <button
             type="button"
             disabled={!canClearLogView}
             title="Oculta los logs visibles sin borrar eventos guardados"
-            onClick={() => onClearMonitorEventsView(source.id)}
+            onClick={() => onClearMonitorEventsView(source.id, visibleMonitorEvents.map((event) => event.id))}
           >
             <Eraser size={15} />
             Limpiar vista
           </button>
         </div>
+        <p className="monitor-log-note">Solo oculta eventos en esta pantalla; el historico permanece guardado.</p>
         <MonitorEventTimeline
           events={visibleMonitorEvents}
           loading={loadingMonitorEvents}
           streamStatus={source.is_active ? streamStatus : null}
           viewCleared={logViewCleared}
         />
-      </details>
+      </section>
 
       {archiveSource ? (
         <div className="confirm-dialog-backdrop" role="presentation" onClick={() => setArchiveSource(null)}>

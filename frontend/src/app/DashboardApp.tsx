@@ -37,8 +37,8 @@ export function DashboardApp() {
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
           filterRules={dashboard.filterRules}
-          monitorEventCutoffsBySource={dashboard.monitorEventCutoffsBySource}
           monitorEventsBySource={dashboard.monitorEventsBySource}
+          monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
           monitorRunsBySource={dashboard.monitorRunsBySource}
           monitorStatsBySource={dashboard.monitorStatsBySource}
           monitorStatsRangeBySource={dashboard.monitorStatsRangeBySource}
