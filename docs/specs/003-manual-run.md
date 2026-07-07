@@ -11,6 +11,7 @@ Allow the user to manually execute a configured monitor and record the execution
 - Create and close a `monitor_sessions` record for punctual/manual launches.
 - Track status, item counters, opportunity counters, and errors.
 - Record the same safe run-event log used by scheduled monitor runs so a manual launch can be inspected from start to final opportunity/no-op decision.
+- Require an explicit initial snapshot before a manual run can process candidates.
 - Expose run history through API and in the PWA monitor view.
 - Execute synchronously from the API for this vertical slice.
 - Use the public Vinted catalog provider contract from spec 002.
@@ -45,6 +46,7 @@ Allow the user to manually execute a configured monitor and record the execution
 - A failed run does not crash the worker.
 - API/PWA can show recent run state from the monitor view.
 - Manual run events include safe configuration, egress, HTTP/session, request-duration, Redis/cache, candidate, filter, persistence, and opportunity/no-op decisions without raw secrets.
+- A manual run without a current initial snapshot is rejected with a clear message to recalibrate the listing first.
 - The PWA does not expose a separate Activity navigation item for run history.
 - `items_found` counts provider candidates.
 - `items_new` and `opportunities_created` stay `0` until later specs.
@@ -58,6 +60,7 @@ Allow the user to manually execute a configured monitor and record the execution
 - Simulate provider failure and confirm persisted error.
 - Confirm worker keeps running after failure.
 - Confirm manual run logs are visible in the monitor log console and expose only masked/fingerprinted cookie, token, HTTP session, and proxy session markers.
+- Confirm a manual run cannot start until `Recalibrar listado inicial` has seeded the current monitor/policy snapshot.
 - Confirm items table remains unchanged after a run.
 - Confirm PWA can trigger a run from `Monitores` and display its activity there.
 

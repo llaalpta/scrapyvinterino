@@ -42,6 +42,8 @@ class SearchSourceRead(BaseModel):
     last_run_at: datetime | None
     next_run_at: datetime | None
     archived_at: datetime | None
+    baseline_ready: bool = False
+    baseline_policy_hash: str | None = None
 
 
 class SearchSourceUpdate(BaseModel):

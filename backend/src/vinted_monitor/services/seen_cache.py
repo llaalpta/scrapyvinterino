@@ -26,6 +26,12 @@ class SeenCache(Protocol):
     def release_processing(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
         """Release short-lived processing locks."""
 
+    def has_baseline(self, monitor_id: int, policy_hash: str) -> bool:
+        """Return whether this monitor/policy has an initial catalog snapshot."""
+
+    def mark_baseline(self, monitor_id: int, policy_hash: str) -> None:
+        """Mark this monitor/policy as calibrated with an initial catalog snapshot."""
+
 
 @dataclass(frozen=True)
 class RedisSeenCache:
@@ -79,6 +85,14 @@ class RedisSeenCache:
             return
         self.client.delete(*[self._processing_key(monitor_id, policy_hash, vinted_item_id) for vinted_item_id in ids])
 
+    def has_baseline(self, monitor_id: int, policy_hash: str) -> bool:
+        self.require_available()
+        return bool(self.client.exists(self._baseline_key(monitor_id, policy_hash)))
+
+    def mark_baseline(self, monitor_id: int, policy_hash: str) -> None:
+        self.require_available()
+        self.client.set(self._baseline_key(monitor_id, policy_hash), "1", ex=self.seen_ttl_seconds)
+
     def _trim_seen_index(self, monitor_id: int, policy_hash: str) -> None:
         if self.max_per_monitor <= 0:
             return
@@ -102,6 +116,10 @@ class RedisSeenCache:
     @staticmethod
     def _seen_index_key(monitor_id: int, policy_hash: str) -> str:
         return f"seen-index:monitor:{monitor_id}:policy:{policy_hash}"
+
+    @staticmethod
+    def _baseline_key(monitor_id: int, policy_hash: str) -> str:
+        return f"baseline:monitor:{monitor_id}:policy:{policy_hash}"
 
 
 def get_seen_cache(settings: Settings | None = None) -> RedisSeenCache:

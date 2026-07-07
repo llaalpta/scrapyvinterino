@@ -52,12 +52,16 @@ from vinted_monitor.services.proxies import (
 )
 from vinted_monitor.services.run_events import list_run_events
 from vinted_monitor.services.runs import (
+    BaselineRequiredError,
     ManualRunProvider,
     RunAlreadyActiveError,
     SearchSourceNotFoundError,
+    ensure_monitor_baseline_ready,
     execute_manual_run,
+    execute_monitor_baseline,
     execute_monitor_run,
     list_runs,
+    monitor_baseline_ready,
 )
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
@@ -79,6 +83,7 @@ from vinted_monitor.services.search_sources import (
 from vinted_monitor.services.search_sources import (
     SearchSourceNotFoundError as SourceUpdateNotFoundError,
 )
+from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -103,20 +108,30 @@ def get_manual_run_provider() -> ManualRunProvider | None:
     return None
 
 
+def _source_read(source: SearchSource) -> SearchSourceRead:
+    baseline_ready, policy_hash = monitor_baseline_ready(source)
+    return SearchSourceRead.model_validate(source).model_copy(
+        update={
+            "baseline_ready": baseline_ready,
+            "baseline_policy_hash": policy_hash,
+        }
+    )
+
+
 @app.get("/api/monitors", response_model=list[SearchSourceRead])
-def get_monitors(db: Session = Depends(get_db)) -> list:
-    return list_sources(db)
+def get_monitors(db: Session = Depends(get_db)) -> list[SearchSourceRead]:
+    return [_source_read(source) for source in list_sources(db)]
 
 
 @app.post("/api/monitors", response_model=SearchSourceRead, status_code=201)
 def post_monitor(payload: SearchSourceCreate, db: Session = Depends(get_db)):
-    return create_source(db, payload.name, payload.url)
+    return _source_read(create_source(db, payload.name, payload.url))
 
 
 @app.patch("/api/monitors/{monitor_id}", response_model=SearchSourceRead)
 def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
     try:
-        return update_source(
+        return _source_read(update_source(
             db,
             monitor_id,
             name=payload.name,
@@ -126,7 +141,7 @@ def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = De
             duration_minutes=payload.duration_minutes,
             clear_duration_minutes="duration_minutes" in payload.model_fields_set and payload.duration_minutes is None,
             filter_definition=payload.filter_definition,
-        )
+        ))
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
@@ -155,15 +170,19 @@ def post_monitor_start(
     try:
         source = db.get(SearchSource, monitor_id)
         if source is not None and source.monitor_mode == "manual":
+            ensure_monitor_baseline_ready(db, monitor_id)
             return execute_manual_run(db, monitor_id, provider=provider)
         ensure_scheduler_can_activate(db, settings, source_id=monitor_id)
-        source = start_source_monitor(db, monitor_id)
+        ensure_monitor_baseline_ready(db, monitor_id)
+        start_source_monitor(db, monitor_id)
         return execute_monitor_run(db, monitor_id, provider=provider)
     except (SearchSourceNotFoundError, SourceUpdateNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (BaselineRequiredError, SeenCacheUnavailableError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SearchSourceConfigError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -172,7 +191,7 @@ def post_monitor_start(
 @app.post("/api/monitors/{monitor_id}/stop", response_model=SearchSourceRead)
 def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
     try:
-        return stop_source_monitor(db, monitor_id)
+        return _source_read(stop_source_monitor(db, monitor_id))
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -370,7 +389,26 @@ def post_monitor_run(
     provider: ManualRunProvider | None = Depends(get_manual_run_provider),
 ):
     try:
+        ensure_monitor_baseline_ready(db, monitor_id)
         return execute_manual_run(db, monitor_id, provider=provider)
+    except SearchSourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (BaselineRequiredError, SeenCacheUnavailableError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/monitors/{monitor_id}/baseline", response_model=RunRead, status_code=201)
+def post_monitor_baseline(
+    monitor_id: int,
+    db: Session = Depends(get_db),
+    provider: ManualRunProvider | None = Depends(get_manual_run_provider),
+):
+    try:
+        return execute_monitor_baseline(db, monitor_id, provider=provider)
     except SearchSourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:

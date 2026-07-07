@@ -41,6 +41,7 @@ SUCCESS = "success"
 FAILED = "failed"
 MANUAL_TRIGGER = "manual"
 SCHEDULER_TRIGGER = "scheduler"
+BASELINE_TRIGGER = "baseline"
 SESSION_ITEM_PASSED = "passed"
 SESSION_ITEM_DISCARDED = "discarded"
 SESSION_ITEM_PASSED_WITHOUT_FILTERS = "passed_without_filters"
@@ -68,6 +69,10 @@ class RunAlreadyActiveError(ValueError):
     pass
 
 
+class BaselineRequiredError(ValueError):
+    pass
+
+
 def execute_manual_run(
     db: Session,
     source_id: int,
@@ -87,6 +92,260 @@ def execute_manual_run(
         create_session_for_run=True,
         close_session_on_finish=True,
     )
+
+
+def monitor_policy_hash(source: SearchSource) -> str:
+    return _policy_hash(source, monitor_filter_snapshot(source.filter_definition))
+
+
+def monitor_baseline_ready(source: SearchSource, cache: SeenCache | None = None) -> tuple[bool, str]:
+    resolved_cache = cache or get_seen_cache()
+    policy_hash = monitor_policy_hash(source)
+    try:
+        return resolved_cache.has_baseline(source.id, policy_hash), policy_hash
+    except SeenCacheUnavailableError:
+        return False, policy_hash
+
+
+def ensure_monitor_baseline_ready(db: Session, source_id: int, seen_cache: SeenCache | None = None) -> str:
+    source = db.get(SearchSource, source_id)
+    if source is None or source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    cache = seen_cache or get_seen_cache()
+    policy_hash = monitor_policy_hash(source)
+    cache.require_available()
+    if not cache.has_baseline(source.id, policy_hash):
+        raise BaselineRequiredError("Recalibra el listado inicial antes de ejecutar este monitor")
+    return policy_hash
+
+
+def execute_monitor_baseline(
+    db: Session,
+    source_id: int,
+    provider: ManualRunProvider | None = None,
+    seen_cache: SeenCache | None = None,
+) -> Run:
+    source = db.get(SearchSource, source_id)
+    if source is None or source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.is_active:
+        raise RunAlreadyActiveError("Deten la sesion antes de recalibrar el listado inicial")
+    if _active_source_run_exists(db, source_id=source.id):
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
+
+    settings = get_settings()
+    runtime_config = get_scheduler_runtime_config(db, settings)
+    selected_egress = choose_run_egress(db, settings)
+    owned_provider = provider is None
+    provider_runtime_metadata: dict[str, Any] = {}
+    if provider is None:
+        run_provider, provider_runtime_metadata = _provider_for_egress(db, selected_egress, runtime_config, settings)
+    else:
+        run_provider = provider
+
+    filter_snapshot = monitor_filter_snapshot(source.filter_definition)
+    policy_hash = _policy_hash(source, filter_snapshot)
+    run = Run(
+        source_id=source.id,
+        monitor_session_id=None,
+        status=RUNNING,
+        trigger=BASELINE_TRIGGER,
+        items_found=0,
+        items_new=0,
+        items_filter_passed=0,
+        items_discarded_by_filters=0,
+        items_filter_pending=0,
+        opportunities_created=0,
+        runtime_metadata={
+            **_run_runtime_metadata(source, selected_egress, runtime_config),
+            **provider_runtime_metadata,
+            "policy_hash": policy_hash,
+            "baseline_run": True,
+        },
+    )
+    db.add(run)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
+    db.refresh(run)
+    proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+    _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_started",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "trigger": BASELINE_TRIGGER,
+            "monitor_mode": source.monitor_mode,
+            "filter_count": filter_term_count(source.filter_definition),
+            "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
+            "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
+            "baseline_run": True,
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_config_resolved",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "monitor_id": source.id,
+            "trigger": BASELINE_TRIGGER,
+            "monitor_mode": source.monitor_mode,
+            "policy_hash": policy_hash,
+            "filter_snapshot": filter_snapshot,
+            "runtime_config": {
+                "catalog_per_page": runtime_config.catalog_per_page,
+                "request_timeout_ms": runtime_config.request_timeout_ms,
+            },
+            "baseline_run": True,
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="egress_selected",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_name": (run.runtime_metadata or {}).get("proxy_name"),
+            "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
+            "direct_allowed": runtime_config.allow_direct_without_proxy,
+        },
+    )
+
+    cache = seen_cache or get_seen_cache()
+    try:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="redis_check_start",
+            proxy_profile_id=proxy_profile_id,
+            message="Checking Redis seen cache availability",
+            details={"policy_hash": policy_hash, "baseline_run": True},
+        )
+        cache.require_available()
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="redis_check_success",
+            proxy_profile_id=proxy_profile_id,
+            message="Redis seen cache is available",
+            details={"policy_hash": policy_hash, "baseline_run": True},
+        )
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="catalog_search_start",
+            method="GET",
+            url=source.url,
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+        )
+        result = run_provider.search(source)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="catalog_search_success",
+            method="GET",
+            url=source.url,
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+            details={"provider": result.provider_metadata},
+        )
+        unique_candidates = _deduplicate_candidates(result.items)
+        candidate_ids = [candidate.vinted_item_id for candidate in unique_candidates]
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="catalog_candidates_received",
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "candidate_count": len(result.items),
+                "unique_candidate_count": len(unique_candidates),
+                "duplicate_count": max(len(result.items) - len(unique_candidates), 0),
+                "page": result.page,
+                "per_page": result.per_page,
+                "total_pages": result.total_pages,
+                "total_entries": result.total_entries,
+                "baseline_run": True,
+            },
+        )
+        cache.mark_seen(source.id, policy_hash, candidate_ids)
+        cache.mark_baseline(source.id, policy_hash)
+        run.status = SUCCESS
+        run.finished_at = datetime.now(UTC)
+        run.items_found = len(result.items)
+        run.items_new = 0
+        run.items_filter_passed = 0
+        run.items_discarded_by_filters = 0
+        run.items_filter_pending = 0
+        run.opportunities_created = 0
+        run.error_message = None
+        source.last_run_at = run.finished_at
+        mark_proxy_run_success(db, proxy_profile_id)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="baseline_snapshot_seeded",
+            proxy_profile_id=proxy_profile_id,
+            message="Foto inicial guardada",
+            details={
+                "candidate_count": len(result.items),
+                "unique_candidate_count": len(unique_candidates),
+                "marked_seen_count": len(candidate_ids),
+                "sample_vinted_item_ids": candidate_ids[:10],
+                "policy_hash": policy_hash,
+                "reason": "explicit_recalibration",
+            },
+        )
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="run_succeeded",
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+            details={
+                "baseline_run": True,
+                "items_found": run.items_found,
+                "items_new": run.items_new,
+                "items_filter_passed": run.items_filter_passed,
+                "items_discarded_by_filters": run.items_discarded_by_filters,
+                "items_filter_pending": run.items_filter_pending,
+                "opportunities_created": run.opportunities_created,
+            },
+        )
+        db.commit()
+        db.refresh(run)
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return run
+    except Exception as exc:
+        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
 
 
 def execute_monitor_run(
@@ -255,6 +514,57 @@ def execute_monitor_run(
         message="Redis seen cache is available",
         details={"policy_hash": policy_hash},
     )
+    try:
+        if not cache.has_baseline(source.id, policy_hash):
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="baseline_required",
+                level="warning",
+                proxy_profile_id=proxy_profile_id,
+                message="Recalibra el listado inicial antes de ejecutar este monitor",
+                details={"policy_hash": policy_hash},
+            )
+            source.is_active = False
+            source.monitor_mode = "manual"
+            source.monitor_started_at = None
+            source.monitor_until = None
+            source.next_run_at = None
+            stop_active_monitor_session(db, source.id, reason="baseline_required")
+            failed_run = _record_failed_run(
+                db,
+                run,
+                source,
+                BaselineRequiredError("Recalibra el listado inicial antes de ejecutar este monitor"),
+                kind="baseline_required",
+                penalize_proxy=False,
+                force_stop_monitor=True,
+            )
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+            return failed_run
+    except SeenCacheUnavailableError as exc:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="redis_check_error",
+            level="error",
+            proxy_profile_id=proxy_profile_id,
+            message=str(exc),
+            details={"policy_hash": policy_hash},
+        )
+        source.is_active = False
+        source.monitor_mode = "manual"
+        source.monitor_started_at = None
+        source.monitor_until = None
+        source.next_run_at = None
+        stop_active_monitor_session(db, source.id, reason="redis_unavailable")
+        failed_run = _record_failed_run(
+            db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True
+        )
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
 
     record_run_event(
         db,
@@ -314,6 +624,30 @@ def execute_monitor_run(
         )
         claimed_ids = cache.claim_unseen(source.id, policy_hash, [candidate.vinted_item_id for candidate in unique_candidates])
         monitor_new_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id in claimed_ids]
+        existing_opportunity_ids = _existing_opportunity_item_ids(db, source, monitor_new_candidates)
+        if existing_opportunity_ids:
+            already_claimed_existing_ids = [
+                candidate.vinted_item_id for candidate in monitor_new_candidates if candidate.vinted_item_id in existing_opportunity_ids
+            ]
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="candidate_existing_opportunity_skipped",
+                level="debug",
+                proxy_profile_id=proxy_profile_id,
+                message="Candidates already have an opportunity for this monitor and were skipped",
+                details={
+                    "existing_opportunity_count": len(already_claimed_existing_ids),
+                    "sample_vinted_item_ids": already_claimed_existing_ids[:10],
+                    "policy_hash": policy_hash,
+                },
+            )
+            cache.mark_seen(source.id, policy_hash, already_claimed_existing_ids)
+            claimed_ids.difference_update(already_claimed_existing_ids)
+            monitor_new_candidates = [
+                candidate for candidate in monitor_new_candidates if candidate.vinted_item_id not in existing_opportunity_ids
+            ]
         seen_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id not in claimed_ids]
         if seen_candidates:
             record_run_event(
@@ -987,6 +1321,22 @@ def _get_or_create_monitor_opportunity(
     db.add(opportunity)
     db.flush()
     return opportunity, True
+
+
+def _existing_opportunity_item_ids(db: Session, source: SearchSource, candidates: list[CatalogItemCandidate]) -> set[str]:
+    candidate_ids = [candidate.vinted_item_id for candidate in candidates]
+    if not candidate_ids:
+        return set()
+    return set(
+        db.scalars(
+            select(Item.vinted_item_id)
+            .join(Opportunity, Opportunity.item_id == Item.id)
+            .where(
+                Opportunity.source_id == source.id,
+                Item.vinted_item_id.in_(candidate_ids),
+            )
+        )
+    )
 
 
 def _deduplicate_candidates(candidates: list[CatalogItemCandidate]) -> list[CatalogItemCandidate]:

@@ -12,7 +12,9 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Request `newest_first`, `page=1`, and a small configurable `per_page` window, default `5`.
 - Force `newest_first` for the fast API request even if the saved catalog URL has another `order`.
 - Require Redis before a monitor processes candidates. If Redis is unavailable, fail the run and stop/block that monitor execution.
+- Require an explicit initial catalog snapshot before manual, continuous, duration, window, or scheduler runs can process candidates.
 - Use Redis seen keys scoped by monitor and evaluation policy hash as the source of truth for whether an item should be processed.
+- Store the initial snapshot marker in Redis by monitor and evaluation policy hash with the same TTL as seen keys.
 - Use short-lived Redis processing locks to avoid concurrent duplicate work for the same monitor/item.
 - Use `items.vinted_item_id` as normalized catalog identity only for items that become opportunities.
 - Count `items_new` as candidates newly claimed by Redis for that monitor/policy in that run.
@@ -52,10 +54,13 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - HTML catalog parsing is not used as a fallback for a failed fast run.
 - Redis availability is checked before candidate processing; unavailable Redis marks the run failed and no detail/opportunity work happens.
 - Item catalog identity is checked idempotently against Redis seen state before detail/filter work.
+- A monitor without a valid initial snapshot is rejected before detail/filter/opportunity work and must be recalibrated explicitly.
+- Recalibrating the initial snapshot fetches the current catalog window, marks visible IDs as seen, records a baseline run, and creates no opportunities.
 - First time an item appears in a monitor/policy, it is considered new for that monitor.
 - Re-running the same monitor with the same top items does not create another opportunity.
 - The same item appearing under another monitor can be considered new for that other monitor.
 - Changing the monitor URL or monitor-owned filter definition changes the policy hash and can reevaluate visible items.
+- Changing the monitor URL or monitor-owned filter definition also requires a new explicit initial snapshot for the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
 - Details are fetched only for monitor-new candidates that need detail and are bounded by the configured per-run limit.
 - Detail failures are recorded without crashing the service.
@@ -68,6 +73,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Simulate expired anonymous session and confirm one bootstrap-and-retry.
 - Simulate retry failure and confirm a failed run plus error row.
 - Run with repeated seen Redis IDs and confirm no detail fetch.
+- Confirm manual and continuous runs without initial snapshot are rejected.
+- Confirm explicit recalibration marks visible IDs as seen without creating opportunities.
 - Run the same fixture twice and confirm no duplicate opportunity or repeated filter work.
 - Run the same item under two monitors and confirm each monitor can count the item once without duplicating alerts inside either monitor.
 - Confirm `items_found`, `items_new`, and `opportunities_created` reflect catalog results, monitor-new items, and created opportunities.

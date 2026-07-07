@@ -21,6 +21,7 @@ export function SourcesView({
   onLoadMonitorRuns,
   onLoadMonitorStats,
   onRefreshRuntime,
+  onRecalibrateBaseline,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
@@ -47,6 +48,7 @@ export function SourcesView({
   onLoadMonitorRuns: (sourceId: number) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onRefreshRuntime: () => Promise<void>;
+  onRecalibrateBaseline: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
@@ -225,6 +227,7 @@ export function SourcesView({
           onClearMonitorEventsView={onClearMonitorEventsView}
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
+          onRecalibrateBaseline={onRecalibrateBaseline}
           onSaveSourceSchedule={onSaveSourceSchedule}
           onStartSession={onStartSession}
           onStopMonitor={onStopMonitor}
@@ -625,6 +628,7 @@ function MonitorDetail({
   onClearMonitorEventsView,
   onDeleteSource,
   onLoadMonitorStats,
+  onRecalibrateBaseline,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
@@ -644,6 +648,7 @@ function MonitorDetail({
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
+  onRecalibrateBaseline: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
@@ -681,6 +686,7 @@ function MonitorDetail({
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const hasUnsavedChanges = sourceDraftHasChanges(source, sourceDraft);
+  const launchBlockedByBaseline = !source.baseline_ready;
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -703,6 +709,10 @@ function MonitorDetail({
           <h4>Configuracion</h4>
           {source.is_active ? <span>Deten el monitor para editarla.</span> : <span>Editable con el monitor detenido.</span>}
         </div>
+        <div className={`baseline-status ${source.baseline_ready ? 'ready' : 'pending'}`}>
+          <span>{source.baseline_ready ? 'Snapshot inicial calibrado' : 'Snapshot inicial pendiente'}</span>
+          {source.baseline_policy_hash ? <code>{source.baseline_policy_hash}</code> : null}
+        </div>
         <MonitorConfigEditor
           disabled={source.is_active}
           source={source}
@@ -723,8 +733,23 @@ function MonitorDetail({
               </button>
               <button
                 type="button"
-                disabled={runningSessionId !== null || savingSourceId === source.id || hasUnsavedChanges}
-                title={hasUnsavedChanges ? 'Guarda los cambios antes de lanzar la sesion' : 'Lanzar sesion'}
+                disabled={savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges}
+                title={hasUnsavedChanges ? 'Guarda los cambios antes de recalibrar' : 'Recalibrar listado inicial'}
+                onClick={() => onRecalibrateBaseline(source)}
+              >
+                <RefreshCw size={16} />
+                Recalibrar listado inicial
+              </button>
+              <button
+                type="button"
+                disabled={runningSessionId !== null || savingSourceId === source.id || hasUnsavedChanges || launchBlockedByBaseline}
+                title={
+                  hasUnsavedChanges
+                    ? 'Guarda los cambios antes de lanzar la sesion'
+                    : launchBlockedByBaseline
+                      ? 'Recalibra el listado inicial antes de ejecutar este monitor'
+                      : 'Lanzar sesion'
+                }
                 onClick={() => onStartSession(source)}
               >
                 <Play size={17} />

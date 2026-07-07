@@ -15,17 +15,26 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
-from vinted_monitor.services.runs import FAILED, SUCCESS, SearchSourceInactiveError, execute_manual_run, execute_monitor_run
+from vinted_monitor.services.runs import (
+    FAILED,
+    SUCCESS,
+    SearchSourceInactiveError,
+    execute_manual_run,
+    execute_monitor_baseline,
+    execute_monitor_run,
+)
 from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 
 
 class FakeSeenCache:
-    def __init__(self, *, unavailable: bool = False, initially_seen: set[str] | None = None) -> None:
+    def __init__(self, *, unavailable: bool = False, initially_seen: set[str] | None = None, baseline_ready: bool = True) -> None:
         self.unavailable = unavailable
         self.seen = set(initially_seen or set())
         self.processing: set[str] = set()
         self.marked_seen: list[str] = []
+        self.baseline_ready = baseline_ready
+        self.marked_baseline: list[tuple[int, str]] = []
 
     def require_available(self) -> None:
         if self.unavailable:
@@ -45,6 +54,15 @@ class FakeSeenCache:
 
     def release_processing(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
         self.processing.difference_update(vinted_item_ids)
+
+    def has_baseline(self, monitor_id: int, policy_hash: str) -> bool:
+        self.require_available()
+        return self.baseline_ready
+
+    def mark_baseline(self, monitor_id: int, policy_hash: str) -> None:
+        self.require_available()
+        self.baseline_ready = True
+        self.marked_baseline.append((monitor_id, policy_hash))
 
 
 class FakeSuccessProvider:
@@ -334,6 +352,133 @@ def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> No
     with SessionLocal() as db:
         with pytest.raises(SearchSourceInactiveError):
             execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache())
+
+
+def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_id: int) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.is_active = False
+        source.monitor_mode = "manual"
+        db.commit()
+
+    cache = FakeSeenCache(baseline_ready=False)
+    with SessionLocal() as db:
+        run = execute_monitor_baseline(db, source_id, provider=FakeSuccessProvider(item_count=2), seen_cache=cache)
+        item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
+        opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+        phases = [event.phase for event in events]
+
+        assert run.status == SUCCESS
+        assert run.trigger == "baseline"
+        assert run.items_found == 2
+        assert run.items_new == 0
+        assert run.opportunities_created == 0
+        assert item_count == 0
+        assert opportunity_count == 0
+        assert sorted(cache.marked_seen) == ["pytest-run-item-0", "pytest-run-item-1"]
+        assert cache.baseline_ready is True
+        assert cache.marked_baseline
+        assert "baseline_snapshot_seeded" in phases
+        assert "filter_passed" not in phases
+        assert "opportunity_created" not in phases
+
+
+def test_monitor_run_without_baseline_fails_before_catalog(source_id: int) -> None:
+    provider = FakeSuccessProvider(item_count=1)
+    with SessionLocal() as db:
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=FakeSeenCache(baseline_ready=False))
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+
+        assert run.status == FAILED
+        assert "Recalibra el listado inicial" in (run.error_message or "")
+        assert provider.detail_calls == []
+        assert any(event.phase == "baseline_required" for event in events)
+        assert all(event.phase != "catalog_search_start" for event in events)
+
+
+def test_monitor_run_skips_existing_opportunity_before_filters(source_id: int) -> None:
+    provider = FakeSuccessProvider(item_count=1)
+    cache = FakeSeenCache()
+    with SessionLocal() as db:
+        first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache)
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.is_active = True
+        db.commit()
+        second_cache = FakeSeenCache()
+        second_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=second_cache)
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == second_run.id).order_by(RunEvent.id.asc())))
+
+        assert first_run.opportunities_created == 1
+        assert second_run.items_new == 0
+        assert second_run.opportunities_created == 0
+        assert any(event.phase == "candidate_existing_opportunity_skipped" for event in events)
+        assert all(event.phase != "filter_passed" for event in events)
+
+
+def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api baseline required monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache(baseline_ready=False))
+    try:
+        response = client.post(f"/api/monitors/{source_id}/runs")
+
+        assert response.status_code == 409
+        assert "Recalibra el listado inicial" in response.json()["detail"]
+    finally:
+        cleanup_source(source_id)
+
+
+def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    cache = FakeSeenCache(baseline_ready=False)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api baseline monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=2)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
+    try:
+        response = client.post(f"/api/monitors/{source_id}/baseline")
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["trigger"] == "baseline"
+        assert body["items_found"] == 2
+        assert body["items_new"] == 0
+        assert body["opportunities_created"] == 0
+        assert cache.baseline_ready is True
+        monitors_response = client.get("/api/monitors")
+        monitor = next(entry for entry in monitors_response.json() if entry["id"] == source_id)
+        assert monitor["baseline_ready"] is True
+    finally:
+        app.dependency_overrides.clear()
+        cleanup_source(source_id)
 
 
 def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.MonkeyPatch) -> None:

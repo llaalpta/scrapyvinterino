@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  calibrateMonitorBaseline,
   createProxyProfile,
   createSource,
   deleteSource,
@@ -206,6 +207,10 @@ export function useDashboardController() {
       setError('Guarda los cambios antes de lanzar la sesion');
       return;
     }
+    if (!source.baseline_ready) {
+      setError('Recalibra el listado inicial antes de ejecutar este monitor');
+      return;
+    }
     setRunningSessionId(source.id);
     try {
       const run = source.monitor_mode === 'manual' ? await runMonitor(source.id) : await startMonitor(source.id);
@@ -230,6 +235,36 @@ export function useDashboardController() {
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
       setRunningSessionId(null);
+    }
+  }
+
+  async function onRecalibrateBaseline(source: SearchSource) {
+    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    setError(null);
+    if (sourceDraftHasChanges(source, draft)) {
+      setError('Guarda los cambios antes de recalibrar el listado inicial');
+      return;
+    }
+    setSavingSourceId(source.id);
+    try {
+      const run = await calibrateMonitorBaseline(source.id);
+      const [sourceData, runData] = await Promise.all([fetchSources(), fetchRuns()]);
+      setSources(sourceData);
+      setSourceDrafts(buildSourceDrafts(sourceData));
+      setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
+      setMonitorRunsBySource((current) => ({
+        ...current,
+        [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+      }));
+      await loadMonitorStats(source.id);
+      await loadMonitorEvents(source.id);
+      if (run.status !== 'success') {
+        setError(run.error_message || 'No se pudo recalibrar el listado inicial');
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo recalibrar el listado inicial');
+    } finally {
+      setSavingSourceId(null);
     }
   }
 
@@ -457,6 +492,7 @@ export function useDashboardController() {
     onClearMonitorEventsView: clearMonitorEventsView,
     onLoadRunEvents: fetchRunEvents,
     onSaveSourceSchedule,
+    onRecalibrateBaseline,
     onStartSession,
     onStopMonitor,
     onTestProxy,

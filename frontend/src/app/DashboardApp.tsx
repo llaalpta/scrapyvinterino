@@ -48,6 +48,7 @@ export function DashboardApp() {
           onLoadMonitorStats={(sourceId, range) => void dashboard.loadMonitorStats(sourceId, range)}
           onLoadMonitorRuns={(sourceId) => void dashboard.loadMonitorRuns(sourceId)}
           onRefreshRuntime={dashboard.refreshRuntime}
+          onRecalibrateBaseline={(source) => void dashboard.onRecalibrateBaseline(source)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
