@@ -62,6 +62,7 @@ class SchedulerRuntimeConfig:
     max_concurrent_runs: int
     allow_direct_without_proxy: bool
     direct_max_concurrent_runs: int
+    direct_runtime_enabled: bool
     catalog_per_page: int
     detail_max_candidates_per_run: int
     request_timeout_ms: int
@@ -82,6 +83,7 @@ class SchedulerState:
     direct_max_concurrent_runs: int
     active_proxy_count: int
     proxy_capacity: int
+    direct_runtime_enabled: bool
     direct_capacity: int
     effective_capacity: int
     active_periodic_monitors: int
@@ -104,9 +106,15 @@ class RunEgress:
 def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
     runtime_config = get_scheduler_runtime_config(db, settings)
     runtime_enabled = settings.scheduler_enabled
-    active_proxies = _active_proxy_profiles(db)
+    target_country_code = settings.vinted_target_country_code.strip().upper()
+    active_proxies = _active_proxy_profiles(db, country_code=target_country_code)
     proxy_capacity = sum(max(proxy.max_concurrent_runs, 1) for proxy in active_proxies)
-    direct_capacity = runtime_config.direct_max_concurrent_runs if runtime_config.allow_direct_without_proxy else 0
+    direct_runtime_enabled = settings.vinted_direct_catalog_enabled
+    direct_capacity = (
+        runtime_config.direct_max_concurrent_runs
+        if runtime_config.allow_direct_without_proxy and direct_runtime_enabled
+        else 0
+    )
     effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity + direct_capacity)
     return SchedulerState(
         enabled=runtime_config.enabled,
@@ -118,6 +126,7 @@ def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
         timezone=settings.scheduler_timezone,
         allow_direct_without_proxy=runtime_config.allow_direct_without_proxy,
         direct_max_concurrent_runs=runtime_config.direct_max_concurrent_runs,
+        direct_runtime_enabled=direct_runtime_enabled,
         active_proxy_count=len(active_proxies),
         proxy_capacity=proxy_capacity,
         direct_capacity=direct_capacity,
@@ -147,6 +156,7 @@ def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Setting
         ),
         allow_direct_without_proxy=bool(value.get("allow_direct_without_proxy", True)),
         direct_max_concurrent_runs=_validate_int(value.get("direct_max_concurrent_runs", 1), "direct_max_concurrent_runs", 0, 10),
+        direct_runtime_enabled=settings.vinted_direct_catalog_enabled,
         catalog_per_page=_validate_int(value.get("catalog_per_page", settings.vinted_fast_catalog_per_page), "catalog_per_page", 1, 96),
         detail_max_candidates_per_run=_validate_int(
             value.get("detail_max_candidates_per_run", settings.vinted_detail_max_candidates_per_run),
@@ -221,7 +231,8 @@ def choose_run_egress(
         if active_proxy_counts is not None
         else _active_run_egress_counts(db)
     )
-    for proxy in list_available_proxy_profiles(db):
+    target_country_code = settings.vinted_target_country_code.strip().upper()
+    for proxy in list_available_proxy_profiles(db, country_code=target_country_code):
         proxy_limit = max(proxy.max_concurrent_runs, 1)
         if proxy_counts.get(proxy.id, 0) >= proxy_limit:
             continue
@@ -234,9 +245,11 @@ def choose_run_egress(
             proxy_kind=proxy.kind,
             proxy_url=proxy_url_for_profile(proxy, settings),
         )
-    if runtime.allow_direct_without_proxy and direct_count < runtime.direct_max_concurrent_runs:
+    if runtime.allow_direct_without_proxy and runtime.direct_runtime_enabled and direct_count < runtime.direct_max_concurrent_runs:
         return RunEgress(mode="direct")
-    raise SchedulerCapacityError("No proxy is available and direct access is disabled or saturated")
+    raise SchedulerCapacityError(
+        f"No proxy is available for country {target_country_code} and direct Vinted catalog access is disabled or saturated"
+    )
 
 
 def normalize_scheduler_config(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -367,15 +380,16 @@ def _validate_scheduler_runtime_keys(value: dict[str, Any]) -> None:
         raise SchedulerConfigError(f"unsupported scheduler fields: {', '.join(unsupported_keys)}")
 
 
-def _active_proxy_profiles(db: Session) -> list[ProxyProfile]:
+def _active_proxy_profiles(db: Session, *, country_code: str | None = None) -> list[ProxyProfile]:
     current_time = datetime.now(UTC)
+    statement = select(ProxyProfile).where(
+        ProxyProfile.is_active.is_(True),
+        (ProxyProfile.cooldown_until.is_(None) | (ProxyProfile.cooldown_until <= current_time)),
+    )
+    if country_code:
+        statement = statement.where(ProxyProfile.country_code == country_code.strip().upper())
     return list(
-        db.scalars(
-            select(ProxyProfile).where(
-                ProxyProfile.is_active.is_(True),
-                (ProxyProfile.cooldown_until.is_(None) | (ProxyProfile.cooldown_until <= current_time)),
-            )
-        )
+        db.scalars(statement)
     )
 
 

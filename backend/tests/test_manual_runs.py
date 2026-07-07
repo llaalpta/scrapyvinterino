@@ -158,6 +158,17 @@ class FakeSearchFailingProvider(FakeSuccessProvider):
         raise RuntimeError("search boom cookie=session-secret")
 
 
+def _test_direct_egress() -> RunEgress:
+    return RunEgress(mode="direct")
+
+
+def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
+    monkeypatch.setattr("vinted_monitor.api.main.settings", settings)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: settings)
+    return settings
+
+
 @pytest.fixture
 def source_id() -> int:
     cleanup_source(None)
@@ -216,7 +227,7 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
     provider = FakeSuccessProvider(item_count=2)
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache)
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
@@ -244,7 +255,13 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
 
 def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=FakeEventingProvider(item_count=1), seen_cache=FakeSeenCache())
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeEventingProvider(item_count=1),
+            seen_cache=FakeSeenCache(),
+            egress=_test_direct_egress(),
+        )
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
 
         phases = [event.phase for event in events]
@@ -331,7 +348,13 @@ def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(sou
         db.commit()
 
     with SessionLocal() as db:
-        run = execute_manual_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache())
+        run = execute_manual_run(
+            db,
+            source_id,
+            provider=FakeSuccessProvider(item_count=1),
+            seen_cache=FakeSeenCache(),
+            egress=_test_direct_egress(),
+        )
         source = db.get(SearchSource, source_id)
 
         assert run.status == SUCCESS
@@ -352,7 +375,13 @@ def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> No
 
     with SessionLocal() as db:
         with pytest.raises(SearchSourceInactiveError):
-            execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache())
+            execute_monitor_run(
+                db,
+                source_id,
+                provider=FakeSuccessProvider(item_count=1),
+                seen_cache=FakeSeenCache(),
+                egress=_test_direct_egress(),
+            )
 
 
 def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_id: int) -> None:
@@ -365,7 +394,13 @@ def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_i
 
     cache = FakeSeenCache(baseline_ready=False)
     with SessionLocal() as db:
-        run = execute_monitor_baseline(db, source_id, provider=FakeSuccessProvider(item_count=2), seen_cache=cache)
+        run = execute_monitor_baseline(
+            db,
+            source_id,
+            provider=FakeSuccessProvider(item_count=2),
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
@@ -389,7 +424,13 @@ def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_i
 def test_monitor_run_without_baseline_fails_before_catalog(source_id: int) -> None:
     provider = FakeSuccessProvider(item_count=1)
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=FakeSeenCache(baseline_ready=False))
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=provider,
+            seen_cache=FakeSeenCache(baseline_ready=False),
+            egress=_test_direct_egress(),
+        )
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
 
         assert run.status == FAILED
@@ -403,13 +444,13 @@ def test_monitor_run_skips_existing_opportunity_before_filters(source_id: int) -
     provider = FakeSuccessProvider(item_count=1)
     cache = FakeSeenCache()
     with SessionLocal() as db:
-        first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache)
+        first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
         source = db.get(SearchSource, source_id)
         assert source is not None
         source.is_active = True
         db.commit()
         second_cache = FakeSeenCache()
-        second_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=second_cache)
+        second_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=second_cache, egress=_test_direct_egress())
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == second_run.id).order_by(RunEvent.id.asc())))
 
         assert first_run.opportunities_created == 1
@@ -435,6 +476,7 @@ def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> N
         db.commit()
         source_id = source.id
 
+    _enable_direct_runtime(monkeypatch)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache(baseline_ready=False))
     try:
         response = client.post(f"/api/monitors/{source_id}/runs")
@@ -463,6 +505,7 @@ def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPa
         source_id = source.id
 
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=2)
+    _enable_direct_runtime(monkeypatch)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
     try:
         response = client.post(f"/api/monitors/{source_id}/baseline")
@@ -527,7 +570,7 @@ def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.Mo
         db.commit()
         source_id = source.id
 
-    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
+    _enable_direct_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -611,7 +654,7 @@ def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypat
         db.commit()
         source_id = source.id
 
-    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
+    _enable_direct_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -655,7 +698,7 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
         db.commit()
         source_id = source.id
 
-    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
+    _enable_direct_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -726,7 +769,7 @@ def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypa
         db.commit()
         source_id = source.id
 
-    monkeypatch.setattr("vinted_monitor.api.main.settings", Settings(scheduler_enabled=True))
+    _enable_direct_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSearchFailingProvider()
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -1070,7 +1113,7 @@ def test_seen_cache_hit_skips_detail_and_database_writes(source_id: int) -> None
     provider = FakeSuccessProvider(item_count=1)
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache)
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
 
         assert run.status == SUCCESS
@@ -1091,7 +1134,7 @@ def test_discarded_item_is_not_persisted(source_id: int) -> None:
     provider = FakeDiscardingDetailProvider(item_count=1)
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache)
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
 
@@ -1109,7 +1152,13 @@ def test_detail_failure_creates_opportunity_with_redacted_error(source_id: int) 
         db.commit()
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=FakeFailingDetailProvider(item_count=1), seen_cache=FakeSeenCache())
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeFailingDetailProvider(item_count=1),
+            seen_cache=FakeSeenCache(),
+            egress=_test_direct_egress(),
+        )
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
         item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
 
@@ -1123,7 +1172,13 @@ def test_detail_failure_creates_opportunity_with_redacted_error(source_id: int) 
 
 def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=FakeSuccessProvider(item_count=1), seen_cache=FakeSeenCache(unavailable=True))
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeSuccessProvider(item_count=1),
+            seen_cache=FakeSeenCache(unavailable=True),
+            egress=_test_direct_egress(),
+        )
         source = db.get(SearchSource, source_id)
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
@@ -1153,8 +1208,8 @@ def test_same_item_can_create_opportunity_in_different_monitor(source_id: int) -
     try:
         provider = FakeSuccessProvider(item_count=1)
         with SessionLocal() as db:
-            first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=FakeSeenCache())
-            second_run = execute_monitor_run(db, second_id, provider=provider, seen_cache=FakeSeenCache())
+            first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=FakeSeenCache(), egress=_test_direct_egress())
+            second_run = execute_monitor_run(db, second_id, provider=provider, seen_cache=FakeSeenCache(), egress=_test_direct_egress())
             item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
             assert item is not None
             opportunity_sources = sorted(db.scalars(select(Opportunity.source_id).where(Opportunity.item_id == item.id)))

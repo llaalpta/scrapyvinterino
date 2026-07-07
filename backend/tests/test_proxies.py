@@ -2,7 +2,8 @@ import pytest
 
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import ProxyProfile
-from vinted_monitor.services.proxies import proxy_url_with_sticky_session
+from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.services.proxies import create_proxy_profile, proxy_url_with_sticky_session, update_proxy_profile
 
 
 def proxy_profile(username: str | None = "customer-user") -> ProxyProfile:
@@ -42,3 +43,23 @@ def test_proxy_url_with_sticky_session_keeps_plain_proxy_without_username() -> N
     url = proxy_url_with_sticky_session(proxy_profile(username=None), "session-123", Settings())
 
     assert url == "http://proxy.example:7777"
+
+
+def test_update_proxy_profile_rejects_incoherent_geo_context() -> None:
+    with SessionLocal() as db:
+        profile = create_proxy_profile(
+            db,
+            name="pytest geo context proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=7777,
+            username=None,
+            password=None,
+        )
+        try:
+            with pytest.raises(ValueError, match="locale country must match"):
+                update_proxy_profile(db, profile.id, country_code="FR")
+        finally:
+            db.delete(profile)
+            db.commit()

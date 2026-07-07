@@ -29,10 +29,10 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Require an explicit initial catalog snapshot before any monitor run can process opportunities.
 - Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
 - Use a deterministic fast catalog flow: create one `curl_cffi` session, diagnose egress with it when configured, bootstrap the saved public catalog document URL, extract anonymous session context such as CSRF/anon markers into memory only, apply one human delay, then call `/api/v2/catalog/items` with API parameters translated from the same saved catalog URL and with browser-coherent headers.
-- Keep proxy usage optional and globally managed by the scheduler.
-- Support UI-managed proxy profiles with encrypted credentials.
+- Keep proxy usage globally managed by the scheduler.
+- Support UI-managed proxy profiles with encrypted credentials and per-profile country, locale, `Accept-Language`, and screen context.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
-- Use active global proxies before direct outbound access; direct access is allowed only when the global scheduler setting permits it.
+- Use active global proxies matching the target country before direct outbound access; direct access is allowed only when both the UI setting and the deployment gate permit it.
 
 ## Interfaces
 
@@ -53,7 +53,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
-  - direct-without-proxy enable flag and direct concurrency limit;
+  - direct-without-proxy UI enable flag and direct concurrency limit;
+  - deployment direct-catalog gate `VINTED_DIRECT_CATALOG_ENABLED`, default false;
+  - target Vinted country/locale headers: `VINTED_TARGET_COUNTRY_CODE`, `VINTED_TARGET_LOCALE`, `VINTED_TARGET_ACCEPT_LANGUAGE`, and `VINTED_TARGET_SCREEN`;
   - per-proxy run concurrency limit stored on each proxy profile;
   - catalog results per run, detail fetch candidate limit, request timeout, proxy cooldown, and stop-after-failures settings;
   - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
@@ -103,9 +105,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
 - No more than `2` monitor runs execute at the same time by default.
 - The same active monitor never has two active runs at the same time.
-- The scheduler uses active healthy proxies from the global pool before direct access.
-- Proxy capacity is the sum of active healthy proxy profile `max_concurrent_runs` values; there is no separate UI-level global per-proxy cap.
-- When no proxy is available, direct access is used only if the global setting allows it.
+- The scheduler uses active healthy proxies from the global pool before direct access, filtered by target country.
+- Proxy capacity is the sum of active healthy target-country proxy profile `max_concurrent_runs` values; there is no separate UI-level global per-proxy cap.
+- When no proxy is available, direct access is used only if the UI setting allows it and `VINTED_DIRECT_CATALOG_ENABLED=true`.
 - If neither proxy nor direct capacity is available, a periodic monitor is not activated or run.
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
 - Manual and scheduler-triggered runs share the same URL-filter compatibility validation and fast API parameter translation.
@@ -116,6 +118,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show the translated fast API parameters and URL filter compatibility in safe structured details.
 - Run logs never expose raw cookie, token, authorization, proxy credential, HTML, or raw Vinted payload values. Cookie/token/session data is represented only as masked/fingerprinted markers; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, seen-cache marks, detail fetch start/success/error/skipped, filter pass/discard, item persisted/reused, and opportunity created/skipped events.
+- Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, screen, egress country match, and any missing required key.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - The PWA Monitors view renders selected monitor accumulated logs as a classic readable console: one text line per event with run id, exact time, level, label, ms, status, URL, message, and collapsible JSON details, whether the monitor is active or stopped.
@@ -141,7 +144,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
 - Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
-- Direct requests behave exactly as monitor runs only when global direct fallback is enabled and no proxy is available.
+- Direct requests behave exactly as monitor runs only when global direct fallback is enabled in the UI, `VINTED_DIRECT_CATALOG_ENABLED=true`, and no matching proxy is available.
 - Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
 - Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
 - Proxy pool entries can be `own`, `datacenter`, or `residential`; target-specific/special proxy classes are not exposed for Vinted.

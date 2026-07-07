@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     # curl_cffi / anti-bot evasion
     curl_impersonate_browser: str = "chrome146"
+    vinted_direct_catalog_enabled: bool = False
+    vinted_target_country_code: str = "ES"
+    vinted_target_locale: str = "es-ES"
+    vinted_target_accept_language: str = "es-ES,es;q=0.9,en;q=0.8"
+    vinted_target_screen: str = "1920x1080"
     human_delay_min_seconds: float = 1.2
     human_delay_max_seconds: float = 3.8
     datadome_challenge_penalty_multiplier: int = 2

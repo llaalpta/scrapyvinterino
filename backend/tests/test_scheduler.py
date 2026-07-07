@@ -60,7 +60,7 @@ def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
         assert state.effective_enabled is False
 
     with SessionLocal() as db:
-        state = get_scheduler_state(db, Settings(scheduler_enabled=True))
+        state = get_scheduler_state(db, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
 
         assert state.enabled is True
         assert state.effective_enabled is True
@@ -223,7 +223,7 @@ def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(monkeyp
             if active_source is not None:
                 active_source.is_active = False
 
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest scheduler window source",
             url="https://www.vinted.es/catalog?search_text=",
@@ -241,7 +241,7 @@ def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(monkeyp
         source_id = source.id
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         submitted_ids = runner.run_once(now=datetime(2026, 7, 3, 6, 0, tzinfo=UTC))
 
         assert submitted_ids == []
@@ -266,15 +266,22 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())
     now = datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
+    active_proxy_ids: list[int] = []
 
     with SessionLocal() as db:
         previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
+        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
         for active_source_id in previously_active_source_ids:
             active_source = db.get(SearchSource, active_source_id)
             if active_source is not None:
                 active_source.is_active = False
+        if active_proxy_ids:
+            db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                {ProxyProfile.is_active: False},
+                synchronize_session=False,
+            )
 
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest due producer source",
             url="https://www.vinted.es/catalog?search_text=nike",
@@ -293,7 +300,7 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
         source_id = source.id
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         submitted_ids = runner.run_once(now=now)
 
         assert submitted_ids == [source_id]
@@ -314,6 +321,11 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
                 active_source = db.get(SearchSource, active_source_id)
                 if active_source is not None:
                     active_source.is_active = True
+            if active_proxy_ids:
+                db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                    {ProxyProfile.is_active: True},
+                    synchronize_session=False,
+                )
             source = db.get(SearchSource, source_id)
             if source is not None:
                 db.delete(source)
@@ -342,7 +354,7 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
                 synchronize_session=False,
             )
 
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         for index in range(2):
             source = SearchSource(
                 name=f"pytest due capacity source {index}",
@@ -363,7 +375,7 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
         db.commit()
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         submitted_ids = runner.run_once(now=now)
 
         assert submitted_ids == [source_ids[0]]

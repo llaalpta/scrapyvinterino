@@ -79,6 +79,7 @@ def execute_manual_run(
     source_id: int,
     provider: ManualRunProvider | None = None,
     seen_cache: SeenCache | None = None,
+    egress: RunEgress | None = None,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is not None and source.is_active:
@@ -92,6 +93,7 @@ def execute_manual_run(
         require_active=False,
         create_session_for_run=True,
         close_session_on_finish=True,
+        egress=egress,
     )
 
 
@@ -129,6 +131,7 @@ def execute_monitor_baseline(
     source_id: int,
     provider: ManualRunProvider | None = None,
     seen_cache: SeenCache | None = None,
+    egress: RunEgress | None = None,
 ) -> Run:
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
@@ -145,7 +148,7 @@ def execute_monitor_baseline(
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
-    selected_egress = choose_run_egress(db, settings)
+    selected_egress = egress or choose_run_egress(db, settings)
     owned_provider = provider is None
     provider_runtime_metadata: dict[str, Any] = {}
     if provider is None:
@@ -198,6 +201,10 @@ def execute_monitor_baseline(
             "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
             "proxy_profile_id": proxy_profile_id,
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": (run.runtime_metadata or {}).get("proxy_country_code"),
+            "locale": (run.runtime_metadata or {}).get("locale"),
+            "screen": (run.runtime_metadata or {}).get("screen"),
             "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "baseline_run": True,
@@ -236,8 +243,14 @@ def execute_monitor_baseline(
             "proxy_profile_id": proxy_profile_id,
             "proxy_name": (run.runtime_metadata or {}).get("proxy_name"),
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": (run.runtime_metadata or {}).get("proxy_country_code"),
+            "locale": (run.runtime_metadata or {}).get("locale"),
+            "accept_language": (run.runtime_metadata or {}).get("accept_language"),
+            "screen": (run.runtime_metadata or {}).get("screen"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "direct_allowed": runtime_config.allow_direct_without_proxy,
+            "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
         },
     )
 
@@ -437,6 +450,10 @@ def execute_monitor_run(
             "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
             "proxy_profile_id": (run.runtime_metadata or {}).get("proxy_profile_id"),
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": (run.runtime_metadata or {}).get("proxy_country_code"),
+            "locale": (run.runtime_metadata or {}).get("locale"),
+            "screen": (run.runtime_metadata or {}).get("screen"),
             "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
             "proxy_session_id_prefix": (run.runtime_metadata or {}).get("proxy_session_id_prefix"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
@@ -484,8 +501,14 @@ def execute_monitor_run(
             "proxy_profile_id": proxy_profile_id,
             "proxy_name": (run.runtime_metadata or {}).get("proxy_name"),
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": (run.runtime_metadata or {}).get("proxy_country_code"),
+            "locale": (run.runtime_metadata or {}).get("locale"),
+            "accept_language": (run.runtime_metadata or {}).get("accept_language"),
+            "screen": (run.runtime_metadata or {}).get("screen"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "direct_allowed": runtime_config.allow_direct_without_proxy,
+            "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
         },
     )
 
@@ -827,13 +850,30 @@ def _provider_for_egress(
     settings,
 ) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any]]:
     proxy_url = egress.proxy_url
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = {
+        "target_country_code": settings.vinted_target_country_code.strip().upper(),
+        "locale": settings.vinted_target_locale,
+        "accept_language": settings.vinted_target_accept_language,
+        "screen": settings.vinted_target_screen,
+    }
+    provider_country_code = settings.vinted_target_country_code.strip().upper()
+    provider_locale = settings.vinted_target_locale
+    provider_accept_language = settings.vinted_target_accept_language
+    provider_screen = settings.vinted_target_screen
     if egress.proxy_profile_id is not None:
         profile = db.get(ProxyProfile, egress.proxy_profile_id)
         if profile is None:
             raise RuntimeError(f"Proxy profile {egress.proxy_profile_id} no longer exists")
         proxy_session_id = str(uuid.uuid4())
         proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
+        provider_country_code = profile.country_code
+        provider_locale = profile.locale
+        provider_accept_language = profile.accept_language
+        provider_screen = profile.screen
+        metadata["proxy_country_code"] = profile.country_code
+        metadata["locale"] = profile.locale
+        metadata["accept_language"] = profile.accept_language
+        metadata["screen"] = profile.screen
         metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
         metadata["proxy_sticky_session"] = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
 
@@ -844,6 +884,10 @@ def _provider_for_egress(
         catalog_per_page=runtime_config.catalog_per_page,
         request_retries=settings.vinted_request_retries,
         proxy_session_marker=metadata.get("proxy_sticky_session"),
+        expected_country_code=provider_country_code,
+        locale=provider_locale,
+        accept_language=provider_accept_language,
+        screen=provider_screen,
     ), metadata
 
 

@@ -8,7 +8,7 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 
 - `SchedulerRunner` is a producer: it evaluates active monitors, windows and jitter, then enqueues `MonitorTask` payloads in Redis.
 - `TaskConsumer` workers are consumers: they block on the Redis task queue, use the configured browser profile, create a per-attempt proxy session, and call `execute_monitor_run()` with a configured provider.
-- Manual runs stay synchronous/direct from the API, but use the same `CurlCffiVintedCatalogProvider` stack.
+- Manual runs stay synchronous from the API, but use the same egress selection and `CurlCffiVintedCatalogProvider` stack as scheduled runs.
 - Existing business logic remains unchanged: Redis seen cache, deduplication, filters, item persistence, opportunities, run events and monitor sessions.
 
 ## Interfaces
@@ -21,6 +21,8 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - Worker retry attempts are deployment-owned through `WORKER_MAX_RETRY_ATTEMPTS`; the PWA does not expose request retry controls for producer-consumer runs.
 - Task payloads include only `proxy_profile_id`; full proxy URLs, usernames, passwords and cookies are never written to Redis or run metadata.
 - Runtime metadata: consumer runs include `task_id`, `consumer_id`, `browser_profile`, `proxy_session_id_prefix` and `attempt`; full proxy credentials and cookies are never persisted.
+- Deployment safety gate: public Vinted catalog traffic is not sent directly from the host unless `VINTED_DIRECT_CATALOG_ENABLED=true`; the default is false.
+- Geo context: Vinted ES catalog runs require an ES proxy profile by default, with matching locale, `Accept-Language`, and screen settings stored on the proxy profile.
 
 ## Acceptance Criteria
 
@@ -32,9 +34,10 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - Bootstrap and catalog API requests share the same `curl_cffi.Session`, proxy and cookie jar, with a human delay between them.
 - Bootstrap always uses the saved public catalog document URL for the monitor, extracts CSRF/anon/session markers into memory, and then calls the JSON catalog API with the same referer and session context.
 - Proxy failures use exponential cooldown; DataDome challenges use the configured challenge penalty multiplier.
-- Run events expose safe diagnostics: `browser_profile`, `proxy_session_id_prefix`, `datadome_cookie`, `bootstrap_duration_ms`, attempt number, `bootstrap_origin=catalog_document`, CSRF/anon presence booleans, and masked/fingerprinted session markers only.
+- Run events expose safe diagnostics: `browser_profile`, `impersonate`, `proxy_session_id_prefix`, target/proxy country, locale, `Accept-Language`, screen, `datadome_cookie`, `bootstrap_duration_ms`, attempt number, `bootstrap_origin=catalog_document`, CSRF/anon/access-token/v_udt presence booleans, and masked/fingerprinted session markers only.
+- Before calling `/api/v2/catalog/items`, the provider must have a complete conservative session context: Chrome `curl_cffi` impersonation, same-session egress diagnostic matching the target country, CSRF token, anon id, `access_token_web`, DataDome cookie, `v_udt`, locale, `Accept-Language`, and screen. Missing or contradictory context records `catalog_session_context_incomplete` and blocks the catalog API request.
 - Before wiring a new ephemeral HTTP client into Redis workers or live Vinted catalog traffic, `scripts/verify_impersonation.py` exits successfully with exact Chrome 120 `User-Agent`, `sec-ch-ua`, and `Accept-Encoding` echoes, no Python/curl/cffi/requests leak markers in header values or non-browser header names, and expected BrowserLeaks TLS 1.3 / HTTP/2 fields. The standard Chrome header name `Upgrade-Insecure-Requests` is allowed.
-- Manual and worker-owned catalog runs use the configured browser profile; the default is `chrome146`. Direct runs without a proxy remain supported and must pass before residential proxy validation.
+- Manual and worker-owned catalog runs use the configured browser profile; the default is `chrome146`. Direct runs without a proxy are blocked by default and are available only when explicitly enabled by deployment configuration.
 - Runtime browser profiles define ordered request headers for bootstrap and catalog API calls, but do not force hop-by-hop headers such as `Connection` or `TE`; HTTP/2 pseudo-header order and SETTINGS are owned by `curl_cffi` impersonation.
 
 ## Verification

@@ -41,6 +41,10 @@ export type ProxyProfile = {
   username_masked: string | null;
   has_password: boolean;
   password_fingerprint: string | null;
+  country_code: string;
+  locale: string;
+  accept_language: string;
+  screen: string;
   is_active: boolean;
   max_concurrent_runs: number;
   cooldown_until: string | null;
@@ -69,6 +73,7 @@ export type SchedulerState = {
   direct_max_concurrent_runs: number;
   active_proxy_count: number;
   proxy_capacity: number;
+  direct_runtime_enabled: boolean;
   direct_capacity: number;
   effective_capacity: number;
   active_periodic_monitors: number;
@@ -347,13 +352,20 @@ export function createProxyProfile(payload: {
   port: number;
   username?: string;
   password?: string;
+  country_code?: string;
+  locale?: string;
+  accept_language?: string;
+  screen?: string;
   max_concurrent_runs?: number;
   is_active?: boolean;
 }): Promise<ProxyProfile> {
   return postJson<ProxyProfile>('/api/proxy-profiles', payload);
 }
 
-export function updateProxyProfile(profileId: number, payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind'>>): Promise<ProxyProfile> {
+export function updateProxyProfile(
+  profileId: number,
+  payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code' | 'locale' | 'accept_language' | 'screen'>>
+): Promise<ProxyProfile> {
   return patchJson<ProxyProfile>(`/api/proxy-profiles/${profileId}`, payload);
 }
 

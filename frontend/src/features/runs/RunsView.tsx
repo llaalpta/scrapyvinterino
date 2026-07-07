@@ -195,6 +195,30 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (country) {
     parts.push(`country=${country}`);
   }
+  const egressCountry = detailString(event.details, 'egress_country_code');
+  if (egressCountry && !country) {
+    parts.push(`country=${egressCountry}`);
+  }
+  const impersonate = detailString(event.details, 'impersonate');
+  if (impersonate) {
+    parts.push(`imp=${impersonate}`);
+  }
+  appendBooleanToken(parts, 'csrf', event.details, 'csrf_token_found');
+  appendBooleanToken(parts, 'anon', event.details, 'anon_id_found');
+  appendBooleanToken(parts, 'access', event.details, 'access_token_found');
+  appendBooleanToken(parts, 'datadome', event.details, 'datadome_cookie');
+  appendBooleanToken(parts, 'v_udt', event.details, 'v_udt_found');
+  appendBooleanToken(parts, 'geo', event.details, 'egress_country_match');
+  appendBooleanToken(parts, 'locale_ok', event.details, 'locale_configured');
+  appendBooleanToken(parts, 'screen_ok', event.details, 'screen_configured');
+  const locale = detailString(event.details, 'locale');
+  if (locale) {
+    parts.push(`locale=${locale}`);
+  }
+  const screen = detailString(event.details, 'screen');
+  if (screen) {
+    parts.push(`screen=${screen}`);
+  }
   if (event.phase === 'catalog_candidates_received') {
     appendNumberToken(parts, 'items', event.details, 'candidate_count');
     appendNumberToken(parts, 'unique', event.details, 'unique_candidate_count');
@@ -208,6 +232,13 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
     appendNumberToken(parts, 'new', event.details, 'seen_miss_count');
   }
   return parts;
+}
+
+function appendBooleanToken(parts: string[], label: string, details: Record<string, unknown>, key: string): void {
+  const value = details[key];
+  if (typeof value === 'boolean') {
+    parts.push(`${label}=${value ? 'ok' : 'missing'}`);
+  }
 }
 
 function appendNumberToken(parts: string[], label: string, details: Record<string, unknown>, key: string): void {
@@ -284,6 +315,8 @@ function eventLabel(phase: string): string {
     anonymous_session_bootstrap_success: 'Sesion anonima obtenida',
     anonymous_session_bootstrap_error: 'Error obteniendo sesion anonima',
     anonymous_session_refresh_start: 'Refrescando sesion anonima',
+    catalog_session_context_ready: 'Contexto de catalogo listo',
+    catalog_session_context_incomplete: 'Contexto de catalogo incompleto',
     navigation_home_request_start: 'Visitando home',
     navigation_home_request_success: 'Home respondio',
     navigation_home_request_error: 'Error visitando home',

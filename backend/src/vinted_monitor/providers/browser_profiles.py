@@ -25,16 +25,31 @@ class BrowserProfile:
     bootstrap_headers: dict[str, str] = field(default_factory=dict)
     api_headers: dict[str, str] = field(default_factory=dict)
 
-    def build_bootstrap_headers(self, referer: str | None = None) -> OrderedDict[str, str]:
+    def build_bootstrap_headers(self, referer: str | None = None, *, accept_language: str | None = None) -> OrderedDict[str, str]:
         """Return ordered headers for the HTML bootstrap request."""
         headers = OrderedDict(self.bootstrap_headers)
+        if accept_language:
+            headers["Accept-Language"] = accept_language
         if referer:
             headers["Referer"] = referer
         return headers
 
-    def build_api_headers(self, referer: str) -> OrderedDict[str, str]:
+    def build_api_headers(
+        self,
+        referer: str,
+        *,
+        accept_language: str | None = None,
+        locale: str | None = None,
+        screen: str | None = None,
+    ) -> OrderedDict[str, str]:
         """Return ordered headers for the JSON catalog API request."""
         headers = OrderedDict(self.api_headers)
+        if accept_language:
+            headers["Accept-Language"] = accept_language
+        if locale:
+            headers["Locale"] = locale
+        if screen:
+            headers["X-Screen"] = screen
         headers["Referer"] = referer
         return headers
 

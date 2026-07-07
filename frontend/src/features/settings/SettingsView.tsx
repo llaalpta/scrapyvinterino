@@ -58,6 +58,7 @@ export function SettingsView({
               <SummaryItem label="Runtime" value={scheduler.runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
               <SummaryItem label="Capacidad" value={`${scheduler.active_periodic_monitors}/${scheduler.effective_capacity} monitores activos`} />
               <SummaryItem label="Egress" value={`${scheduler.proxy_capacity} proxy / ${scheduler.direct_capacity} directo`} />
+              <SummaryItem label="Directo" value={scheduler.direct_runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
             </div>
           </section>
 
@@ -83,7 +84,8 @@ export function SettingsView({
                 <label className="settings-switch">
                   <input
                     type="checkbox"
-                    checked={scheduler.allow_direct_without_proxy}
+                    checked={scheduler.allow_direct_without_proxy && scheduler.direct_runtime_enabled}
+                    disabled={!scheduler.direct_runtime_enabled}
                     onChange={(event) => onUpdateSchedulerConfig({ allow_direct_without_proxy: event.target.checked })}
                   />
                   <span>Salida directa sin proxy</span>
@@ -96,7 +98,7 @@ export function SettingsView({
                 min="0"
                 max="10"
                 value={scheduler.direct_max_concurrent_runs}
-                disabled={!scheduler.allow_direct_without_proxy}
+                disabled={!scheduler.allow_direct_without_proxy || !scheduler.direct_runtime_enabled}
                 onBlur={(value) => updateNumber('direct_max_concurrent_runs', value)}
               />
             </div>
@@ -235,6 +237,31 @@ export function SettingsView({
               />
             </label>
             <label>
+              Pais
+              <input
+                value={proxyDraft.countryCode}
+                maxLength={2}
+                onChange={(event) => setProxyDraft({ ...proxyDraft, countryCode: event.target.value.toUpperCase() })}
+                required
+              />
+            </label>
+            <label>
+              Locale
+              <input value={proxyDraft.locale} onChange={(event) => setProxyDraft({ ...proxyDraft, locale: event.target.value })} required />
+            </label>
+            <label className="wide-field">
+              Accept-Language
+              <input
+                value={proxyDraft.acceptLanguage}
+                onChange={(event) => setProxyDraft({ ...proxyDraft, acceptLanguage: event.target.value })}
+                required
+              />
+            </label>
+            <label>
+              Screen
+              <input value={proxyDraft.screen} onChange={(event) => setProxyDraft({ ...proxyDraft, screen: event.target.value })} required />
+            </label>
+            <label>
               Usuario
               <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} />
             </label>
@@ -251,7 +278,7 @@ export function SettingsView({
           </div>
         </form>
         {proxyProfiles.length === 0 ? (
-          <p className="empty-inline">Sin proxys configurados. Se usara directo solo si la configuracion global lo permite.</p>
+          <p className="empty-inline">Sin proxys configurados. Los runs de catalogo quedan bloqueados mientras el directo este deshabilitado por runtime.</p>
         ) : (
           <div className="proxy-list">
             {proxyProfiles.map((proxy) => (
@@ -261,6 +288,9 @@ export function SettingsView({
                   <span>
                     {proxy.kind} | {proxy.scheme}://{proxy.username_masked ? `${proxy.username_masked}@` : ''}
                     {proxy.host}:{proxy.port} | max {proxy.max_concurrent_runs}
+                  </span>
+                  <span>
+                    {proxy.country_code} | {proxy.locale} | {proxy.screen}
                   </span>
                 </div>
                 <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
@@ -361,6 +391,9 @@ function HelpTooltip({ text }: { text: string }) {
 }
 
 function getCapacityHint(scheduler: SchedulerState) {
+  if (!scheduler.direct_runtime_enabled && scheduler.proxy_capacity <= 0) {
+    return 'Salida directa bloqueada por .env: configura un proxy activo de ES antes de lanzar runs.';
+  }
   if (scheduler.proxy_capacity > 0) {
     return 'Los proxys activos tienen prioridad antes de usar salida directa.';
   }
@@ -379,4 +412,8 @@ export type ProxyDraft = {
   maxConcurrentRuns: string;
   username: string;
   password: string;
+  countryCode: string;
+  locale: string;
+  acceptLanguage: string;
+  screen: string;
 };

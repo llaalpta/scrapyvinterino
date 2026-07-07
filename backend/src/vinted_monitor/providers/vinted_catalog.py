@@ -30,15 +30,27 @@ CSRF_TOKEN_PATTERNS = (
     re.compile(r'\\"X-CSRF-Token\\"\s*,\s*\\"([^"\\]+)\\"'),
     re.compile(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
 )
+SCREEN_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 
 
 @dataclass
 class CatalogSessionContext:
     csrf_token: str | None = None
     anon_id: str | None = None
+    access_token_web: str | None = None
+    datadome: str | None = None
     v_udt: str | None = None
     user_iso_locale: str | None = None
     screen: str | None = None
+
+
+@dataclass
+class EgressContext:
+    ip: str | None = None
+    country: str | None = None
+    country_code: str | None = None
+    asn: int | str | None = None
+    org: str | None = None
 
 
 class VintedCatalogProviderError(RuntimeError):
@@ -46,6 +58,10 @@ class VintedCatalogProviderError(RuntimeError):
 
 
 class VintedCatalogSessionError(VintedCatalogProviderError):
+    pass
+
+
+class VintedCatalogSessionContextError(VintedCatalogProviderError):
     pass
 
 
@@ -86,6 +102,11 @@ class CurlCffiVintedCatalogProvider:
         human_delay_max: float = 3.8,
         session_factory: Callable[..., Any] | None = None,
         proxy_session_marker: dict[str, Any] | None = None,
+        expected_country_code: str | None = "ES",
+        locale: str = "es-ES",
+        accept_language: str = "es-ES,es;q=0.9,en;q=0.8",
+        screen: str = "1920x1080",
+        require_complete_session_context: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.profile = profile or profile_for_impersonate(self.settings.curl_impersonate_browser)
@@ -98,11 +119,17 @@ class CurlCffiVintedCatalogProvider:
         self.human_delay_max = human_delay_max
         self.session_factory = session_factory or Session
         self.proxy_session_marker = proxy_session_marker
+        self.expected_country_code = expected_country_code.strip().upper() if expected_country_code else None
+        self.locale = locale
+        self.accept_language = accept_language
+        self.screen = screen
+        self.require_complete_session_context = require_complete_session_context
         self.http_session_id = str(uuid.uuid4())
         self._session: Session | None = None
         self._bootstrapped = False
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
+        self._egress_context = EgressContext()
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
         last_error: VintedCatalogProviderError | None = None
@@ -115,6 +142,8 @@ class CurlCffiVintedCatalogProvider:
             try:
                 response = self._request_catalog_api(source, page, attempt=retry_index + 1)
                 return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
+            except VintedCatalogSessionContextError:
+                raise
             except VintedCatalogSessionError:
                 self._emit_event(
                     phase="anonymous_session_refresh_start",
@@ -140,7 +169,7 @@ class CurlCffiVintedCatalogProvider:
         self._ensure_session()
         self._diagnose_egress(attempt=1)
         assert self._session is not None
-        headers = self.profile.build_bootstrap_headers()
+        headers = self.profile.build_bootstrap_headers(accept_language=self.accept_language)
         self._emit_event(
             phase="detail_http_request_start",
             method="GET",
@@ -266,13 +295,41 @@ class CurlCffiVintedCatalogProvider:
         """Close and recreate the session (same proxy, fresh cookies)."""
         self.close()
         self._catalog_session_context = CatalogSessionContext()
+        self._egress_context = EgressContext()
         self._ensure_session()
 
     def _request_catalog_api(self, source: Any, page: int | None, *, attempt: int) -> dict[str, Any]:
         assert self._session is not None
         url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
         params = build_catalog_api_params(source.url, page, self.catalog_per_page)
-        headers = dict(self.profile.build_api_headers(referer=source.url))
+        context_report = self._session_context_report()
+        missing_context = self._missing_session_context(context_report)
+        if self.require_complete_session_context and missing_context:
+            self._emit_event(
+                phase="catalog_session_context_incomplete",
+                level="error",
+                details={
+                    **context_report,
+                    "missing_required": missing_context,
+                    "message": "Catalog session context incomplete; refusing catalog API request",
+                },
+            )
+            raise VintedCatalogSessionContextError(
+                f"Catalog session context incomplete; refusing catalog API request: {', '.join(missing_context)}"
+            )
+        self._emit_event(
+            phase="catalog_session_context_ready",
+            details=context_report,
+        )
+
+        headers = dict(
+            self.profile.build_api_headers(
+                referer=source.url,
+                accept_language=self.accept_language,
+                locale=self.locale,
+                screen=self.screen,
+            )
+        )
         if self._catalog_session_context.anon_id:
             headers["X-Anon-Id"] = self._catalog_session_context.anon_id
         if self._catalog_session_context.csrf_token:
@@ -292,9 +349,9 @@ class CurlCffiVintedCatalogProvider:
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
+                "impersonate": self.profile.impersonate,
                 "http_session": self._session_marker(),
-                "csrf_token_found": self._catalog_session_context.csrf_token is not None,
-                "anon_id_found": self._catalog_session_context.anon_id is not None,
+                **context_report,
                 "csrf_token": _secret_marker_or_none("csrf_token", self._catalog_session_context.csrf_token),
                 "anon_id": _secret_marker_or_none("anon_id", self._catalog_session_context.anon_id),
                 "request_headers": safe_headers(headers),
@@ -444,7 +501,7 @@ class CurlCffiVintedCatalogProvider:
     def _bootstrap_anonymous_session(self, source_url: str, *, attempt: int) -> None:
         assert self._session is not None
         bootstrap_url = source_url
-        headers = dict(self.profile.build_bootstrap_headers(referer=None))
+        headers = dict(self.profile.build_bootstrap_headers(referer=None, accept_language=self.accept_language))
 
         self._emit_event(
             phase="anonymous_session_bootstrap_start",
@@ -456,6 +513,10 @@ class CurlCffiVintedCatalogProvider:
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
+                "expected_country_code": self.expected_country_code,
+                "locale": self.locale,
+                "accept_language": self.accept_language,
+                "screen": self.screen,
                 "bootstrap_origin": "catalog_document",
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
@@ -543,7 +604,6 @@ class CurlCffiVintedCatalogProvider:
             message="Anonymous public session obtained from catalog document via curl_cffi",
             details={
                 "session_marker_count": len(cookie_names),
-                "datadome_cookie": dd_present,
                 "bootstrap_duration_ms": bootstrap_duration_ms,
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
@@ -552,11 +612,20 @@ class CurlCffiVintedCatalogProvider:
                 "http_session": self._session_marker(),
                 "csrf_token_found": self._catalog_session_context.csrf_token is not None,
                 "anon_id_found": self._catalog_session_context.anon_id is not None,
+                "access_token_found": self._catalog_session_context.access_token_web is not None,
+                "datadome_cookie": self._catalog_session_context.datadome is not None,
                 "v_udt_found": self._catalog_session_context.v_udt is not None,
+                "expected_country_code": self.expected_country_code,
+                "locale": self.locale,
+                "accept_language": self.accept_language,
                 "user_iso_locale": self._catalog_session_context.user_iso_locale,
-                "screen": self._catalog_session_context.screen,
+                "screen": self.screen,
+                "response_screen": self._catalog_session_context.screen,
+                "datadome_cookie_seen_by_detector": dd_present,
                 "csrf_token": _secret_marker_or_none("csrf_token", self._catalog_session_context.csrf_token),
                 "anon_id": _secret_marker_or_none("anon_id", self._catalog_session_context.anon_id),
+                "access_token_web": _secret_marker_or_none("access_token_web", self._catalog_session_context.access_token_web),
+                "datadome": _secret_marker_or_none("datadome", self._catalog_session_context.datadome),
                 "v_udt": _secret_marker_or_none("v_udt", self._catalog_session_context.v_udt),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
@@ -582,10 +651,78 @@ class CurlCffiVintedCatalogProvider:
             or self._cookie_value("csrf_token")
             or self._cookie_value("_csrf_token"),
             anon_id=_header_value(headers, "x-anon-id") or self._cookie_value("anon_id"),
+            access_token_web=self._cookie_value("access_token_web"),
+            datadome=self._cookie_value("datadome"),
             v_udt=_header_value(headers, "x-v-udt") or self._cookie_value("v_udt"),
             user_iso_locale=_header_value(headers, "x-user-iso-locale"),
             screen=_header_value(headers, "x-screen"),
         )
+
+    def _session_context_report(self) -> dict[str, Any]:
+        context = self._catalog_session_context
+        response_locale = _normalize_country_code(context.user_iso_locale)
+        expected_country_code = self.expected_country_code
+        egress_country_code = _normalize_country_code(self._egress_context.country_code)
+        locale_country = _country_from_locale(self.locale)
+        screen_configured = bool(self.screen and SCREEN_PATTERN.match(self.screen.strip().lower()))
+        response_screen_matches = context.screen is None or context.screen.strip().lower() == self.screen.strip().lower()
+        response_locale_matches = response_locale is None or expected_country_code is None or response_locale == expected_country_code
+
+        return {
+            "browser_profile": self.profile.name,
+            "impersonate": self.profile.impersonate,
+            "impersonate_ready": self.profile.impersonate.startswith("chrome"),
+            "bootstrap_origin": "catalog_document",
+            "expected_country_code": expected_country_code,
+            "egress_ip": self._egress_context.ip,
+            "egress_country": self._egress_context.country,
+            "egress_country_code": egress_country_code,
+            "egress_country_match": expected_country_code is None or egress_country_code == expected_country_code,
+            "egress_asn": self._egress_context.asn,
+            "egress_org": self._egress_context.org,
+            "csrf_token_found": context.csrf_token is not None,
+            "anon_id_found": context.anon_id is not None,
+            "access_token_found": context.access_token_web is not None,
+            "datadome_cookie": context.datadome is not None,
+            "v_udt_found": context.v_udt is not None,
+            "locale": self.locale,
+            "locale_configured": bool(self.locale and locale_country == expected_country_code),
+            "accept_language": self.accept_language,
+            "accept_language_configured": self.accept_language.lower().startswith(self.locale.lower()),
+            "screen": self.screen,
+            "screen_configured": screen_configured,
+            "response_locale": context.user_iso_locale,
+            "response_locale_matches": response_locale_matches,
+            "response_screen": context.screen,
+            "response_screen_matches": response_screen_matches,
+            "csrf_token": _secret_marker_or_none("csrf_token", context.csrf_token),
+            "anon_id": _secret_marker_or_none("anon_id", context.anon_id),
+            "access_token_web": _secret_marker_or_none("access_token_web", context.access_token_web),
+            "datadome": _secret_marker_or_none("datadome", context.datadome),
+            "v_udt": _secret_marker_or_none("v_udt", context.v_udt),
+            "cookies_after_bootstrap": self._cookie_markers(),
+        }
+
+    def _missing_session_context(self, report: Mapping[str, Any]) -> list[str]:
+        missing: list[str] = []
+        required_truthy_flags = {
+            "impersonate": report.get("impersonate_ready"),
+            "csrf_token": report.get("csrf_token_found"),
+            "anon_id": report.get("anon_id_found"),
+            "access_token_web": report.get("access_token_found"),
+            "datadome": report.get("datadome_cookie"),
+            "v_udt": report.get("v_udt_found"),
+            "locale": report.get("locale_configured"),
+            "accept_language": report.get("accept_language_configured"),
+            "screen": report.get("screen_configured"),
+            "egress_country_code": report.get("egress_country_match") and bool(report.get("egress_country_code")),
+            "response_locale": report.get("response_locale_matches"),
+            "response_screen": report.get("response_screen_matches"),
+        }
+        for name, present in required_truthy_flags.items():
+            if not present:
+                missing.append(name)
+        return missing
 
     def _emit_event(
         self,
@@ -634,6 +771,7 @@ class CurlCffiVintedCatalogProvider:
         try:
             response = self._session.get(url, headers=headers, timeout=self.timeout_ms / 1000)
             payload = response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {}
+            self._egress_context = _egress_context_from_payload(payload)
             details = {
                 "attempt": attempt,
                 "http_session": self._session_marker(),
@@ -718,6 +856,32 @@ def _egress_details_from_payload(payload: Any) -> dict[str, Any]:
         "asn": payload.get("asn") or connection.get("asn"),
         "org": payload.get("org") or payload.get("isp") or connection.get("org"),
     }
+
+
+def _egress_context_from_payload(payload: Any) -> EgressContext:
+    details = _egress_details_from_payload(payload)
+    return EgressContext(
+        ip=_optional_str(details.get("ip")),
+        country=_optional_str(details.get("country")),
+        country_code=_normalize_country_code(details.get("country_code")),
+        asn=details.get("asn"),
+        org=_optional_str(details.get("org")),
+    )
+
+
+def _normalize_country_code(value: Any) -> str | None:
+    if not value:
+        return None
+    cleaned = str(value).strip().upper()
+    if len(cleaned) != 2:
+        return None
+    return cleaned
+
+
+def _country_from_locale(value: str | None) -> str | None:
+    if not value or "-" not in value:
+        return None
+    return _normalize_country_code(value.rsplit("-", 1)[-1])
 
 
 def extract_csrf_token(html: str) -> str | None:

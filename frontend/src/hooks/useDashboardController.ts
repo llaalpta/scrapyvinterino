@@ -40,7 +40,20 @@ import { type ProxyDraft } from '../features/settings/SettingsView';
 import { buildSourceDraft, buildSourceDrafts, parseFilterTerms, sourceDraftHasChanges, type SourceDraft } from '../features/sources/sourceDrafts';
 
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
-const emptyProxyDraft: ProxyDraft = { name: '', scheme: 'http', kind: 'own', host: '', port: '', maxConcurrentRuns: '1', username: '', password: '' };
+const emptyProxyDraft: ProxyDraft = {
+  name: '',
+  scheme: 'http',
+  kind: 'own',
+  host: '',
+  port: '',
+  maxConcurrentRuns: '1',
+  username: '',
+  password: '',
+  countryCode: 'ES',
+  locale: 'es-ES',
+  acceptLanguage: 'es-ES,es;q=0.9,en;q=0.8',
+  screen: '1920x1080'
+};
 const DEFAULT_MONITOR_STATS_RANGE: MonitorStatsRange = 'all';
 const MONITOR_RUN_HISTORY_LIMIT = 1000;
 
@@ -167,6 +180,10 @@ export function useDashboardController() {
         host: proxyDraft.host,
         port: Number(proxyDraft.port),
         max_concurrent_runs: Number(proxyDraft.maxConcurrentRuns),
+        country_code: proxyDraft.countryCode,
+        locale: proxyDraft.locale,
+        accept_language: proxyDraft.acceptLanguage,
+        screen: proxyDraft.screen,
         username: proxyDraft.username || undefined,
         password: proxyDraft.password || undefined
       });

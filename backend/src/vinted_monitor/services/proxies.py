@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
@@ -13,6 +14,11 @@ from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import ProxyProfile
 
 PROXY_KINDS = {"own", "datacenter", "residential"}
+DEFAULT_PROXY_COUNTRY_CODE = "ES"
+DEFAULT_PROXY_LOCALE = "es-ES"
+DEFAULT_PROXY_ACCEPT_LANGUAGE = "es-ES,es;q=0.9,en;q=0.8"
+DEFAULT_PROXY_SCREEN = "1920x1080"
+SCREEN_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 
 
 class ProxyProfileNotFoundError(ValueError):
@@ -31,6 +37,10 @@ class ProxyPublicFields:
     username_masked: str | None
     has_password: bool
     password_fingerprint: str | None
+    country_code: str
+    locale: str
+    accept_language: str
+    screen: str
     is_active: bool
     max_concurrent_runs: int
     cooldown_until: datetime | None
@@ -45,17 +55,20 @@ def list_proxy_profiles(db: Session) -> list[ProxyProfile]:
     return list(db.scalars(select(ProxyProfile).order_by(ProxyProfile.id.desc())))
 
 
-def list_available_proxy_profiles(db: Session, *, now: datetime | None = None) -> list[ProxyProfile]:
+def list_available_proxy_profiles(db: Session, *, now: datetime | None = None, country_code: str | None = None) -> list[ProxyProfile]:
     current_time = now or datetime.now(UTC)
-    return list(
-        db.scalars(
-            select(ProxyProfile)
-            .where(
-                ProxyProfile.is_active.is_(True),
-                (ProxyProfile.cooldown_until.is_(None) | (ProxyProfile.cooldown_until <= current_time)),
-            )
-            .order_by(ProxyProfile.failure_count.asc(), ProxyProfile.last_used_at.asc().nullsfirst(), ProxyProfile.id.asc())
+    statement = (
+        select(ProxyProfile)
+        .where(
+            ProxyProfile.is_active.is_(True),
+            (ProxyProfile.cooldown_until.is_(None) | (ProxyProfile.cooldown_until <= current_time)),
         )
+        .order_by(ProxyProfile.failure_count.asc(), ProxyProfile.last_used_at.asc().nullsfirst(), ProxyProfile.id.asc())
+    )
+    if country_code:
+        statement = statement.where(ProxyProfile.country_code == country_code.strip().upper())
+    return list(
+        db.scalars(statement)
     )
 
 
@@ -69,6 +82,10 @@ def create_proxy_profile(
     port: int,
     username: str | None,
     password: str | None,
+    country_code: str = DEFAULT_PROXY_COUNTRY_CODE,
+    locale: str = DEFAULT_PROXY_LOCALE,
+    accept_language: str = DEFAULT_PROXY_ACCEPT_LANGUAGE,
+    screen: str = DEFAULT_PROXY_SCREEN,
     max_concurrent_runs: int = 1,
     is_active: bool = True,
     settings: Settings | None = None,
@@ -82,6 +99,10 @@ def create_proxy_profile(
         port=_validate_port(port),
         username=username.strip() if username else None,
         password_encrypted=_encrypt_password(password, settings) if password else None,
+        country_code=_validate_country_code(country_code),
+        locale=_validate_locale(locale, country_code),
+        accept_language=_validate_accept_language(accept_language, locale),
+        screen=_validate_screen(screen),
         max_concurrent_runs=_validate_max_concurrent_runs(max_concurrent_runs),
         is_active=is_active,
     )
@@ -103,6 +124,10 @@ def update_proxy_profile(
     username: str | None = None,
     password: str | None = None,
     clear_password: bool = False,
+    country_code: str | None = None,
+    locale: str | None = None,
+    accept_language: str | None = None,
+    screen: str | None = None,
     max_concurrent_runs: int | None = None,
     is_active: bool | None = None,
     settings: Settings | None = None,
@@ -127,6 +152,20 @@ def update_proxy_profile(
         profile.password_encrypted = None
     elif password:
         profile.password_encrypted = _encrypt_password(password, settings)
+    next_country_code = _validate_country_code(country_code) if country_code is not None else profile.country_code
+    next_locale = _validate_locale(locale if locale is not None else profile.locale, next_country_code)
+    next_accept_language = _validate_accept_language(
+        accept_language if accept_language is not None else profile.accept_language,
+        next_locale,
+    )
+    if country_code is not None:
+        profile.country_code = next_country_code
+    if locale is not None or country_code is not None:
+        profile.locale = next_locale
+    if accept_language is not None or locale is not None or country_code is not None:
+        profile.accept_language = next_accept_language
+    if screen is not None:
+        profile.screen = _validate_screen(screen)
     if max_concurrent_runs is not None:
         profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
@@ -204,6 +243,10 @@ def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = 
         username_masked=mask_text(profile.username),
         has_password=bool(profile.password_encrypted),
         password_fingerprint=fingerprint_text(password) if password else None,
+        country_code=profile.country_code,
+        locale=profile.locale,
+        accept_language=profile.accept_language,
+        screen=profile.screen,
         is_active=profile.is_active,
         max_concurrent_runs=profile.max_concurrent_runs,
         cooldown_until=profile.cooldown_until,
@@ -284,6 +327,41 @@ def _validate_kind(kind: str) -> str:
     cleaned = kind.strip().lower()
     if cleaned not in PROXY_KINDS:
         raise ValueError("Proxy kind must be own, datacenter, or residential")
+    return cleaned
+
+
+def _validate_country_code(value: str) -> str:
+    cleaned = value.strip().upper()
+    if len(cleaned) != 2 or not cleaned.isalpha():
+        raise ValueError("Proxy country_code must be an ISO 3166-1 alpha-2 code")
+    return cleaned
+
+
+def _validate_locale(value: str, country_code: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("Proxy locale cannot be empty")
+    if "-" not in cleaned:
+        raise ValueError("Proxy locale must include language and country, for example es-ES")
+    locale_country = cleaned.rsplit("-", 1)[-1].upper()
+    if locale_country != country_code.strip().upper():
+        raise ValueError("Proxy locale country must match country_code")
+    return cleaned
+
+
+def _validate_accept_language(value: str, locale: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("Proxy accept_language cannot be empty")
+    if not cleaned.lower().startswith(locale.lower()):
+        raise ValueError("Proxy accept_language must start with locale")
+    return cleaned
+
+
+def _validate_screen(value: str) -> str:
+    cleaned = value.strip().lower()
+    if not SCREEN_PATTERN.match(cleaned):
+        raise ValueError("Proxy screen must use WIDTHxHEIGHT format")
     return cleaned
 
 

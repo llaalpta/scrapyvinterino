@@ -55,8 +55,12 @@ class FakeCurlSession:
         }
         self.calls.append(call)
         response = self.handler(call)
-        set_cookie = response.headers.get("set-cookie") or response.headers.get("Set-Cookie")
-        if set_cookie:
+        set_cookie_header = response.headers.get("set-cookie") or response.headers.get("Set-Cookie")
+        if isinstance(set_cookie_header, str):
+            set_cookie_values = [set_cookie_header]
+        else:
+            set_cookie_values = list(set_cookie_header or [])
+        for set_cookie in set_cookie_values:
             name, _, remainder = set_cookie.partition("=")
             value = remainder.split(";", 1)[0]
             self.cookies[name] = value
@@ -344,12 +348,18 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
     fixture = load_fixture()
 
     def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
         if path(call) == "/catalog":
             return FakeResponse(
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": "access_token_web=anon; Path=/;",
+                    "set-cookie": ["access_token_web=anon; Path=/;", "datadome=dd-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -370,14 +380,14 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None, curl_impersonate_browser="chrome146"),
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip", curl_impersonate_browser="chrome146"),
         session_factory=fake_session_factory(handler, calls),
     )
     result = provider.search(source())
 
     assert len(result.items) == 2
-    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
-    assert "Referer" not in calls[0]["headers"]
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
+    assert "Referer" not in calls[1]["headers"]
 
 
 def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
@@ -385,14 +395,22 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
     events: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
         if path(call) == "/catalog":
             return FakeResponse(
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": "datadome=public-marker; Path=/;",
+                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "datadome=public-marker; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "1920x1080",
                 },
             )
         if path(call) == "/api/v2/catalog/items":
@@ -400,7 +418,7 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
         session_factory=fake_session_factory(handler, calls),
         event_sink=lambda **event: events.append(event),
     )
@@ -410,24 +428,30 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
     phases = [event["phase"] for event in events]
     assert phases == [
         "http_session_created",
+        "egress_diagnostic_start",
+        "egress_diagnostic_success",
         "anonymous_session_bootstrap_start",
         "anonymous_session_bootstrap_success",
         "human_delay_applied",
+        "catalog_session_context_ready",
         "catalog_api_request_start",
         "catalog_api_request_success",
     ]
     assert events[0]["details"]["http_session"]["masked"]
-    assert events[1]["details"]["bootstrap_origin"] == "catalog_document"
-    assert events[2]["details"]["datadome_cookie"] is True
-    assert "bootstrap_duration_ms" in events[2]["details"]
-    assert events[2]["details"]["csrf_token_found"] is True
-    assert events[2]["details"]["anon_id_found"] is True
-    assert events[2]["details"]["v_udt_found"] is True
+    assert events[3]["details"]["bootstrap_origin"] == "catalog_document"
+    assert events[4]["details"]["datadome_cookie"] is True
+    assert "bootstrap_duration_ms" in events[4]["details"]
     assert events[4]["details"]["csrf_token_found"] is True
     assert events[4]["details"]["anon_id_found"] is True
-    assert events[4]["details"]["browser_profile"] == provider.profile.name
+    assert events[4]["details"]["access_token_found"] is True
+    assert events[4]["details"]["v_udt_found"] is True
+    assert events[6]["details"]["egress_country_match"] is True
+    assert events[7]["details"]["csrf_token_found"] is True
+    assert events[7]["details"]["anon_id_found"] is True
+    assert events[7]["details"]["browser_profile"] == provider.profile.name
     serialized = json.dumps(events)
     assert "public-marker" not in serialized
+    assert "access-secret-value" not in serialized
     assert "csrf-secret-value" not in serialized
     assert "anon-secret-value" not in serialized
     assert "udt-secret-value" not in serialized
@@ -449,7 +473,13 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
             return FakeResponse(
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
-                headers={"set-cookie": "access_token_web=anonymous-secret-value; Path=/;"},
+                headers={
+                    "set-cookie": ["access_token_web=anonymous-secret-value; Path=/;", "datadome=dd-secret-value; Path=/;"],
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "1920x1080",
+                },
             )
         if path(call) == "/api/v2/catalog/items":
             assert call["cookies"]["access_token_web"] == "anonymous-secret-value"
@@ -487,6 +517,31 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
     assert "diag-secret-value" not in json.dumps(events)
     assert "anonymous-secret-value" not in json.dumps(events)
     assert "csrf-secret-value" not in json.dumps(events)
+
+
+def test_curl_provider_blocks_catalog_api_when_session_context_is_incomplete() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(200, text='{"CSRF_TOKEN":"csrf-secret-value"}', headers={"x-anon-id": "anon-secret-value"})
+        if path(call) == "/api/v2/catalog/items":
+            raise AssertionError("catalog API must not be called with incomplete session context")
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    with pytest.raises(VintedCatalogProviderError, match="Catalog session context incomplete"):
+        provider.search(source())
+
+    assert [path(call) for call in calls] == ["/catalog"]
+    incomplete_event = next(event for event in events if event["phase"] == "catalog_session_context_incomplete")
+    assert set(incomplete_event["details"]["missing_required"]) >= {"access_token_web", "datadome", "v_udt", "egress_country_code"}
 
 
 def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:
@@ -551,6 +606,7 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(handler, calls),
+        require_complete_session_context=False,
     )
 
     result = provider.search(source())
@@ -578,6 +634,7 @@ def test_curl_provider_raises_after_second_session_failure() -> None:
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(handler, calls),
+        require_complete_session_context=False,
     )
 
     with pytest.raises(VintedCatalogProviderError):
@@ -604,6 +661,7 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(handler, calls),
+        require_complete_session_context=False,
     )
 
     with pytest.raises(VintedCatalogProviderError):
@@ -625,6 +683,7 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(handler, calls),
+        require_complete_session_context=False,
     )
 
     with pytest.raises(DataDomeChallengeError):
@@ -635,22 +694,38 @@ def test_curl_provider_standard_flow_visits_catalog_document_then_api() -> None:
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
         if path(call) == "/catalog":
-            return FakeResponse(200, text="<html>ok</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": ["access_token_web=anon; Path=/;", "datadome=ok; Path=/;"],
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "1920x1080",
+                },
+            )
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
         session_factory=fake_session_factory(handler, calls),
     )
 
     provider.search(source())
 
-    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
-    assert "Referer" not in calls[0]["headers"]
-    assert calls[1]["headers"]["Referer"] == source().url
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
+    assert "Referer" not in calls[1]["headers"]
+    assert calls[2]["headers"]["Referer"] == source().url
 
 
 def test_get_profile_by_name_scans_all_profiles() -> None:

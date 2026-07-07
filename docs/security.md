@@ -7,6 +7,8 @@
 - Redaccion automatica de datos sensibles en logs.
 - Mensajes de error persistidos deben pasar por redaccion antes de guardarse en `runs`, `errors` o campos de error de entidades.
 - Proxies residenciales son opcionales; credenciales cifradas en `proxy_profiles` con clave local.
+- El acceso directo al catalogo publico de Vinted esta bloqueado por defecto mediante `VINTED_DIRECT_CATALOG_ENABLED=false`; para trafico real se debe configurar un proxy compatible con el pais objetivo.
+- Cada proxy de Vinted debe declarar pais, locale, `Accept-Language` y screen coherentes. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
 - No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML ni payloads raw completos en logs o respuestas API.
 - Los eventos de run pueden guardar metodo, fase, nivel, URL saneada, headers saneados, status, duracion en ms, timeout, intento/retry, proxy, IP de salida, pais, user-agent, fingerprints y errores de Vinted redacted/truncados.
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
@@ -17,6 +19,7 @@
 - Los UUID de sesion sticky del proxy son efimeros: se generan por tarea, se registran solo como marcador seguro, y se descartan al terminar.
 - Las cookies DataDome obtenidas durante el bootstrap se mantienen solo en memoria de la sesion `curl_cffi` y no se persisten.
 - El bootstrap anonimo de Vinted usa la URL publica de catalogo guardada en el monitor; las cookies, tokens, CSRF y marcadores anonimos resultantes solo viven en memoria de esa sesion efimera y se registran exclusivamente como marcadores seguros.
+- Antes de pedir `/api/v2/catalog/items`, el provider debe tener contexto anonimo completo en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, cookie DataDome, `v_udt`, locale, `Accept-Language` y screen. Si falta algo, se registra el motivo y no se hace la peticion al catalogo.
 - Los eventos de run pueden incluir el nombre del perfil de navegador usado, el marcador seguro del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.
 - Acciones de compra futuras:
   - requeriran click explicito;
