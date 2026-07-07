@@ -404,6 +404,44 @@
   font-size: 12px;
 }
 
+.catalog-filter-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #f8fafc;
+}
+
+.catalog-filter-status.ready {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.catalog-filter-status.blocked {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.catalog-filter-status-title {
+  color: #344054;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.catalog-filter-status span,
+.catalog-filter-status strong {
+  color: #697586;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.catalog-filter-status strong {
+  color: #b42318;
+}
+
 .monitor-config-editor {
   display: grid;
   gap: 12px;

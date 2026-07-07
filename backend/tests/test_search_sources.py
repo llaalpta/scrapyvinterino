@@ -8,6 +8,7 @@ from vinted_monitor.db.models import AppSetting, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
 from vinted_monitor.services.search_sources import (
+    catalog_filter_compatibility,
     normalize_vinted_catalog_url,
     validate_search_source_name,
     validate_vinted_catalog_url,
@@ -41,6 +42,22 @@ def test_validate_vinted_catalog_url_preserves_original_after_trim() -> None:
 def test_validate_vinted_catalog_url_rejects_non_catalog_urls(url: str) -> None:
     with pytest.raises(ValueError):
         validate_vinted_catalog_url(url)
+
+
+def test_validate_vinted_catalog_url_rejects_unsupported_catalog_filters() -> None:
+    with pytest.raises(ValueError, match="color_ids"):
+        validate_vinted_catalog_url("https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12")
+
+
+def test_catalog_filter_compatibility_reports_supported_ignored_and_unsupported() -> None:
+    compatibility = catalog_filter_compatibility(
+        "https://www.vinted.es/catalog?catalog[]=76&brand_ids[]=88&page=2&time=123&color_ids[]=12"
+    )
+
+    assert compatibility["compatible"] is False
+    assert compatibility["supported"] == {"brand_ids": ["88"], "catalog": ["76"]}
+    assert compatibility["ignored"] == {"page": ["2"], "time": ["123"]}
+    assert compatibility["unsupported"] == {"color_ids[]": ["12"]}
 
 
 def test_normalize_vinted_catalog_url_preserves_blank_and_repeated_values() -> None:
@@ -86,6 +103,9 @@ def test_create_source_api_persists_normalized_query() -> None:
         assert created["name"] == "pytest source"
         assert created["normalized_query"]["brand_ids[]"] == ["88", "364"]
         assert created["normalized_query"]["search_text"] == [""]
+        assert created["catalog_filter_compatibility"]["compatible"] is True
+        assert created["catalog_filter_compatibility"]["supported"]["brand_ids"] == ["88", "364"]
+        assert created["catalog_filter_compatibility"]["ignored"]["order"] == ["newest_first"]
 
         list_response = client.get("/api/monitors")
         assert list_response.status_code == 200
@@ -112,6 +132,18 @@ def test_create_source_api_rejects_invalid_url() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_create_source_api_rejects_unsupported_catalog_filter_without_persisting() -> None:
+    client = TestClient(app)
+    response = client.post(
+        "/api/monitors",
+        json={"name": "bad filter source", "url": "https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12"},
+    )
+
+    assert response.status_code == 422
+    with SessionLocal() as db:
+        assert db.query(SearchSource).filter(SearchSource.name == "bad filter source").one_or_none() is None
 
 
 def test_update_source_api_persists_scheduler_config() -> None:

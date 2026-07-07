@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -268,53 +267,3 @@ def profile_for_impersonate(impersonate: str) -> BrowserProfile:
         supported = ", ".join(profile.impersonate for profile in BROWSER_PROFILES)
         raise ValueError(f"No browser profile configured for impersonate={impersonate!r}. Supported: {supported}")
     return profile
-
-
-# ---------------------------------------------------------------------------
-# Navigation flow selection
-# ---------------------------------------------------------------------------
-
-NAVIGATION_FLOWS: list[dict[str, Any]] = [
-    {
-        "name": "google_referral",
-        "weight": 40,
-        "bootstrap_referer": "https://www.google.com/",
-        "needs_home_visit": False,
-    },
-    {
-        "name": "home_navigation",
-        "weight": 30,
-        "bootstrap_referer": None,
-        "needs_home_visit": True,
-    },
-    {
-        "name": "internal_referral",
-        "weight": 30,
-        "bootstrap_referer": None,
-        "needs_home_visit": False,
-    },
-]
-
-
-@dataclass(frozen=True)
-class NavigationFlow:
-    name: str
-    bootstrap_referer: str | None
-    needs_home_visit: bool
-
-
-def select_navigation_flow(rng: random.Random | None = None) -> NavigationFlow:
-    """Select a weighted random navigation flow for realistic browsing."""
-    generator = rng or random.Random()
-    names = []
-    weights = []
-    for flow in NAVIGATION_FLOWS:
-        names.append(flow["name"])
-        weights.append(flow["weight"])
-    chosen_name = generator.choices(names, weights=weights, k=1)[0]
-    chosen = next(f for f in NAVIGATION_FLOWS if f["name"] == chosen_name)
-    return NavigationFlow(
-        name=chosen["name"],
-        bootstrap_referer=chosen["bootstrap_referer"],
-        needs_home_visit=chosen["needs_home_visit"],
-    )

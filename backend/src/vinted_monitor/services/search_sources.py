@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.db.models import SearchSource
+from vinted_monitor.providers.catalog_url import analyze_catalog_url, ensure_catalog_url_filters_supported
 from vinted_monitor.services.filters import normalize_filter_definition
 from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.scheduler import normalize_scheduler_config
@@ -49,6 +50,7 @@ def validate_vinted_catalog_url(url: str) -> str:
     if parsed.path not in ALLOWED_VINTED_CATALOG_PATHS:
         raise ValueError("Search source URL must point to a Vinted catalog page")
 
+    ensure_catalog_url_filters_supported(normalized_url)
     return normalized_url
 
 
@@ -56,6 +58,10 @@ def normalize_vinted_catalog_url(url: str) -> dict[str, list[str]]:
     parsed = urlparse(url)
     query = parse_qs(parsed.query, keep_blank_values=True)
     return {key: values for key, values in sorted(query.items())}
+
+
+def catalog_filter_compatibility(url: str) -> dict:
+    return analyze_catalog_url(url).as_dict()
 
 
 def create_source(db: Session, name: str, url: str) -> SearchSource:

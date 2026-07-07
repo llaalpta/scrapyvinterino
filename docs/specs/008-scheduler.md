@@ -28,6 +28,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Do not run a monitor when Redis is unavailable.
 - Require an explicit initial catalog snapshot before any monitor run can process opportunities.
 - Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
+- Use a deterministic fast catalog flow: create one `curl_cffi` session, diagnose egress with it when configured, bootstrap cookies on `https://www.vinted.es/`, apply one human delay, then call `/api/v2/catalog/items` with API parameters translated from the saved catalog URL.
 - Keep proxy usage optional and globally managed by the scheduler.
 - Support UI-managed proxy profiles with encrypted credentials.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
@@ -88,6 +89,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
 - Launching a manual, recurring, duration, window, or scheduler run is blocked until `Recalibrar listado inicial` has created a valid Redis snapshot for the monitor's current policy hash.
+- Launching or recalibrating is blocked when the saved URL contains catalog filters that cannot be translated to the fast API.
 - `Guardar` is the only PWA action that persists monitor configuration.
 - `Lanzar sesion` is disabled when the selected monitor has unsaved configuration changes and must not send `PATCH /api/monitors/{id}`.
 - Monitor active state is controlled only by `POST /api/monitors/{id}/start` and `POST /api/monitors/{id}/stop`; monitor configuration `PATCH` rejects legacy `is_active` payloads.
@@ -106,12 +108,15 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - When no proxy is available, direct access is used only if the global setting allows it.
 - If neither proxy nor direct capacity is available, a periodic monitor is not activated or run.
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
+- Manual and scheduler-triggered runs share the same URL-filter compatibility validation and fast API parameter translation.
 - Manual and scheduler-triggered runs never create the initial snapshot implicitly; recalibration is always an explicit PWA/API action.
 - Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
 - Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
 - Run logs show operational progress with sanitized URLs, request headers after redaction/masking, response headers after redaction/masking, status codes, per-request durations in milliseconds, egress mode, proxy profile id when used, auth mode, IP/country from the egress diagnostic, filter snapshot, Redis/cache decisions, candidate decisions, persistence decisions, opportunity outcomes, and safe counts only.
+- Run logs show the translated fast API parameters and URL filter compatibility in safe structured details.
 - Run logs never expose raw cookie, token, authorization, proxy credential, HTML, or raw Vinted payload values. Cookie/token/session data is represented only as masked/fingerprinted markers; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, seen-cache marks, detail fetch start/success/error/skipped, filter pass/discard, item persisted/reused, and opportunity created/skipped events.
+- Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - The PWA Monitors view renders selected monitor accumulated logs as a classic readable console: one text line per event with run id, exact time, level, label, ms, status, URL, message, and collapsible JSON details, whether the monitor is active or stopped.
 - The selected monitor log console supports local level filtering and text search without mutating persisted `run_events`.
@@ -130,6 +135,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
 - Inactive monitors appear after active monitors in the compact monitor table; selecting an inactive monitor shows editable configuration, launch/archive controls, historical performance, and archive confirmation without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
+- The PWA monitor detail shows supported, ignored, and unsupported URL filters; unsupported filters block recalibration and launch.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - Candidates with an already existing opportunity for the same monitor are marked seen and skipped before filter/detail work if Redis lost that seen state.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
@@ -164,6 +170,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm active monitor details show read-only configuration, stop/log controls, and do not show save, archive, or punctual launch controls.
 - Confirm inactive monitor launch is blocked while there are unsaved changes, save persists the configuration, and launch then starts using that persisted configuration without another PATCH.
 - Confirm inactive monitor launch is blocked while the initial snapshot is missing, explicit recalibration enables launch, and recalibration creates no opportunities.
+- Confirm inactive monitor launch and recalibration are blocked when URL filters are unsupported.
 - Confirm inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
@@ -171,6 +178,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm scheduler capacity reflects active proxy capacity plus allowed direct capacity.
 - Confirm periodic activation is blocked when scheduler is disabled or capacity is exhausted.
 - Confirm run metadata records `egress_mode=proxy` with proxy details when a proxy is selected and `egress_mode=direct` when direct fallback is used.
+- Confirm provider requests use the deterministic order `egress diagnostic` when configured, `https://www.vinted.es/`, then `/api/v2/catalog/items`.
 - Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.
 - Confirm Redis miss plus existing monitor opportunity is skipped before filters and logged as `candidate_existing_opportunity_skipped`.
 - Confirm direct-disabled/no-proxy path leaves the monitor pending instead of running.

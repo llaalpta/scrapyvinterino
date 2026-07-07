@@ -12,6 +12,16 @@ SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
 )
 BEARER_TOKEN_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 URL_USERINFO_PATTERN = re.compile(r"\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@([^\s/]+)", re.IGNORECASE)
+SENSITIVE_HEADER_TOKENS = (
+    "anon-id",
+    "authorization",
+    "cookie",
+    "csrf",
+    "password",
+    "secret",
+    "token",
+    "v-udt",
+)
 
 
 def redact_sensitive_text(value: str) -> str:
@@ -109,4 +119,4 @@ def safe_cookie_header_markers(header_value: str, *, kind: str = "cookie") -> li
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
-    return any(token in lowered for token in ["token", "cookie", "password", "secret", "authorization", "csrf"])
+    return any(token in lowered for token in SENSITIVE_HEADER_TOKENS)

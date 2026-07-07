@@ -687,6 +687,7 @@ function MonitorDetail({
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const hasUnsavedChanges = sourceDraftHasChanges(source, sourceDraft);
   const launchBlockedByBaseline = !source.baseline_ready;
+  const launchBlockedByFilters = source.catalog_filter_compatibility ? !source.catalog_filter_compatibility.compatible : false;
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -713,6 +714,7 @@ function MonitorDetail({
           <span>{source.baseline_ready ? 'Snapshot inicial calibrado' : 'Snapshot inicial pendiente'}</span>
           {source.baseline_policy_hash ? <code>{source.baseline_policy_hash}</code> : null}
         </div>
+        <CatalogFilterCompatibilityStatus source={source} />
         <MonitorConfigEditor
           disabled={source.is_active}
           source={source}
@@ -733,8 +735,14 @@ function MonitorDetail({
               </button>
               <button
                 type="button"
-                disabled={savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges}
-                title={hasUnsavedChanges ? 'Guarda los cambios antes de recalibrar' : 'Recalibrar listado inicial'}
+                disabled={savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges || launchBlockedByFilters}
+                title={
+                  hasUnsavedChanges
+                    ? 'Guarda los cambios antes de recalibrar'
+                    : launchBlockedByFilters
+                      ? 'Corrige los filtros de URL no soportados antes de recalibrar'
+                      : 'Recalibrar listado inicial'
+                }
                 onClick={() => onRecalibrateBaseline(source)}
               >
                 <RefreshCw size={16} />
@@ -742,10 +750,12 @@ function MonitorDetail({
               </button>
               <button
                 type="button"
-                disabled={runningSessionId !== null || savingSourceId === source.id || hasUnsavedChanges || launchBlockedByBaseline}
+                disabled={runningSessionId !== null || savingSourceId === source.id || hasUnsavedChanges || launchBlockedByBaseline || launchBlockedByFilters}
                 title={
                   hasUnsavedChanges
                     ? 'Guarda los cambios antes de lanzar la sesion'
+                    : launchBlockedByFilters
+                      ? 'Corrige los filtros de URL no soportados antes de ejecutar este monitor'
                     : launchBlockedByBaseline
                       ? 'Recalibra el listado inicial antes de ejecutar este monitor'
                       : 'Lanzar sesion'
@@ -847,6 +857,30 @@ function MonitorDetail({
       ) : null}
     </div>
   );
+}
+
+function CatalogFilterCompatibilityStatus({ source }: { source: SearchSource }) {
+  const compatibility = source.catalog_filter_compatibility;
+  if (!compatibility) {
+    return null;
+  }
+  const supported = Object.entries(compatibility.supported);
+  const ignored = Object.entries(compatibility.ignored);
+  const unsupported = Object.entries(compatibility.unsupported);
+  return (
+    <div className={`catalog-filter-status ${compatibility.compatible ? 'ready' : 'blocked'}`}>
+      <div className="catalog-filter-status-title">
+        <span>{compatibility.compatible ? 'Filtros URL compatibles' : 'Filtros URL no soportados'}</span>
+      </div>
+      {supported.length > 0 ? <span>Aplicados: {formatFilterEntries(supported)}</span> : <span>Sin filtros URL aplicados.</span>}
+      {ignored.length > 0 ? <span>Ignorados: {formatFilterEntries(ignored)}</span> : null}
+      {unsupported.length > 0 ? <strong>Bloquean: {formatFilterEntries(unsupported)}</strong> : null}
+    </div>
+  );
+}
+
+function formatFilterEntries(entries: Array<[string, string[]]>): string {
+  return entries.map(([key, values]) => `${key}=${values.join(',') || '""'}`).join(' · ');
 }
 
 function MonitorConfigEditor({

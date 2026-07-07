@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 import pytest
 
 from vinted_monitor.core.config import Settings
-from vinted_monitor.providers.browser_profiles import NavigationFlow, get_profile_by_name
+from vinted_monitor.providers.browser_profiles import get_profile_by_name
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
@@ -22,9 +22,6 @@ from vinted_monitor.providers.vinted_catalog import (
 )
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "vinted_catalog_payload.json"
-INTERNAL_FLOW = NavigationFlow(name="internal_referral", bootstrap_referer=None, needs_home_visit=False)
-
-
 class FakeResponse:
     def __init__(self, status_code: int = 200, *, text: str = "", json_data: dict | None = None, headers: dict | None = None) -> None:
         self.status_code = status_code
@@ -210,6 +207,21 @@ def test_build_catalog_api_params_translates_public_catalog_url_and_forces_newes
     }
 
 
+def test_build_catalog_api_params_ignores_non_filter_page_time_and_order() -> None:
+    params = build_catalog_api_params(
+        "https://www.vinted.es/catalog?catalog[]=76&page=3&time=1783419579&order=relevance",
+        page=None,
+        per_page=5,
+    )
+
+    assert params == {
+        "page": 1,
+        "per_page": 5,
+        "order": "newest_first",
+        "catalog_ids": "76",
+    }
+
+
 def test_parse_catalog_api_payload_maps_items_and_provider_metadata() -> None:
     fixture = load_fixture()
     result = parse_catalog_api_payload(fixture)
@@ -295,7 +307,7 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
     fixture = load_fixture()
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/catalog":
+        if path(call) == "/":
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=anon; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
             assert call["params"]["per_page"] == 5
@@ -307,14 +319,13 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=NavigationFlow(name="internal_referral", bootstrap_referer=None, needs_home_visit=False),
         session_factory=fake_session_factory(handler, calls),
     )
     result = provider.search(source())
 
     assert len(result.items) == 2
-    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
-    assert calls[0]["headers"]["Referer"] == "https://www.vinted.es/"
+    assert [path(call) for call in calls] == ["/", "/api/v2/catalog/items"]
+    assert "Referer" not in calls[0]["headers"]
 
 
 def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
@@ -322,7 +333,7 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
     events: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/catalog":
+        if path(call) == "/":
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=public-marker; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
@@ -330,7 +341,6 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=NavigationFlow(name="google_referral", bootstrap_referer="https://www.google.com/", needs_home_visit=False),
         session_factory=fake_session_factory(handler, calls),
         event_sink=lambda **event: events.append(event),
     )
@@ -347,7 +357,7 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
         "catalog_api_request_success",
     ]
     assert events[0]["details"]["http_session"]["masked"]
-    assert events[1]["details"]["navigation_flow"] == "google_referral"
+    assert events[1]["details"]["bootstrap_origin"] == "base_domain"
     assert events[2]["details"]["datadome_cookie"] is True
     assert "bootstrap_duration_ms" in events[2]["details"]
     assert events[4]["details"]["browser_profile"] == provider.profile.name
@@ -365,7 +375,7 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
                 json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES", "connection": {"asn": 64500, "org": "Test ISP"}},
                 headers={"content-type": "application/json", "set-cookie": "diagnostic_cookie=diag-secret-value; Path=/;"},
             )
-        if path(call) == "/catalog":
+        if path(call) == "/":
             assert call["cookies"]["diagnostic_cookie"] == "diag-secret-value"
             return FakeResponse(
                 200,
@@ -386,7 +396,6 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
     }
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
-        navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
         proxy_session_marker=proxy_session,
         event_sink=lambda **event: events.append(event),
@@ -394,7 +403,7 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
 
     provider.search(source())
 
-    assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/ip", "/", "/api/v2/catalog/items"]
     egress_event = next(event for event in events if event["phase"] == "egress_diagnostic_success")
     assert egress_event["status_code"] == 200
     assert egress_event["duration_ms"] is not None
@@ -420,7 +429,6 @@ def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure(
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
         event_sink=lambda **event: events.append(event),
     )
@@ -460,7 +468,7 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
 
     def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
-        if path(call) == "/catalog":
+        if path(call) == "/":
             bootstrap_calls += 1
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
@@ -472,7 +480,6 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
 
@@ -490,7 +497,7 @@ def test_curl_provider_raises_after_second_session_failure() -> None:
 
     def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
-        if path(call) == "/catalog":
+        if path(call) == "/":
             bootstrap_calls += 1
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
@@ -500,7 +507,6 @@ def test_curl_provider_raises_after_second_session_failure() -> None:
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
 
@@ -515,7 +521,7 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/catalog":
+        if path(call) == "/":
             return FakeResponse(
                 200,
                 text=build_next_flight_html(load_fixture()),
@@ -527,21 +533,20 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
 
     with pytest.raises(VintedCatalogProviderError):
         provider.search(source())
 
-    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/", "/api/v2/catalog/items", "/api/v2/catalog/items"]
 
 
 def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> None:
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/catalog":
+        if path(call) == "/":
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, text="<html>geo.captcha-delivery.com</html>", headers={"content-type": "text/html"})
@@ -549,7 +554,6 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
 
@@ -557,11 +561,11 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
         provider.search(source())
 
 
-def test_curl_provider_home_navigation_visits_home_then_catalog() -> None:
+def test_curl_provider_standard_flow_visits_home_then_api() -> None:
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) in {"/", "/catalog"}:
+        if path(call) == "/":
             return FakeResponse(200, text="<html>ok</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
@@ -569,14 +573,14 @@ def test_curl_provider_home_navigation_visits_home_then_catalog() -> None:
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
-        navigation_flow=NavigationFlow(name="home_navigation", bootstrap_referer=None, needs_home_visit=True),
         session_factory=fake_session_factory(handler, calls),
     )
 
     provider.search(source())
 
-    assert [path(call) for call in calls] == ["/", "/catalog", "/api/v2/catalog/items"]
-    assert calls[1]["headers"]["Referer"] == "https://www.vinted.es/"
+    assert [path(call) for call in calls] == ["/", "/api/v2/catalog/items"]
+    assert "Referer" not in calls[0]["headers"]
+    assert calls[1]["headers"]["Referer"] == source().url
 
 
 def test_get_profile_by_name_scans_all_profiles() -> None:

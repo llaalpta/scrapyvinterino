@@ -19,6 +19,15 @@ export type SearchSource = {
   archived_at: string | null;
   baseline_ready: boolean;
   baseline_policy_hash: string | null;
+  catalog_filter_compatibility: CatalogFilterCompatibility;
+};
+
+export type CatalogFilterCompatibility = {
+  compatible: boolean;
+  api_params: Record<string, string | number>;
+  supported: Record<string, string[]>;
+  ignored: Record<string, string[]>;
+  unsupported: Record<string, string[]>;
 };
 
 export type ProxyProfile = {

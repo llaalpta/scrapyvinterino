@@ -15,6 +15,7 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
+from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.runs import (
     FAILED,
     SUCCESS,
@@ -478,6 +479,34 @@ def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPa
         assert monitor["baseline_ready"] is True
     finally:
         app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest unsupported legacy monitor",
+            url="https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12",
+            normalized_query={"catalog[]": ["76"], "color_ids[]": ["12"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    try:
+        response = client.post(f"/api/monitors/{source_id}/baseline")
+
+        assert response.status_code == 422
+        assert "color_ids" in response.json()["detail"]
+        with SessionLocal() as db:
+            assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == source_id)) == 0
+    finally:
         cleanup_source(source_id)
 
 
@@ -1135,3 +1164,15 @@ def test_same_item_can_create_opportunity_in_different_monitor(source_id: int) -
             assert opportunity_sources == sorted([source_id, second_id])
     finally:
         cleanup_source(second_id)
+
+
+def test_run_event_timestamps_are_assigned_per_event(source_id: int) -> None:
+    with SessionLocal() as db:
+        first = record_run_event(db, source_id=source_id, phase="pytest_first")
+        second = record_run_event(db, source_id=source_id, phase="pytest_second")
+        db.commit()
+
+        assert first.created_at is not None
+        assert second.created_at is not None
+        assert second.created_at >= first.created_at
+        assert second.created_at != first.created_at

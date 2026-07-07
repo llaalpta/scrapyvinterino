@@ -195,7 +195,26 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (country) {
     parts.push(`country=${country}`);
   }
+  if (event.phase === 'catalog_candidates_received') {
+    appendNumberToken(parts, 'items', event.details, 'candidate_count');
+    appendNumberToken(parts, 'unique', event.details, 'unique_candidate_count');
+    appendNumberToken(parts, 'total', event.details, 'total_entries');
+  }
+  if (event.phase === 'baseline_snapshot_seeded' || event.phase === 'redis_seen_marked') {
+    appendNumberToken(parts, 'marked', event.details, 'marked_seen_count');
+  }
+  if (event.phase === 'redis_seen_result') {
+    appendNumberToken(parts, 'seen', event.details, 'seen_hit_count');
+    appendNumberToken(parts, 'new', event.details, 'seen_miss_count');
+  }
   return parts;
+}
+
+function appendNumberToken(parts: string[], label: string, details: Record<string, unknown>, key: string): void {
+  const value = details[key];
+  if (typeof value === 'number') {
+    parts.push(`${label}=${value}`);
+  }
 }
 
 function detailString(details: Record<string, unknown>, key: string): string | null {

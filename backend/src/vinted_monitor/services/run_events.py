@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.core.redaction import redact_sensitive_text
+from vinted_monitor.core.redaction import SENSITIVE_HEADER_TOKENS, redact_sensitive_text
 from vinted_monitor.db.models import RunEvent
 
 MAX_MESSAGE_LENGTH = 1200
 LOG_LEVELS = {"debug", "info", "warning", "error"}
+_timestamp_lock = Lock()
+_last_event_timestamp: datetime | None = None
 
 
 def record_run_event(
@@ -46,6 +50,7 @@ def record_run_event(
         auth_mode=auth_mode,
         message=_redacted_message(message),
         details=_redacted_details(details or {}),
+        created_at=_event_timestamp(),
     )
     db.add(event)
     db.flush()
@@ -54,6 +59,20 @@ def record_run_event(
 
 def list_run_events(db: Session, run_id: int) -> list[RunEvent]:
     return list(db.scalars(select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.created_at.asc(), RunEvent.id.asc())))
+
+
+def redact_run_event_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    return _redacted_details(details or {})
+
+
+def _event_timestamp() -> datetime:
+    global _last_event_timestamp
+    with _timestamp_lock:
+        current = datetime.now(UTC)
+        if _last_event_timestamp is not None and current <= _last_event_timestamp:
+            current = _last_event_timestamp + timedelta(microseconds=1)
+        _last_event_timestamp = current
+        return current
 
 
 def sanitize_url(url: str) -> str:
@@ -114,7 +133,7 @@ def _is_sensitive_key(key: str) -> bool:
     }
     if lowered in safe_keys:
         return False
-    return any(token in lowered for token in ["token", "cookie", "password", "secret", "authorization", "csrf"])
+    return any(token in lowered for token in SENSITIVE_HEADER_TOKENS)
 
 
 def _event_level(phase: str, level: str | None) -> str:

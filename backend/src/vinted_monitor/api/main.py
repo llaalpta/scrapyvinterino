@@ -50,7 +50,7 @@ from vinted_monitor.services.proxies import (
     proxy_url_for_profile,
     update_proxy_profile,
 )
-from vinted_monitor.services.run_events import list_run_events
+from vinted_monitor.services.run_events import list_run_events, redact_run_event_details
 from vinted_monitor.services.runs import (
     BaselineRequiredError,
     ManualRunProvider,
@@ -74,6 +74,7 @@ from vinted_monitor.services.search_sources import (
     SearchSourceActiveError,
     SearchSourceConfigError,
     archive_source,
+    catalog_filter_compatibility,
     create_source,
     list_sources,
     start_source_monitor,
@@ -114,6 +115,7 @@ def _source_read(source: SearchSource) -> SearchSourceRead:
         update={
             "baseline_ready": baseline_ready,
             "baseline_policy_hash": policy_hash,
+            "catalog_filter_compatibility": catalog_filter_compatibility(source.url),
         }
     )
 
@@ -374,7 +376,7 @@ def stream_monitor_events(last_event_id: int = Query(0, ge=0)):
                     "user_agent": event.user_agent,
                     "auth_mode": event.auth_mode,
                     "message": event.message,
-                    "details": event.details,
+                    "details": redact_run_event_details(event.details),
                 }
                 yield f"id: {event.id}\nevent: monitor_event\ndata: {json.dumps(payload)}\n\n"
             await asyncio.sleep(2)
@@ -397,6 +399,8 @@ def post_monitor_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (BaselineRequiredError, SeenCacheUnavailableError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -415,6 +419,8 @@ def post_monitor_baseline(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/actions", response_model=ActionRequestRead, status_code=201)

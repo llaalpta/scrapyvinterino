@@ -7,14 +7,15 @@ import uuid
 from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import urljoin
 
 from curl_cffi.requests import Session
 
 from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.core.redaction import safe_cookie_markers, safe_headers, safe_secret_marker
-from vinted_monitor.providers.browser_profiles import BrowserProfile, NavigationFlow, profile_for_impersonate, select_navigation_flow
+from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
+from vinted_monitor.providers.catalog_url import build_catalog_api_params
 from vinted_monitor.providers.datadome import DataDomeChallengeError, has_datadome_cookie, human_delay, is_datadome_challenge
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
@@ -64,7 +65,6 @@ class CurlCffiVintedCatalogProvider:
         event_sink: ProviderEventSink | None = None,
         human_delay_min: float = 1.2,
         human_delay_max: float = 3.8,
-        navigation_flow: NavigationFlow | None = None,
         session_factory: Callable[..., Any] | None = None,
         proxy_session_marker: dict[str, Any] | None = None,
     ) -> None:
@@ -77,7 +77,6 @@ class CurlCffiVintedCatalogProvider:
         self.event_sink = event_sink
         self.human_delay_min = human_delay_min
         self.human_delay_max = human_delay_max
-        self.navigation_flow = navigation_flow or select_navigation_flow()
         self.session_factory = session_factory or Session
         self.proxy_session_marker = proxy_session_marker
         self.http_session_id = str(uuid.uuid4())
@@ -91,7 +90,7 @@ class CurlCffiVintedCatalogProvider:
             self._ensure_session()
             self._diagnose_egress(attempt=retry_index + 1)
             if not self._bootstrapped:
-                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 1)
+                self._bootstrap_anonymous_session(attempt=retry_index + 1)
 
             try:
                 response = self._request_catalog_api(source, page, attempt=retry_index + 1)
@@ -106,7 +105,8 @@ class CurlCffiVintedCatalogProvider:
                     details={"attempt": retry_index + 2, "retry_reason": "session_rejected"},
                 )
                 self._reset_session()
-                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 2)
+                self._diagnose_egress(attempt=retry_index + 2)
+                self._bootstrap_anonymous_session(attempt=retry_index + 2)
                 response = self._request_catalog_api(source, page, attempt=retry_index + 2)
                 return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
             except VintedCatalogProviderError as exc:
@@ -261,6 +261,7 @@ class CurlCffiVintedCatalogProvider:
                 "page": params["page"],
                 "per_page": params["per_page"],
                 "order": params["order"],
+                "api_params": params,
                 "session_marker_count": len(cookie_names),
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
@@ -410,29 +411,22 @@ class CurlCffiVintedCatalogProvider:
         )
         return payload
 
-    def _bootstrap_anonymous_session(self, referer_url: str, *, attempt: int) -> None:
+    def _bootstrap_anonymous_session(self, *, attempt: int) -> None:
         assert self._session is not None
-        flow = self.navigation_flow
-        if flow.needs_home_visit:
-            self._visit_home_before_catalog(attempt=attempt)
-
-        bootstrap_url = referer_url
-        referer = flow.bootstrap_referer
-        if referer is None and flow.name in {"home_navigation", "internal_referral"}:
-            referer = str(self.settings.vinted_base_url)
-        headers = dict(self.profile.build_bootstrap_headers(referer=referer))
+        bootstrap_url = urljoin(str(self.settings.vinted_base_url), "/")
+        headers = dict(self.profile.build_bootstrap_headers(referer=None))
 
         self._emit_event(
             phase="anonymous_session_bootstrap_start",
             method="GET",
             url=bootstrap_url,
-            message="Obtaining anonymous public Vinted session via curl_cffi",
+            message="Obtaining anonymous public Vinted session from base domain via curl_cffi",
             details={
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
-                "navigation_flow": flow.name,
+                "bootstrap_origin": "base_domain",
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
@@ -475,7 +469,7 @@ class CurlCffiVintedCatalogProvider:
                 details={
                     "attempt": attempt,
                     "browser_profile": self.profile.name,
-                    "navigation_flow": flow.name,
+                    "bootstrap_origin": "base_domain",
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
@@ -513,7 +507,7 @@ class CurlCffiVintedCatalogProvider:
             url=bootstrap_url,
             status_code=response.status_code,
             duration_ms=bootstrap_duration_ms,
-            message="Anonymous public session obtained via curl_cffi",
+            message="Anonymous public session obtained from base domain via curl_cffi",
             details={
                 "session_marker_count": len(cookie_names),
                 "datadome_cookie": dd_present,
@@ -521,7 +515,7 @@ class CurlCffiVintedCatalogProvider:
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
-                "navigation_flow": flow.name,
+                "bootstrap_origin": "base_domain",
                 "http_session": self._session_marker(),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
@@ -533,109 +527,7 @@ class CurlCffiVintedCatalogProvider:
         self._emit_event(
             phase="human_delay_applied",
             duration_ms=round(delay_applied * 1000),
-            details={"min_seconds": self.human_delay_min, "max_seconds": self.human_delay_max, "navigation_flow": flow.name},
-        )
-
-    def _visit_home_before_catalog(self, *, attempt: int) -> None:
-        assert self._session is not None
-        home_url = urljoin(str(self.settings.vinted_base_url), "/")
-        headers = dict(self.profile.build_bootstrap_headers(referer=None))
-        self._emit_event(
-            phase="navigation_home_request_start",
-            method="GET",
-            url=home_url,
-            details={
-                "attempt": attempt,
-                "browser_profile": self.profile.name,
-                "navigation_flow": self.navigation_flow.name,
-                "http_session": self._session_marker(),
-                "request_headers": safe_headers(headers),
-                "cookies_before": self._cookie_markers(),
-            },
-        )
-        started_at = time.perf_counter()
-        try:
-            response = self._session.get(
-                home_url,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-            )
-        except Exception as exc:
-            self._emit_event(
-                phase="navigation_home_request_error",
-                method="GET",
-                url=home_url,
-                duration_ms=_elapsed_ms(started_at),
-                level="error",
-                message=str(exc),
-                details={
-                    "timeout_ms": self.timeout_ms,
-                    "attempt": attempt,
-                    "http_session": self._session_marker(),
-                    "request_headers": safe_headers(headers),
-                    "cookies_after": self._cookie_markers(),
-                },
-            )
-            raise VintedCatalogProviderError(f"Vinted home navigation failed: {exc}") from exc
-
-        if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
-            self._emit_event(
-                phase="datadome_challenge_detected",
-                method="GET",
-                url=home_url,
-                status_code=response.status_code,
-                duration_ms=_elapsed_ms(started_at),
-                level="warning",
-                message="DataDome challenge detected during home navigation",
-                details={
-                    "attempt": attempt,
-                    "browser_profile": self.profile.name,
-                    "navigation_flow": self.navigation_flow.name,
-                    "http_session": self._session_marker(),
-                    "response_headers": safe_headers(dict(response.headers)),
-                    "cookies_after": self._cookie_markers(),
-                },
-            )
-            raise DataDomeChallengeError("DataDome challenge detected during home navigation")
-
-        if response.status_code >= 400:
-            self._emit_event(
-                phase="navigation_home_request_error",
-                method="GET",
-                url=home_url,
-                status_code=response.status_code,
-                duration_ms=_elapsed_ms(started_at),
-                level="error",
-                message=f"Home navigation returned HTTP {response.status_code}",
-                details={
-                    "timeout_ms": self.timeout_ms,
-                    "attempt": attempt,
-                    "http_session": self._session_marker(),
-                    "response_headers": safe_headers(dict(response.headers)),
-                    "cookies_after": self._cookie_markers(),
-                },
-            )
-            raise VintedCatalogProviderError(f"Vinted home navigation failed: HTTP {response.status_code}")
-
-        self._emit_event(
-            phase="navigation_home_request_success",
-            method="GET",
-            url=home_url,
-            status_code=response.status_code,
-            duration_ms=_elapsed_ms(started_at),
-            details={
-                "attempt": attempt,
-                "navigation_flow": self.navigation_flow.name,
-                "http_session": self._session_marker(),
-                "response_headers": safe_headers(dict(response.headers)),
-                "cookies_after": self._cookie_markers(),
-            },
-        )
-        delay_applied = human_delay(1.5, 3.0)
-        self._emit_event(
-            phase="navigation_delay_applied",
-            duration_ms=round(delay_applied * 1000),
-            details={"min_seconds": 1.5, "max_seconds": 3.0, "navigation_flow": self.navigation_flow.name},
+            details={"min_seconds": self.human_delay_min, "max_seconds": self.human_delay_max, "bootstrap_origin": "base_domain"},
         )
 
     def _emit_event(
@@ -736,34 +628,6 @@ class CurlCffiVintedCatalogProvider:
 # ---------------------------------------------------------------------------
 
 
-def build_catalog_api_params(source_url: str, page: int | None, per_page: int) -> dict[str, str | int]:
-    query = parse_qs(urlparse(source_url).query, keep_blank_values=True)
-    params: dict[str, str | int] = {
-        "page": page or 1,
-        "per_page": per_page,
-        "order": "newest_first",
-    }
-
-    direct_keys = ["search_text", "price_from", "price_to", "currency"]
-    for key in direct_keys:
-        value = _first_query_value(query, key)
-        if value is not None:
-            params[key] = value
-
-    repeated_mapping = {
-        "catalog[]": "catalog_ids",
-        "brand_ids[]": "brand_ids",
-        "size_ids[]": "size_ids",
-        "status_ids[]": "status_ids",
-    }
-    for public_key, api_key in repeated_mapping.items():
-        values = query.get(public_key) or query.get(public_key.removesuffix("[]")) or []
-        if values:
-            params[api_key] = ",".join(values)
-
-    return params
-
-
 def _egress_details_from_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -775,14 +639,6 @@ def _egress_details_from_payload(payload: Any) -> dict[str, Any]:
         "asn": payload.get("asn") or connection.get("asn"),
         "org": payload.get("org") or payload.get("isp") or connection.get("org"),
     }
-
-
-def _first_query_value(query: Mapping[str, list[str]], key: str) -> str | None:
-    values = query.get(key)
-    if not values:
-        return None
-    return values[0]
-
 
 def _elapsed_ms(started_at: float) -> int:
     return max(round((time.perf_counter() - started_at) * 1000), 0)

@@ -45,6 +45,10 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Accepted path: `/catalog` or `/catalog/`.
 - Surrounding whitespace is stripped before saving; the remaining URL string is preserved as entered.
 - Query parameters are parsed with blank values preserved and stored by sorted key.
+- Only catalog URL filters that can be translated to the fast catalog API are accepted.
+- Supported product filters are `search_text`, `catalog[]`, `brand_ids[]`, `size_ids[]`, `status_ids[]`, `price_from`, `price_to`, and `currency`.
+- `page`, `time`, and `order` are accepted but ignored by execution because runs force page `1` and `newest_first`.
+- Any other query parameter is rejected with a clear validation error before saving.
 - URL validation must not call Vinted and must not trigger scraping.
 
 ## Acceptance Criteria
@@ -62,6 +66,8 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - The original URL is preserved unchanged except for surrounding whitespace trimming.
 - Query parameters are stored in normalized JSON.
 - Invalid URL input is rejected by the API.
+- URLs with unsupported catalog filters are rejected by the API and do not create or update monitors.
+- Monitor details show whether saved URL filters are compatible with the fast catalog API.
 - Creating a monitor does not trigger scraping.
 
 ## Verification
@@ -78,6 +84,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
   - stopped monitor detail exposes editable configuration and archive confirmation dialog.
   - mobile monitor layout keeps the table above the detail without horizontal overflow and scrolls the selected detail into view.
 - Confirm `search_sources` row includes `url` and `normalized_query`.
+- Confirm URLs with unsupported filters are rejected without mutating persisted monitors.
 - Confirm archived monitors keep historical runs and disappear from the default PWA monitor list.
 
 ## Audit

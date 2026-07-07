@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from vinted_monitor.services.run_events import redact_run_event_details
 from vinted_monitor.services.scheduler import SchedulerConfigError, normalize_scheduler_config
 from vinted_monitor.services.search_sources import validate_search_source_name, validate_vinted_catalog_url
 
@@ -44,6 +45,7 @@ class SearchSourceRead(BaseModel):
     archived_at: datetime | None
     baseline_ready: bool = False
     baseline_policy_hash: str | None = None
+    catalog_filter_compatibility: dict[str, Any] = Field(default_factory=dict)
 
 
 class SearchSourceUpdate(BaseModel):
@@ -319,6 +321,11 @@ class RunEventRead(BaseModel):
     message: str | None
     details: dict[str, Any]
     created_at: datetime
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def validate_details(cls, value: dict[str, Any] | None) -> dict[str, Any]:
+        return redact_run_event_details(value)
 
 
 class ActionRequestCreate(BaseModel):

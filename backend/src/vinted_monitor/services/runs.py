@@ -34,6 +34,7 @@ from vinted_monitor.services.monitor_sessions import get_active_monitor_session,
 from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success, proxy_url_with_sticky_session
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.scheduler import RunEgress, choose_run_egress, get_scheduler_runtime_config
+from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
 
 RUNNING = "running"
@@ -111,6 +112,10 @@ def ensure_monitor_baseline_ready(db: Session, source_id: int, seen_cache: SeenC
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    try:
+        validate_vinted_catalog_url(source.url)
+    except ValueError as exc:
+        raise SearchSourceConfigError(str(exc)) from exc
     cache = seen_cache or get_seen_cache()
     policy_hash = monitor_policy_hash(source)
     cache.require_available()
@@ -132,6 +137,11 @@ def execute_monitor_baseline(
         raise RunAlreadyActiveError("Deten la sesion antes de recalibrar el listado inicial")
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
+    try:
+        validate_vinted_catalog_url(source.url)
+    except ValueError as exc:
+        raise SearchSourceConfigError(str(exc)) from exc
+    catalog_filters = catalog_filter_compatibility(source.url)
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
@@ -206,6 +216,7 @@ def execute_monitor_baseline(
             "monitor_mode": source.monitor_mode,
             "policy_hash": policy_hash,
             "filter_snapshot": filter_snapshot,
+            "catalog_filter_compatibility": catalog_filters,
             "runtime_config": {
                 "catalog_per_page": runtime_config.catalog_per_page,
                 "request_timeout_ms": runtime_config.request_timeout_ms,
@@ -367,6 +378,11 @@ def execute_monitor_run(
         raise SearchSourceInactiveError(f"Search source {source_id} is inactive")
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
+    try:
+        validate_vinted_catalog_url(source.url)
+    except ValueError as exc:
+        raise SearchSourceConfigError(str(exc)) from exc
+    catalog_filters = catalog_filter_compatibility(source.url)
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
@@ -447,6 +463,7 @@ def execute_monitor_run(
             "monitor_mode": source.monitor_mode,
             "policy_hash": policy_hash,
             "filter_snapshot": filter_snapshot,
+            "catalog_filter_compatibility": catalog_filters,
             "runtime_config": {
                 "catalog_per_page": runtime_config.catalog_per_page,
                 "detail_max_candidates_per_run": runtime_config.detail_max_candidates_per_run,

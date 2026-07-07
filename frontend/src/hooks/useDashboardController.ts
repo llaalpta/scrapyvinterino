@@ -211,6 +211,10 @@ export function useDashboardController() {
       setError('Recalibra el listado inicial antes de ejecutar este monitor');
       return;
     }
+    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+      setError('Corrige los filtros de URL no soportados antes de ejecutar este monitor');
+      return;
+    }
     setRunningSessionId(source.id);
     try {
       const run = source.monitor_mode === 'manual' ? await runMonitor(source.id) : await startMonitor(source.id);
@@ -243,6 +247,10 @@ export function useDashboardController() {
     setError(null);
     if (sourceDraftHasChanges(source, draft)) {
       setError('Guarda los cambios antes de recalibrar el listado inicial');
+      return;
+    }
+    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+      setError('Corrige los filtros de URL no soportados antes de recalibrar el listado inicial');
       return;
     }
     setSavingSourceId(source.id);
