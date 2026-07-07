@@ -353,9 +353,6 @@ export function createProxyProfile(payload: {
   username?: string;
   password?: string;
   country_code?: string;
-  locale?: string;
-  accept_language?: string;
-  screen?: string;
   max_concurrent_runs?: number;
   is_active?: boolean;
 }): Promise<ProxyProfile> {
@@ -364,7 +361,7 @@ export function createProxyProfile(payload: {
 
 export function updateProxyProfile(
   profileId: number,
-  payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code' | 'locale' | 'accept_language' | 'screen'>>
+  payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code'>>
 ): Promise<ProxyProfile> {
   return patchJson<ProxyProfile>(`/api/proxy-profiles/${profileId}`, payload);
 }

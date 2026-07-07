@@ -49,10 +49,7 @@ const emptyProxyDraft: ProxyDraft = {
   maxConcurrentRuns: '1',
   username: '',
   password: '',
-  countryCode: 'ES',
-  locale: 'es-ES',
-  acceptLanguage: 'es-ES,es;q=0.9,en;q=0.8',
-  screen: '1920x1080'
+  countryCode: 'ES'
 };
 const DEFAULT_MONITOR_STATS_RANGE: MonitorStatsRange = 'all';
 const MONITOR_RUN_HISTORY_LIMIT = 1000;
@@ -181,9 +178,6 @@ export function useDashboardController() {
         port: Number(proxyDraft.port),
         max_concurrent_runs: Number(proxyDraft.maxConcurrentRuns),
         country_code: proxyDraft.countryCode,
-        locale: proxyDraft.locale,
-        accept_language: proxyDraft.acceptLanguage,
-        screen: proxyDraft.screen,
         username: proxyDraft.username || undefined,
         password: proxyDraft.password || undefined
       });

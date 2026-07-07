@@ -15,9 +15,6 @@ from vinted_monitor.db.models import ProxyProfile
 
 PROXY_KINDS = {"own", "datacenter", "residential"}
 DEFAULT_PROXY_COUNTRY_CODE = "ES"
-DEFAULT_PROXY_LOCALE = "es-ES"
-DEFAULT_PROXY_ACCEPT_LANGUAGE = "es-ES,es;q=0.9,en;q=0.8"
-DEFAULT_PROXY_SCREEN = "1920x1080"
 SCREEN_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 
 
@@ -49,6 +46,32 @@ class ProxyPublicFields:
     last_test_status: str | None
     last_test_ip: str | None
     last_test_error: str | None
+
+
+@dataclass(frozen=True)
+class ProxyContextPreset:
+    country_code: str
+    locale: str
+    accept_language: str
+    screen: str
+
+
+def _context_preset(country_code: str, locale: str, accept_language: str, screen: str) -> ProxyContextPreset:
+    return ProxyContextPreset(
+        country_code=_validate_country_code(country_code),
+        locale=_validate_locale(locale, country_code),
+        accept_language=_validate_accept_language(accept_language, locale),
+        screen=_validate_screen(screen),
+    )
+
+
+def resolve_proxy_context(country_code: str = DEFAULT_PROXY_COUNTRY_CODE) -> ProxyContextPreset:
+    code = _validate_country_code(country_code)
+    preset = PROXY_CONTEXT_PRESETS.get(code)
+    if preset is None:
+        supported = ", ".join(sorted(PROXY_CONTEXT_PRESETS))
+        raise ValueError(f"Unsupported proxy country_code {code}; add an internal egress context preset. Supported: {supported}")
+    return preset
 
 
 def list_proxy_profiles(db: Session) -> list[ProxyProfile]:
@@ -83,14 +106,12 @@ def create_proxy_profile(
     username: str | None,
     password: str | None,
     country_code: str = DEFAULT_PROXY_COUNTRY_CODE,
-    locale: str = DEFAULT_PROXY_LOCALE,
-    accept_language: str = DEFAULT_PROXY_ACCEPT_LANGUAGE,
-    screen: str = DEFAULT_PROXY_SCREEN,
     max_concurrent_runs: int = 1,
     is_active: bool = True,
     settings: Settings | None = None,
 ) -> ProxyProfile:
     settings = settings or get_settings()
+    context = resolve_proxy_context(country_code)
     profile = ProxyProfile(
         name=_validate_name(name),
         scheme=_validate_scheme(scheme),
@@ -99,10 +120,10 @@ def create_proxy_profile(
         port=_validate_port(port),
         username=username.strip() if username else None,
         password_encrypted=_encrypt_password(password, settings) if password else None,
-        country_code=_validate_country_code(country_code),
-        locale=_validate_locale(locale, country_code),
-        accept_language=_validate_accept_language(accept_language, locale),
-        screen=_validate_screen(screen),
+        country_code=context.country_code,
+        locale=context.locale,
+        accept_language=context.accept_language,
+        screen=context.screen,
         max_concurrent_runs=_validate_max_concurrent_runs(max_concurrent_runs),
         is_active=is_active,
     )
@@ -125,9 +146,6 @@ def update_proxy_profile(
     password: str | None = None,
     clear_password: bool = False,
     country_code: str | None = None,
-    locale: str | None = None,
-    accept_language: str | None = None,
-    screen: str | None = None,
     max_concurrent_runs: int | None = None,
     is_active: bool | None = None,
     settings: Settings | None = None,
@@ -152,20 +170,12 @@ def update_proxy_profile(
         profile.password_encrypted = None
     elif password:
         profile.password_encrypted = _encrypt_password(password, settings)
-    next_country_code = _validate_country_code(country_code) if country_code is not None else profile.country_code
-    next_locale = _validate_locale(locale if locale is not None else profile.locale, next_country_code)
-    next_accept_language = _validate_accept_language(
-        accept_language if accept_language is not None else profile.accept_language,
-        next_locale,
-    )
     if country_code is not None:
-        profile.country_code = next_country_code
-    if locale is not None or country_code is not None:
-        profile.locale = next_locale
-    if accept_language is not None or locale is not None or country_code is not None:
-        profile.accept_language = next_accept_language
-    if screen is not None:
-        profile.screen = _validate_screen(screen)
+        context = resolve_proxy_context(country_code)
+        profile.country_code = context.country_code
+        profile.locale = context.locale
+        profile.accept_language = context.accept_language
+        profile.screen = context.screen
     if max_concurrent_runs is not None:
         profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
@@ -363,6 +373,17 @@ def _validate_screen(value: str) -> str:
     if not SCREEN_PATTERN.match(cleaned):
         raise ValueError("Proxy screen must use WIDTHxHEIGHT format")
     return cleaned
+
+
+PROXY_CONTEXT_PRESETS: dict[str, ProxyContextPreset] = {
+    "ES": _context_preset("ES", "es-ES", "es-ES,es;q=0.9,en;q=0.8", "1920x1080"),
+    "FR": _context_preset("FR", "fr-FR", "fr-FR,fr;q=0.9,en;q=0.8", "1920x1080"),
+    "IT": _context_preset("IT", "it-IT", "it-IT,it;q=0.9,en;q=0.8", "1920x1080"),
+    "DE": _context_preset("DE", "de-DE", "de-DE,de;q=0.9,en;q=0.8", "1920x1080"),
+    "PT": _context_preset("PT", "pt-PT", "pt-PT,pt;q=0.9,en;q=0.8", "1920x1080"),
+    "NL": _context_preset("NL", "nl-NL", "nl-NL,nl;q=0.9,en;q=0.8", "1920x1080"),
+    "BE": _context_preset("BE", "fr-BE", "fr-BE,fr;q=0.9,nl;q=0.8,en;q=0.7", "1920x1080"),
+}
 
 
 def _validate_host(host: str) -> str:

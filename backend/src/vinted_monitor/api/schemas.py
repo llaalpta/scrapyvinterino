@@ -151,9 +151,6 @@ class ProxyProfileCreate(BaseModel):
     username: str | None = None
     password: str | None = None
     country_code: str = "ES"
-    locale: str = "es-ES"
-    accept_language: str = "es-ES,es;q=0.9,en;q=0.8"
-    screen: str = "1920x1080"
     max_concurrent_runs: int = Field(default=1, ge=1, le=10)
     is_active: bool = True
 
@@ -170,9 +167,6 @@ class ProxyProfileUpdate(BaseModel):
     password: str | None = None
     clear_password: bool = False
     country_code: str | None = None
-    locale: str | None = None
-    accept_language: str | None = None
-    screen: str | None = None
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=10)
     is_active: bool | None = None
 

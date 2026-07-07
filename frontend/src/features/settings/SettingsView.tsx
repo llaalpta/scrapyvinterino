@@ -246,22 +246,6 @@ export function SettingsView({
               />
             </label>
             <label>
-              Locale
-              <input value={proxyDraft.locale} onChange={(event) => setProxyDraft({ ...proxyDraft, locale: event.target.value })} required />
-            </label>
-            <label className="wide-field">
-              Accept-Language
-              <input
-                value={proxyDraft.acceptLanguage}
-                onChange={(event) => setProxyDraft({ ...proxyDraft, acceptLanguage: event.target.value })}
-                required
-              />
-            </label>
-            <label>
-              Screen
-              <input value={proxyDraft.screen} onChange={(event) => setProxyDraft({ ...proxyDraft, screen: event.target.value })} required />
-            </label>
-            <label>
               Usuario
               <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} />
             </label>
@@ -290,7 +274,7 @@ export function SettingsView({
                     {proxy.host}:{proxy.port} | max {proxy.max_concurrent_runs}
                   </span>
                   <span>
-                    {proxy.country_code} | {proxy.locale} | {proxy.screen}
+                    Contexto resuelto: {proxy.country_code} | {proxy.locale} | {proxy.screen}
                   </span>
                 </div>
                 <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
@@ -413,7 +397,4 @@ export type ProxyDraft = {
   username: string;
   password: string;
   countryCode: string;
-  locale: string;
-  acceptLanguage: string;
-  screen: string;
 };

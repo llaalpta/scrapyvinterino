@@ -8,7 +8,7 @@
 - Mensajes de error persistidos deben pasar por redaccion antes de guardarse en `runs`, `errors` o campos de error de entidades.
 - Proxies residenciales son opcionales; credenciales cifradas en `proxy_profiles` con clave local.
 - El acceso directo al catalogo publico de Vinted esta bloqueado por defecto mediante `VINTED_DIRECT_CATALOG_ENABLED=false`; para trafico real se debe configurar un proxy compatible con el pais objetivo.
-- Cada proxy de Vinted debe declarar pais, locale, `Accept-Language` y screen coherentes. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
+- Cada proxy de Vinted debe declarar pais; locale, `Accept-Language` y screen se resuelven desde presets internos y no son editables desde la PWA/API. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
 - No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML ni payloads raw completos en logs o respuestas API.
 - Los eventos de run pueden guardar metodo, fase, nivel, URL saneada, headers saneados, status, duracion en ms, timeout, intento/retry, proxy, IP de salida, pais, user-agent, fingerprints y errores de Vinted redacted/truncados.
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.

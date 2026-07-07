@@ -79,6 +79,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 - Runtime defaults moved from `chrome120` to `chrome146` to align the provider profile with the current HAR-derived catalog navigation.
 - The provider no longer bootstraps against the base Vinted domain. Each run uses the monitor's saved `/catalog?...` URL as the document bootstrap, then calls `/api/v2/catalog/items` with the same session, cookies, proxy identity, referer, CSRF token and anon id when those markers are present.
+- Proxy profiles now accept only connection data and country as user input. Locale, `Accept-Language`, and screen are resolved from internal country presets, stored for diagnostics, and rejected if sent through legacy create/update payloads.
 - Empty `search_by_image_uuid` and `search_by_image_id` URL parameters are accepted and ignored; non-empty values remain unsupported because image-search filters are not translated to the fast API.
 - Run events record `bootstrap_origin=catalog_document`, CSRF/anon presence booleans, and safe markers only. Raw cookies, CSRF values, anon ids and Vinted session tokens remain memory-only.
 

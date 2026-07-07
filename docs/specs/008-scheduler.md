@@ -30,7 +30,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
 - Use a deterministic fast catalog flow: create one `curl_cffi` session, diagnose egress with it when configured, bootstrap the saved public catalog document URL, extract anonymous session context such as CSRF/anon markers into memory only, apply one human delay, then call `/api/v2/catalog/items` with API parameters translated from the same saved catalog URL and with browser-coherent headers.
 - Keep proxy usage globally managed by the scheduler.
-- Support UI-managed proxy profiles with encrypted credentials and per-profile country, locale, `Accept-Language`, and screen context.
+- Support UI-managed proxy profiles with encrypted credentials and a declared proxy country; locale, `Accept-Language`, and screen context are resolved internally from country/domain presets.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
 - Use active global proxies matching the target country before direct outbound access; direct access is allowed only when both the UI setting and the deployment gate permit it.
 
@@ -55,7 +55,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - per-monitor concurrency limit, default `1`;
   - direct-without-proxy UI enable flag and direct concurrency limit;
   - deployment direct-catalog gate `VINTED_DIRECT_CATALOG_ENABLED`, default false;
-  - target Vinted country/locale headers: `VINTED_TARGET_COUNTRY_CODE`, `VINTED_TARGET_LOCALE`, `VINTED_TARGET_ACCEPT_LANGUAGE`, and `VINTED_TARGET_SCREEN`;
+  - target Vinted country and internal locale/header/screen presets, with deployment-owned defaults for direct diagnostics;
   - per-proxy run concurrency limit stored on each proxy profile;
   - catalog results per run, detail fetch candidate limit, request timeout, proxy cooldown, and stop-after-failures settings;
   - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
@@ -144,6 +144,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
 - Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
+- Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, and screen are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
 - Direct requests behave exactly as monitor runs only when global direct fallback is enabled in the UI, `VINTED_DIRECT_CATALOG_ENABLED=true`, and no matching proxy is available.
 - Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
 - Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
@@ -178,6 +179,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
 - Confirm no monitor API or PWA path exposes proxy selection per monitor.
+- Confirm proxy API/PWA writes reject manual `locale`, `Accept-Language`, and screen fields while read views expose only the resolved context for diagnostics.
 - Confirm scheduler capacity reflects active proxy capacity plus allowed direct capacity.
 - Confirm periodic activation is blocked when scheduler is disabled or capacity is exhausted.
 - Confirm run metadata records `egress_mode=proxy` with proxy details when a proxy is selected and `egress_mode=direct` when direct fallback is used.
