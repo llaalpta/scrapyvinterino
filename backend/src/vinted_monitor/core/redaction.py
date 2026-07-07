@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from http.cookies import SimpleCookie
 from typing import Any
 
 SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
@@ -33,9 +34,9 @@ def safe_secret_marker(name: str, value: str, *, kind: str = "session") -> dict[
 def mask_secret(value: str) -> str:
     if not value:
         return "<empty>"
-    if len(value) < 10:
+    if len(value) < 12:
         return "<masked>"
-    return f"{value[:3]}****{value[-3:]}"
+    return f"{value[:4]}****{value[-4:]}"
 
 
 def fingerprint_secret(value: str) -> str:
@@ -63,5 +64,49 @@ def safe_cookie_markers(cookies: Any) -> list[dict[str, Any]]:
 
 
 def _iter_cookies(cookies: Any) -> Iterable[Any]:
+    if isinstance(cookies, dict):
+        return [
+            type("CookieMarker", (), {"name": str(name), "value": str(value)})()
+            for name, value in cookies.items()
+        ]
     jar = getattr(cookies, "jar", cookies)
     return list(jar) if jar is not None else []
+
+
+def safe_headers(headers: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not headers:
+        return {}
+    safe: dict[str, Any] = {}
+    for key, value in headers.items():
+        name = str(key)
+        text_value = str(value)
+        lowered = name.lower()
+        if lowered in {"cookie", "set-cookie"}:
+            safe[name] = safe_cookie_header_markers(text_value, kind=lowered)
+        elif _is_sensitive_key(name):
+            safe[name] = safe_secret_marker(name, text_value, kind="header")
+        else:
+            safe[name] = redact_sensitive_text(text_value)[:1200]
+    return safe
+
+
+def safe_cookie_header_markers(header_value: str, *, kind: str = "cookie") -> list[dict[str, Any]]:
+    parsed = SimpleCookie()
+    try:
+        parsed.load(header_value)
+    except Exception:
+        return [safe_secret_marker(kind, header_value, kind=kind)]
+    markers: list[dict[str, Any]] = []
+    for name, morsel in parsed.items():
+        marker = safe_secret_marker(name, morsel.value, kind=kind)
+        if morsel["domain"]:
+            marker["domain"] = morsel["domain"]
+        if morsel["expires"]:
+            marker["expires"] = morsel["expires"]
+        markers.append(marker)
+    return markers or [safe_secret_marker(kind, header_value, kind=kind)]
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in ["token", "cookie", "password", "secret", "authorization", "csrf"])

@@ -200,6 +200,8 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache)
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+        phases = [event.phase for event in events]
 
         assert run.status == SUCCESS
         assert run.items_found == 2
@@ -208,6 +210,17 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         assert item_count == 2
         assert opportunity_count == 2
         assert sorted(cache.marked_seen) == ["pytest-run-item-0", "pytest-run-item-1"]
+        assert "run_config_resolved" in phases
+        assert "egress_selected" in phases
+        assert "catalog_candidates_received" in phases
+        assert phases.count("candidate_evaluation_start") == 2
+        assert phases.count("candidate_detail_not_required") == 2
+        assert phases.count("candidate_filter_decision") == 2
+        assert phases.count("item_persisted") == 2
+        assert phases.count("opportunity_created") == 2
+        assert "redis_seen_marked" in phases
+        assert next(event for event in events if event.phase == "catalog_candidates_received").details["candidate_count"] == 2
+        assert next(event for event in events if event.phase == "redis_seen_marked").details["marked_seen_count"] == 2
 
 
 def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
@@ -279,9 +292,12 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert created_providers[0].kwargs["proxy_url"].endswith(":@proxy.example:8000")
         assert run.runtime_metadata["proxy_profile_id"] == proxy.id
         assert run.runtime_metadata["proxy_session_id_prefix"]
+        assert run.runtime_metadata["proxy_sticky_session"]["masked"]
         run_started = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "run_started"))
         assert run_started is not None
         assert run_started.details["proxy_session_id_prefix"] == run.runtime_metadata["proxy_session_id_prefix"]
+        assert run_started.details["proxy_sticky_session"] == run.runtime_metadata["proxy_sticky_session"]
+        assert created_providers[0].kwargs["proxy_session_marker"] == run.runtime_metadata["proxy_sticky_session"]
 
 
 def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:

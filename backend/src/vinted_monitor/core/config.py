@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     human_delay_max_seconds: float = 3.8
     datadome_challenge_penalty_multiplier: int = 2
     proxy_sticky_username_template: str = "{username}-session-{session_id}"
+    egress_diagnostic_url: str | None = "https://ipwho.is/"
 
     scheduler_enabled: bool = False
     scheduler_max_concurrent_runs: int = 2

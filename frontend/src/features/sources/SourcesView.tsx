@@ -2,7 +2,7 @@ import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, use
 import { Eraser, FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
 import { monitorEventsStreamUrl, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
-import { RunEventEntry } from '../runs/RunsView';
+import { eventSearchText, RunEventEntry } from '../runs/RunsView';
 import { buildSourceDraft, filterTermLabelFromDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
@@ -383,17 +383,57 @@ function MonitorEventTimeline({
     () => [...events].sort((left, right) => left.id - right.id),
     [events]
   );
+  const [levelFilter, setLevelFilter] = useState<RunEvent['level'] | 'all'>('all');
+  const [searchText, setSearchText] = useState('');
+  const normalizedSearch = searchText.trim().toLowerCase();
+  const visibleEvents = useMemo(
+    () =>
+      orderedEvents.filter((event) => {
+        if (levelFilter !== 'all' && event.level !== levelFilter) {
+          return false;
+        }
+        return normalizedSearch === '' || eventSearchText(event).includes(normalizedSearch);
+      }),
+    [levelFilter, normalizedSearch, orderedEvents]
+  );
+  const filterHasMatches = visibleEvents.length > 0;
+  const hasActiveFilter = levelFilter !== 'all' || normalizedSearch !== '';
 
   return (
     <div className="run-events monitor-event-timeline">
-      <div className={`event-stream-status ${streamStatus ?? 'connected'}`}>
-        <RefreshCw size={14} />
-        <span>{streamStatus ? monitorStreamLabel(streamStatus) : 'Historico acumulado'}</span>
+      <div className="event-log-toolbar">
+        <div className={`event-stream-status ${streamStatus ?? 'connected'}`}>
+          <RefreshCw size={14} />
+          <span>{streamStatus ? monitorStreamLabel(streamStatus) : 'Historico acumulado'}</span>
+        </div>
+        <div className="event-log-controls">
+          <select
+            aria-label="Filtrar logs por nivel"
+            value={levelFilter}
+            onChange={(event) => setLevelFilter(event.target.value as RunEvent['level'] | 'all')}
+          >
+            <option value="all">Todos los niveles</option>
+            <option value="info">Info</option>
+            <option value="debug">Debug</option>
+            <option value="warning">Warning</option>
+            <option value="error">Error</option>
+          </select>
+          <input
+            aria-label="Buscar logs"
+            placeholder="Buscar logs"
+            type="search"
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+          />
+        </div>
       </div>
       {loading ? <p className="event-empty">Cargando logs acumulados...</p> : null}
       {!loading && viewCleared ? <p className="event-empty">Vista limpia. Los nuevos eventos apareceran aqui.</p> : null}
       {!loading && !viewCleared && orderedEvents.length === 0 ? <p className="event-empty">Sin logs acumulados para este monitor.</p> : null}
-      {orderedEvents.map((event) => (
+      {!loading && !viewCleared && orderedEvents.length > 0 && hasActiveFilter && !filterHasMatches ? (
+        <p className="event-empty">Sin coincidencias para el filtro actual.</p>
+      ) : null}
+      {visibleEvents.map((event) => (
         <RunEventEntry event={event} key={event.id} showRunId />
       ))}
     </div>

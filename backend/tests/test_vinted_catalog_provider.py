@@ -306,7 +306,7 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=NavigationFlow(name="internal_referral", bootstrap_referer=None, needs_home_visit=False),
         session_factory=fake_session_factory(handler, calls),
     )
@@ -329,7 +329,7 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=NavigationFlow(name="google_referral", bootstrap_referer="https://www.google.com/", needs_home_visit=False),
         session_factory=fake_session_factory(handler, calls),
         event_sink=lambda **event: events.append(event),
@@ -339,17 +339,101 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
 
     phases = [event["phase"] for event in events]
     assert phases == [
+        "http_session_created",
         "anonymous_session_bootstrap_start",
         "anonymous_session_bootstrap_success",
         "human_delay_applied",
         "catalog_api_request_start",
         "catalog_api_request_success",
     ]
-    assert events[0]["details"]["navigation_flow"] == "google_referral"
-    assert events[1]["details"]["datadome_cookie"] is True
-    assert "bootstrap_duration_ms" in events[1]["details"]
-    assert events[3]["details"]["browser_profile"] == provider.profile.name
+    assert events[0]["details"]["http_session"]["masked"]
+    assert events[1]["details"]["navigation_flow"] == "google_referral"
+    assert events[2]["details"]["datadome_cookie"] is True
+    assert "bootstrap_duration_ms" in events[2]["details"]
+    assert events[4]["details"]["browser_profile"] == provider.profile.name
     assert "public-marker" not in json.dumps(events)
+
+
+def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES", "connection": {"asn": 64500, "org": "Test ISP"}},
+                headers={"content-type": "application/json", "set-cookie": "diagnostic_cookie=diag-secret-value; Path=/;"},
+            )
+        if path(call) == "/catalog":
+            assert call["cookies"]["diagnostic_cookie"] == "diag-secret-value"
+            return FakeResponse(
+                200,
+                text="<html>bootstrap</html>",
+                headers={"set-cookie": "access_token_web=anonymous-secret-value; Path=/;"},
+            )
+        if path(call) == "/api/v2/catalog/items":
+            assert call["cookies"]["access_token_web"] == "anonymous-secret-value"
+            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+        return FakeResponse(404)
+
+    proxy_session = {
+        "kind": "proxy_session",
+        "name": "proxy_sticky_session_id",
+        "masked": "abcd****wxyz",
+        "length": 36,
+        "fingerprint": "sha256:test",
+    }
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        navigation_flow=INTERNAL_FLOW,
+        session_factory=fake_session_factory(handler, calls),
+        proxy_session_marker=proxy_session,
+        event_sink=lambda **event: events.append(event),
+    )
+
+    provider.search(source())
+
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
+    egress_event = next(event for event in events if event["phase"] == "egress_diagnostic_success")
+    assert egress_event["status_code"] == 200
+    assert egress_event["duration_ms"] is not None
+    assert egress_event["details"]["egress"] == {
+        "ip": "203.0.113.10",
+        "country": "Spain",
+        "country_code": "ES",
+        "asn": 64500,
+        "org": "Test ISP",
+    }
+    assert egress_event["details"]["proxy_session"] == proxy_session
+    assert "diag-secret-value" not in json.dumps(events)
+    assert "anonymous-secret-value" not in json.dumps(events)
+
+
+def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+
+    def handler(_call: dict) -> FakeResponse:
+        raise RuntimeError("detail network boom")
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        navigation_flow=INTERNAL_FLOW,
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    with pytest.raises(VintedCatalogProviderError):
+        provider.fetch_detail(candidate)
+
+    phases = [event["phase"] for event in events]
+    assert phases == ["http_session_created", "detail_http_request_start", "detail_http_request_error"]
+    error_event = events[-1]
+    assert error_event["duration_ms"] is not None
+    assert error_event["details"]["vinted_item_id"] == candidate.vinted_item_id
+    assert error_event["details"]["http_session"]["masked"]
 
 
 def test_curl_provider_uses_only_explicit_proxy() -> None:
@@ -361,7 +445,7 @@ def test_curl_provider_uses_only_explicit_proxy() -> None:
 
     CurlCffiVintedCatalogProvider(settings=Settings(), session_factory=factory)._ensure_session()
     CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         proxy_url="http://user:pass@proxy.example:8000",
         session_factory=factory,
     )._ensure_session()
@@ -387,7 +471,7 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
@@ -415,7 +499,7 @@ def test_curl_provider_raises_after_second_session_failure() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
@@ -442,7 +526,7 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
@@ -464,7 +548,7 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=INTERNAL_FLOW,
         session_factory=fake_session_factory(handler, calls),
     )
@@ -484,7 +568,7 @@ def test_curl_provider_home_navigation_visits_home_then_catalog() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(),
+        settings=Settings(egress_diagnostic_url=None),
         navigation_flow=NavigationFlow(name="home_navigation", bootstrap_referer=None, needs_home_visit=True),
         session_factory=fake_session_factory(handler, calls),
     )

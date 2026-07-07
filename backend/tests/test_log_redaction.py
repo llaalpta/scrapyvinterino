@@ -1,6 +1,6 @@
 import json
 
-from vinted_monitor.core.redaction import fingerprint_secret, mask_secret, safe_secret_marker
+from vinted_monitor.core.redaction import fingerprint_secret, mask_secret, safe_headers, safe_secret_marker
 from vinted_monitor.services.run_events import _redacted_details, sanitize_url
 
 
@@ -11,7 +11,7 @@ def test_safe_secret_marker_masks_and_fingerprints_without_raw_value() -> None:
     assert marker == {
         "kind": "cookie",
         "name": "access_token_web",
-        "masked": "ver****lue",
+        "masked": "very****alue",
         "length": 23,
         "fingerprint": fingerprint_secret("very-secret-token-value"),
     }
@@ -40,6 +40,23 @@ def test_run_event_details_are_redacted_recursively() -> None:
     assert details["message"] == "token=<redacted>"
     assert details["session_markers"][0]["masked"] == "abc****xyz"
     assert details["session_markers"][0]["fingerprint"] == "sha256:123"
+
+
+def test_safe_headers_expose_only_safe_markers_for_cookies_and_tokens() -> None:
+    headers = safe_headers(
+        {
+            "Authorization": "Bearer secret-token-value",
+            "Set-Cookie": "access_token_web=anonymous-secret-value; Path=/",
+            "User-Agent": "pytest-browser",
+        }
+    )
+
+    serialized = json.dumps(headers)
+    assert headers["Authorization"]["masked"] == "Bear****alue"
+    assert headers["Set-Cookie"][0]["masked"] == "anon****alue"
+    assert headers["User-Agent"] == "pytest-browser"
+    assert "secret-token-value" not in serialized
+    assert "anonymous-secret-value" not in serialized
 
 
 def test_sanitize_url_removes_userinfo_and_sensitive_query_values() -> None:

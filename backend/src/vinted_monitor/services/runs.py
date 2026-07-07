@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
-from vinted_monitor.core.redaction import redact_sensitive_text
+from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_marker
 from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
@@ -164,6 +164,7 @@ def execute_monitor_run(
             "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
             "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
             "proxy_session_id_prefix": (run.runtime_metadata or {}).get("proxy_session_id_prefix"),
+            "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "task_id": (run.runtime_metadata or {}).get("task_id"),
         },
     )
@@ -174,6 +175,43 @@ def execute_monitor_run(
     run.runtime_metadata = {**(run.runtime_metadata or {}), "policy_hash": policy_hash}
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_config_resolved",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "monitor_id": source.id,
+            "trigger": trigger,
+            "monitor_mode": source.monitor_mode,
+            "policy_hash": policy_hash,
+            "filter_snapshot": filter_snapshot,
+            "runtime_config": {
+                "catalog_per_page": runtime_config.catalog_per_page,
+                "detail_max_candidates_per_run": runtime_config.detail_max_candidates_per_run,
+                "request_timeout_ms": runtime_config.request_timeout_ms,
+                "stop_monitor_after_consecutive_failures": runtime_config.stop_monitor_after_consecutive_failures,
+            },
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="egress_selected",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "egress_mode": (run.runtime_metadata or {}).get("egress_mode"),
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_name": (run.runtime_metadata or {}).get("proxy_name"),
+            "proxy_kind": (run.runtime_metadata or {}).get("proxy_kind"),
+            "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
+            "direct_allowed": runtime_config.allow_direct_without_proxy,
+        },
+    )
 
     record_run_event(
         db,
@@ -258,8 +296,40 @@ def execute_monitor_run(
     processed_ids: list[str] = []
     try:
         unique_candidates = _deduplicate_candidates(result.items)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="catalog_candidates_received",
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "candidate_count": len(result.items),
+                "unique_candidate_count": len(unique_candidates),
+                "duplicate_count": max(len(result.items) - len(unique_candidates), 0),
+                "page": result.page,
+                "per_page": result.per_page,
+                "total_pages": result.total_pages,
+                "total_entries": result.total_entries,
+            },
+        )
         claimed_ids = cache.claim_unseen(source.id, policy_hash, [candidate.vinted_item_id for candidate in unique_candidates])
         monitor_new_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id in claimed_ids]
+        seen_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id not in claimed_ids]
+        if seen_candidates:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="candidate_seen_skipped",
+                level="debug",
+                proxy_profile_id=proxy_profile_id,
+                message="Candidates already seen by this monitor policy were skipped",
+                details={
+                    "seen_hit_count": len(seen_candidates),
+                    "sample_vinted_item_ids": [candidate.vinted_item_id for candidate in seen_candidates[:10]],
+                    "policy_hash": policy_hash,
+                },
+            )
         record_run_event(
             db,
             run_id=run.id,
@@ -297,6 +367,15 @@ def execute_monitor_run(
         mark_proxy_run_success(db, proxy_profile_id)
         if close_session_on_finish and run.monitor_session_id is not None:
             stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="completed")
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="monitor_session_closed",
+                proxy_profile_id=proxy_profile_id,
+                message="Monitor session closed after run completion",
+                details={"monitor_session_id": run.monitor_session_id, "reason": "completed"},
+            )
         _clear_manual_monitor_runtime(source)
         record_run_event(
             db,
@@ -317,6 +396,19 @@ def execute_monitor_run(
         )
         db.commit()
         cache.mark_seen(source.id, policy_hash, processed_ids)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="redis_seen_marked",
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "marked_seen_count": len(processed_ids),
+                "sample_vinted_item_ids": processed_ids[:10],
+                "policy_hash": policy_hash,
+            },
+        )
+        db.commit()
         db.refresh(run)
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return run
@@ -392,6 +484,7 @@ def _provider_for_egress(
         proxy_session_id = str(uuid.uuid4())
         proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
         metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
+        metadata["proxy_sticky_session"] = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
 
     return CurlCffiVintedCatalogProvider(
         settings=settings,
@@ -399,6 +492,7 @@ def _provider_for_egress(
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
         request_retries=settings.vinted_request_retries,
+        proxy_session_marker=metadata.get("proxy_sticky_session"),
     ), metadata
 
 
@@ -515,6 +609,16 @@ def _record_failed_run(
     should_stop_monitor = _should_stop_monitor_after_failure(db, run, source, force_stop_monitor=force_stop_monitor)
     if run.monitor_session_id is not None and should_stop_monitor:
         stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="failed")
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="monitor_session_closed",
+            level="warning",
+            proxy_profile_id=proxy_profile_id,
+            message="Monitor session closed after run failure",
+            details={"monitor_session_id": run.monitor_session_id, "reason": "failed"},
+        )
         source.is_active = False
         source.monitor_started_at = None
         source.monitor_until = None
@@ -593,6 +697,23 @@ def _evaluate_monitor_candidates(
     detail_attempts = 0
 
     for candidate in candidates:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="candidate_evaluation_start",
+            url=candidate.url,
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "title": candidate.title,
+                "price_amount": str(candidate.price_amount),
+                "currency": candidate.currency,
+                "brand": candidate.brand,
+                "size": candidate.size,
+                "filter_count": filter_snapshot_term_count(filters),
+            },
+        )
         transient_item = build_transient_catalog_item(candidate)
         evaluation_status = SESSION_ITEM_PASSED_WITHOUT_FILTERS if not filters else SESSION_ITEM_PASSED
         matched_terms: list[str] = []
@@ -602,6 +723,19 @@ def _evaluate_monitor_candidates(
         if filters:
             if detail_attempts < max_detail_candidates:
                 detail_attempts += 1
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="candidate_detail_required",
+                    url=candidate.url,
+                    proxy_profile_id=proxy_profile_id,
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt": detail_attempts,
+                        "max_detail_candidates": max_detail_candidates,
+                    },
+                )
                 record_run_event(
                     db,
                     run_id=run.id,
@@ -689,6 +823,35 @@ def _evaluate_monitor_candidates(
                 decision = evaluate_exclusion_filters(transient_item, filters)
                 evaluation_status = decision.status
                 matched_terms = decision.matched_terms
+        else:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="candidate_detail_not_required",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "reason": "no_filters_configured",
+                },
+            )
+
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="candidate_filter_decision",
+            level="warning" if evaluation_status == SESSION_ITEM_DISCARDED else None,
+            url=candidate.url,
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "evaluation_status": evaluation_status,
+                "matched_terms": matched_terms,
+                "detail_error": detail_error,
+            },
+        )
 
         if evaluation_status == SESSION_ITEM_DISCARDED:
             discarded += 1
@@ -720,11 +883,53 @@ def _evaluate_monitor_candidates(
             },
         )
 
+        existing_item_id = db.scalar(select(Item.id).where(Item.vinted_item_id == candidate.vinted_item_id))
         item = get_or_persist_catalog_item(db, candidate)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="item_reused" if existing_item_id else "item_persisted",
+            url=candidate.url,
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "item_id": item.id,
+            },
+        )
         if detail is not None:
             apply_item_detail(db, item, detail)
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="item_detail_persisted",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "item_id": item.id,
+                    "photo_count": len(detail.photos),
+                    "has_description": bool(detail.description),
+                    "has_total_price": detail.total_price_amount is not None,
+                },
+            )
         if detail_error is not None:
             record_item_detail_error(db, item, detail_error)
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="item_detail_error_recorded",
+                level="warning",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                message=detail_error,
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "item_id": item.id,
+                },
+            )
         _, created = _get_or_create_monitor_opportunity(db, source, run, item, evaluation_status, filters)
         record_run_event(
             db,

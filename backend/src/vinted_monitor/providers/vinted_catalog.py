@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -11,6 +12,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from curl_cffi.requests import Session
 
 from vinted_monitor.core.config import Settings, get_settings
+from vinted_monitor.core.redaction import safe_cookie_markers, safe_headers, safe_secret_marker
 from vinted_monitor.providers.browser_profiles import BrowserProfile, NavigationFlow, profile_for_impersonate, select_navigation_flow
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
 from vinted_monitor.providers.datadome import DataDomeChallengeError, has_datadome_cookie, human_delay, is_datadome_challenge
@@ -64,6 +66,7 @@ class CurlCffiVintedCatalogProvider:
         human_delay_max: float = 3.8,
         navigation_flow: NavigationFlow | None = None,
         session_factory: Callable[..., Any] | None = None,
+        proxy_session_marker: dict[str, Any] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.profile = profile or profile_for_impersonate(self.settings.curl_impersonate_browser)
@@ -76,13 +79,17 @@ class CurlCffiVintedCatalogProvider:
         self.human_delay_max = human_delay_max
         self.navigation_flow = navigation_flow or select_navigation_flow()
         self.session_factory = session_factory or Session
+        self.proxy_session_marker = proxy_session_marker
+        self.http_session_id = str(uuid.uuid4())
         self._session: Session | None = None
         self._bootstrapped = False
+        self._egress_diagnosed = False
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
         last_error: VintedCatalogProviderError | None = None
         for retry_index in range(self.request_retries + 1):
             self._ensure_session()
+            self._diagnose_egress(attempt=retry_index + 1)
             if not self._bootstrapped:
                 self._bootstrap_anonymous_session(source.url, attempt=retry_index + 1)
 
@@ -111,24 +118,86 @@ class CurlCffiVintedCatalogProvider:
 
     def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
         self._ensure_session()
+        self._diagnose_egress(attempt=1)
         assert self._session is not None
         headers = self.profile.build_bootstrap_headers()
+        self._emit_event(
+            phase="detail_http_request_start",
+            method="GET",
+            url=candidate.url,
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "http_session": self._session_marker(),
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
+            },
+        )
+        started_at = time.perf_counter()
         try:
             response = self._session.get(
                 candidate.url,
                 headers=dict(headers),
                 timeout=self.timeout_ms / 1000,
             )
+            response_details = {
+                "vinted_item_id": candidate.vinted_item_id,
+                "http_session": self._session_marker(),
+                "request_headers": safe_headers(headers),
+                "response_headers": safe_headers(dict(response.headers)),
+                "cookies_after": self._cookie_markers(),
+            }
             if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
+                self._emit_event(
+                    phase="detail_http_request_error",
+                    method="GET",
+                    url=candidate.url,
+                    status_code=response.status_code,
+                    duration_ms=_elapsed_ms(started_at),
+                    level="warning",
+                    message="DataDome challenge detected on item detail request",
+                    details=response_details,
+                )
                 raise DataDomeChallengeError("DataDome challenge detected on item detail request")
             if response.status_code >= 400:
+                self._emit_event(
+                    phase="detail_http_request_error",
+                    method="GET",
+                    url=candidate.url,
+                    status_code=response.status_code,
+                    duration_ms=_elapsed_ms(started_at),
+                    level="error",
+                    message=f"HTTP {response.status_code}",
+                    details=response_details,
+                )
                 raise VintedCatalogProviderError(
                     f"Vinted detail request failed for {candidate.vinted_item_id}: HTTP {response.status_code}"
                 )
+            self._emit_event(
+                phase="detail_http_request_success",
+                method="GET",
+                url=candidate.url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                details=response_details,
+            )
         except DataDomeChallengeError:
             raise
         except Exception as exc:
             if not isinstance(exc, VintedCatalogProviderError):
+                self._emit_event(
+                    phase="detail_http_request_error",
+                    method="GET",
+                    url=candidate.url,
+                    duration_ms=_elapsed_ms(started_at),
+                    level="error",
+                    message=str(exc),
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "http_session": self._session_marker(),
+                        "request_headers": safe_headers(headers),
+                        "cookies_after": self._cookie_markers(),
+                    },
+                )
                 raise VintedCatalogProviderError(
                     f"Vinted detail request failed for {candidate.vinted_item_id}: {exc}"
                 ) from exc
@@ -139,12 +208,20 @@ class CurlCffiVintedCatalogProvider:
     def close(self) -> None:
         """Discard the session, cookies, and proxy connection."""
         if self._session is not None:
+            self._emit_event(
+                phase="http_session_closed",
+                details={
+                    "http_session": self._session_marker(),
+                    "cookies_before_close": self._cookie_markers(),
+                },
+            )
             try:
                 self._session.close()
             except Exception:
                 pass
             self._session = None
         self._bootstrapped = False
+        self._egress_diagnosed = False
 
     def _ensure_session(self) -> None:
         if self._session is None:
@@ -152,6 +229,16 @@ class CurlCffiVintedCatalogProvider:
             self._session = self.session_factory(
                 impersonate=self.profile.impersonate,
                 proxies=proxy_dict,
+            )
+            self._emit_event(
+                phase="http_session_created",
+                details={
+                    "http_session": self._session_marker(),
+                    "browser_profile": self.profile.name,
+                    "impersonate": self.profile.impersonate,
+                    "proxy_configured": bool(self.proxy_url),
+                    "proxy_session": self.proxy_session_marker,
+                },
             )
 
     def _reset_session(self) -> None:
@@ -178,6 +265,9 @@ class CurlCffiVintedCatalogProvider:
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
+                "http_session": self._session_marker(),
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
             },
         )
         started_at = time.perf_counter()
@@ -196,7 +286,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=str(exc),
-                details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+                details={
+                    "timeout_ms": self.timeout_ms,
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "request_headers": safe_headers(headers),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
 
@@ -210,7 +306,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="warning",
                 message="DataDome served a challenge instead of catalog data",
-                details={"attempt": attempt, "browser_profile": self.profile.name},
+                details={
+                    "attempt": attempt,
+                    "browser_profile": self.profile.name,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise DataDomeChallengeError("DataDome challenge detected on catalog API request")
 
@@ -223,7 +325,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="warning",
                 message=f"Catalog API rejected anonymous session with status {response.status_code}",
-                details={"attempt": attempt, "retryable": attempt == 1},
+                details={
+                    "attempt": attempt,
+                    "retryable": attempt == 1,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogSessionError(f"Vinted catalog API session rejected with status {response.status_code}")
 
@@ -236,7 +344,12 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=f"HTTP {response.status_code}",
-                details={"attempt": attempt},
+                details={
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: HTTP {response.status_code}")
 
@@ -250,7 +363,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="warning",
                 message="Catalog API returned a non-JSON response",
-                details={"content_type": content_type, "attempt": attempt},
+                details={
+                    "content_type": content_type,
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogSessionError("Vinted catalog API returned a non-JSON response")
 
@@ -264,7 +383,12 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message="Catalog API response did not contain items",
-                details={"attempt": attempt},
+                details={
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError("Vinted catalog API response did not contain items")
 
@@ -279,6 +403,9 @@ class CurlCffiVintedCatalogProvider:
                 "content_type": content_type,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
+                "http_session": self._session_marker(),
+                "response_headers": safe_headers(dict(response.headers)),
+                "cookies_after": self._cookie_markers(),
             },
         )
         return payload
@@ -306,6 +433,9 @@ class CurlCffiVintedCatalogProvider:
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
                 "navigation_flow": flow.name,
+                "http_session": self._session_marker(),
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
             },
         )
         started_at = time.perf_counter()
@@ -323,7 +453,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=str(exc),
-                details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+                details={
+                    "timeout_ms": self.timeout_ms,
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "request_headers": safe_headers(headers),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
 
@@ -336,7 +472,14 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="warning",
                 message="DataDome challenge detected during bootstrap",
-                details={"attempt": attempt, "browser_profile": self.profile.name, "navigation_flow": flow.name},
+                details={
+                    "attempt": attempt,
+                    "browser_profile": self.profile.name,
+                    "navigation_flow": flow.name,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise DataDomeChallengeError("DataDome challenge detected during bootstrap")
 
@@ -349,7 +492,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=f"Bootstrap returned HTTP {response.status_code}",
-                details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+                details={
+                    "timeout_ms": self.timeout_ms,
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: HTTP {response.status_code}")
 
@@ -373,6 +522,9 @@ class CurlCffiVintedCatalogProvider:
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
                 "navigation_flow": flow.name,
+                "http_session": self._session_marker(),
+                "response_headers": safe_headers(dict(response.headers)),
+                "cookies_after": self._cookie_markers(),
             },
         )
 
@@ -396,6 +548,9 @@ class CurlCffiVintedCatalogProvider:
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
                 "navigation_flow": self.navigation_flow.name,
+                "http_session": self._session_marker(),
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
             },
         )
         started_at = time.perf_counter()
@@ -413,7 +568,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=str(exc),
-                details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+                details={
+                    "timeout_ms": self.timeout_ms,
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "request_headers": safe_headers(headers),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError(f"Vinted home navigation failed: {exc}") from exc
 
@@ -426,7 +587,14 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="warning",
                 message="DataDome challenge detected during home navigation",
-                details={"attempt": attempt, "browser_profile": self.profile.name, "navigation_flow": self.navigation_flow.name},
+                details={
+                    "attempt": attempt,
+                    "browser_profile": self.profile.name,
+                    "navigation_flow": self.navigation_flow.name,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise DataDomeChallengeError("DataDome challenge detected during home navigation")
 
@@ -439,7 +607,13 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 level="error",
                 message=f"Home navigation returned HTTP {response.status_code}",
-                details={"timeout_ms": self.timeout_ms, "attempt": attempt},
+                details={
+                    "timeout_ms": self.timeout_ms,
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                },
             )
             raise VintedCatalogProviderError(f"Vinted home navigation failed: HTTP {response.status_code}")
 
@@ -449,7 +623,13 @@ class CurlCffiVintedCatalogProvider:
             url=home_url,
             status_code=response.status_code,
             duration_ms=_elapsed_ms(started_at),
-            details={"attempt": attempt, "navigation_flow": self.navigation_flow.name},
+            details={
+                "attempt": attempt,
+                "navigation_flow": self.navigation_flow.name,
+                "http_session": self._session_marker(),
+                "response_headers": safe_headers(dict(response.headers)),
+                "cookies_after": self._cookie_markers(),
+            },
         )
         delay_applied = human_delay(1.5, 3.0)
         self._emit_event(
@@ -483,6 +663,73 @@ class CurlCffiVintedCatalogProvider:
             details=details,
         )
 
+    def _diagnose_egress(self, *, attempt: int) -> None:
+        if self._egress_diagnosed or not self.settings.egress_diagnostic_url:
+            return
+        assert self._session is not None
+        url = str(self.settings.egress_diagnostic_url)
+        headers = {"Accept": "application/json", "User-Agent": self.profile.user_agent}
+        self._emit_event(
+            phase="egress_diagnostic_start",
+            method="GET",
+            url=url,
+            details={
+                "attempt": attempt,
+                "http_session": self._session_marker(),
+                "proxy_configured": bool(self.proxy_url),
+                "proxy_session": self.proxy_session_marker,
+                "request_headers": safe_headers(headers),
+            },
+        )
+        started_at = time.perf_counter()
+        try:
+            response = self._session.get(url, headers=headers, timeout=self.timeout_ms / 1000)
+            payload = response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {}
+            details = {
+                "attempt": attempt,
+                "http_session": self._session_marker(),
+                "proxy_configured": bool(self.proxy_url),
+                "proxy_session": self.proxy_session_marker,
+                "egress": _egress_details_from_payload(payload),
+                "response_headers": safe_headers(dict(response.headers)),
+                "cookies_after": self._cookie_markers(),
+            }
+            self._emit_event(
+                phase="egress_diagnostic_success" if response.status_code < 400 else "egress_diagnostic_error",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level=None if response.status_code < 400 else "warning",
+                message=None if response.status_code < 400 else f"HTTP {response.status_code}",
+                details=details,
+            )
+        except Exception as exc:
+            self._emit_event(
+                phase="egress_diagnostic_error",
+                method="GET",
+                url=url,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message=str(exc),
+                details={
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "proxy_configured": bool(self.proxy_url),
+                    "proxy_session": self.proxy_session_marker,
+                },
+            )
+        finally:
+            self._egress_diagnosed = True
+
+    def _session_marker(self) -> dict[str, Any]:
+        return safe_secret_marker("http_session_id", self.http_session_id, kind="http_session")
+
+    def _cookie_markers(self) -> list[dict[str, Any]]:
+        if self._session is None:
+            return []
+        return safe_cookie_markers(self._session.cookies)
+
 
 # ---------------------------------------------------------------------------
 # Pure parsing and mapping functions with no transport dependency.
@@ -515,6 +762,19 @@ def build_catalog_api_params(source_url: str, page: int | None, per_page: int) -
             params[api_key] = ",".join(values)
 
     return params
+
+
+def _egress_details_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    connection = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
+    return {
+        "ip": payload.get("ip") or payload.get("query"),
+        "country": payload.get("country"),
+        "country_code": payload.get("country_code") or payload.get("countryCode"),
+        "asn": payload.get("asn") or connection.get("asn"),
+        "org": payload.get("org") or payload.get("isp") or connection.get("org"),
+    }
 
 
 def _first_query_value(query: Mapping[str, list[str]], key: str) -> str | None:

@@ -63,7 +63,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - `level`: `debug`, `info`, `warning`, or `error`;
   - stable machine phase such as `run_started`, `redis_check_error`, `anonymous_session_bootstrap_success`, `catalog_api_request_success`, `detail_fetch_error`, `item_discarded`, or `opportunity_created`;
   - `duration_ms`, `status_code`, `timeout_ms`, `attempt`, and `retry_reason` when available;
-  - safe session markers with name, length, masked preview, and fingerprint, never the full value.
+  - exact event timestamp, one line per event in the PWA console, and collapsible structured details for deeper inspection;
+  - safe cookie, token, HTTP session, and proxy sticky-session markers with name, length, `first4****last4` masked preview for long values, and fingerprint, never the full value;
+  - egress diagnostic data collected through the same HTTP session/proxy, including IP and country when the diagnostic endpoint returns them.
 - Database:
   - `app_settings`;
   - `search_sources.scheduler_config`;
@@ -104,10 +106,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
 - Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
 - Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
-- Run logs show operational progress with sanitized URLs, status codes, durations, egress mode, proxy profile id when used, auth mode, and safe counts only; they never expose cookie or token values.
-- Run logs expose anonymous session diagnostics using masked/fingerprinted markers only; short values show no characters.
-- Run logs show Redis availability, seen-cache hits/misses, detail fetch start/success/error/skipped, filter pass/discard, and opportunity created/skipped events.
-- The PWA Monitors view renders selected monitor accumulated logs as a readable timeline/console with run id, level, label, timestamp, ms, status, URL, message, and collapsible details, whether the monitor is active or stopped.
+- Run logs show operational progress with sanitized URLs, request headers after redaction/masking, response headers after redaction/masking, status codes, per-request durations in milliseconds, egress mode, proxy profile id when used, auth mode, IP/country from the egress diagnostic, filter snapshot, Redis/cache decisions, candidate decisions, persistence decisions, opportunity outcomes, and safe counts only.
+- Run logs never expose raw cookie, token, authorization, proxy credential, HTML, or raw Vinted payload values. Cookie/token/session data is represented only as masked/fingerprinted markers; short values show no characters.
+- Run logs show Redis availability, seen-cache hits/misses, seen-cache marks, detail fetch start/success/error/skipped, filter pass/discard, item persisted/reused, and opportunity created/skipped events.
+- The PWA Monitors view renders selected monitor accumulated logs as a classic readable console: one text line per event with run id, exact time, level, label, ms, status, URL, message, and collapsible JSON details, whether the monitor is active or stopped.
+- The selected monitor log console supports local level filtering and text search without mutating persisted `run_events`.
 - The selected monitor log timeline can be cleared locally with `Limpiar vista`; this stores the currently visible event IDs as hidden in the browser session and never deletes persisted `run_events`.
 - The PWA Monitors view is organized as three top-level cards: new monitor configuration, the single compact monitor table, and the selected-monitor detail. The table and detail are stacked instead of nested inside a parent card.
 - Active monitors appear before inactive monitors in the PWA's single compact monitor table, using status chips and row styling instead of separate active/inactive sections, and show a selected-monitor detail with session summary, read-only configuration, performance card, logs, and a working stop control.
@@ -148,6 +151,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
 - Confirm selecting inactive monitors still shows the all-history chart, accumulated counts, and accumulated log timeline after manual or stopped recurring runs.
 - Confirm `Limpiar vista` hides the selected monitor's visible timeline without deleting events from `/api/monitors/{monitor_id}/events`, and new event IDs remain visible after the cleanup.
+- Confirm monitor logs include run configuration resolution, selected egress, HTTP session creation/close, egress IP/country when available, Redis decisions, candidate evaluation, detail requirements, filter decisions, item persistence/reuse, opportunity outcomes, exact timestamps, and request durations in milliseconds.
+- Confirm safe cookie/token/session/proxy markers use masked/fingerprinted values only and never include raw secret values.
+- Confirm the PWA log console renders one line per event, level filtering, text search, and collapsible details without horizontal overflow on mobile.
 - Confirm the Monitors view renders three top-level cards for creation, list, and selected detail without nesting the table or detail inside another card.
 - Confirm the compact monitor table selects active and inactive monitors, updates the full-width detail panel, and scrolls the detail into view on mobile without horizontal overflow.
 - Confirm active monitor details show read-only configuration, stop/log controls, and do not show save, archive, or punctual launch controls.

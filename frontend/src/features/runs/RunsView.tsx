@@ -1,5 +1,4 @@
-import { AlertTriangle, Clock3, FileText, Info, RefreshCw, XCircle } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { FileText, RefreshCw } from 'lucide-react';
 import type { Run, RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
 import { type RunActivityController, useRunActivity } from './runActivity';
@@ -124,27 +123,21 @@ export function RunActivityList({
 
 export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; showRunId?: boolean }) {
   const hasDetails = Object.keys(event.details).length > 0;
+  const tokens = eventLineTokens(event, showRunId);
   return (
     <article className={`run-event-entry ${event.level}`}>
-      <div className="event-rail">
-        {eventIcon(event.level)}
-      </div>
-      <div className="event-body">
-        <div className="event-title-row">
-          <strong>{eventLabel(event.phase)}</strong>
-          <span className={`event-level ${event.level}`}>{levelLabel(event.level)}</span>
-        </div>
-        <div className="event-meta-row">
-          {showRunId && event.run_id ? <span>Run #{event.run_id}</span> : null}
-          <span>{formatDate(event.created_at)}</span>
-          {eventMeta(event) ? <span>{eventMeta(event)}</span> : null}
-          {event.auth_mode ? <span>{event.auth_mode}</span> : null}
-        </div>
+      <div className="event-console-line">
+        <span className="event-time">{formatLogTimestamp(event.created_at)}</span>
+        <span className={`event-level ${event.level}`}>{event.level.toUpperCase()}</span>
+        {tokens.map((token) => (
+          <span className="event-token" key={token}>{token}</span>
+        ))}
+        <strong>{eventLabel(event.phase)}</strong>
+        {event.message ? <span className="event-message">{event.message}</span> : null}
         {event.url ? <code className="event-url">{event.url}</code> : null}
-        {event.message ? <p>{event.message}</p> : null}
         {hasDetails ? (
           <details className="event-details">
-            <summary>Detalles</summary>
+            <summary>json</summary>
             <code>{JSON.stringify(event.details, null, 2)}</code>
           </details>
         ) : null}
@@ -153,41 +146,86 @@ export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; s
   );
 }
 
-function eventMeta(event: RunEvent): string {
-  const parts = [];
+export function eventSearchText(event: RunEvent): string {
+  return [
+    event.phase,
+    event.level,
+    event.message,
+    event.url,
+    event.run_id ? `run#${event.run_id}` : null,
+    eventLineTokens(event, true).join(' '),
+    JSON.stringify(event.details)
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
+  const parts: string[] = [];
+  if (showRunId && event.run_id) {
+    parts.push(`run#${event.run_id}`);
+  }
   if (event.method) {
     parts.push(event.method);
   }
   if (event.status_code) {
-    parts.push(String(event.status_code));
+    parts.push(`status=${event.status_code}`);
   }
   if (event.duration_ms !== null) {
-    parts.push(`${event.duration_ms}ms`);
+    parts.push(`ms=${event.duration_ms}`);
   }
-  return parts.join(' - ');
+  if (event.auth_mode) {
+    parts.push(`auth=${event.auth_mode}`);
+  }
+  const itemId = detailString(event.details, 'vinted_item_id');
+  if (itemId) {
+    parts.push(`item=${itemId}`);
+  }
+  const session = nestedDetailString(event.details, 'http_session', 'masked');
+  if (session) {
+    parts.push(`session=${session}`);
+  }
+  const proxySession = nestedDetailString(event.details, 'proxy_session', 'masked') || nestedDetailString(event.details, 'proxy_sticky_session', 'masked');
+  if (proxySession) {
+    parts.push(`proxy_session=${proxySession}`);
+  }
+  const ip = nestedDetailString(event.details, 'egress', 'ip') || (event.egress_ip ?? null);
+  if (ip) {
+    parts.push(`ip=${ip}`);
+  }
+  const country = nestedDetailString(event.details, 'egress', 'country_code') || nestedDetailString(event.details, 'egress', 'country');
+  if (country) {
+    parts.push(`country=${country}`);
+  }
+  return parts;
 }
 
-function eventIcon(level: RunEvent['level']): ReactNode {
-  if (level === 'error') {
-    return <XCircle size={16} />;
+function detailString(details: Record<string, unknown>, key: string): string | null {
+  const value = details[key];
+  if (typeof value === 'string' && value) {
+    return value;
   }
-  if (level === 'warning') {
-    return <AlertTriangle size={16} />;
+  if (typeof value === 'number') {
+    return String(value);
   }
-  if (level === 'debug') {
-    return <Clock3 size={16} />;
-  }
-  return <Info size={16} />;
+  return null;
 }
 
-function levelLabel(level: RunEvent['level']): string {
-  const labels = {
-    debug: 'Debug',
-    info: 'Info',
-    warning: 'Aviso',
-    error: 'Error'
-  };
-  return labels[level];
+function nestedDetailString(details: Record<string, unknown>, parent: string, key: string): string | null {
+  const value = details[parent];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return detailString(value as Record<string, unknown>, key);
+}
+
+function formatLogTimestamp(value: string): string {
+  const date = new Date(value);
+  return new Intl.DateTimeFormat('es-ES', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    fractionalSecondDigits: 3,
+    hour12: false
+  }).format(date);
 }
 
 function streamLabel(status: 'connecting' | 'connected' | 'error'): string {
@@ -203,31 +241,59 @@ function streamLabel(status: 'connecting' | 'connected' | 'error'): string {
 function eventLabel(phase: string): string {
   const labels: Record<string, string> = {
     run_started: 'Run iniciado',
+    run_config_resolved: 'Configuracion resuelta',
     run_succeeded: 'Run completado',
     run_failed: 'Run fallido',
+    egress_selected: 'Egress seleccionado',
+    http_session_created: 'Sesion HTTP creada',
+    http_session_closed: 'Sesion HTTP cerrada',
+    egress_diagnostic_start: 'Diagnosticando IP de salida',
+    egress_diagnostic_success: 'IP de salida diagnosticada',
+    egress_diagnostic_error: 'Error diagnosticando IP',
     redis_check_start: 'Comprobando Redis',
     redis_check_success: 'Redis disponible',
     redis_check_error: 'Redis no disponible',
     redis_seen_result: 'Cache de vistos evaluada',
+    redis_seen_marked: 'Vistos marcados en Redis',
+    candidate_seen_skipped: 'Candidatos ya vistos omitidos',
     catalog_search_start: 'Iniciando busqueda',
     catalog_search_success: 'Busqueda completada',
+    catalog_candidates_received: 'Candidatos recibidos',
     anonymous_session_bootstrap_start: 'Obteniendo sesion anonima',
     anonymous_session_bootstrap_success: 'Sesion anonima obtenida',
     anonymous_session_bootstrap_error: 'Error obteniendo sesion anonima',
     anonymous_session_refresh_start: 'Refrescando sesion anonima',
+    navigation_home_request_start: 'Visitando home',
+    navigation_home_request_success: 'Home respondio',
+    navigation_home_request_error: 'Error visitando home',
+    navigation_delay_applied: 'Pausa de navegacion aplicada',
+    human_delay_applied: 'Pausa humana aplicada',
     catalog_api_request_start: 'Consultando API de catalogo',
     catalog_api_request_success: 'API de catalogo respondio',
     catalog_api_request_error: 'Error en API de catalogo',
     catalog_api_session_rejected: 'Sesion rechazada por catalogo',
     catalog_api_parse_error: 'Respuesta de catalogo no procesable',
+    datadome_challenge_detected: 'Challenge DataDome detectado',
+    candidate_evaluation_start: 'Evaluando candidato',
+    candidate_detail_required: 'Detalle requerido',
+    candidate_detail_not_required: 'Detalle no requerido',
+    candidate_filter_decision: 'Decision de filtros',
+    detail_http_request_start: 'HTTP detalle iniciado',
+    detail_http_request_success: 'HTTP detalle completado',
+    detail_http_request_error: 'HTTP detalle fallido',
     detail_fetch_start: 'Obteniendo detalle',
     detail_fetch_success: 'Detalle obtenido',
     detail_fetch_error: 'Error obteniendo detalle',
     detail_fetch_skipped: 'Detalle omitido',
     filter_passed: 'Filtros superados',
+    item_persisted: 'Item persistido',
+    item_reused: 'Item reutilizado',
+    item_detail_persisted: 'Detalle persistido',
+    item_detail_error_recorded: 'Error de detalle persistido',
     item_discarded: 'Item descartado',
     opportunity_created: 'Oportunidad creada',
-    opportunity_skipped: 'Oportunidad ya existente'
+    opportunity_skipped: 'Oportunidad ya existente',
+    monitor_session_closed: 'Sesion de monitor cerrada'
   };
   return labels[phase] ?? phase.replaceAll('_', ' ');
 }
