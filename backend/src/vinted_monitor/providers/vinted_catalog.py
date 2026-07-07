@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urljoin
@@ -20,6 +21,24 @@ from vinted_monitor.providers.datadome import DataDomeChallengeError, has_datado
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
+CSRF_TOKEN_PATTERNS = (
+    re.compile(r'"CSRF_TOKEN"\s*:\s*"([^"]+)"'),
+    re.compile(r'\\"CSRF_TOKEN\\"\s*:\s*\\"([^"\\]+)\\"'),
+    re.compile(r'"csrfToken"\s*:\s*"([^"]+)"'),
+    re.compile(r'\\"csrfToken\\"\s*:\s*\\"([^"\\]+)\\"'),
+    re.compile(r'"X-CSRF-Token"\s*,\s*"([^"]+)"'),
+    re.compile(r'\\"X-CSRF-Token\\"\s*,\s*\\"([^"\\]+)\\"'),
+    re.compile(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+)
+
+
+@dataclass
+class CatalogSessionContext:
+    csrf_token: str | None = None
+    anon_id: str | None = None
+    v_udt: str | None = None
+    user_iso_locale: str | None = None
+    screen: str | None = None
 
 
 class VintedCatalogProviderError(RuntimeError):
@@ -83,6 +102,7 @@ class CurlCffiVintedCatalogProvider:
         self._session: Session | None = None
         self._bootstrapped = False
         self._egress_diagnosed = False
+        self._catalog_session_context = CatalogSessionContext()
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
         last_error: VintedCatalogProviderError | None = None
@@ -90,7 +110,7 @@ class CurlCffiVintedCatalogProvider:
             self._ensure_session()
             self._diagnose_egress(attempt=retry_index + 1)
             if not self._bootstrapped:
-                self._bootstrap_anonymous_session(attempt=retry_index + 1)
+                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 1)
 
             try:
                 response = self._request_catalog_api(source, page, attempt=retry_index + 1)
@@ -106,7 +126,7 @@ class CurlCffiVintedCatalogProvider:
                 )
                 self._reset_session()
                 self._diagnose_egress(attempt=retry_index + 2)
-                self._bootstrap_anonymous_session(attempt=retry_index + 2)
+                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 2)
                 response = self._request_catalog_api(source, page, attempt=retry_index + 2)
                 return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
             except VintedCatalogProviderError as exc:
@@ -222,6 +242,7 @@ class CurlCffiVintedCatalogProvider:
             self._session = None
         self._bootstrapped = False
         self._egress_diagnosed = False
+        self._catalog_session_context = CatalogSessionContext()
 
     def _ensure_session(self) -> None:
         if self._session is None:
@@ -244,6 +265,7 @@ class CurlCffiVintedCatalogProvider:
     def _reset_session(self) -> None:
         """Close and recreate the session (same proxy, fresh cookies)."""
         self.close()
+        self._catalog_session_context = CatalogSessionContext()
         self._ensure_session()
 
     def _request_catalog_api(self, source: Any, page: int | None, *, attempt: int) -> dict[str, Any]:
@@ -251,6 +273,10 @@ class CurlCffiVintedCatalogProvider:
         url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
         params = build_catalog_api_params(source.url, page, self.catalog_per_page)
         headers = dict(self.profile.build_api_headers(referer=source.url))
+        if self._catalog_session_context.anon_id:
+            headers["X-Anon-Id"] = self._catalog_session_context.anon_id
+        if self._catalog_session_context.csrf_token:
+            headers["X-CSRF-Token"] = self._catalog_session_context.csrf_token
 
         cookie_names = list(self._session.cookies.keys()) if self._session.cookies else []
         self._emit_event(
@@ -267,6 +293,10 @@ class CurlCffiVintedCatalogProvider:
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
                 "http_session": self._session_marker(),
+                "csrf_token_found": self._catalog_session_context.csrf_token is not None,
+                "anon_id_found": self._catalog_session_context.anon_id is not None,
+                "csrf_token": _secret_marker_or_none("csrf_token", self._catalog_session_context.csrf_token),
+                "anon_id": _secret_marker_or_none("anon_id", self._catalog_session_context.anon_id),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
             },
@@ -411,22 +441,22 @@ class CurlCffiVintedCatalogProvider:
         )
         return payload
 
-    def _bootstrap_anonymous_session(self, *, attempt: int) -> None:
+    def _bootstrap_anonymous_session(self, source_url: str, *, attempt: int) -> None:
         assert self._session is not None
-        bootstrap_url = urljoin(str(self.settings.vinted_base_url), "/")
+        bootstrap_url = source_url
         headers = dict(self.profile.build_bootstrap_headers(referer=None))
 
         self._emit_event(
             phase="anonymous_session_bootstrap_start",
             method="GET",
             url=bootstrap_url,
-            message="Obtaining anonymous public Vinted session from base domain via curl_cffi",
+            message="Obtaining anonymous public Vinted session from catalog document via curl_cffi",
             details={
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
-                "bootstrap_origin": "base_domain",
+                "bootstrap_origin": "catalog_document",
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
@@ -450,6 +480,7 @@ class CurlCffiVintedCatalogProvider:
                 details={
                     "timeout_ms": self.timeout_ms,
                     "attempt": attempt,
+                    "bootstrap_origin": "catalog_document",
                     "http_session": self._session_marker(),
                     "request_headers": safe_headers(headers),
                     "cookies_after": self._cookie_markers(),
@@ -469,7 +500,7 @@ class CurlCffiVintedCatalogProvider:
                 details={
                     "attempt": attempt,
                     "browser_profile": self.profile.name,
-                    "bootstrap_origin": "base_domain",
+                    "bootstrap_origin": "catalog_document",
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
@@ -489,6 +520,7 @@ class CurlCffiVintedCatalogProvider:
                 details={
                     "timeout_ms": self.timeout_ms,
                     "attempt": attempt,
+                    "bootstrap_origin": "catalog_document",
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
@@ -498,6 +530,7 @@ class CurlCffiVintedCatalogProvider:
 
         cookie_names = list(self._session.cookies.keys()) if self._session.cookies else []
         dd_present = has_datadome_cookie(dict(self._session.cookies)) if self._session.cookies else False
+        self._catalog_session_context = self._build_catalog_session_context(response)
         self._bootstrapped = True
         bootstrap_duration_ms = _elapsed_ms(started_at)
 
@@ -507,7 +540,7 @@ class CurlCffiVintedCatalogProvider:
             url=bootstrap_url,
             status_code=response.status_code,
             duration_ms=bootstrap_duration_ms,
-            message="Anonymous public session obtained from base domain via curl_cffi",
+            message="Anonymous public session obtained from catalog document via curl_cffi",
             details={
                 "session_marker_count": len(cookie_names),
                 "datadome_cookie": dd_present,
@@ -515,8 +548,16 @@ class CurlCffiVintedCatalogProvider:
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
                 "browser_profile": self.profile.name,
-                "bootstrap_origin": "base_domain",
+                "bootstrap_origin": "catalog_document",
                 "http_session": self._session_marker(),
+                "csrf_token_found": self._catalog_session_context.csrf_token is not None,
+                "anon_id_found": self._catalog_session_context.anon_id is not None,
+                "v_udt_found": self._catalog_session_context.v_udt is not None,
+                "user_iso_locale": self._catalog_session_context.user_iso_locale,
+                "screen": self._catalog_session_context.screen,
+                "csrf_token": _secret_marker_or_none("csrf_token", self._catalog_session_context.csrf_token),
+                "anon_id": _secret_marker_or_none("anon_id", self._catalog_session_context.anon_id),
+                "v_udt": _secret_marker_or_none("v_udt", self._catalog_session_context.v_udt),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
             },
@@ -527,7 +568,23 @@ class CurlCffiVintedCatalogProvider:
         self._emit_event(
             phase="human_delay_applied",
             duration_ms=round(delay_applied * 1000),
-            details={"min_seconds": self.human_delay_min, "max_seconds": self.human_delay_max, "bootstrap_origin": "base_domain"},
+            details={
+                "min_seconds": self.human_delay_min,
+                "max_seconds": self.human_delay_max,
+                "bootstrap_origin": "catalog_document",
+            },
+        )
+
+    def _build_catalog_session_context(self, response: Any) -> CatalogSessionContext:
+        headers = dict(response.headers)
+        return CatalogSessionContext(
+            csrf_token=extract_csrf_token(response.text)
+            or self._cookie_value("csrf_token")
+            or self._cookie_value("_csrf_token"),
+            anon_id=_header_value(headers, "x-anon-id") or self._cookie_value("anon_id"),
+            v_udt=_header_value(headers, "x-v-udt") or self._cookie_value("v_udt"),
+            user_iso_locale=_header_value(headers, "x-user-iso-locale"),
+            screen=_header_value(headers, "x-screen"),
         )
 
     def _emit_event(
@@ -622,6 +679,28 @@ class CurlCffiVintedCatalogProvider:
             return []
         return safe_cookie_markers(self._session.cookies)
 
+    def _cookie_value(self, name: str) -> str | None:
+        if self._session is None or not self._session.cookies:
+            return None
+
+        cookies = self._session.cookies
+        get_value = getattr(cookies, "get", None)
+        if callable(get_value):
+            try:
+                value = get_value(name)
+            except Exception:
+                value = None
+            if value:
+                return str(value)
+
+        jar = getattr(cookies, "jar", cookies)
+        for cookie in jar:
+            cookie_name = getattr(cookie, "name", None)
+            cookie_value = getattr(cookie, "value", None)
+            if cookie_name == name and cookie_value:
+                return str(cookie_value)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Pure parsing and mapping functions with no transport dependency.
@@ -639,6 +718,29 @@ def _egress_details_from_payload(payload: Any) -> dict[str, Any]:
         "asn": payload.get("asn") or connection.get("asn"),
         "org": payload.get("org") or payload.get("isp") or connection.get("org"),
     }
+
+
+def extract_csrf_token(html: str) -> str | None:
+    for pattern in CSRF_TOKEN_PATTERNS:
+        match = pattern.search(html)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _header_value(headers: Mapping[str, Any], key: str) -> str | None:
+    lowered_key = key.lower()
+    for name, value in headers.items():
+        if str(name).lower() == lowered_key and value:
+            return str(value)
+    return None
+
+
+def _secret_marker_or_none(name: str, value: str | None) -> dict[str, Any] | None:
+    if not value:
+        return None
+    return safe_secret_marker(name, value, kind="session_secret")
+
 
 def _elapsed_ms(started_at: float) -> int:
     return max(round((time.perf_counter() - started_at) * 1000), 0)

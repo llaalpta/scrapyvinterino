@@ -7,6 +7,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Scheduler is a producer and enqueues `MonitorTask` payloads to Redis with `LPUSH`.
 - Consumers block with `BRPOP`, create a browser profile plus per-attempt proxy sticky session, then execute monitor business logic through `execute_monitor_run()`.
 - `CurlCffiVintedCatalogProvider` is the only Vinted catalog HTTP provider.
+- Runtime catalog traffic now bootstraps the saved catalog document URL, extracts CSRF/anon/session context into memory, and then calls `/api/v2/catalog/items` with the same `curl_cffi` session.
 - Manual runs remain synchronous from the API, but use the same provider stack.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 
@@ -17,7 +18,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Asocks is treated as ephemeral sticky-by-username egress: each task attempt gets a fresh UUID in the proxy username, and the UUID is discarded after the attempt.
 - Do not call the Asocks refresh API from runtime scraping code; rotation is achieved by using a new session UUID per attempt.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
-- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome120`. Direct no-proxy runs remain the first validation path before Asocks is configured.
+- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain the first validation path before Asocks is configured.
 - Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
 - Redis task payloads carry `proxy_profile_id` only; the consumer resolves the profile and builds the sticky URL inside the attempt.
 - Treat `403` and `429` from Vinted as DataDome-style challenge responses for retry purposes.
@@ -67,16 +68,23 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 ## Chrome 120 Runtime Direct Validation 2026-07-06
 
-- Added `chrome_120_win10` as the default runtime browser profile and set `CURL_IMPERSONATE_BROWSER=chrome120` in defaults and example environment.
+- At that checkpoint, `chrome_120_win10` was added as the then-default runtime browser profile and the example environment was aligned with Chrome 120.
 - `CurlCffiVintedCatalogProvider`, worker-owned runs, manual owned-provider runs, and diagnostics now use the configured browser profile instead of random profile selection by default.
 - Direct no-proxy validation passed through the API: temporary manual monitor `1106`, run `900`, status `success`, `items_found=5`, `items_new=5`, `opportunities_created=5`, `browser_profile=chrome_120_win10`, and 25 safe run events. The temporary monitor was archived after the check.
 - Direct Vinted smoke passed with `scripts/check_datadome.py --url "https://www.vinted.es/catalog?search_text=nike"` using `chrome_120_win10`; bootstrap `200`, catalog API `200`, no DataDome challenge, and 5 items returned.
 - Verification passed: `ruff check`, focused Chrome/runtime tests (`31 passed`), full 010 pytest suite with host DB/Redis URLs (`80 passed`), and `python scripts/verify_impersonation.py`.
 - Asocks/sticky proxy validation remains pending and is the next blocker before marking 010 `done`.
 
+## Chrome 146 Catalog-Document Runtime 2026-07-07
+
+- Runtime defaults moved from `chrome120` to `chrome146` to align the provider profile with the current HAR-derived catalog navigation.
+- The provider no longer bootstraps against the base Vinted domain. Each run uses the monitor's saved `/catalog?...` URL as the document bootstrap, then calls `/api/v2/catalog/items` with the same session, cookies, proxy identity, referer, CSRF token and anon id when those markers are present.
+- Empty `search_by_image_uuid` and `search_by_image_id` URL parameters are accepted and ignored; non-empty values remain unsupported because image-search filters are not translated to the fast API.
+- Run events record `bootstrap_origin=catalog_document`, CSRF/anon presence booleans, and safe markers only. Raw cookies, CSRF values, anon ids and Vinted session tokens remain memory-only.
+
 ## Continuous Direct Scheduler Validation 2026-07-06
 
-- Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity under `CURL_IMPERSONATE_BROWSER=chrome120`.
+- Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity on the then-current Chrome 120 profile.
 - Scheduler and detailed process logs were enabled locally with `SCHEDULER_ENABLED=true` and `LOG_LEVEL=DEBUG`. Because Docker Compose does not refresh container environment on `restart`, `api` and `worker` had to be recreated once with `docker compose up -d --force-recreate api worker`.
 - `GET /api/scheduler` after recreation returned `runtime_enabled=true`, `effective_enabled=true`, `allow_direct_without_proxy=true`, `direct_capacity=1`, and `effective_capacity=1`.
 - Temporary continuous monitor `1107` used `https://www.vinted.es/catalog?search_text=&order=newest_first`, `interval_seconds=60`, `jitter_percent=0`, and no proxy. It was stopped after the smoke to avoid accidental continuous scraping.

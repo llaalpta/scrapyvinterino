@@ -2,7 +2,7 @@
 
 Fecha de observacion inicial: 2026-07-02.
 
-Ultima actualizacion: 2026-07-05.
+Ultima actualizacion: 2026-07-07.
 
 ## URL investigada
 
@@ -27,7 +27,8 @@ La investigacion se hizo sin login, sin cuenta personal y sin tokens personales.
 - Cargar una pagina publica de Vinted emite cookies anonimas publicas, incluyendo `access_token_web` con scope publico.
 - Con esa sesion anonima publica, `GET /api/v2/catalog/items` devolvio `200 application/json`.
 - La sesion observada no usa cuenta personal, login ni token personal.
-- El HTML publico puede usarse para bootstrap o renovacion de sesion anonima, pero no debe ser el camino normal de extraccion del catalogo rapido.
+- El documento publico de catalogo se usa como bootstrap/renovacion de sesion anonima, pero no debe ser el camino normal de extraccion del catalogo rapido.
+- En HAR de catalogo con Chrome 146 se observo CSRF en el documento/bundle y `x-anon-id` en peticiones posteriores; el proveedor debe extraerlos cuando existan y reenviarlos al API con la misma sesion HTTP.
 - Si el API JSON falla por autenticacion o sesion, el proveedor debe refrescar la sesion anonima y reintentar una vez.
 - Si el reintento falla, debe fallar solo la ejecucion/fuente correspondiente y registrar error; no debe detener API, PWA, worker ni otras fuentes.
 
@@ -45,7 +46,7 @@ Decision de rendimiento:
 
 - Para monitorizacion rapida, usar API JSON con `order=newest_first`, `page=1` y `per_page=5` por defecto.
 - No mantener fallback al HTML de catalogo en el camino rapido.
-- Mantener el HTML solo como bootstrap/refresh de sesion anonima publica.
+- Mantener el documento HTML de catalogo solo como bootstrap/refresh de sesion anonima publica, no como fallback de extraccion de items.
 - Mantener parseo HTML como conocimiento de investigacion, no como camino operativo preferente.
 
 ## Parametros y paginacion
@@ -79,8 +80,9 @@ Decision de rendimiento:
 ## Contrato HTTP rapido decidido para catalogo
 
 - Bootstrap anonimo:
-  - `GET` a una pagina publica de Vinted con headers de navegador.
-  - Guardar solo cookies/tokens publicos en memoria de proceso inicialmente.
+  - `GET` a la URL publica de catalogo guardada en el monitor con headers de navegador.
+  - Guardar solo cookies/tokens publicos y contexto anonimo en memoria de proceso inicialmente.
+  - Extraer CSRF, anon id, `v_udt`, locale y screen cuando aparezcan en el documento, headers o cookies.
 - Catalogo rapido:
   - `GET /api/v2/catalog/items`.
   - Parametros observados:
@@ -92,9 +94,10 @@ Decision de rendimiento:
     - `per_page=5` por defecto para monitorizacion.
   - Headers:
     - `User-Agent`;
-    - `Accept: application/json, text/plain, */*`;
+    - `Accept` coherente con el perfil de navegador runtime;
     - `Accept-Language`;
     - `Referer` con la URL publica de busqueda.
+    - `X-CSRF-Token` y `X-Anon-Id` cuando el bootstrap los haya obtenido.
   - Si devuelve `401`, `403`, captcha, HTML inesperado o JSON sin `items`, refrescar sesion anonima y reintentar una vez.
   - Si el reintento falla, registrar error y marcar la ejecucion como fallida.
 
@@ -122,7 +125,7 @@ Decision de rendimiento:
 - `CatalogSearchResult` contiene items normalizados, paginacion y metadatos del proveedor.
 - `CatalogItemCandidate` representa un item publico antes de persistirlo.
 - La implementacion rapida debe usar HTTP directo al API JSON con sesion anonima publica.
-- El HTML publico debe reservarse para bootstrap/refresh de sesion anonima y para investigacion.
+- El documento HTML publico debe reservarse para bootstrap/refresh de sesion anonima y para investigacion.
 - Playwright queda reservado para investigacion o para obtener contexto anonimo si en el futuro cambia el comportamiento.
 
 ## Sanitizacion

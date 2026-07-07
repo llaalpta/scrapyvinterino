@@ -12,6 +12,7 @@ SUPPORTED_REPEATED_KEYS = {
     "status_ids": "status_ids",
 }
 IGNORED_QUERY_KEYS = {"page", "time", "order"}
+EMPTY_ONLY_IGNORED_QUERY_KEYS = {"search_by_image_uuid", "search_by_image_id"}
 
 
 class UnsupportedCatalogFiltersError(ValueError):
@@ -64,6 +65,9 @@ def analyze_catalog_url(source_url: str, page: int | None = None, per_page: int 
                 supported[key] = clean_values
             continue
         if key in IGNORED_QUERY_KEYS:
+            ignored[key] = clean_values
+            continue
+        if key in EMPTY_ONLY_IGNORED_QUERY_KEYS and all(value == "" for value in clean_values):
             ignored[key] = clean_values
             continue
         unsupported[raw_key] = clean_values

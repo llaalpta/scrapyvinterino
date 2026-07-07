@@ -14,6 +14,7 @@ from vinted_monitor.providers.vinted_catalog import (
     VintedCatalogProviderError,
     build_catalog_api_params,
     decode_next_flight_payload,
+    extract_csrf_token,
     map_catalog_item,
     parse_catalog_api_payload,
     parse_catalog_html,
@@ -93,6 +94,16 @@ def test_curl_provider_defaults_to_configured_chrome120_profile() -> None:
     assert captured_sessions == [{"impersonate": "chrome120", "proxies": None}]
 
 
+def test_curl_provider_default_runtime_profile_is_chrome146_without_env_file() -> None:
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(_env_file=None),
+        session_factory=lambda **_: FakeCurlSession(lambda _call: FakeResponse(200), []),
+    )
+
+    assert provider.profile.name == "chrome_146_win10"
+    assert provider.profile.impersonate == "chrome146"
+
+
 def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_headers() -> None:
     profile = get_profile_by_name("chrome_120_win10")
     assert profile is not None
@@ -133,6 +144,25 @@ def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_heade
     assert "TE" not in bootstrap_headers
     assert "Connection" not in api_headers
     assert "TE" not in api_headers
+
+
+def test_chrome146_runtime_headers_match_observed_catalog_flow() -> None:
+    profile = get_profile_by_name("chrome_146_win10")
+    assert profile is not None
+
+    bootstrap_headers = profile.build_bootstrap_headers()
+    api_headers = profile.build_api_headers("https://www.vinted.es/catalog?catalog[]=2050")
+
+    assert profile.impersonate == "chrome146"
+    assert profile.user_agent.endswith("Chrome/146.0.0.0 Safari/537.36")
+    assert bootstrap_headers["sec-ch-ua"] == '"Not-A.Brand";v="24", "Chromium";v="146"'
+    assert bootstrap_headers["Accept-Language"] == "en-GB,en;q=0.9"
+    assert bootstrap_headers["Priority"] == "u=0, i"
+    assert "Cache-Control" not in bootstrap_headers
+    assert api_headers["Accept"] == "application/json,text/plain,*/*,image/webp"
+    assert api_headers["Locale"] == "es-ES"
+    assert api_headers["Priority"] == "u=3"
+    assert api_headers["Referer"] == "https://www.vinted.es/catalog?catalog[]=2050"
 
 
 @pytest.fixture(autouse=True)
@@ -232,6 +262,13 @@ def test_parse_catalog_api_payload_maps_items_and_provider_metadata() -> None:
     assert result.provider_metadata == {"source": "catalog_api_json"}
 
 
+def test_extract_csrf_token_from_catalog_document_variants() -> None:
+    assert extract_csrf_token('{"CSRF_TOKEN":"csrf-secret-value"}') == "csrf-secret-value"
+    assert extract_csrf_token(r'\"csrfToken\":\"csrf-secret-value\"') == "csrf-secret-value"
+    assert extract_csrf_token(r'headers.set(\"X-CSRF-Token\",\"csrf-secret-value\")') == "csrf-secret-value"
+    assert extract_csrf_token("<html>no token</html>") is None
+
+
 def test_parse_catalog_html_allows_empty_catalog_results() -> None:
     result = parse_catalog_html(
         build_next_flight_html(
@@ -307,24 +344,39 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
     fixture = load_fixture()
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/":
-            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=anon; Path=/;"})
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": "access_token_web=anon; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "1920x1080",
+                },
+            )
         if path(call) == "/api/v2/catalog/items":
             assert call["params"]["per_page"] == 5
             assert call["params"]["order"] == "newest_first"
-            assert call["headers"]["Accept"] == "application/json, text/plain, */*"
+            assert call["headers"]["Accept"] == "application/json,text/plain,*/*,image/webp"
+            assert call["headers"]["X-CSRF-Token"] == "csrf-secret-value"
+            assert call["headers"]["X-Anon-Id"] == "anon-secret-value"
+            assert call["headers"]["Locale"] == "es-ES"
+            assert call["headers"]["Priority"] == "u=3"
+            assert call["headers"]["Referer"] == source().url
             assert call["cookies"]["access_token_web"] == "anon"
             return FakeResponse(200, json_data=fixture, headers={"content-type": "application/json"})
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
+        settings=Settings(egress_diagnostic_url=None, curl_impersonate_browser="chrome146"),
         session_factory=fake_session_factory(handler, calls),
     )
     result = provider.search(source())
 
     assert len(result.items) == 2
-    assert [path(call) for call in calls] == ["/", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
     assert "Referer" not in calls[0]["headers"]
 
 
@@ -333,8 +385,16 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
     events: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/":
-            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=public-marker; Path=/;"})
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": "datadome=public-marker; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                },
+            )
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
         return FakeResponse(404)
@@ -357,11 +417,20 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
         "catalog_api_request_success",
     ]
     assert events[0]["details"]["http_session"]["masked"]
-    assert events[1]["details"]["bootstrap_origin"] == "base_domain"
+    assert events[1]["details"]["bootstrap_origin"] == "catalog_document"
     assert events[2]["details"]["datadome_cookie"] is True
     assert "bootstrap_duration_ms" in events[2]["details"]
+    assert events[2]["details"]["csrf_token_found"] is True
+    assert events[2]["details"]["anon_id_found"] is True
+    assert events[2]["details"]["v_udt_found"] is True
+    assert events[4]["details"]["csrf_token_found"] is True
+    assert events[4]["details"]["anon_id_found"] is True
     assert events[4]["details"]["browser_profile"] == provider.profile.name
-    assert "public-marker" not in json.dumps(events)
+    serialized = json.dumps(events)
+    assert "public-marker" not in serialized
+    assert "csrf-secret-value" not in serialized
+    assert "anon-secret-value" not in serialized
+    assert "udt-secret-value" not in serialized
 
 
 def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> None:
@@ -375,11 +444,11 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
                 json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES", "connection": {"asn": 64500, "org": "Test ISP"}},
                 headers={"content-type": "application/json", "set-cookie": "diagnostic_cookie=diag-secret-value; Path=/;"},
             )
-        if path(call) == "/":
+        if path(call) == "/catalog":
             assert call["cookies"]["diagnostic_cookie"] == "diag-secret-value"
             return FakeResponse(
                 200,
-                text="<html>bootstrap</html>",
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={"set-cookie": "access_token_web=anonymous-secret-value; Path=/;"},
             )
         if path(call) == "/api/v2/catalog/items":
@@ -403,7 +472,7 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
 
     provider.search(source())
 
-    assert [path(call) for call in calls] == ["/ip", "/", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
     egress_event = next(event for event in events if event["phase"] == "egress_diagnostic_success")
     assert egress_event["status_code"] == 200
     assert egress_event["duration_ms"] is not None
@@ -417,6 +486,7 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
     assert egress_event["details"]["proxy_session"] == proxy_session
     assert "diag-secret-value" not in json.dumps(events)
     assert "anonymous-secret-value" not in json.dumps(events)
+    assert "csrf-secret-value" not in json.dumps(events)
 
 
 def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:
@@ -468,7 +538,7 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
 
     def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
-        if path(call) == "/":
+        if path(call) == "/catalog":
             bootstrap_calls += 1
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
@@ -497,7 +567,7 @@ def test_curl_provider_raises_after_second_session_failure() -> None:
 
     def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
-        if path(call) == "/":
+        if path(call) == "/catalog":
             bootstrap_calls += 1
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=fresh; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
@@ -521,7 +591,7 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/":
+        if path(call) == "/catalog":
             return FakeResponse(
                 200,
                 text=build_next_flight_html(load_fixture()),
@@ -539,14 +609,14 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
     with pytest.raises(VintedCatalogProviderError):
         provider.search(source())
 
-    assert [path(call) for call in calls] == ["/", "/api/v2/catalog/items", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items", "/api/v2/catalog/items"]
 
 
 def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> None:
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/":
+        if path(call) == "/catalog":
             return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, text="<html>geo.captcha-delivery.com</html>", headers={"content-type": "text/html"})
@@ -561,11 +631,11 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
         provider.search(source())
 
 
-def test_curl_provider_standard_flow_visits_home_then_api() -> None:
+def test_curl_provider_standard_flow_visits_catalog_document_then_api() -> None:
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        if path(call) == "/":
+        if path(call) == "/catalog":
             return FakeResponse(200, text="<html>ok</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
@@ -578,7 +648,7 @@ def test_curl_provider_standard_flow_visits_home_then_api() -> None:
 
     provider.search(source())
 
-    assert [path(call) for call in calls] == ["/", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
     assert "Referer" not in calls[0]["headers"]
     assert calls[1]["headers"]["Referer"] == source().url
 

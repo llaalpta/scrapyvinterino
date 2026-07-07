@@ -16,7 +16,7 @@
 - `curl_cffi` con `impersonate` falsifica la huella TLS/JA3 y HTTP/2. Los perfiles de navegador (User-Agent, Sec-Ch-Ua) son datos publicos, no secretos.
 - Los UUID de sesion sticky del proxy son efimeros: se generan por tarea, se registran solo como marcador seguro, y se descartan al terminar.
 - Las cookies DataDome obtenidas durante el bootstrap se mantienen solo en memoria de la sesion `curl_cffi` y no se persisten.
-- El bootstrap anonimo de Vinted usa el dominio base `https://www.vinted.es/`; las cookies/tokens anonimos resultantes solo viven en memoria de esa sesion efimera y se registran exclusivamente como marcadores seguros.
+- El bootstrap anonimo de Vinted usa la URL publica de catalogo guardada en el monitor; las cookies, tokens, CSRF y marcadores anonimos resultantes solo viven en memoria de esa sesion efimera y se registran exclusivamente como marcadores seguros.
 - Los eventos de run pueden incluir el nombre del perfil de navegador usado, el marcador seguro del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.
 - Acciones de compra futuras:
   - requeriran click explicito;

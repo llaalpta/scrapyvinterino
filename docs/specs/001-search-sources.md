@@ -48,6 +48,8 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Only catalog URL filters that can be translated to the fast catalog API are accepted.
 - Supported product filters are `search_text`, `catalog[]`, `brand_ids[]`, `size_ids[]`, `status_ids[]`, `price_from`, `price_to`, and `currency`.
 - `page`, `time`, and `order` are accepted but ignored by execution because runs force page `1` and `newest_first`.
+- Empty `search_by_image_uuid` and `search_by_image_id` query parameters are accepted and ignored because Chrome catalog navigations can include them as blank placeholders.
+- Non-empty `search_by_image_uuid` or `search_by_image_id` values are rejected because image-search filters are not translated to the fast catalog API.
 - Any other query parameter is rejected with a clear validation error before saving.
 - URL validation must not call Vinted and must not trigger scraping.
 

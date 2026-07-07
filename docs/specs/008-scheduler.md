@@ -28,7 +28,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Do not run a monitor when Redis is unavailable.
 - Require an explicit initial catalog snapshot before any monitor run can process opportunities.
 - Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
-- Use a deterministic fast catalog flow: create one `curl_cffi` session, diagnose egress with it when configured, bootstrap cookies on `https://www.vinted.es/`, apply one human delay, then call `/api/v2/catalog/items` with API parameters translated from the saved catalog URL.
+- Use a deterministic fast catalog flow: create one `curl_cffi` session, diagnose egress with it when configured, bootstrap the saved public catalog document URL, extract anonymous session context such as CSRF/anon markers into memory only, apply one human delay, then call `/api/v2/catalog/items` with API parameters translated from the same saved catalog URL and with browser-coherent headers.
 - Keep proxy usage optional and globally managed by the scheduler.
 - Support UI-managed proxy profiles with encrypted credentials.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
@@ -178,7 +178,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm scheduler capacity reflects active proxy capacity plus allowed direct capacity.
 - Confirm periodic activation is blocked when scheduler is disabled or capacity is exhausted.
 - Confirm run metadata records `egress_mode=proxy` with proxy details when a proxy is selected and `egress_mode=direct` when direct fallback is used.
-- Confirm provider requests use the deterministic order `egress diagnostic` when configured, `https://www.vinted.es/`, then `/api/v2/catalog/items`.
+- Confirm provider requests use the deterministic order `egress diagnostic` when configured, saved `/catalog?...` document URL, then `/api/v2/catalog/items`.
 - Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.
 - Confirm Redis miss plus existing monitor opportunity is skipped before filters and logged as `candidate_existing_opportunity_skipped`.
 - Confirm direct-disabled/no-proxy path leaves the monitor pending instead of running.

@@ -60,6 +60,25 @@ def test_catalog_filter_compatibility_reports_supported_ignored_and_unsupported(
     assert compatibility["unsupported"] == {"color_ids[]": ["12"]}
 
 
+def test_catalog_filter_compatibility_ignores_empty_search_by_image_params() -> None:
+    compatibility = catalog_filter_compatibility(
+        "https://www.vinted.es/catalog?catalog[]=2050&search_by_image_uuid=&search_by_image_id="
+    )
+
+    assert compatibility["compatible"] is True
+    assert compatibility["supported"] == {"catalog": ["2050"]}
+    assert compatibility["ignored"] == {
+        "search_by_image_id": [""],
+        "search_by_image_uuid": [""],
+    }
+    assert compatibility["unsupported"] == {}
+
+
+def test_validate_vinted_catalog_url_rejects_non_empty_search_by_image_params() -> None:
+    with pytest.raises(ValueError, match="search_by_image_uuid"):
+        validate_vinted_catalog_url("https://www.vinted.es/catalog?catalog[]=2050&search_by_image_uuid=image-123")
+
+
 def test_normalize_vinted_catalog_url_preserves_blank_and_repeated_values() -> None:
     normalized = normalize_vinted_catalog_url(
         "https://www.vinted.es/catalog?search_text=&brand_ids[]=88&brand_ids[]=364&price_to=5.00"
