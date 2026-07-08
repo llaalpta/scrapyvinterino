@@ -212,6 +212,7 @@ class VintedSessionContextRead(BaseModel):
 
 class VintedSessionRead(BaseModel):
     id: int
+    source_id: int
     proxy_profile_id: int
     status: str
     browser_profile: str
@@ -233,64 +234,6 @@ class VintedSessionRead(BaseModel):
     invalidated_at: datetime | None
     last_error: str | None
     context: VintedSessionContextRead
-
-
-class VintedSessionPreflightRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_url: str | None = None
-
-    @field_validator("source_url")
-    @classmethod
-    def validate_optional_source_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return validate_vinted_catalog_url(value)
-
-
-class CatalogApiProbeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_url: str | None = None
-
-    @field_validator("source_url")
-    @classmethod
-    def validate_optional_source_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return validate_vinted_catalog_url(value)
-
-
-class CatalogApiProbeRead(BaseModel):
-    outcome: str
-    source_url: str
-    catalog_api_url: str
-    status_code: int | None
-    duration_ms: int | None
-    egress_ip: str | None
-    egress_country_code: str | None
-    context: dict[str, Any]
-    missing_required: list[str]
-    request: dict[str, Any]
-    response: dict[str, Any]
-    error: str | None
-
-
-class VintedSessionImportRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    proxy_session_id: str
-    cookie_header: str | None = None
-    cookies: dict[str, str] = Field(default_factory=dict)
-    csrf_token: str | None = None
-    anon_id: str | None = None
-    access_token_web: str | None = None
-    datadome: str | None = None
-    v_udt: str | None = None
-    user_iso_locale: str | None = None
-    vinted_screen: str = "catalog"
-    egress_ip: str | None = None
-    egress_country_code: str | None = None
 
 
 class ItemRead(BaseModel):

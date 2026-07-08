@@ -10,7 +10,7 @@ Tablas principales:
 - `items`: articulos normalizados de Vinted que llegaron a oportunidad; `vinted_item_id` define identidad de catalogo/cache.
 - `opportunities`: articulos vistos por un monitor que no fueron descartados; es la tabla principal de resultados utiles del producto y su unicidad notificable es por monitor e item.
 - `proxy_profiles`: pool global de proxys configurables desde UI con secretos cifrados, tipo, capacidad y estado operativo.
-- `vinted_sessions`: sesiones anonimas publicas de Vinted preparadas por proxy sticky; guardan cookies/tokens cifrados, contexto seguro, contador de uso, expiracion e invalidacion.
+- `vinted_sessions`: sesiones anonimas publicas de Vinted propiedad de un monitor y asociadas al proxy sticky usado; guardan cookies/tokens cifrados, contexto seguro, contador de uso, expiracion e invalidacion.
 - `run_events`: eventos HTTP y operativos saneados para depurar monitores/runs.
 - `action_requests`: acciones solicitadas por usuario.
 - `action_executions`: resultado de acciones autenticadas futuras.

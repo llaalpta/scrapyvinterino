@@ -20,7 +20,14 @@ MAX_INTERVAL_SECONDS = 3600
 DEFAULT_JITTER_PERCENT = 20
 MIN_JITTER_PERCENT = 0
 MAX_JITTER_PERCENT = 50
-SUPPORTED_SOURCE_CONFIG_KEYS = {"interval_seconds", "jitter_percent", "allowed_windows"}
+MIN_STOP_AFTER_VINTED_SESSION_USES = 1
+MAX_STOP_AFTER_VINTED_SESSION_USES = 1000
+SUPPORTED_SOURCE_CONFIG_KEYS = {
+    "interval_seconds",
+    "jitter_percent",
+    "allowed_windows",
+    "stop_after_vinted_session_uses",
+}
 RUNTIME_CONFIG_KEYS = {
     "enabled",
     "max_concurrent_runs",
@@ -47,12 +54,14 @@ class SourceSchedulerConfig:
     interval_seconds: int = DEFAULT_INTERVAL_SECONDS
     jitter_percent: int = DEFAULT_JITTER_PERCENT
     allowed_windows: tuple[str, ...] = ()
+    stop_after_vinted_session_uses: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "interval_seconds": self.interval_seconds,
             "jitter_percent": self.jitter_percent,
             "allowed_windows": list(self.allowed_windows),
+            "stop_after_vinted_session_uses": self.stop_after_vinted_session_uses,
         }
 
 
@@ -270,10 +279,17 @@ def normalize_scheduler_config(value: dict[str, Any] | None) -> dict[str, Any]:
         MAX_JITTER_PERCENT,
     )
     allowed_windows = _validate_allowed_windows(raw.get("allowed_windows", []))
+    stop_after_vinted_session_uses = _validate_optional_int(
+        raw.get("stop_after_vinted_session_uses"),
+        "stop_after_vinted_session_uses",
+        MIN_STOP_AFTER_VINTED_SESSION_USES,
+        MAX_STOP_AFTER_VINTED_SESSION_USES,
+    )
     return SourceSchedulerConfig(
         interval_seconds=interval_seconds,
         jitter_percent=jitter_percent,
         allowed_windows=tuple(allowed_windows),
+        stop_after_vinted_session_uses=stop_after_vinted_session_uses,
     ).as_dict()
 
 
@@ -320,6 +336,7 @@ def source_config(source: SearchSource) -> SourceSchedulerConfig:
         interval_seconds=normalized["interval_seconds"],
         jitter_percent=normalized["jitter_percent"],
         allowed_windows=tuple(normalized["allowed_windows"]),
+        stop_after_vinted_session_uses=normalized.get("stop_after_vinted_session_uses"),
     )
 
 
@@ -439,6 +456,12 @@ def _validate_int(value: Any, field: str, minimum: int, maximum: int) -> int:
     if parsed < minimum or parsed > maximum:
         raise SchedulerConfigError(f"{field} must be between {minimum} and {maximum}")
     return parsed
+
+
+def _validate_optional_int(value: Any, field: str, minimum: int, maximum: int) -> int | None:
+    if value in (None, ""):
+        return None
+    return _validate_int(value, field, minimum, maximum)
 
 
 def _validate_allowed_windows(value: Any) -> list[str]:

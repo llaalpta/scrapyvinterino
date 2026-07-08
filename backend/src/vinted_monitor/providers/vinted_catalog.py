@@ -131,6 +131,7 @@ class CurlCffiVintedCatalogProvider:
         viewport_size: str = "1920x1080",
         prepared_session: PreparedCatalogSession | None = None,
         require_complete_session_context: bool = True,
+        require_datadome_cookie: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.profile = profile or profile_for_impersonate(self.settings.curl_impersonate_browser)
@@ -150,6 +151,7 @@ class CurlCffiVintedCatalogProvider:
         self.viewport_size = viewport_size.strip().lower()
         self.prepared_session = prepared_session
         self.require_complete_session_context = require_complete_session_context
+        self.require_datadome_cookie = require_datadome_cookie
         self.http_session_id = str(uuid.uuid4())
         self._session: Session | None = None
         self._bootstrapped = prepared_session is not None
@@ -1034,7 +1036,6 @@ class CurlCffiVintedCatalogProvider:
             "csrf_token": report.get("csrf_token_found"),
             "anon_id": report.get("anon_id_found"),
             "access_token_web": report.get("access_token_found"),
-            "datadome": report.get("datadome_cookie"),
             "v_udt": report.get("v_udt_found"),
             "locale": report.get("locale_configured"),
             "accept_language": report.get("accept_language_configured"),
@@ -1044,6 +1045,8 @@ class CurlCffiVintedCatalogProvider:
             "response_locale": report.get("response_locale_matches"),
             "response_screen": report.get("response_screen_matches"),
         }
+        if self.require_datadome_cookie:
+            required_truthy_flags["datadome"] = report.get("datadome_cookie")
         for name, present in required_truthy_flags.items():
             if not present:
                 missing.append(name)

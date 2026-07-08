@@ -13,8 +13,6 @@ from sqlalchemy.orm import Session
 from vinted_monitor.api.schemas import (
     ActionRequestCreate,
     ActionRequestRead,
-    CatalogApiProbeRead,
-    CatalogApiProbeRequest,
     ItemRead,
     MonitorStatsRead,
     OpportunityResultPageRead,
@@ -29,17 +27,12 @@ from vinted_monitor.api.schemas import (
     SearchSourceCreate,
     SearchSourceRead,
     SearchSourceUpdate,
-    VintedSessionImportRequest,
-    VintedSessionPreflightRequest,
     VintedSessionRead,
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.core.redaction import redact_sensitive_text
-from vinted_monitor.db.models import ProxyProfile, RunEvent, SearchSource
+from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal, get_db
-from vinted_monitor.providers.browser_profiles import profile_for_impersonate
-from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider, PreparedCatalogSession
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
     DEFAULT_PAGE,
@@ -56,7 +49,6 @@ from vinted_monitor.services.proxies import (
     mark_proxy_test_result,
     profile_to_public_fields,
     proxy_url_for_profile,
-    proxy_url_with_sticky_session,
     update_proxy_profile,
 )
 from vinted_monitor.services.run_events import list_run_events, redact_run_event_details
@@ -96,10 +88,7 @@ from vinted_monitor.services.search_sources import (
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 from vinted_monitor.services.vinted_sessions import (
     VintedSessionRequiredError,
-    generate_proxy_session_id,
     get_latest_vinted_session_summary,
-    parse_cookie_header,
-    save_prepared_vinted_session,
 )
 
 settings = get_settings()
@@ -314,155 +303,31 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
     return _proxy_profile_read(updated, db)
 
 
-@app.post("/api/proxy-profiles/{profile_id}/vinted-session/preflight", response_model=ProxyProfileRead)
-def post_proxy_profile_vinted_session_preflight(
-    profile_id: int,
-    payload: VintedSessionPreflightRequest | None = None,
-    db: Session = Depends(get_db),
-) -> ProxyProfileRead:
-    profile = db.get(ProxyProfile, profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
-    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
-    proxy_session_id = generate_proxy_session_id()
-    proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
-    source_url = payload.source_url if payload and payload.source_url else f"{settings.vinted_base_url}/catalog?search_text=pepe"
-    provider = CurlCffiVintedCatalogProvider(
-        settings=settings,
-        profile=browser_profile,
-        proxy_url=proxy_url,
-        timeout_ms=settings.vinted_request_timeout_ms,
-        catalog_per_page=settings.vinted_fast_catalog_per_page,
-        request_retries=0,
-        proxy_session_marker=None,
-        expected_country_code=profile.country_code,
-        locale=profile.locale,
-        accept_language=profile.accept_language,
-        screen=profile.vinted_screen,
-        viewport_size=profile.screen,
+@app.post("/api/proxy-profiles/{profile_id}/vinted-session/preflight", status_code=410)
+def post_proxy_profile_vinted_session_preflight(profile_id: int) -> None:
+    del profile_id
+    raise HTTPException(
+        status_code=410,
+        detail="Las sesiones Vinted son propiedad del monitor; lanza o recalibra un monitor para prepararlas automaticamente",
     )
-    try:
-        report = provider.bootstrap_for_session(source_url, collect_datadome=True)
-        prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
-        session = save_prepared_vinted_session(
-            db,
-            profile,
-            proxy_session_id=proxy_session_id,
-            profile=browser_profile,
-            context=prepared,
-            settings=settings,
-            last_error=None if not report.get("missing_required") else str(report.get("missing_required")),
-        )
-        db.commit()
-        db.refresh(session)
-    except Exception as exc:
-        prepared = PreparedCatalogSession(
-            proxy_session_id=proxy_session_id,
-            cookies={},
-            user_iso_locale=profile.locale,
-            vinted_screen=profile.vinted_screen,
-        )
-        save_prepared_vinted_session(
-            db,
-            profile,
-            proxy_session_id=proxy_session_id,
-            profile=browser_profile,
-            context=prepared,
-            status="incomplete",
-            settings=settings,
-            last_error=str(exc),
-        )
-        db.commit()
-    finally:
-        provider.close()
-    db.refresh(profile)
-    return _proxy_profile_read(profile, db)
 
 
-@app.post("/api/proxy-profiles/{profile_id}/catalog-api/probe", response_model=CatalogApiProbeRead)
-def post_proxy_profile_catalog_api_probe(
-    profile_id: int,
-    payload: CatalogApiProbeRequest | None = None,
-    db: Session = Depends(get_db),
-) -> CatalogApiProbeRead:
-    profile = db.get(ProxyProfile, profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
-    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
-    proxy_session_id = generate_proxy_session_id()
-    proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
-    source_url = payload.source_url if payload and payload.source_url else f"{settings.vinted_base_url}/catalog?search_text=pepe"
-    provider = CurlCffiVintedCatalogProvider(
-        settings=settings,
-        profile=browser_profile,
-        proxy_url=proxy_url,
-        timeout_ms=settings.vinted_request_timeout_ms,
-        catalog_per_page=settings.vinted_fast_catalog_per_page,
-        request_retries=0,
-        proxy_session_marker=None,
-        expected_country_code=profile.country_code,
-        locale=profile.locale,
-        accept_language=profile.accept_language,
-        screen=profile.vinted_screen,
-        viewport_size=profile.screen,
+@app.post("/api/proxy-profiles/{profile_id}/catalog-api/probe", status_code=410)
+def post_proxy_profile_catalog_api_probe(profile_id: int) -> None:
+    del profile_id
+    raise HTTPException(
+        status_code=410,
+        detail="El probe de catalogo por proxy se elimino; el probe real ocurre dentro de la preparacion de sesion del monitor",
     )
-    try:
-        return CatalogApiProbeRead(**provider.probe_catalog_api(source_url))
-    except Exception as exc:
-        return CatalogApiProbeRead(
-            outcome="transport_error",
-            source_url=source_url,
-            catalog_api_url=f"{str(settings.vinted_base_url).rstrip('/')}/api/v2/catalog/items",
-            status_code=None,
-            duration_ms=None,
-            egress_ip=None,
-            egress_country_code=None,
-            context={},
-            missing_required=[],
-            request={},
-            response={},
-            error=redact_sensitive_text(str(exc)),
-        )
-    finally:
-        provider.close()
 
 
-@app.post("/api/proxy-profiles/{profile_id}/vinted-session/import", response_model=ProxyProfileRead)
-def post_proxy_profile_vinted_session_import(
-    profile_id: int,
-    payload: VintedSessionImportRequest,
-    db: Session = Depends(get_db),
-) -> ProxyProfileRead:
-    profile = db.get(ProxyProfile, profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
-    cookies = {**(parse_cookie_header(payload.cookie_header) if payload.cookie_header else {}), **payload.cookies}
-    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
-    prepared = PreparedCatalogSession(
-        proxy_session_id=payload.proxy_session_id,
-        cookies=cookies,
-        csrf_token=payload.csrf_token,
-        anon_id=payload.anon_id,
-        access_token_web=payload.access_token_web,
-        datadome=payload.datadome,
-        v_udt=payload.v_udt,
-        user_iso_locale=payload.user_iso_locale,
-        vinted_screen=payload.vinted_screen,
-        egress_ip=payload.egress_ip,
-        egress_country_code=payload.egress_country_code,
+@app.post("/api/proxy-profiles/{profile_id}/vinted-session/import", status_code=410)
+def post_proxy_profile_vinted_session_import(profile_id: int) -> None:
+    del profile_id
+    raise HTTPException(
+        status_code=410,
+        detail="La importacion de sesiones Vinted por proxy se elimino antes de produccion; las sesiones se preparan desde el monitor",
     )
-    session = save_prepared_vinted_session(
-        db,
-        profile,
-        proxy_session_id=payload.proxy_session_id,
-        profile=browser_profile,
-        context=prepared,
-        settings=settings,
-    )
-    db.commit()
-    db.refresh(session)
-    db.refresh(profile)
-    return _proxy_profile_read(profile, db)
 
 
 @app.get("/api/opportunities", response_model=OpportunityResultPageRead)

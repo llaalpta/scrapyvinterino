@@ -150,6 +150,7 @@ class VintedSession(Base):
     __tablename__ = "vinted_sessions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
     proxy_profile_id: Mapped[int] = mapped_column(ForeignKey("proxy_profiles.id"))
     proxy_session_id: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(40), default="ready")

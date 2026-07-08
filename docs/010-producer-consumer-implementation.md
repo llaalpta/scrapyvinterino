@@ -5,9 +5,9 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 ## Current State
 
 - Scheduler is a producer and enqueues `MonitorTask` payloads to Redis with `LPUSH`.
-- Consumers block with `BRPOP`, create a browser profile plus per-attempt proxy sticky session, then execute monitor business logic through `execute_monitor_run()`.
+- Consumers block with `BRPOP`, create a browser profile, select proxy capacity, then execute monitor business logic through `execute_monitor_run()`.
 - `CurlCffiVintedCatalogProvider` is the only Vinted catalog HTTP provider.
-- Runtime catalog traffic now bootstraps the saved catalog document URL, extracts CSRF/anon/session context into memory, and then calls `/api/v2/catalog/items` with the same `curl_cffi` session.
+- Runtime catalog traffic is monitor-owned: the run reuses a ready `vinted_sessions` row for that monitor/proxy sticky identity or prepares one automatically from the saved catalog document URL before scraping.
 - Manual runs remain synchronous from the API, but use the same provider stack.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 
@@ -15,12 +15,12 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 
 - Use `PROXY_STICKY_USERNAME_TEMPLATE` for provider-specific sticky formats. Default: `{username}-session-{session_id}`.
 - For providers that require `sessid`, configure `{username}-sessid-{session_id}`.
-- Asocks is treated as ephemeral sticky-by-username egress: each task attempt gets a fresh UUID in the proxy username, and the UUID is discarded after the attempt.
+- Residential proxy sticky identities are tied to prepared Vinted sessions for a monitor, not to a one-off task attempt.
 - Do not call the Asocks refresh API from runtime scraping code; rotation is achieved by using a new session UUID per attempt.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
 - Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain the first validation path before Asocks is configured.
 - Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
-- Redis task payloads carry `proxy_profile_id` only; the consumer resolves the profile and builds the sticky URL inside the attempt.
+- Redis task payloads carry `proxy_profile_id` only; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
 - Treat `403` and `429` from Vinted as DataDome-style challenge responses for retry purposes.
 - Keep retry escalation in `TaskConsumer`; `execute_monitor_run()` records the failed run and re-raises `DataDomeChallengeError`.
 

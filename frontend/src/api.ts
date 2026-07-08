@@ -59,6 +59,7 @@ export type ProxyProfile = {
 
 export type VintedSession = {
   id: number;
+  source_id: number;
   proxy_profile_id: number;
   status: 'ready' | 'incomplete' | 'invalid' | string;
   browser_profile: string;
@@ -90,25 +91,11 @@ export type VintedSession = {
   };
 };
 
-export type CatalogApiProbe = {
-  outcome: 'accepted_json' | 'challenge' | 'rejected' | 'non_json' | 'transport_error' | string;
-  source_url: string;
-  catalog_api_url: string;
-  status_code: number | null;
-  duration_ms: number | null;
-  egress_ip: string | null;
-  egress_country_code: string | null;
-  context: Record<string, unknown>;
-  missing_required: string[];
-  request: Record<string, unknown>;
-  response: Record<string, unknown>;
-  error: string | null;
-};
-
 export type SourceSchedulerConfig = {
   interval_seconds?: number;
   jitter_percent?: number;
   allowed_windows?: string[];
+  stop_after_vinted_session_uses?: number | null;
 };
 
 export type SchedulerState = {
@@ -418,14 +405,6 @@ export function updateProxyProfile(
 
 export function testProxyProfile(profileId: number): Promise<ProxyProfile> {
   return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/test`);
-}
-
-export function preflightVintedSession(profileId: number): Promise<ProxyProfile> {
-  return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/vinted-session/preflight`, {});
-}
-
-export function probeCatalogApi(profileId: number): Promise<CatalogApiProbe> {
-  return postJson<CatalogApiProbe>(`/api/proxy-profiles/${profileId}/catalog-api/probe`, {});
 }
 
 export function startMonitor(sourceId: number): Promise<Run> {

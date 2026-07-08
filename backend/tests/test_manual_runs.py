@@ -15,6 +15,7 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
+from vinted_monitor.services.monitor_sessions import start_monitor_session
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.run_events import record_run_event
@@ -165,10 +166,17 @@ def _test_direct_egress() -> RunEgress:
     return RunEgress(mode="direct")
 
 
-def _create_ready_vinted_session(db, proxy: ProxyProfile, *, proxy_session_id: str = "pytestsession") -> None:
+def _create_ready_vinted_session(
+    db,
+    source: SearchSource,
+    proxy: ProxyProfile,
+    *,
+    proxy_session_id: str = "pytestsession",
+) -> None:
     profile = profile_for_impersonate("chrome146")
     save_prepared_vinted_session(
         db,
+        source,
         proxy,
         proxy_session_id=proxy_session_id,
         profile=profile,
@@ -345,7 +353,9 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
             username="customer",
             password=None,
         )
-        _create_ready_vinted_session(db, proxy, proxy_session_id="stickytest01")
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        _create_ready_vinted_session(db, source, proxy, proxy_session_id="stickytest01")
         run = execute_monitor_run(
             db,
             source_id,
@@ -367,11 +377,89 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert run.runtime_metadata["proxy_session_id_prefix"] == "stickyte"
         assert run.runtime_metadata["vinted_session_id"]
         assert run.runtime_metadata["proxy_sticky_session"]["masked"]
-        run_started = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "run_started"))
-        assert run_started is not None
-        assert run_started.details["proxy_session_id_prefix"] == run.runtime_metadata["proxy_session_id_prefix"]
-        assert run_started.details["proxy_sticky_session"] == run.runtime_metadata["proxy_sticky_session"]
+        selected = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "vinted_session_selected"))
+        assert selected is not None
+        assert selected.details["vinted_session_id"] == run.runtime_metadata["vinted_session_id"]
+        assert selected.details["proxy_session"] == run.runtime_metadata["proxy_sticky_session"]
         assert created_providers[0].kwargs["proxy_session_marker"] == run.runtime_metadata["proxy_sticky_session"]
+
+
+def test_ready_vinted_session_is_scoped_to_monitor(source_id: int) -> None:
+    other_source_id: int | None = None
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        other_source = SearchSource(
+            name="pytest other scoped session source",
+            url="https://www.vinted.es/catalog?search_text=other",
+            normalized_query={"search_text": ["other"]},
+            scheduler_config={},
+        )
+        proxy = create_proxy_profile(
+            db,
+            name="pytest scoped session proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8001,
+            username=None,
+            password=None,
+        )
+        db.add(other_source)
+        db.flush()
+        other_source_id = other_source.id
+        _create_ready_vinted_session(db, source, proxy, proxy_session_id="scopedtest01")
+        db.commit()
+
+        from vinted_monitor.services.vinted_sessions import VintedSessionRequiredError, get_ready_vinted_session
+
+        with pytest.raises(VintedSessionRequiredError):
+            get_ready_vinted_session(db, other_source, proxy, settings=Settings(), require_datadome=False)
+
+    cleanup_source(other_source_id)
+
+
+def test_active_monitor_stops_after_vinted_session_use_limit() -> None:
+    source_id: int | None = None
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest vinted session use limit",
+            url="https://www.vinted.es/catalog?search_text=limit",
+            normalized_query={"search_text": ["limit"]},
+            is_active=True,
+            monitor_mode="continuous",
+            scheduler_config={
+                "interval_seconds": 300,
+                "jitter_percent": 0,
+                "allowed_windows": [],
+                "stop_after_vinted_session_uses": 1,
+            },
+        )
+        db.add(source)
+        db.flush()
+        start_monitor_session(db, source)
+        db.commit()
+        source_id = source.id
+
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeSuccessProvider(item_count=1, prefix="pytest-run-item-limit"),
+            seen_cache=FakeSeenCache(),
+            egress=_test_direct_egress(),
+            runtime_metadata_extra={"vinted_session_id": 987654},
+        )
+
+        db.refresh(source)
+        event = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "vinted_session_use_limit_reached"))
+        assert run.status == SUCCESS
+        assert source.is_active is False
+        assert source.monitor_mode == "continuous"
+        assert event is not None
+        assert event.details["vinted_session_use_count"] == 1
+        assert event.details["stop_after_vinted_session_uses"] == 1
+
+    cleanup_source(source_id)
 
 
 def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:

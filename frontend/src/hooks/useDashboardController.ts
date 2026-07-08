@@ -12,8 +12,6 @@ import {
   fetchRuns,
   fetchScheduler,
   fetchSources,
-  preflightVintedSession,
-  probeCatalogApi,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -25,7 +23,6 @@ import {
   type MonitorStatsRange,
   type OpportunityResult,
   type Page,
-  type CatalogApiProbe,
   type ProxyProfile,
   type SchedulerUpdate,
   type Run,
@@ -76,8 +73,6 @@ export function useDashboardController() {
   const [savingScheduler, setSavingScheduler] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [testingProxyIds, setTestingProxyIds] = useState<number[]>([]);
-  const [preparingProxySessionIds, setPreparingProxySessionIds] = useState<number[]>([]);
-  const [probingCatalogApiIds, setProbingCatalogApiIds] = useState<number[]>([]);
   const [proxyActionMessages, setProxyActionMessages] = useState<Record<number, string>>({});
   const [loadingOpportunities, setLoadingOpportunities] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -214,45 +209,6 @@ export function useDashboardController() {
       setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
     } finally {
       setTestingProxyIds((current) => current.filter((id) => id !== profileId));
-    }
-  }
-
-  async function onPrepareVintedSession(profileId: number) {
-    setError(null);
-    setPreparingProxySessionIds((current) => addId(current, profileId));
-    setProxyActionMessages((current) => ({ ...current, [profileId]: 'Preparando sesion Vinted...' }));
-    try {
-      const updated = await preflightVintedSession(profileId);
-      setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
-      setProxyActionMessages((current) => ({
-        ...current,
-        [profileId]: proxySessionMessage(updated)
-      }));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted';
-      setError(message);
-      setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
-    } finally {
-      setPreparingProxySessionIds((current) => current.filter((id) => id !== profileId));
-    }
-  }
-
-  async function onProbeCatalogApi(profileId: number) {
-    setError(null);
-    setProbingCatalogApiIds((current) => addId(current, profileId));
-    setProxyActionMessages((current) => ({ ...current, [profileId]: 'Probando API catalogo...' }));
-    try {
-      const probe = await probeCatalogApi(profileId);
-      setProxyActionMessages((current) => ({
-        ...current,
-        [profileId]: catalogApiProbeMessage(probe)
-      }));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'No se pudo probar la API de catalogo';
-      setError(message);
-      setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
-    } finally {
-      setProbingCatalogApiIds((current) => current.filter((id) => id !== profileId));
     }
   }
 
@@ -571,8 +527,6 @@ export function useDashboardController() {
     onStartSession,
     onStopMonitor,
     onTestProxy,
-    onPrepareVintedSession,
-    onProbeCatalogApi,
     onToggleProxy,
     onToggleScheduler,
     onUpdateSchedulerConfig,
@@ -585,7 +539,6 @@ export function useDashboardController() {
     proxyDraft,
     proxyProfiles,
     proxyActionMessages,
-    probingCatalogApiIds,
     refreshRuntime,
     opportunityFilters,
     opportunitiesPageSize,
@@ -604,7 +557,6 @@ export function useDashboardController() {
     sources,
     sourceUrl,
     testingProxyIds,
-    preparingProxySessionIds,
     runs,
     updateOpportunityFilter,
     updateSourceDraft
@@ -622,6 +574,10 @@ export function useDashboardController() {
     const jitterPercent = isRecurring
       ? parseIntegerInRange(draft.jitterPercent, 'El jitter', 0, 50)
       : (source.scheduler_config.jitter_percent ?? 20);
+    const stopAfterVintedSessionUses =
+      isRecurring && draft.stopAfterVintedSessionUses.trim()
+        ? parseIntegerInRange(draft.stopAfterVintedSessionUses, 'El limite de usos de sesion Vinted', 1, 1000)
+        : null;
     const durationMinutes =
       draft.monitorMode === 'duration' ? parseIntegerInRange(draft.sessionDurationMinutes, 'La duracion del monitor', 1, 1440) : null;
     return updateSource(source.id, {
@@ -631,7 +587,8 @@ export function useDashboardController() {
       scheduler_config: {
         interval_seconds: intervalSeconds,
         jitter_percent: jitterPercent,
-        allowed_windows: draft.monitorMode === 'window' ? allowedWindows : []
+        allowed_windows: draft.monitorMode === 'window' ? allowedWindows : [],
+        stop_after_vinted_session_uses: stopAfterVintedSessionUses
       }
     });
   }
@@ -649,28 +606,6 @@ function proxyTestMessage(profile: ProxyProfile): string {
     return `Test IP fallido: ${profile.last_test_error ?? 'sin detalle'}`;
   }
   return 'Test IP completado sin estado';
-}
-
-function proxySessionMessage(profile: ProxyProfile): string {
-  const session = profile.vinted_session;
-  if (!session) {
-    return 'Sesion Vinted no preparada';
-  }
-  if (session.status === 'ready') {
-    return `Sesion Vinted ready: ${session.egress_ip ?? 'sin IP'}`;
-  }
-  return `Sesion Vinted ${session.status}: ${session.last_error ?? 'contexto incompleto'}`;
-}
-
-function catalogApiProbeMessage(probe: CatalogApiProbe): string {
-  const status = probe.status_code ? `HTTP ${probe.status_code}` : 'sin HTTP';
-  const duration = probe.duration_ms !== null ? `${probe.duration_ms}ms` : 'sin ms';
-  const itemCount = probe.response['items_count'];
-  const items = typeof itemCount === 'number' ? ` items=${itemCount}` : '';
-  const missing = probe.missing_required.length > 0 ? ` missing=${probe.missing_required.join(',')}` : '';
-  const egress = probe.egress_ip ? ` ip=${probe.egress_ip}` : '';
-  const error = probe.error ? ` error=${probe.error}` : '';
-  return `API catalogo ${probe.outcome}: ${status} ${duration}${items}${egress}${missing}${error}`;
 }
 
 function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number): string {

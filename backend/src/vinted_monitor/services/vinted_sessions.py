@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.core.crypto import decrypt_text, encrypt_text, fingerprint_text
 from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_marker
-from vinted_monitor.db.models import ProxyProfile, VintedSession
+from vinted_monitor.db.models import ProxyProfile, SearchSource, VintedSession
 from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
 
@@ -43,6 +43,7 @@ class VintedSessionImportError(ValueError):
 @dataclass(frozen=True)
 class VintedSessionSummary:
     id: int
+    source_id: int
     proxy_profile_id: int
     status: str
     browser_profile: str
@@ -70,13 +71,17 @@ def generate_proxy_session_id() -> str:
     return uuid.uuid4().hex
 
 
-def get_latest_vinted_session_summary(db: Session, proxy_profile_id: int, settings: Settings | None = None) -> VintedSessionSummary | None:
-    session = db.scalar(
-        select(VintedSession)
-        .where(VintedSession.proxy_profile_id == proxy_profile_id)
-        .order_by(VintedSession.created_at.desc(), VintedSession.id.desc())
-        .limit(1)
-    )
+def get_latest_vinted_session_summary(
+    db: Session,
+    proxy_profile_id: int,
+    settings: Settings | None = None,
+    *,
+    source_id: int | None = None,
+) -> VintedSessionSummary | None:
+    statement = select(VintedSession).where(VintedSession.proxy_profile_id == proxy_profile_id)
+    if source_id is not None:
+        statement = statement.where(VintedSession.source_id == source_id)
+    session = db.scalar(statement.order_by(VintedSession.created_at.desc(), VintedSession.id.desc()).limit(1))
     if session is None:
         return None
     return summarize_vinted_session(session, settings=settings)
@@ -84,10 +89,12 @@ def get_latest_vinted_session_summary(db: Session, proxy_profile_id: int, settin
 
 def get_ready_vinted_session(
     db: Session,
+    source: SearchSource,
     proxy_profile: ProxyProfile,
     *,
     settings: Settings | None = None,
     now: datetime | None = None,
+    require_datadome: bool = True,
 ) -> tuple[VintedSession, PreparedCatalogSession]:
     settings = settings or get_settings()
     current_time = now or datetime.now(UTC)
@@ -95,6 +102,7 @@ def get_ready_vinted_session(
     statement = (
         select(VintedSession)
         .where(
+            VintedSession.source_id == source.id,
             VintedSession.proxy_profile_id == proxy_profile.id,
             VintedSession.status == READY,
             VintedSession.browser_profile == profile.name,
@@ -112,23 +120,22 @@ def get_ready_vinted_session(
     session = db.scalar(statement)
     if session is None:
         raise VintedSessionRequiredError(
-            f"Prepara una sesion Vinted para el proxy {proxy_profile.name} antes de lanzar o recalibrar monitores"
+            f"No hay sesion Vinted usable para el monitor {source.id} con el proxy {proxy_profile.name}"
         )
     prepared = prepared_context_from_session(session, settings)
-    missing = missing_prepared_context(prepared)
+    missing = missing_prepared_context(prepared, require_datadome=require_datadome)
     if missing:
         mark_vinted_session_invalid(db, session.id, reason=f"Prepared Vinted session missing context: {', '.join(missing)}")
         raise VintedSessionRequiredError(
             f"La sesion Vinted preparada esta incompleta ({', '.join(missing)}); prepara una sesion nueva"
         )
-    session.request_count = (session.request_count or 0) + 1
-    session.last_used_at = current_time
-    db.flush()
+    mark_vinted_session_used(db, session, now=current_time)
     return session, prepared
 
 
 def save_prepared_vinted_session(
     db: Session,
+    source: SearchSource,
     proxy_profile: ProxyProfile,
     *,
     proxy_session_id: str,
@@ -139,17 +146,19 @@ def save_prepared_vinted_session(
     max_requests: int | None = None,
     ttl_minutes: int | None = None,
     last_error: str | None = None,
+    require_datadome: bool = True,
 ) -> VintedSession:
     settings = settings or get_settings()
     now = datetime.now(UTC)
     context_payload = context_to_encrypted_payload(context)
-    missing = missing_prepared_context(context)
+    missing = missing_prepared_context(context, require_datadome=require_datadome)
     resolved_status = status
     resolved_error = last_error
     if missing and status == READY:
         resolved_status = INCOMPLETE
         resolved_error = f"Prepared Vinted session missing context: {', '.join(missing)}"
     session = VintedSession(
+        source_id=source.id,
         proxy_profile_id=proxy_profile.id,
         proxy_session_id=proxy_session_id.strip(),
         status=resolved_status,
@@ -176,6 +185,12 @@ def save_prepared_vinted_session(
     return session
 
 
+def mark_vinted_session_used(db: Session, session: VintedSession, *, now: datetime | None = None) -> None:
+    session.request_count = (session.request_count or 0) + 1
+    session.last_used_at = now or datetime.now(UTC)
+    db.flush()
+
+
 def mark_vinted_session_invalid(db: Session, session_id: int | None, *, reason: str) -> None:
     if session_id is None:
         return
@@ -198,6 +213,7 @@ def summarize_vinted_session(session: VintedSession, settings: Settings | None =
         context_flags = {key: False for key in REQUIRED_CONTEXT_FLAGS}
     return VintedSessionSummary(
         id=session.id,
+        source_id=session.source_id,
         proxy_profile_id=session.proxy_profile_id,
         status=session.status,
         browser_profile=session.browser_profile,
@@ -277,9 +293,9 @@ def prepared_context_flags(context: PreparedCatalogSession) -> dict[str, bool]:
     }
 
 
-def missing_prepared_context(context: PreparedCatalogSession) -> list[str]:
+def missing_prepared_context(context: PreparedCatalogSession, *, require_datadome: bool = True) -> list[str]:
     flags = prepared_context_flags(context)
-    return [name for name, ok in flags.items() if not ok]
+    return [name for name, ok in flags.items() if not ok and (require_datadome or name != "datadome")]
 
 
 def parse_cookie_header(cookie_header: str) -> dict[str, str]:

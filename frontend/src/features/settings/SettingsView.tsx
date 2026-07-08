@@ -4,14 +4,10 @@ import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
 
 export function SettingsView({
   onCreateProxy,
-  onPrepareVintedSession,
-  onProbeCatalogApi,
   onTestProxy,
   onToggleProxy,
   onToggleScheduler,
   onUpdateSchedulerConfig,
-  preparingProxySessionIds,
-  probingCatalogApiIds,
   proxyDraft,
   proxyActionMessages,
   proxyProfiles,
@@ -22,14 +18,10 @@ export function SettingsView({
   testingProxyIds
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
-  onPrepareVintedSession: (profileId: number) => void;
-  onProbeCatalogApi: (profileId: number) => void;
   onTestProxy: (profileId: number) => void;
   onToggleProxy: (profile: ProxyProfile) => void;
   onToggleScheduler: () => void;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
-  preparingProxySessionIds: number[];
-  probingCatalogApiIds: number[];
   proxyDraft: ProxyDraft;
   proxyActionMessages: Record<number, string>;
   proxyProfiles: ProxyProfile[];
@@ -279,9 +271,7 @@ export function SettingsView({
           <div className="proxy-list">
             {proxyProfiles.map((proxy) => {
               const testing = testingProxyIds.includes(proxy.id);
-              const preparingSession = preparingProxySessionIds.includes(proxy.id);
-              const probingCatalogApi = probingCatalogApiIds.includes(proxy.id);
-              const busy = testing || preparingSession || probingCatalogApi;
+              const busy = testing;
               return (
                 <article className="proxy-row" key={proxy.id}>
                   <div>
@@ -297,8 +287,8 @@ export function SettingsView({
                     <ProxyTestStatus proxy={proxy} testing={testing} message={proxyActionMessages[proxy.id]} />
                   </div>
                   <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
-                  <span className={proxyTestStatusClass(proxy, testing || probingCatalogApi)}>
-                    {testing || probingCatalogApi
+                  <span className={proxyTestStatusClass(proxy, testing)}>
+                    {testing
                       ? 'Probando...'
                       : proxy.cooldown_until
                         ? 'Cooldown'
@@ -311,14 +301,6 @@ export function SettingsView({
                   <button type="button" disabled={busy} onClick={() => onTestProxy(proxy.id)}>
                     <Play size={16} />
                     {testing ? 'Probando...' : 'Test IP'}
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => onPrepareVintedSession(proxy.id)}>
-                    <Play size={16} />
-                    {preparingSession ? 'Preparando...' : 'Preparar sesion'}
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => onProbeCatalogApi(proxy.id)}>
-                    <Play size={16} />
-                    {probingCatalogApi ? 'Probando API...' : 'Probar API catalogo'}
                   </button>
                 </article>
               );
@@ -359,7 +341,7 @@ function proxyTestStatusClass(proxy: ProxyProfile, testing: boolean) {
 function ProxySessionStatus({ proxy }: { proxy: ProxyProfile }) {
   const session = proxy.vinted_session;
   if (!session) {
-    return <span>Sesion Vinted: no preparada</span>;
+    return <span>Ultima sesion Vinted asociada: sin datos</span>;
   }
   const ok = session.status === 'ready';
   const checks = [
@@ -375,7 +357,8 @@ function ProxySessionStatus({ proxy }: { proxy: ProxyProfile }) {
   const expires = session.expires_at ? ` expira ${formatShortDateTime(session.expires_at)}` : '';
   return (
     <span>
-      Sesion Vinted: {ok ? 'ready' : session.status} | {session.egress_ip ?? 'sin IP'} | {checks} | {session.request_count}/{session.max_requests}
+      Ultima sesion Vinted monitor #{session.source_id}: {ok ? 'ready' : session.status} | {session.egress_ip ?? 'sin IP'} | {checks} |{' '}
+      {session.request_count}/{session.max_requests}
       {expires}
       {session.last_error ? ` | ${session.last_error}` : ''}
     </span>

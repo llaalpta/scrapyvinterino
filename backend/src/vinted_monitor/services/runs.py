@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_marker
 from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
@@ -40,9 +41,16 @@ from vinted_monitor.services.scheduler import RunEgress, choose_run_egress, get_
 from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
 from vinted_monitor.services.vinted_sessions import (
+    INCOMPLETE,
+    READY,
     VintedSessionRequiredError,
+    generate_proxy_session_id,
     get_ready_vinted_session,
     mark_vinted_session_invalid,
+    mark_vinted_session_used,
+    missing_prepared_context,
+    prepared_context_flags,
+    save_prepared_vinted_session,
 )
 
 RUNNING = "running"
@@ -158,11 +166,7 @@ def execute_monitor_baseline(
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
     owned_provider = provider is None
-    provider_runtime_metadata: dict[str, Any] = {}
-    if provider is None:
-        run_provider, provider_runtime_metadata = _provider_for_egress(db, selected_egress, runtime_config, settings)
-    else:
-        run_provider = provider
+    run_provider: ManualRunProvider | None = provider
 
     filter_snapshot = monitor_filter_snapshot(source.filter_definition)
     policy_hash = _policy_hash(source, filter_snapshot)
@@ -179,7 +183,6 @@ def execute_monitor_baseline(
         opportunities_created=0,
         runtime_metadata={
             **_run_runtime_metadata(source, selected_egress, runtime_config),
-            **provider_runtime_metadata,
             "policy_hash": policy_hash,
             "baseline_run": True,
         },
@@ -189,11 +192,11 @@ def execute_monitor_baseline(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        if run_provider is not None:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
-    _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
 
     record_run_event(
         db,
@@ -287,6 +290,25 @@ def execute_monitor_baseline(
             message="Redis seen cache is available",
             details={"policy_hash": policy_hash, "baseline_run": True},
         )
+        try:
+            if run_provider is None:
+                run_provider, provider_runtime_metadata = _provider_for_egress(
+                    db,
+                    source,
+                    selected_egress,
+                    runtime_config,
+                    settings,
+                    run=run,
+                )
+                _merge_run_metadata(run, provider_runtime_metadata)
+                db.flush()
+            proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+            _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+        except Exception as exc:
+            failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
+            if run_provider is not None:
+                _close_owned_provider(run_provider, owned_provider=owned_provider)
+            return failed_run
         record_run_event(
             db,
             run_id=run.id,
@@ -413,11 +435,7 @@ def execute_monitor_run(
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
     owned_provider = provider is None
-    provider_runtime_metadata: dict[str, Any] = {}
-    if provider is None:
-        run_provider, provider_runtime_metadata = _provider_for_egress(db, selected_egress, runtime_config, settings)
-    else:
-        run_provider = provider
+    run_provider: ManualRunProvider | None = provider
     run_session = start_monitor_session(db, source, allow_manual=True) if create_session_for_run else None
     active_session = run_session
     if active_session is None and require_active and source.monitor_mode != "manual":
@@ -435,7 +453,6 @@ def execute_monitor_run(
         opportunities_created=0,
         runtime_metadata={
             **_run_runtime_metadata(source, selected_egress, runtime_config),
-            **provider_runtime_metadata,
             **(runtime_metadata_extra or {}),
         },
     )
@@ -444,7 +461,8 @@ def execute_monitor_run(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        if run_provider is not None:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
     record_run_event(
@@ -474,7 +492,6 @@ def execute_monitor_run(
             "task_id": (run.runtime_metadata or {}).get("task_id"),
         },
     )
-
     cache = seen_cache or get_seen_cache()
     filter_snapshot = monitor_filter_snapshot(source.filter_definition)
     policy_hash = _policy_hash(source, filter_snapshot)
@@ -622,6 +639,26 @@ def execute_monitor_run(
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
 
+    try:
+        if run_provider is None:
+            run_provider, provider_runtime_metadata = _provider_for_egress(
+                db,
+                source,
+                selected_egress,
+                runtime_config,
+                settings,
+                run=run,
+            )
+            _merge_run_metadata(run, provider_runtime_metadata)
+            db.flush()
+        proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+        _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+    except Exception as exc:
+        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
+        if run_provider is not None:
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
+
     record_run_event(
         db,
         run_id=run.id,
@@ -766,6 +803,8 @@ def execute_monitor_run(
                 message="Monitor session closed after run completion",
                 details={"monitor_session_id": run.monitor_session_id, "reason": "completed"},
             )
+        elif not close_session_on_finish:
+            _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
         _clear_manual_monitor_runtime(source)
         record_run_event(
             db,
@@ -861,9 +900,12 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
 
 def _provider_for_egress(
     db: Session,
+    source: SearchSource,
     egress: RunEgress,
     runtime_config,
     settings,
+    *,
+    run: Run | None = None,
 ) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any]]:
     proxy_url = egress.proxy_url
     metadata: dict[str, Any] = {
@@ -879,13 +921,35 @@ def _provider_for_egress(
     provider_viewport_size = settings.vinted_target_screen
     provider_vinted_screen = settings.vinted_target_vinted_screen
     prepared_session = None
+    proxy_marker: dict[str, Any] | None = None
+    event_sink = _build_provider_event_sink(db, run, source, egress.proxy_profile_id) if run is not None else None
     if egress.proxy_profile_id is not None:
         profile = db.get(ProxyProfile, egress.proxy_profile_id)
         if profile is None:
             raise RuntimeError(f"Proxy profile {egress.proxy_profile_id} no longer exists")
-        vinted_session, prepared_session = get_ready_vinted_session(db, profile, settings=settings)
+        try:
+            vinted_session, prepared_session = get_ready_vinted_session(
+                db,
+                source,
+                profile,
+                settings=settings,
+                require_datadome=False,
+            )
+            session_action = "reused"
+        except VintedSessionRequiredError:
+            vinted_session, prepared_session, prepared_metadata = _prepare_vinted_session_for_run(
+                db,
+                source,
+                profile,
+                runtime_config,
+                settings,
+                event_sink=event_sink,
+            )
+            metadata.update(prepared_metadata)
+            session_action = "prepared"
         proxy_session_id = vinted_session.proxy_session_id
         proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
+        proxy_marker = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
         provider_country_code = profile.country_code
         provider_locale = profile.locale
         provider_accept_language = profile.accept_language
@@ -900,8 +964,29 @@ def _provider_for_egress(
         metadata["vinted_session_status"] = vinted_session.status
         metadata["vinted_session_request_count"] = vinted_session.request_count
         metadata["vinted_session_max_requests"] = vinted_session.max_requests
+        metadata["vinted_session_action"] = session_action
+        metadata["vinted_session_datadome_present"] = bool(prepared_session.datadome or (prepared_session.cookies or {}).get("datadome"))
         metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
-        metadata["proxy_sticky_session"] = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
+        metadata["proxy_sticky_session"] = proxy_marker
+        if run is not None:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="vinted_session_selected",
+                proxy_profile_id=profile.id,
+                auth_mode="public_anonymous",
+                details={
+                    "action": session_action,
+                    "vinted_session_id": vinted_session.id,
+                    "vinted_session_status": vinted_session.status,
+                    "vinted_session_use_count": vinted_session.request_count,
+                    "vinted_session_max_requests": vinted_session.max_requests,
+                    "context": prepared_context_flags(prepared_session),
+                    "datadome_required": False,
+                    "proxy_session": proxy_marker,
+                },
+            )
     elif settings.vinted_prepared_session_required:
         raise VintedSessionRequiredError("Prepara una sesion Vinted con proxy antes de lanzar trafico de catalogo")
 
@@ -911,6 +996,7 @@ def _provider_for_egress(
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
         request_retries=settings.vinted_request_retries,
+        event_sink=event_sink,
         proxy_session_marker=metadata.get("proxy_sticky_session"),
         expected_country_code=provider_country_code,
         locale=provider_locale,
@@ -918,7 +1004,120 @@ def _provider_for_egress(
         screen=provider_vinted_screen,
         viewport_size=provider_viewport_size,
         prepared_session=prepared_session,
+        require_datadome_cookie=False,
     ), metadata
+
+
+def _prepare_vinted_session_for_run(
+    db: Session,
+    source: SearchSource,
+    proxy_profile: ProxyProfile,
+    runtime_config,
+    settings,
+    *,
+    event_sink,
+) -> tuple[Any, Any, dict[str, Any]]:
+    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    proxy_session_id = generate_proxy_session_id()
+    proxy_url = proxy_url_with_sticky_session(proxy_profile, proxy_session_id, settings)
+    proxy_marker = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
+    if event_sink is not None:
+        event_sink(
+            phase="vinted_session_prepare_start",
+            message="Preparing monitor-owned Vinted session",
+            details={
+                "monitor_id": source.id,
+                "proxy_profile_id": proxy_profile.id,
+                "browser_profile": browser_profile.name,
+                "impersonate": browser_profile.impersonate,
+                "proxy_session": proxy_marker,
+                "datadome_required": False,
+                "source_url": source.url,
+            },
+        )
+    provider = CurlCffiVintedCatalogProvider(
+        settings=settings,
+        profile=browser_profile,
+        proxy_url=proxy_url,
+        timeout_ms=runtime_config.request_timeout_ms,
+        catalog_per_page=runtime_config.catalog_per_page,
+        request_retries=0,
+        event_sink=event_sink,
+        proxy_session_marker=proxy_marker,
+        expected_country_code=proxy_profile.country_code,
+        locale=proxy_profile.locale,
+        accept_language=proxy_profile.accept_language,
+        screen=proxy_profile.vinted_screen,
+        viewport_size=proxy_profile.screen,
+        require_datadome_cookie=False,
+    )
+    try:
+        context_report = provider.bootstrap_for_session(source.url, collect_datadome=True)
+        probe = provider.probe_catalog_api(source.url)
+        prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
+    finally:
+        provider.close()
+
+    missing_context = list(probe.get("missing_required") or [])
+    missing_prepared = missing_prepared_context(prepared, require_datadome=False)
+    probe_outcome = str(probe.get("outcome") or "unknown")
+    usable = probe_outcome == "accepted_json" and not missing_context and not missing_prepared
+    if not usable:
+        reasons = []
+        if probe_outcome != "accepted_json":
+            reasons.append(f"probe={probe_outcome}")
+        if missing_context:
+            reasons.append(f"context={','.join(missing_context)}")
+        if missing_prepared:
+            reasons.append(f"prepared={','.join(missing_prepared)}")
+        last_error = "Prepared Vinted session rejected: " + "; ".join(reasons or ["unknown"])
+    else:
+        last_error = None
+
+    saved = save_prepared_vinted_session(
+        db,
+        source,
+        proxy_profile,
+        proxy_session_id=proxy_session_id,
+        profile=browser_profile,
+        context=prepared,
+        status=READY if usable else INCOMPLETE,
+        settings=settings,
+        last_error=last_error,
+        require_datadome=False,
+    )
+    if usable:
+        mark_vinted_session_used(db, saved)
+        prepared.session_id = saved.id
+    if event_sink is not None:
+        event_sink(
+            phase="vinted_session_prepare_result",
+            level="info" if usable else "error",
+            message="Prepared Vinted session is usable" if usable else "Prepared Vinted session is not usable",
+            details={
+                "vinted_session_id": saved.id,
+                "status": saved.status,
+                "probe_outcome": probe_outcome,
+                "probe_status_code": probe.get("status_code"),
+                "probe_duration_ms": probe.get("duration_ms"),
+                "context": prepared_context_flags(prepared),
+                "context_report": context_report,
+                "missing_required": missing_context,
+                "missing_prepared": missing_prepared,
+                "datadome_required": False,
+                "proxy_session": proxy_marker,
+                "vinted_session_use_count": saved.request_count,
+                "vinted_session_max_requests": saved.max_requests,
+                "last_error": saved.last_error,
+            },
+        )
+    if not usable:
+        raise VintedSessionRequiredError(saved.last_error or "Prepared Vinted session is not usable")
+    return saved, prepared, {
+        "vinted_session_prepare_probe_outcome": probe_outcome,
+        "vinted_session_prepare_probe_status_code": probe.get("status_code"),
+        "vinted_session_prepare_probe_duration_ms": probe.get("duration_ms"),
+    }
 
 
 def _close_owned_provider(provider: ManualRunProvider, *, owned_provider: bool) -> None:
@@ -960,15 +1159,18 @@ def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_confi
     }
 
 
-def _attach_provider_event_sink(
+def _merge_run_metadata(run: Run, metadata: dict[str, Any]) -> None:
+    run.runtime_metadata = {**(run.runtime_metadata or {}), **metadata}
+
+
+def _build_provider_event_sink(
     db: Session,
-    provider: ManualRunProvider,
-    run: Run,
+    run: Run | None,
     source: SearchSource,
     proxy_profile_id: int | None,
-) -> None:
-    if not hasattr(provider, "event_sink"):
-        return
+):
+    if run is None:
+        return None
 
     def sink(
         *,
@@ -998,7 +1200,19 @@ def _attach_provider_event_sink(
             details=details,
         )
 
-    provider.event_sink = sink
+    return sink
+
+
+def _attach_provider_event_sink(
+    db: Session,
+    provider: ManualRunProvider,
+    run: Run,
+    source: SearchSource,
+    proxy_profile_id: int | None,
+) -> None:
+    if not hasattr(provider, "event_sink"):
+        return
+    provider.event_sink = _build_provider_event_sink(db, run, source, proxy_profile_id)
 
 
 def _record_failed_run(
@@ -1012,6 +1226,7 @@ def _record_failed_run(
     force_stop_monitor: bool = False,
 ) -> Run:
     message = redact_sensitive_text(str(exc))
+    session_failure = _classify_session_failure(exc, kind=kind)
     record_run_event(
         db,
         run_id=run.id,
@@ -1022,7 +1237,13 @@ def _record_failed_run(
         proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
         user_agent=None,
         auth_mode="public_anonymous",
-        details={"kind": kind or exc.__class__.__name__},
+        details={
+            "kind": kind or exc.__class__.__name__,
+            "session_end_reason": session_failure["session_end_reason"],
+            "recovery_action": session_failure["recovery_action"],
+            "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
+            "vinted_session_use_count": (run.runtime_metadata or {}).get("vinted_session_request_count"),
+        },
     )
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
@@ -1051,6 +1272,8 @@ def _record_failed_run(
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
+    elif run.monitor_session_id is not None:
+        _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
     _clear_manual_monitor_runtime(source)
     db.add(
         ErrorLog(
@@ -1064,6 +1287,126 @@ def _record_failed_run(
     db.commit()
     db.refresh(run)
     return run
+
+
+def _stop_monitor_if_vinted_session_use_limit_reached(db: Session, run: Run, source: SearchSource) -> bool:
+    if source.monitor_mode == "manual" or run.monitor_session_id is None:
+        return False
+    limit = _stop_after_vinted_session_uses(source)
+    if limit is None:
+        return False
+    vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
+    if not isinstance(vinted_session_id, int):
+        return False
+    use_count = _completed_run_count_for_vinted_session(db, run, vinted_session_id)
+    if use_count < limit:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="vinted_session_use_count_checked",
+            proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+            auth_mode="public_anonymous",
+            details={
+                "vinted_session_id": vinted_session_id,
+                "vinted_session_use_count": use_count,
+                "stop_after_vinted_session_uses": limit,
+                "limit_reached": False,
+            },
+        )
+        return False
+
+    stop_active_monitor_session(db, source.id, stopped_at=run.finished_at or datetime.now(UTC), reason="vinted_session_use_limit_reached")
+    source.is_active = False
+    source.monitor_started_at = None
+    source.monitor_until = None
+    source.next_run_at = None
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="vinted_session_use_limit_reached",
+        level="warning",
+        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        auth_mode="public_anonymous",
+        message="Monitor stopped after configured Vinted session use limit",
+        details={
+            "monitor_session_id": run.monitor_session_id,
+            "vinted_session_id": vinted_session_id,
+            "vinted_session_use_count": use_count,
+            "stop_after_vinted_session_uses": limit,
+            "session_end_reason": "vinted_session_use_limit_reached",
+            "recovery_action": "manual_review_or_relaunch",
+        },
+    )
+    return True
+
+
+def _stop_after_vinted_session_uses(source: SearchSource) -> int | None:
+    value = (source.scheduler_config or {}).get("stop_after_vinted_session_uses")
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_session_id: int) -> int:
+    if run.monitor_session_id is None:
+        return 0
+    count = 1 if run.status in {SUCCESS, FAILED} else 0
+    previous_runs = db.scalars(
+        select(Run).where(
+            Run.source_id == run.source_id,
+            Run.monitor_session_id == run.monitor_session_id,
+            Run.id != run.id,
+            Run.status.in_([SUCCESS, FAILED]),
+        )
+    )
+    for previous in previous_runs:
+        if (previous.runtime_metadata or {}).get("vinted_session_id") == vinted_session_id:
+            count += 1
+    return count
+
+
+def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
+    text = str(exc).lower()
+    if isinstance(exc, DataDomeChallengeError) or kind == "datadome_challenge":
+        return {
+            "session_end_reason": "datadome_challenge",
+            "recovery_action": "invalidate_session_and_rotate_sticky",
+        }
+    if isinstance(exc, VintedCatalogSessionContextError):
+        return {
+            "session_end_reason": "catalog_context_incomplete",
+            "recovery_action": "invalidate_session_and_prepare_new",
+        }
+    if isinstance(exc, VintedCatalogSessionError):
+        return {
+            "session_end_reason": "catalog_session_rejected",
+            "recovery_action": "invalidate_session_and_prepare_new",
+        }
+    if isinstance(exc, VintedSessionRequiredError):
+        return {
+            "session_end_reason": "session_preparation_unusable",
+            "recovery_action": "prepare_new_sticky_session",
+        }
+    if "timeout" in text or "timed out" in text or "operation timed out" in text:
+        return {
+            "session_end_reason": "proxy_or_network_timeout",
+            "recovery_action": "retry_with_new_sticky_if_repeated",
+        }
+    if "proxy" in text:
+        return {
+            "session_end_reason": "proxy_transport_error",
+            "recovery_action": "cooldown_proxy_on_repeated_failure",
+        }
+    return {
+        "session_end_reason": "run_error",
+        "recovery_action": "inspect_run_log",
+    }
 
 
 def _should_stop_monitor_after_failure(db: Session, run: Run, source: SearchSource, *, force_stop_monitor: bool) -> bool:

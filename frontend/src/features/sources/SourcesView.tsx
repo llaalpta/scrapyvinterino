@@ -932,6 +932,18 @@ function MonitorConfigEditor({
                 onChange={(event) => updateSourceDraft(source.id, 'jitterPercent', event.target.value)}
               />
             </label>
+            <label>
+              Parar tras usos sesion
+              <input
+                type="number"
+                min="1"
+                max="1000"
+                disabled={disabled}
+                placeholder="sin limite"
+                value={sourceDraft.stopAfterVintedSessionUses}
+                onChange={(event) => updateSourceDraft(source.id, 'stopAfterVintedSessionUses', event.target.value)}
+              />
+            </label>
           </>
         ) : null}
         {sourceDraft.monitorMode === 'window' ? (
@@ -1008,6 +1020,9 @@ function monitorSummary(source: SearchSource): string[] {
   if (source.monitor_mode !== 'manual') {
     entries.push(`Cada ${config.interval_seconds ?? 300}s`);
     entries.push(`Jitter ${config.jitter_percent ?? 20}%`);
+    if (config.stop_after_vinted_session_uses) {
+      entries.push(`Max ${config.stop_after_vinted_session_uses} usos sesion`);
+    }
   }
   if (source.monitor_mode === 'duration' && source.monitor_until) {
     entries.push(`Hasta ${formatDate(source.monitor_until)}`);
@@ -1036,6 +1051,10 @@ function draftSummary(
   if (draft.monitorMode !== 'manual') {
     entries.push(`Cada ${draft.intervalSeconds || source.scheduler_config.interval_seconds || 300}s`);
     entries.push(`Jitter ${draft.jitterPercent || source.scheduler_config.jitter_percent || 20}%`);
+    const stopAfterUses = draft.stopAfterVintedSessionUses || source.scheduler_config.stop_after_vinted_session_uses;
+    if (stopAfterUses) {
+      entries.push(`Max ${stopAfterUses} usos sesion`);
+    }
   }
   if (draft.monitorMode === 'duration') {
     entries.push(`${draft.sessionDurationMinutes || source.duration_minutes || 60} min`);

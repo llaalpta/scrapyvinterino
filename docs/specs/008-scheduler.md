@@ -16,6 +16,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Start a monitor for a bounded duration from now, with `monitor_until` stored on the monitor.
 - Configure interval seconds per monitor, default `300`, minimum `60`, maximum `3600`.
 - Add jitter/randomization between runs, default `20%`, minimum `0%`, maximum `50%`.
+- Configure an optional per-monitor stop limit for Vinted session use count, `stop_after_vinted_session_uses`, empty by default, minimum `1`, maximum `1000`.
 - Support one daily allowed execution window configured by start/end timepickers and stored as `HH:MM-HH:MM`.
 - Record scheduler-triggered errors in the same run/error model.
 - Record safe run progress events for anonymous session bootstrap, catalog API request, retries, detail fetches, and failures.
@@ -27,8 +28,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Require Redis for per-monitor seen state and processing locks.
 - Do not run a monitor when Redis is unavailable.
 - Require an explicit initial catalog snapshot before any monitor run can process opportunities.
-- Isolate anonymous public Vinted session cookies per prepared proxy sticky identity.
-- Use a deterministic fast catalog flow: create one `curl_cffi` session, load the encrypted prepared Vinted session for the same proxy sticky identity, diagnose egress with it when configured, then call `/api/v2/catalog/items` with API parameters translated from the saved catalog URL and with browser-coherent headers.
+- Isolate anonymous public Vinted session cookies per monitor and prepared proxy sticky identity.
+- Use a deterministic fast catalog flow: create one `curl_cffi` session, load or automatically prepare the encrypted monitor-owned Vinted session for the same proxy sticky identity, diagnose egress with it when configured, then call `/api/v2/catalog/items` with API parameters translated from the saved catalog URL and with browser-coherent headers.
 - Keep proxy usage globally managed by the scheduler.
 - Support UI-managed proxy profiles with encrypted credentials and a declared proxy country; locale, `Accept-Language`, viewport, and Vinted `x-screen` context are resolved internally from country/domain presets.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
@@ -61,6 +62,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
   - monitor jitter percent: default `20`, minimum `0`, maximum `50`;
   - optional allowed windows as local `HH:MM-HH:MM` ranges;
+  - optional `stop_after_vinted_session_uses` per monitor, counting completed runs in the active monitor session that used the same `vinted_session_id`;
   - scheduler timezone, default `Europe/Madrid`;
   - optional UI-managed proxy profiles.
 - Run event log:
@@ -98,11 +100,12 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Active monitor configuration is read-only until the monitor is stopped; direct monitor configuration `PATCH` while active is rejected.
 - Launching a recurring monitor is rejected when the effective scheduler is disabled or no scheduler capacity is available.
 - Launching any monitor creates a monitor session; recurring sessions remain active until stopped/expired/failed, while punctual sessions close after the run.
+- A recurring monitor with `stop_after_vinted_session_uses=N` stops automatically after the Nth completed run in that active monitor session that used the same `vinted_session_id`, and records `vinted_session_use_limit_reached`.
 - The scheduler only considers active recurring monitors.
 - Expired active monitors are stopped before scheduler planning.
 - Jitter prevents fixed exact polling intervals.
 - Scheduler failures are logged without stopping the worker.
-- Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
+- Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, `stop_after_vinted_session_uses` outside `1..1000`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
 - No more than `2` monitor runs execute at the same time by default.
 - The same active monitor never has two active runs at the same time.
 - The scheduler uses active healthy proxies from the global pool before direct access, filtered by target country.
@@ -119,6 +122,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs never expose raw cookie, token, authorization, proxy credential, HTML, or raw Vinted payload values. Cookie/token/session data is represented only as masked/fingerprinted markers; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, seen-cache marks, detail fetch start/success/error/skipped, filter pass/discard, item persisted/reused, and opportunity created/skipped events.
 - Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, viewport, Vinted `x-screen`, egress country match, and any missing required key.
+- Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - The PWA Monitors view renders selected monitor accumulated logs as a classic readable console: one text line per event with run id, exact time, level, label, ms, status, URL, message, and collapsible JSON details, whether the monitor is active or stopped.
@@ -142,7 +146,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - Candidates with an already existing opportunity for the same monitor are marked seen and skipped before filter/detail work if Redis lost that seen state.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
-- Anonymous public cookies/tokens are encrypted at rest only in prepared Vinted sessions and are isolated per proxy sticky identity.
+- Anonymous public cookies/tokens are encrypted at rest only in prepared Vinted sessions and are isolated per monitor plus proxy sticky identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
 - Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, viewport and Vinted `x-screen` are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
 - Direct requests behave exactly as monitor runs only when global direct fallback is enabled in the UI, `VINTED_DIRECT_CATALOG_ENABLED=true`, and no matching proxy is available.
@@ -174,6 +178,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm active monitor details show read-only configuration, stop/log controls, and do not show save, archive, or punctual launch controls.
 - Confirm inactive monitor launch is blocked while there are unsaved changes, save persists the configuration, and launch then starts using that persisted configuration without another PATCH.
 - Confirm inactive monitor launch is blocked while the initial snapshot is missing, explicit recalibration enables launch, and recalibration creates no opportunities.
+- Confirm a recurring monitor configured with `stop_after_vinted_session_uses=1` stops after one completed run, logs the limit, and leaves the encrypted Vinted session history available for diagnosis.
 - Confirm inactive monitor launch and recalibration are blocked when URL filters are unsupported.
 - Confirm inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog.
 - Confirm two different monitors can run concurrently up to the global limit.

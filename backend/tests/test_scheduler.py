@@ -162,6 +162,7 @@ def test_normalize_scheduler_config_applies_defaults() -> None:
         "interval_seconds": 300,
         "jitter_percent": 20,
         "allowed_windows": [],
+        "stop_after_vinted_session_uses": None,
     }
 
 
@@ -174,6 +175,8 @@ def test_normalize_scheduler_config_applies_defaults() -> None:
         ({"allowed_windows": "09:00-12:00"}, "allowed_windows must be a list"),
         ({"allowed_windows": ["bad"]}, "allowed_windows entries must use HH:MM-HH:MM"),
         ({"allowed_windows": ["09:00-09:00"]}, "allowed_windows start and end cannot be equal"),
+        ({"stop_after_vinted_session_uses": 0}, "stop_after_vinted_session_uses must be between 1 and 1000"),
+        ({"stop_after_vinted_session_uses": 1001}, "stop_after_vinted_session_uses must be between 1 and 1000"),
         ({"pause_windows": ["10:00-11:00"]}, "unsupported scheduler_config fields: pause_windows"),
     ],
 )

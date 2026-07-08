@@ -18,8 +18,8 @@
 - `curl_cffi` con `impersonate` falsifica la huella TLS/JA3 y HTTP/2. Los perfiles de navegador (User-Agent, Sec-Ch-Ua) son datos publicos, no secretos.
 - Los identificadores sticky de proxy se guardan como parte de una sesion Vinted preparada y solo se registran como marcador seguro.
 - Las cookies DataDome, tokens publicos y CSRF de sesiones preparadas se cifran en `vinted_sessions.context_encrypted`; la API y los logs nunca devuelven valores raw.
-- La preparacion de sesion Vinted es explicita por proxy sticky. Un run reutiliza una sesion `ready` compatible o falla antes de tocar el catalogo.
-- Antes de pedir `/api/v2/catalog/items`, el provider debe tener contexto anonimo completo en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, cookie DataDome, `v_udt`, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`. Si falta algo, se registra el motivo y no se hace la peticion al catalogo.
+- La preparacion de sesion Vinted pertenece al monitor y se ejecuta automaticamente si el run no encuentra una sesion `ready` compatible con el proxy sticky seleccionado.
+- Antes de pedir `/api/v2/catalog/items` para scraping, el provider debe tener contexto anonimo base en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, `v_udt`, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`. DataDome se registra como presente/ausente, pero en el modo de medicion actual no bloquea si el probe previo de catalogo devuelve JSON aceptado.
 - Los eventos de run pueden incluir el nombre del perfil de navegador usado, el marcador seguro del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.
 - Acciones de compra futuras:
   - requeriran click explicito;

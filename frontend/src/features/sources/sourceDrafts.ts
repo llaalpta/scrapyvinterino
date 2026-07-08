@@ -4,6 +4,7 @@ export type SourceDraft = {
   monitorMode: SearchSource['monitor_mode'];
   intervalSeconds: string;
   jitterPercent: string;
+  stopAfterVintedSessionUses: string;
   windowStart: string;
   windowEnd: string;
   sessionDurationMinutes: string;
@@ -21,6 +22,7 @@ export function buildSourceDraft(source: SearchSource): SourceDraft {
     monitorMode: source.monitor_mode ?? 'manual',
     intervalSeconds: String(config.interval_seconds ?? 300),
     jitterPercent: String(config.jitter_percent ?? 20),
+    stopAfterVintedSessionUses: config.stop_after_vinted_session_uses ? String(config.stop_after_vinted_session_uses) : '',
     windowStart,
     windowEnd,
     sessionDurationMinutes: String(source.duration_minutes ?? 60),
@@ -56,6 +58,7 @@ function draftFingerprint(draft: SourceDraft): string {
   if (draft.monitorMode !== 'manual') {
     payload.intervalSeconds = draft.intervalSeconds.trim();
     payload.jitterPercent = draft.jitterPercent.trim();
+    payload.stopAfterVintedSessionUses = draft.stopAfterVintedSessionUses.trim();
   }
   if (draft.monitorMode === 'duration') {
     payload.sessionDurationMinutes = draft.sessionDurationMinutes.trim();

@@ -182,6 +182,7 @@ def test_update_source_api_persists_scheduler_config() -> None:
                     "interval_seconds": 120,
                     "jitter_percent": 10,
                     "allowed_windows": ["09:00-23:00"],
+                    "stop_after_vinted_session_uses": 3,
                 },
             },
         )
@@ -193,6 +194,7 @@ def test_update_source_api_persists_scheduler_config() -> None:
             "interval_seconds": 120,
             "jitter_percent": 10,
             "allowed_windows": ["09:00-23:00"],
+            "stop_after_vinted_session_uses": 3,
         }
 
         with SessionLocal() as db:
@@ -200,6 +202,7 @@ def test_update_source_api_persists_scheduler_config() -> None:
             assert source is not None
             assert source.is_active is False
             assert source.scheduler_config["interval_seconds"] == 120
+            assert source.scheduler_config["stop_after_vinted_session_uses"] == 3
     finally:
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
