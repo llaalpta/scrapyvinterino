@@ -5,11 +5,13 @@ import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
 export function SettingsView({
   onCreateProxy,
   onPrepareVintedSession,
+  onProbeCatalogApi,
   onTestProxy,
   onToggleProxy,
   onToggleScheduler,
   onUpdateSchedulerConfig,
   preparingProxySessionIds,
+  probingCatalogApiIds,
   proxyDraft,
   proxyActionMessages,
   proxyProfiles,
@@ -21,11 +23,13 @@ export function SettingsView({
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
   onPrepareVintedSession: (profileId: number) => void;
+  onProbeCatalogApi: (profileId: number) => void;
   onTestProxy: (profileId: number) => void;
   onToggleProxy: (profile: ProxyProfile) => void;
   onToggleScheduler: () => void;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
   preparingProxySessionIds: number[];
+  probingCatalogApiIds: number[];
   proxyDraft: ProxyDraft;
   proxyActionMessages: Record<number, string>;
   proxyProfiles: ProxyProfile[];
@@ -276,7 +280,8 @@ export function SettingsView({
             {proxyProfiles.map((proxy) => {
               const testing = testingProxyIds.includes(proxy.id);
               const preparingSession = preparingProxySessionIds.includes(proxy.id);
-              const busy = testing || preparingSession;
+              const probingCatalogApi = probingCatalogApiIds.includes(proxy.id);
+              const busy = testing || preparingSession || probingCatalogApi;
               return (
                 <article className="proxy-row" key={proxy.id}>
                   <div>
@@ -292,8 +297,12 @@ export function SettingsView({
                     <ProxyTestStatus proxy={proxy} testing={testing} message={proxyActionMessages[proxy.id]} />
                   </div>
                   <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
-                  <span className={proxyTestStatusClass(proxy, testing)}>
-                    {testing ? 'Probando IP...' : proxy.cooldown_until ? 'Cooldown' : proxy.last_test_ip ?? proxy.last_test_status ?? 'Sin test'}
+                  <span className={proxyTestStatusClass(proxy, testing || probingCatalogApi)}>
+                    {testing || probingCatalogApi
+                      ? 'Probando...'
+                      : proxy.cooldown_until
+                        ? 'Cooldown'
+                        : proxy.last_test_ip ?? proxy.last_test_status ?? 'Sin test'}
                   </span>
                   <button type="button" disabled={busy} onClick={() => onToggleProxy(proxy)}>
                     {proxy.is_active ? <Pause size={16} /> : <Play size={16} />}
@@ -306,6 +315,10 @@ export function SettingsView({
                   <button type="button" disabled={busy} onClick={() => onPrepareVintedSession(proxy.id)}>
                     <Play size={16} />
                     {preparingSession ? 'Preparando...' : 'Preparar sesion'}
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => onProbeCatalogApi(proxy.id)}>
+                    <Play size={16} />
+                    {probingCatalogApi ? 'Probando API...' : 'Probar API catalogo'}
                   </button>
                 </article>
               );

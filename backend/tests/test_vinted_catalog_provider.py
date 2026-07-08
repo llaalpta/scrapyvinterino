@@ -582,6 +582,124 @@ def test_curl_provider_blocks_catalog_api_when_session_context_is_incomplete() -
     assert set(incomplete_event["details"]["missing_required"]) >= {"access_token_web", "datadome", "v_udt", "egress_country_code"}
 
 
+def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_context() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/api/v2/catalog/items":
+            assert call["headers"]["X-CSRF-Token"] == "csrf-secret-value"
+            assert call["headers"]["X-Anon-Id"] == "anon-secret-value"
+            assert call["cookies"]["access_token_web"] == "access-secret-value"
+            assert "datadome" not in call["cookies"]
+            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    probe = provider.probe_catalog_api(source().url)
+
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
+    assert probe["outcome"] == "accepted_json"
+    assert probe["status_code"] == 200
+    assert probe["response"]["items_count"] == 2
+    assert "datadome" in probe["missing_required"]
+    serialized_probe = json.dumps(probe)
+    assert "access-secret-value" not in serialized_probe
+    assert "csrf-secret-value" not in serialized_probe
+    assert "anon-secret-value" not in serialized_probe
+    assert "udt-secret-value" not in serialized_probe
+
+
+def test_curl_provider_catalog_api_probe_reports_challenge_without_raising() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(
+                403,
+                text="<html>geo.captcha-delivery.com datadome=raw-secret</html>",
+                headers={"content-type": "text/html", "set-cookie": "datadome=raw-secret; Path=/;"},
+            )
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    probe = provider.probe_catalog_api(source().url)
+
+    assert probe["outcome"] == "challenge"
+    assert probe["status_code"] == 403
+    assert "body_snippet" in probe["response"]
+    assert "raw-secret" not in json.dumps(probe)
+
+
+def test_curl_provider_catalog_api_probe_reports_transport_error() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/api/v2/catalog/items":
+            raise RuntimeError("proxy timeout datadome=raw-secret")
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    probe = provider.probe_catalog_api(source().url)
+
+    assert probe["outcome"] == "transport_error"
+    assert probe["status_code"] is None
+    assert "raw-secret" not in json.dumps(probe)
+
+
 def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_returned() -> None:
     calls: list[dict] = []
     events: list[dict] = []

@@ -367,3 +367,60 @@ def test_proxy_profile_test_endpoint_records_failure(monkeypatch) -> None:
             if profile is not None:
                 db.delete(profile)
                 db.commit()
+
+
+def test_proxy_profile_catalog_api_probe_endpoint_returns_safe_diagnostic(monkeypatch) -> None:
+    class FakeCatalogProvider:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def probe_catalog_api(self, source_url: str) -> dict:
+            return {
+                "outcome": "accepted_json",
+                "source_url": source_url,
+                "catalog_api_url": "https://www.vinted.es/api/v2/catalog/items",
+                "status_code": 200,
+                "duration_ms": 123,
+                "egress_ip": "198.51.100.88",
+                "egress_country_code": "ES",
+                "context": {"datadome_cookie": False},
+                "missing_required": ["datadome"],
+                "request": {"method": "GET"},
+                "response": {"content_type": "application/json", "items_count": 2},
+                "error": None,
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("vinted_monitor.api.main.CurlCffiVintedCatalogProvider", FakeCatalogProvider)
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": unique_name("api catalog probe proxy"),
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7786,
+            "country_code": "ES",
+        },
+    )
+    assert create_response.status_code == 201
+    proxy_payload = create_response.json()
+
+    try:
+        response = client.post(f"/api/proxy-profiles/{proxy_payload['id']}/catalog-api/probe")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["outcome"] == "accepted_json"
+        assert payload["response"]["items_count"] == 2
+        assert payload["missing_required"] == ["datadome"]
+        assert "proxy.example" not in response.text
+    finally:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, proxy_payload["id"])
+            if profile is not None:
+                db.delete(profile)
+                db.commit()

@@ -90,6 +90,21 @@ export type VintedSession = {
   };
 };
 
+export type CatalogApiProbe = {
+  outcome: 'accepted_json' | 'challenge' | 'rejected' | 'non_json' | 'transport_error' | string;
+  source_url: string;
+  catalog_api_url: string;
+  status_code: number | null;
+  duration_ms: number | null;
+  egress_ip: string | null;
+  egress_country_code: string | null;
+  context: Record<string, unknown>;
+  missing_required: string[];
+  request: Record<string, unknown>;
+  response: Record<string, unknown>;
+  error: string | null;
+};
+
 export type SourceSchedulerConfig = {
   interval_seconds?: number;
   jitter_percent?: number;
@@ -407,6 +422,10 @@ export function testProxyProfile(profileId: number): Promise<ProxyProfile> {
 
 export function preflightVintedSession(profileId: number): Promise<ProxyProfile> {
   return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/vinted-session/preflight`, {});
+}
+
+export function probeCatalogApi(profileId: number): Promise<CatalogApiProbe> {
+  return postJson<CatalogApiProbe>(`/api/proxy-profiles/${profileId}/catalog-api/probe`, {});
 }
 
 export function startMonitor(sourceId: number): Promise<Run> {

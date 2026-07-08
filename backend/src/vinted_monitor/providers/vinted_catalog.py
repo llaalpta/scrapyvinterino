@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 from curl_cffi.requests import Session
 
 from vinted_monitor.core.config import Settings, get_settings
-from vinted_monitor.core.redaction import safe_cookie_markers, safe_headers, safe_secret_marker
+from vinted_monitor.core.redaction import redact_sensitive_text, safe_cookie_markers, safe_headers, safe_secret_marker
 from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
 from vinted_monitor.providers.catalog_url import build_catalog_api_params
@@ -215,6 +215,19 @@ class CurlCffiVintedCatalogProvider:
         if collect_datadome:
             self._try_datadome_collector(source_url)
         return self._session_context_report()
+
+    def probe_catalog_api(self, source_url: str) -> dict[str, Any]:
+        """Probe the catalog API once and return a safe diagnostic report.
+
+        This intentionally bypasses the conservative prepared-session gate but
+        does not persist data or mark the session as ready. It is only for
+        operator diagnostics.
+        """
+        self._ensure_session()
+        self._diagnose_egress(attempt=1)
+        if not self._bootstrapped:
+            self._bootstrap_anonymous_session(source_url, attempt=1)
+        return self._probe_catalog_api_request(source_url)
 
     def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
         if self._session is None or not self._bootstrapped:
@@ -590,6 +603,109 @@ class CurlCffiVintedCatalogProvider:
             },
         )
         return payload
+
+    def _probe_catalog_api_request(self, source_url: str) -> dict[str, Any]:
+        assert self._session is not None
+        url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
+        params = build_catalog_api_params(source_url, None, self.catalog_per_page)
+        context_report = self._session_context_report()
+        missing_context = self._missing_session_context(context_report)
+        headers = dict(
+            self.profile.build_api_headers(
+                referer=source_url,
+                accept_language=self.accept_language,
+                locale=self.locale,
+                screen=self.vinted_screen,
+            )
+        )
+        if self._catalog_session_context.anon_id:
+            headers["X-Anon-Id"] = self._catalog_session_context.anon_id
+        if self._catalog_session_context.csrf_token:
+            headers["X-CSRF-Token"] = self._catalog_session_context.csrf_token
+
+        request_details = {
+            "method": "GET",
+            "url": url,
+            "params": params,
+            "headers": safe_headers(headers),
+            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
+            "cookies": self._cookie_markers(),
+        }
+        started_at = time.perf_counter()
+        try:
+            response = self._session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=self.timeout_ms / 1000,
+            )
+        except Exception as exc:
+            duration_ms = _elapsed_ms(started_at)
+            return {
+                "outcome": "transport_error",
+                "source_url": source_url,
+                "catalog_api_url": url,
+                "status_code": None,
+                "duration_ms": duration_ms,
+                "egress_ip": self._egress_context.ip,
+                "egress_country_code": self._egress_context.country_code,
+                "context": context_report,
+                "missing_required": missing_context,
+                "request": request_details,
+                "response": {},
+                "error": redact_sensitive_text(str(exc)),
+            }
+
+        duration_ms = _elapsed_ms(started_at)
+        content_type = str(response.headers.get("content-type", ""))
+        response_details: dict[str, Any] = {
+            "headers": safe_headers(dict(response.headers)),
+            "content_type": content_type,
+        }
+        outcome = "rejected"
+        error: str | None = None
+        body_snippet = getattr(response, "text", "")[:1200]
+
+        if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
+            outcome = "challenge"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif response.status_code >= 400:
+            outcome = "rejected"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif "json" not in content_type.lower():
+            outcome = "non_json"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        else:
+            try:
+                payload = response.json()
+            except Exception as exc:
+                outcome = "non_json"
+                error = redact_sensitive_text(str(exc))
+                response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+            else:
+                if isinstance(payload, Mapping):
+                    outcome = "accepted_json"
+                    items = payload.get("items")
+                    response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                    response_details["items_count"] = len(items) if isinstance(items, list) else None
+                else:
+                    outcome = "non_json"
+                    response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+
+        return {
+            "outcome": outcome,
+            "source_url": source_url,
+            "catalog_api_url": url,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+            "egress_ip": self._egress_context.ip,
+            "egress_country_code": self._egress_context.country_code,
+            "context": context_report,
+            "missing_required": missing_context,
+            "request": request_details,
+            "response": response_details,
+            "error": error,
+        }
 
     def _bootstrap_anonymous_session(self, source_url: str, *, attempt: int) -> None:
         assert self._session is not None

@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from vinted_monitor.api.schemas import (
     ActionRequestCreate,
     ActionRequestRead,
+    CatalogApiProbeRead,
+    CatalogApiProbeRequest,
     ItemRead,
     MonitorStatsRead,
     OpportunityResultPageRead,
@@ -33,6 +35,7 @@ from vinted_monitor.api.schemas import (
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
+from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import ProxyProfile, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal, get_db
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
@@ -374,6 +377,54 @@ def post_proxy_profile_vinted_session_preflight(
         provider.close()
     db.refresh(profile)
     return _proxy_profile_read(profile, db)
+
+
+@app.post("/api/proxy-profiles/{profile_id}/catalog-api/probe", response_model=CatalogApiProbeRead)
+def post_proxy_profile_catalog_api_probe(
+    profile_id: int,
+    payload: CatalogApiProbeRequest | None = None,
+    db: Session = Depends(get_db),
+) -> CatalogApiProbeRead:
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
+    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    proxy_session_id = generate_proxy_session_id()
+    proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
+    source_url = payload.source_url if payload and payload.source_url else f"{settings.vinted_base_url}/catalog?search_text=pepe"
+    provider = CurlCffiVintedCatalogProvider(
+        settings=settings,
+        profile=browser_profile,
+        proxy_url=proxy_url,
+        timeout_ms=settings.vinted_request_timeout_ms,
+        catalog_per_page=settings.vinted_fast_catalog_per_page,
+        request_retries=0,
+        proxy_session_marker=None,
+        expected_country_code=profile.country_code,
+        locale=profile.locale,
+        accept_language=profile.accept_language,
+        screen=profile.vinted_screen,
+        viewport_size=profile.screen,
+    )
+    try:
+        return CatalogApiProbeRead(**provider.probe_catalog_api(source_url))
+    except Exception as exc:
+        return CatalogApiProbeRead(
+            outcome="transport_error",
+            source_url=source_url,
+            catalog_api_url=f"{str(settings.vinted_base_url).rstrip('/')}/api/v2/catalog/items",
+            status_code=None,
+            duration_ms=None,
+            egress_ip=None,
+            egress_country_code=None,
+            context={},
+            missing_required=[],
+            request={},
+            response={},
+            error=redact_sensitive_text(str(exc)),
+        )
+    finally:
+        provider.close()
 
 
 @app.post("/api/proxy-profiles/{profile_id}/vinted-session/import", response_model=ProxyProfileRead)

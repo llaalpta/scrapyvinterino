@@ -13,6 +13,7 @@ import {
   fetchScheduler,
   fetchSources,
   preflightVintedSession,
+  probeCatalogApi,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -24,6 +25,7 @@ import {
   type MonitorStatsRange,
   type OpportunityResult,
   type Page,
+  type CatalogApiProbe,
   type ProxyProfile,
   type SchedulerUpdate,
   type Run,
@@ -75,6 +77,7 @@ export function useDashboardController() {
   const [savingProxy, setSavingProxy] = useState(false);
   const [testingProxyIds, setTestingProxyIds] = useState<number[]>([]);
   const [preparingProxySessionIds, setPreparingProxySessionIds] = useState<number[]>([]);
+  const [probingCatalogApiIds, setProbingCatalogApiIds] = useState<number[]>([]);
   const [proxyActionMessages, setProxyActionMessages] = useState<Record<number, string>>({});
   const [loadingOpportunities, setLoadingOpportunities] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -231,6 +234,25 @@ export function useDashboardController() {
       setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
     } finally {
       setPreparingProxySessionIds((current) => current.filter((id) => id !== profileId));
+    }
+  }
+
+  async function onProbeCatalogApi(profileId: number) {
+    setError(null);
+    setProbingCatalogApiIds((current) => addId(current, profileId));
+    setProxyActionMessages((current) => ({ ...current, [profileId]: 'Probando API catalogo...' }));
+    try {
+      const probe = await probeCatalogApi(profileId);
+      setProxyActionMessages((current) => ({
+        ...current,
+        [profileId]: catalogApiProbeMessage(probe)
+      }));
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'No se pudo probar la API de catalogo';
+      setError(message);
+      setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
+    } finally {
+      setProbingCatalogApiIds((current) => current.filter((id) => id !== profileId));
     }
   }
 
@@ -550,6 +572,7 @@ export function useDashboardController() {
     onStopMonitor,
     onTestProxy,
     onPrepareVintedSession,
+    onProbeCatalogApi,
     onToggleProxy,
     onToggleScheduler,
     onUpdateSchedulerConfig,
@@ -562,6 +585,7 @@ export function useDashboardController() {
     proxyDraft,
     proxyProfiles,
     proxyActionMessages,
+    probingCatalogApiIds,
     refreshRuntime,
     opportunityFilters,
     opportunitiesPageSize,
@@ -636,6 +660,17 @@ function proxySessionMessage(profile: ProxyProfile): string {
     return `Sesion Vinted ready: ${session.egress_ip ?? 'sin IP'}`;
   }
   return `Sesion Vinted ${session.status}: ${session.last_error ?? 'contexto incompleto'}`;
+}
+
+function catalogApiProbeMessage(probe: CatalogApiProbe): string {
+  const status = probe.status_code ? `HTTP ${probe.status_code}` : 'sin HTTP';
+  const duration = probe.duration_ms !== null ? `${probe.duration_ms}ms` : 'sin ms';
+  const itemCount = probe.response['items_count'];
+  const items = typeof itemCount === 'number' ? ` items=${itemCount}` : '';
+  const missing = probe.missing_required.length > 0 ? ` missing=${probe.missing_required.join(',')}` : '';
+  const egress = probe.egress_ip ? ` ip=${probe.egress_ip}` : '';
+  const error = probe.error ? ` error=${probe.error}` : '';
+  return `API catalogo ${probe.outcome}: ${status} ${duration}${items}${egress}${missing}${error}`;
 }
 
 function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number): string {

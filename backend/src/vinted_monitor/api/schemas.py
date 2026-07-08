@@ -248,6 +248,34 @@ class VintedSessionPreflightRequest(BaseModel):
         return validate_vinted_catalog_url(value)
 
 
+class CatalogApiProbeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_url: str | None = None
+
+    @field_validator("source_url")
+    @classmethod
+    def validate_optional_source_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_vinted_catalog_url(value)
+
+
+class CatalogApiProbeRead(BaseModel):
+    outcome: str
+    source_url: str
+    catalog_api_url: str
+    status_code: int | None
+    duration_ms: int | None
+    egress_ip: str | None
+    egress_country_code: str | None
+    context: dict[str, Any]
+    missing_required: list[str]
+    request: dict[str, Any]
+    response: dict[str, Any]
+    error: str | None
+
+
 class VintedSessionImportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
