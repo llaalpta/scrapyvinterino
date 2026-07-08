@@ -16,6 +16,12 @@ copy .env.example .env
 docker compose up --build
 ```
 
+## Flujo de Ramas
+
+El flujo de desarrollo SDD esta documentado en `docs/sdd-process.md`. Para trabajo no trivial, usa una rama corta por spec o fix, creada desde `develop`, y prepara PR de vuelta a `develop`.
+
+Si `develop` no existe localmente, no sigas acumulando cambios en una rama larga por defecto. Confirma primero si hay que crear `develop`, traerlo de remoto o tratar el cambio como excepcion puntual.
+
 ## Base de Datos Local
 
 La base de datos local es descartable mientras el producto siga en desarrollo puro. No hay datos reales que conservar.
@@ -46,6 +52,15 @@ Para QA de la PWA, usa la ruta aislada:
 ```
 
 El script levanta backend/worker/cache con Docker Compose, arranca Vite local en `http://127.0.0.1:5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`. No mata procesos ajenos: si el puerto esta ocupado por otro proceso, falla con un mensaje claro.
+
+Antes de recrear contenedores o arrancar otro Vite:
+
+```powershell
+.\scripts\qa-pwa.ps1 stop
+docker compose ps
+```
+
+Usa una sola ruta para cada pasada de QA: frontend Docker en `5173` o QA aislada en `5176`. Si hay conflicto de puerto, identifica el proceso antes de relanzar servicios. No reconstruyas Postgres, Redis, API o worker solo para refrescar una pantalla si el cambio esta limitado al frontend.
 
 Para cerrar solo el Vite lanzado por el script:
 

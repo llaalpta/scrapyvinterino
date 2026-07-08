@@ -4,18 +4,36 @@ This project uses Spec Driven Development to keep product intent, architecture, 
 
 ## Default Flow
 
-1. Understand the requested change.
-2. Check `docs/roadmap.md` to identify the current priority.
-3. Read the existing documentation that owns the affected area.
-4. Update the existing document if the change affects behavior, architecture, risk, security, deployment, or data.
-5. Define acceptance criteria.
-6. Implement the smallest useful vertical slice.
-7. Verify with focused checks.
-8. Run an explicit implementer self-review.
-9. Fix or explicitly defer self-review findings.
-10. Commit the code and documentation together.
+1. Check `git status --short --branch` and confirm the current branch matches the requested spec or fix.
+2. Understand the requested change.
+3. Check `docs/roadmap.md` to identify the current priority.
+4. Read the existing documentation that owns the affected area.
+5. Update the existing document if the change affects behavior, architecture, risk, security, deployment, or data.
+6. Define acceptance criteria.
+7. Implement the smallest useful vertical slice.
+8. Verify with focused checks.
+9. Run an explicit implementer self-review.
+10. Fix or explicitly defer self-review findings.
+11. Commit the code and documentation together.
+12. For non-trivial work, propose a separate implementation audit in the final response.
 
 Documentation and implementation should move together. A feature is not done if the relevant docs are stale.
+
+## Branch and PR Discipline
+
+Use one short-lived branch per spec or coherent fix. The default integration target is `develop`, and completed work should be proposed as a PR back to `develop`.
+
+Branch from `develop` before editing a new spec or feature. If `develop` does not exist locally, stop and ask before continuing, or create it intentionally as an explicit repository workflow change. Do not silently invent a new integration branch during unrelated product work.
+
+Name branches by scope, for example:
+
+- `spec/010-session-prepare`
+- `feature/010-proxy-session-pool`
+- `fix/010-rate-limit-refresh`
+
+Do not keep stacking unrelated specs on a long-lived feature branch. If the current branch scope does not match the requested work, switch or create the correct branch before editing files.
+
+The existing `feature/fast-opportunity-pipeline` branch is a pre-policy development branch. Future specs should not continue accumulating on it unless the user explicitly chooses that as a temporary exception.
 
 ## Post-Implementation Self-Review
 
@@ -36,11 +54,36 @@ For frontend work, a screen is not done just because it compiles. Navigation mus
 
 Frontend structure is part of the acceptance bar. Before adding a non-trivial PWA flow, keep the React root thin, place feature screens under `frontend/src/features/`, shared UI under `frontend/src/components/`, composition under `frontend/src/app/`, cross-feature state hooks under `frontend/src/hooks/`, and styles under `frontend/src/styles/`. Do not continue growing a multi-view `App.tsx` monolith when the change adds new state, controls, or views.
 
+## Independent Audit Proposal
+
+The implementer self-review is mandatory and is not a substitute for a later independent audit.
+
+After every non-trivial implementation, propose a separate audit/review pass. Do not run it automatically unless the user asks for it. The audit proposal should name the relevant layers instead of being generic:
+
+- spec and roadmap alignment;
+- API contracts and negative paths;
+- scripts and CLI entrypoints;
+- database schema, migrations, and persistence checks;
+- Redis/cache behavior and expiry assumptions;
+- worker, scheduler, and background jobs;
+- frontend UI, state, and disabled/empty states;
+- Docker/runtime configuration and environment variables;
+- logs, redaction, and observability;
+- verification gaps and missing smoke tests.
+
 ## Browser QA Rule
 
 When a spec changes the PWA, run a browser-driven QA pass against the live development app.
 
 Use `.\scripts\qa-pwa.ps1 start` as the default PWA QA entrypoint. It keeps backend services in Docker and runs an isolated local Vite server on `127.0.0.1:5176` with a localhost API proxy, avoiding conflicts with the Docker frontend service and stale browser sessions.
+
+Before restarting or recreating containers for frontend QA:
+
+- run `.\scripts\qa-pwa.ps1 stop` if isolated QA may be active;
+- inspect `docker compose ps` to see which frontend/API services are already running;
+- check the target port before starting another Vite server when a conflict is suspected;
+- choose either the Docker frontend on `5173` or isolated QA on `5176`, not both for the same pass;
+- rebuild only the affected service unless the change explicitly crosses service boundaries.
 
 The QA pass should use Playwright MCP when available and cover the behavior claimed by the spec:
 
@@ -57,7 +100,7 @@ If the live app differs from the source code or build output, restart the affect
 
 After closing a feature, capture generalized lessons in the existing process docs or agent instructions when a preventable issue was found.
 
-Write these lessons as durable rules, not as session notes. Prefer guidance such as “after implementing a frontend flow, verify the running app with Playwright and persisted data with the database” over a detailed account of a specific bug.
+Write these lessons as durable rules, not as session notes. Prefer guidance such as "after implementing a frontend flow, verify the running app with Playwright and persisted data with the database" over a detailed account of a specific bug.
 
 Do not create new documents for these lessons unless no existing document owns the topic.
 
@@ -146,6 +189,7 @@ Research docs are for facts learned from investigation.
 
 Before considering work done:
 
+- Branch scope was checked and matches the spec or coherent fix.
 - Relevant docs are current.
 - No duplicate or contradictory docs were introduced.
 - Code matches the documented architecture.
@@ -154,6 +198,8 @@ Before considering work done:
 - For PWA changes, Playwright or equivalent browser QA covered the live app.
 - Post-implementation self-review completed.
 - Self-review findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
+- A separate audit proposal was included for non-trivial work.
+- Frontend/container ownership was checked before restarting or recreating Vite/Docker services.
 - Process docs were updated with generalized prevention rules if the work revealed a repeatable quality gap.
 - Checks were run or skipped with a clear reason.
 - Git status is clean after commit.

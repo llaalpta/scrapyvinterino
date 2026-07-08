@@ -18,15 +18,17 @@ Authenticated Vinted actions are future work. Do not implement favorites, checko
 
 Before implementing a non-trivial change:
 
-1. Read the relevant docs in `docs/`.
-2. Check `docs/roadmap.md`; work on the first incomplete `Now` item unless the user explicitly changes priority.
-3. Update the existing spec, research note, ADR, or product decision record if the change affects behavior or direction.
-4. Define acceptance criteria before coding.
-5. Implement the smallest vertical slice that satisfies the criteria.
-6. Run focused verification.
-7. Run an explicit implementer self-review for non-trivial changes.
-8. Resolve self-review findings or document why they are deferred.
-9. Commit a coherent, small change.
+1. Check `git status --short --branch` and confirm the branch scope matches the spec or fix being implemented.
+2. Read the relevant docs in `docs/`.
+3. Check `docs/roadmap.md`; work on the first incomplete `Now` item unless the user explicitly changes priority.
+4. Update the existing spec, research note, ADR, or product decision record if the change affects behavior or direction.
+5. Define acceptance criteria before coding.
+6. Implement the smallest useful vertical slice that satisfies the criteria.
+7. Run focused verification.
+8. Run an explicit implementer self-review for non-trivial changes.
+9. Resolve self-review findings or document why they are deferred.
+10. Commit a coherent, small change.
+11. In the final response for non-trivial work, propose an optional independent audit of the implementation scope.
 
 Small mechanical fixes can skip a formal spec update, but they must not contradict existing docs.
 
@@ -53,6 +55,12 @@ Do not mark a roadmap item `done` until self-review findings are fixed, downgrad
 
 For frontend work, unavailable future behavior must be absent, visibly disabled, or represented as an empty state. Do not leave clickable placeholders that look complete.
 
+## Independent Audit Offer
+
+After every non-trivial implementation, the implementer must propose a separate audit/review pass instead of assuming the implementation is fully trusted. The proposal should name the likely audit surface: spec alignment, API contracts, scripts, database/migrations, Redis/cache behavior, worker/scheduler, frontend UI/state, Docker/runtime configuration, logs/redaction, and verification gaps.
+
+Do not run this independent audit automatically unless the user asks for it. The implementer self-review remains mandatory and separate.
+
 ## Frontend QA Standard
 
 Frontend changes must be tested against the running app, not only against source code or a production build.
@@ -67,6 +75,8 @@ Use Playwright MCP for browser-driven QA when the change affects UI, navigation,
 - successful input updates the UI and is observable through API and database when persistence is part of the feature.
 
 If the live app does not match the source code, restart the relevant dev service before claiming the feature works. A passing build does not prove the running PWA is current.
+
+Before restarting or recreating containers for frontend QA, make sure the previous frontend/Vite process is intentionally closed or owned by Docker Compose. Prefer `.\scripts\qa-pwa.ps1 start` for isolated PWA QA and `.\scripts\qa-pwa.ps1 stop` before changing QA mode. Do not start competing Vite servers on the same port, and do not rebuild unrelated services just to refresh the UI.
 
 Frontend structure is part of frontend quality. For non-trivial PWA work, keep `frontend/src/App.tsx` as a thin root, put dashboard-level composition in `frontend/src/app/`, cross-feature state hooks in `frontend/src/hooks/`, feature views in `frontend/src/features/`, shared UI in `frontend/src/components/`, generic helpers in `frontend/src/utils/`, and CSS under `frontend/src/styles/`. Split mixed-responsibility files before adding new behavior to them.
 
@@ -129,6 +139,10 @@ If a check cannot run, document the reason in the final response.
 ## Git
 
 - Keep commits small and descriptive.
+- Use one short-lived branch per spec or coherent fix. Branch from `develop` and open a PR back to `develop` for review before merge. If `develop` does not exist locally, stop and ask before continuing or create it intentionally as part of a repository workflow change.
+- Name branches by scope, for example `spec/010-session-prepare`, `feature/010-proxy-session-pool`, or `fix/010-rate-limit-refresh`.
+- Do not keep stacking unrelated specs on a long-lived feature branch. If the current branch scope does not match the requested work, switch or create the correct branch before editing files.
+- At the end of non-trivial work, report the branch, commit hash, verification evidence, and whether a PR should be opened.
 - Do not commit generated caches, secrets, local `.env`, or dependency folders.
 - Do not revert user changes unless explicitly requested.
 - Check `git status --short --branch` before and after work.
