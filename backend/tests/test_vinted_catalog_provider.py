@@ -7,7 +7,12 @@ import pytest
 
 from vinted_monitor.core.config import Settings
 from vinted_monitor.providers.browser_profiles import get_profile_by_name
-from vinted_monitor.providers.datadome import DataDomeChallengeError
+from vinted_monitor.providers.datadome import (
+    DataDomeChallengeError,
+    extract_datadome_client_key,
+    extract_datadome_cookie_from_response_cookie,
+    extract_datadome_tags_version,
+)
 from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
@@ -45,6 +50,7 @@ class FakeCurlSession:
 
     def get(self, url, *, params=None, headers=None, timeout=None):
         call = {
+            "method": "GET",
             "url": url,
             "params": params or {},
             "headers": headers or {},
@@ -55,6 +61,26 @@ class FakeCurlSession:
         }
         self.calls.append(call)
         response = self.handler(call)
+        self._store_response_cookies(response)
+        return response
+
+    def post(self, url, *, data=None, headers=None, timeout=None):
+        call = {
+            "method": "POST",
+            "url": url,
+            "data": data or {},
+            "headers": headers or {},
+            "timeout": timeout,
+            "impersonate": self.impersonate,
+            "proxies": self.proxies,
+            "cookies": dict(self.cookies),
+        }
+        self.calls.append(call)
+        response = self.handler(call)
+        self._store_response_cookies(response)
+        return response
+
+    def _store_response_cookies(self, response: FakeResponse) -> None:
         set_cookie_header = response.headers.get("set-cookie") or response.headers.get("Set-Cookie")
         if isinstance(set_cookie_header, str):
             set_cookie_values = [set_cookie_header]
@@ -64,7 +90,6 @@ class FakeCurlSession:
             name, _, remainder = set_cookie.partition("=")
             value = remainder.split(";", 1)[0]
             self.cookies[name] = value
-        return response
 
     def close(self) -> None:
         self.closed = True
@@ -271,6 +296,18 @@ def test_extract_csrf_token_from_catalog_document_variants() -> None:
     assert extract_csrf_token(r'\"csrfToken\":\"csrf-secret-value\"') == "csrf-secret-value"
     assert extract_csrf_token(r'headers.set(\"X-CSRF-Token\",\"csrf-secret-value\")') == "csrf-secret-value"
     assert extract_csrf_token("<html>no token</html>") is None
+
+
+def test_extract_datadome_bootstrap_metadata() -> None:
+    html = (
+        '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
+        '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
+    )
+
+    assert extract_datadome_tags_version(html) == "5.7.0"
+    assert extract_datadome_client_key(html) == "TESTDATADOMEKEY1234567890"
+    assert extract_datadome_cookie_from_response_cookie("datadome=dd-cookie-secret; Path=/; Secure") == "dd-cookie-secret"
+    assert extract_datadome_cookie_from_response_cookie("session=other; Path=/") is None
 
 
 def test_parse_catalog_html_allows_empty_catalog_results() -> None:
@@ -543,6 +580,203 @@ def test_curl_provider_blocks_catalog_api_when_session_context_is_incomplete() -
     assert [path(call) for call in calls] == ["/catalog"]
     incomplete_event = next(event for event in events if event["phase"] == "catalog_session_context_incomplete")
     assert set(incomplete_event["details"]["missing_required"]) >= {"access_token_web", "datadome", "v_udt", "egress_country_code"}
+
+
+def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_returned() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text=(
+                    '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
+                    '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
+                    '{"CSRF_TOKEN":"csrf-secret-value"}'
+                ),
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/js":
+            assert call["method"] == "POST"
+            assert call["data"]["jsType"] == "ch"
+            assert call["data"]["ddv"] == "5.7.0"
+            assert call["data"]["ddk"] == "TESTDATADOMEKEY1234567890"
+            assert call["headers"]["Sec-Fetch-Site"] == "cross-site"
+            return FakeResponse(
+                200,
+                json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure; SameSite=Lax"},
+                headers={"content-type": "application/json"},
+            )
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    report = provider.bootstrap_for_session(source().url, collect_datadome=True)
+    prepared = provider.export_prepared_session(proxy_session_id="pytestproxy01")
+
+    assert report["datadome_cookie"] is True
+    assert prepared.datadome == "dd-cookie-secret"
+    assert prepared.cookies["datadome"] == "dd-cookie-secret"
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/js"]
+    assert [event["phase"] for event in events][-2:] == ["datadome_collector_start", "datadome_collector_success"]
+    serialized_events = json.dumps(events)
+    assert "dd-cookie-secret" not in serialized_events
+    assert "TESTDATADOMEKEY1234567890" not in serialized_events
+    assert "access-secret-value" not in serialized_events
+    assert "csrf-secret-value" not in serialized_events
+    assert "anon-secret-value" not in serialized_events
+    assert "udt-secret-value" not in serialized_events
+
+
+def test_curl_provider_preflight_collector_tries_le_after_ch_without_cookie() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text=(
+                    '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
+                    '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
+                    '{"CSRF_TOKEN":"csrf-secret-value"}'
+                ),
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/js":
+            if call["data"]["jsType"] == "ch":
+                return FakeResponse(200, json_data={"status": 200, "cid": "collector-cid"}, headers={"content-type": "application/json"})
+            return FakeResponse(
+                200,
+                json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure"},
+                headers={"content-type": "application/json"},
+            )
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    report = provider.bootstrap_for_session(source().url, collect_datadome=True)
+
+    assert report["datadome_cookie"] is True
+    assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
+
+
+def test_curl_provider_preflight_collector_keeps_incomplete_when_no_cookie_returned() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text=(
+                    '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
+                    '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
+                    '{"CSRF_TOKEN":"csrf-secret-value"}'
+                ),
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/js":
+            return FakeResponse(200, json_data={"status": 200}, headers={"content-type": "application/json"})
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    report = provider.bootstrap_for_session(source().url, collect_datadome=True)
+    prepared = provider.export_prepared_session(proxy_session_id="pytestproxy01")
+
+    assert report["datadome_cookie"] is False
+    assert "datadome" in provider._missing_session_context(report)
+    assert prepared.datadome is None
+    assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
+    assert events[-1]["phase"] == "datadome_collector_failed"
+
+
+def test_curl_provider_preflight_collector_skips_when_base_context_is_incomplete() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text=(
+                    '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
+                    '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
+                    '{"CSRF_TOKEN":"csrf-secret-value"}'
+                ),
+                headers={"x-anon-id": "anon-secret-value", "x-user-iso-locale": "ES", "x-screen": "catalog"},
+            )
+        if path(call) == "/js":
+            raise AssertionError("DataDome collector must not run before base context is complete")
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    report = provider.bootstrap_for_session(source().url, collect_datadome=True)
+
+    assert report["datadome_cookie"] is False
+    assert {call["method"] for call in calls} == {"GET"}
+    skipped = next(event for event in events if event["phase"] == "datadome_collector_skipped")
+    assert skipped["details"]["reason"] == "base_context_incomplete"
+    assert set(skipped["details"]["missing_required"]) >= {"access_token_web", "v_udt"}
 
 
 def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:

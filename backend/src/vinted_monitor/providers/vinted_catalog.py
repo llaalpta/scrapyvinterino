@@ -17,7 +17,13 @@ from vinted_monitor.core.redaction import safe_cookie_markers, safe_headers, saf
 from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
 from vinted_monitor.providers.catalog_url import build_catalog_api_params
-from vinted_monitor.providers.datadome import DataDomeChallengeError, has_datadome_cookie, human_delay, is_datadome_challenge
+from vinted_monitor.providers.datadome import (
+    DataDomeChallengeError,
+    DataDomeCookieCollector,
+    has_datadome_cookie,
+    human_delay,
+    is_datadome_challenge,
+)
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
@@ -150,6 +156,7 @@ class CurlCffiVintedCatalogProvider:
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
         self._egress_context = EgressContext()
+        self._last_bootstrap_html = ""
         if prepared_session is not None:
             self._catalog_session_context = CatalogSessionContext(
                 csrf_token=prepared_session.csrf_token,
@@ -199,12 +206,14 @@ class CurlCffiVintedCatalogProvider:
 
         raise last_error or VintedCatalogProviderError("Vinted catalog API request failed")
 
-    def bootstrap_for_session(self, source_url: str) -> dict[str, Any]:
+    def bootstrap_for_session(self, source_url: str, *, collect_datadome: bool = False) -> dict[str, Any]:
         """Warm only the catalog document and return a safe context report."""
         self._ensure_session()
         self._diagnose_egress(attempt=1)
         if not self._bootstrapped:
             self._bootstrap_anonymous_session(source_url, attempt=1)
+        if collect_datadome:
+            self._try_datadome_collector(source_url)
         return self._session_context_report()
 
     def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
@@ -333,6 +342,7 @@ class CurlCffiVintedCatalogProvider:
         self._bootstrapped = False
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
+        self._last_bootstrap_html = ""
 
     def _ensure_session(self) -> None:
         if self._session is None:
@@ -673,6 +683,7 @@ class CurlCffiVintedCatalogProvider:
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: HTTP {response.status_code}")
 
+        self._last_bootstrap_html = response.text or ""
         cookie_names = list(self._session.cookies.keys()) if self._session.cookies else []
         dd_present = has_datadome_cookie(dict(self._session.cookies)) if self._session.cookies else False
         self._catalog_session_context = self._build_catalog_session_context(response)
@@ -729,6 +740,115 @@ class CurlCffiVintedCatalogProvider:
             },
         )
 
+    def _try_datadome_collector(self, source_url: str) -> None:
+        assert self._session is not None
+        collector_url = str(self.settings.vinted_datadome_collector_url)
+        if not self.settings.vinted_datadome_collector_enabled:
+            self._emit_event(
+                phase="datadome_collector_skipped",
+                method="POST",
+                url=collector_url,
+                details={"reason": "disabled"},
+            )
+            return
+        if self._catalog_session_context.datadome:
+            self._emit_event(
+                phase="datadome_collector_skipped",
+                method="POST",
+                url=collector_url,
+                details={
+                    "reason": "datadome_already_present",
+                    "datadome_cookie": True,
+                    "cookies_after": self._cookie_markers(),
+                },
+            )
+            return
+        if not self._last_bootstrap_html:
+            self._emit_event(
+                phase="datadome_collector_skipped",
+                method="POST",
+                url=collector_url,
+                level="warning",
+                details={"reason": "bootstrap_html_missing"},
+            )
+            return
+
+        report = self._session_context_report()
+        missing_without_datadome = [name for name in self._missing_session_context(report) if name != "datadome"]
+        if missing_without_datadome:
+            self._emit_event(
+                phase="datadome_collector_skipped",
+                method="POST",
+                url=collector_url,
+                level="warning",
+                details={
+                    "reason": "base_context_incomplete",
+                    "missing_required": missing_without_datadome,
+                    **report,
+                },
+            )
+            return
+
+        self._emit_event(
+            phase="datadome_collector_start",
+            method="POST",
+            url=collector_url,
+            details={
+                "timeout_ms": self.timeout_ms,
+                "browser_profile": self.profile.name,
+                "impersonate": self.profile.impersonate,
+                "http_session": self._session_marker(),
+                "proxy_session": self.proxy_session_marker,
+                "locale": self.locale,
+                "accept_language": self.accept_language,
+                "viewport_size": self.viewport_size,
+                "vinted_screen": self.vinted_screen,
+            },
+        )
+        started_at = time.perf_counter()
+        result = DataDomeCookieCollector(
+            session=self._session,
+            profile=self.profile,
+            collector_url=collector_url,
+            source_url=source_url,
+            page_html=self._last_bootstrap_html,
+            accept_language=self.accept_language,
+            locale=self.locale,
+            viewport_size=self.viewport_size,
+            vinted_screen=self.vinted_screen,
+            timeout_seconds=self.timeout_ms / 1000,
+            default_ddv=self.settings.vinted_datadome_collector_default_ddv,
+            configured_client_key=self.settings.vinted_datadome_client_key,
+        ).collect()
+        if result.success:
+            self._catalog_session_context.datadome = result.datadome_cookie or self._cookie_value("datadome")
+            self._emit_event(
+                phase="datadome_collector_success",
+                method="POST",
+                url=collector_url,
+                duration_ms=_elapsed_ms(started_at),
+                details={
+                    **result.safe_details(),
+                    "context": self._session_context_report(),
+                    "cookies_after": self._cookie_markers(),
+                },
+            )
+            return
+
+        self._emit_event(
+            phase="datadome_collector_failed",
+            method="POST",
+            url=collector_url,
+            duration_ms=_elapsed_ms(started_at),
+            level="warning",
+            message="DataDome collector did not return a cookie",
+            details={
+                **result.safe_details(),
+                "context": self._session_context_report(),
+                "cookies_after": self._cookie_markers(),
+            },
+        )
+
     def _build_catalog_session_context(self, response: Any) -> CatalogSessionContext:
         headers = dict(response.headers)
         return CatalogSessionContext(
@@ -751,8 +871,8 @@ class CurlCffiVintedCatalogProvider:
         locale_country = _country_from_locale(self.locale)
         viewport_configured = bool(self.viewport_size and VIEWPORT_PATTERN.match(self.viewport_size.strip().lower()))
         vinted_screen_configured = bool(self.vinted_screen == "catalog")
-        response_screen_matches = context.screen is None or context.screen.strip().lower() == self.vinted_screen
-        response_locale_matches = response_locale is None or expected_country_code is None or response_locale == expected_country_code
+        response_screen_matches = bool(context.screen and context.screen.strip().lower() == self.vinted_screen)
+        response_locale_matches = bool(response_locale and (expected_country_code is None or response_locale == expected_country_code))
 
         return {
             "browser_profile": self.profile.name,
@@ -983,6 +1103,8 @@ def _normalize_country_code(value: Any) -> str | None:
         return None
     cleaned = str(value).strip().upper()
     if len(cleaned) != 2:
+        if "-" in cleaned:
+            return _normalize_country_code(cleaned.rsplit("-", 1)[-1])
         return None
     return cleaned
 

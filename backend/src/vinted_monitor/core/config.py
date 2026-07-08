@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     vinted_prepared_session_required: bool = True
     vinted_session_max_requests: int = 50
     vinted_session_ttl_minutes: int = 120
+    vinted_datadome_collector_enabled: bool = True
+    vinted_datadome_collector_url: AnyHttpUrl = "https://dd.vinted.lt/js"
+    vinted_datadome_collector_default_ddv: str = "5.7.0"
+    vinted_datadome_client_key: str | None = Field(default=None, repr=False)
     human_delay_min_seconds: float = 1.2
     human_delay_max_seconds: float = 3.8
     datadome_challenge_penalty_multiplier: int = 2

@@ -339,7 +339,7 @@ def post_proxy_profile_vinted_session_preflight(
         viewport_size=profile.screen,
     )
     try:
-        report = provider.bootstrap_for_session(source_url)
+        report = provider.bootstrap_for_session(source_url, collect_datadome=True)
         prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
         session = save_prepared_vinted_session(
             db,

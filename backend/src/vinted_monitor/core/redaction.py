@@ -7,7 +7,7 @@ from http.cookies import SimpleCookie
 from typing import Any
 
 SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
-    r"\b(access_token_web|authorization|cookie|csrf(?:_token)?|password|refresh_token|secret|set-cookie|token)(\s*[:=]\s*)([^\s;,&]+)",
+    r"\b(access_token_web|anon_id|authorization|cookie|csrf(?:_token)?|datadome|ddk|jspl|password|refresh_token|secret|set-cookie|token|v_udt)(\s*[:=]\s*)([^\s;,&]+)",
     re.IGNORECASE,
 )
 BEARER_TOKEN_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
@@ -17,6 +17,9 @@ SENSITIVE_HEADER_TOKENS = (
     "authorization",
     "cookie",
     "csrf",
+    "datadome",
+    "ddk",
+    "jspl",
     "password",
     "secret",
     "token",
