@@ -12,6 +12,7 @@ import {
   fetchRuns,
   fetchScheduler,
   fetchSources,
+  prepareMonitorVintedSession,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -299,6 +300,41 @@ export function useDashboardController() {
     }
   }
 
+  async function onPrepareVintedSession(source: SearchSource) {
+    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    setError(null);
+    if (sourceDraftHasChanges(source, draft)) {
+      setError('Guarda los cambios antes de preparar la sesion Vinted');
+      return;
+    }
+    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+      setError('Corrige los filtros de URL no soportados antes de preparar la sesion Vinted');
+      return;
+    }
+    setSavingSourceId(source.id);
+    try {
+      const run = await prepareMonitorVintedSession(source.id);
+      const [sourceData, runData, proxyData] = await Promise.all([fetchSources(), fetchRuns(), fetchProxyProfiles()]);
+      setSources(sourceData);
+      setSourceDrafts(buildSourceDrafts(sourceData));
+      setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
+      setProxyProfiles(proxyData);
+      setMonitorRunsBySource((current) => ({
+        ...current,
+        [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+      }));
+      await loadMonitorStats(source.id);
+      await loadMonitorEvents(source.id);
+      if (run.status !== 'success') {
+        setError(run.error_message || 'No se pudo preparar la sesion Vinted');
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted');
+    } finally {
+      setSavingSourceId(null);
+    }
+  }
+
   async function onStopMonitor(sourceId: number) {
     setError(null);
     setSavingSourceId(sourceId);
@@ -523,6 +559,7 @@ export function useDashboardController() {
     onClearMonitorEventsView: clearMonitorEventsView,
     onLoadRunEvents: fetchRunEvents,
     onSaveSourceSchedule,
+    onPrepareVintedSession,
     onRecalibrateBaseline,
     onStartSession,
     onStopMonitor,

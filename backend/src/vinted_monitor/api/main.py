@@ -61,6 +61,7 @@ from vinted_monitor.services.runs import (
     execute_manual_run,
     execute_monitor_baseline,
     execute_monitor_run,
+    execute_monitor_session_prepare,
     list_runs,
     monitor_baseline_ready,
 )
@@ -308,7 +309,7 @@ def post_proxy_profile_vinted_session_preflight(profile_id: int) -> None:
     del profile_id
     raise HTTPException(
         status_code=410,
-        detail="Las sesiones Vinted son propiedad del monitor; lanza o recalibra un monitor para prepararlas automaticamente",
+        detail="Las sesiones Vinted son propiedad del monitor; usa Preparar sesion, lanza o recalibra un monitor para prepararlas",
     )
 
 
@@ -459,6 +460,25 @@ def post_monitor_baseline(
 ):
     try:
         return execute_monitor_baseline(db, monitor_id, provider=provider)
+    except SearchSourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except VintedSessionRequiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/monitors/{monitor_id}/vinted-session/prepare", response_model=RunRead, status_code=201)
+def post_monitor_vinted_session_prepare(
+    monitor_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return execute_monitor_session_prepare(db, monitor_id)
     except SearchSourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:

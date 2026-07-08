@@ -21,6 +21,7 @@ from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.runs import (
     FAILED,
+    SESSION_PREPARE_TRIGGER,
     SUCCESS,
     SearchSourceInactiveError,
     execute_manual_run,
@@ -188,6 +189,62 @@ class FakeFailingDetailProvider(FakeSuccessProvider):
 class FakeSearchFailingProvider(FakeSuccessProvider):
     def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
         raise RuntimeError("search boom cookie=session-secret")
+
+
+class FakeSessionPreparingProvider:
+    created: list[FakeSessionPreparingProvider] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.event_sink = kwargs.get("event_sink")
+        self.closed = False
+        self.bootstrap_calls: list[tuple[str, bool]] = []
+        self.probe_calls: list[str] = []
+        FakeSessionPreparingProvider.created.append(self)
+
+    def bootstrap_for_session(self, source_url: str, *, collect_datadome: bool = False) -> dict:
+        self.bootstrap_calls.append((source_url, collect_datadome))
+        if self.event_sink is not None:
+            self.event_sink(
+                phase="anonymous_session_bootstrap_success",
+                method="GET",
+                url=source_url,
+                status_code=200,
+                duration_ms=7,
+                details={"anon": True, "v_udt": True},
+            )
+        return {"bootstrap": "ok", "datadome_cookie": False}
+
+    def probe_catalog_api(self, source_url: str) -> dict:
+        self.probe_calls.append(source_url)
+        return {
+            "outcome": "accepted_json",
+            "status_code": 200,
+            "duration_ms": 11,
+            "missing_required": [],
+        }
+
+    def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
+        return PreparedCatalogSession(
+            proxy_session_id=proxy_session_id,
+            cookies={
+                "access_token_web": "prepared-access-token",
+                "v_udt": "prepared-v-udt",
+                "anon_id": "prepared-anon",
+            },
+            csrf_token="prepared-csrf",
+            anon_id="prepared-anon",
+            access_token_web="prepared-access-token",
+            datadome=None,
+            v_udt="prepared-v-udt",
+            user_iso_locale=self.kwargs["locale"],
+            vinted_screen=self.kwargs["screen"],
+            egress_ip="203.0.113.42",
+            egress_country_code=self.kwargs["expected_country_code"],
+        )
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _test_direct_egress() -> RunEgress:
@@ -410,6 +467,84 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert selected.details["vinted_session_id"] == run.runtime_metadata["vinted_session_id"]
         assert selected.details["proxy_session"] == run.runtime_metadata["proxy_sticky_session"]
         assert created_providers[0].kwargs["proxy_session_marker"] == run.runtime_metadata["proxy_sticky_session"]
+
+
+def test_monitor_session_prepare_api_creates_ready_session_without_business_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    FakeSessionPreparingProvider.created = []
+    monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.get_settings",
+        lambda: Settings(
+            scheduler_enabled=True,
+            proxy_sticky_username_template="{username}-sessid-{session_id}",
+            vinted_prepared_session_required=True,
+        ),
+    )
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest prepare proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8010,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest prepare monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+        source_url = source.url
+        proxy_id = proxy.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/vinted-session/prepare")
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["trigger"] == SESSION_PREPARE_TRIGGER
+        assert body["status"] == SUCCESS
+        assert body["items_found"] == 0
+        assert body["opportunities_created"] == 0
+        assert body["runtime_metadata"]["vinted_session_id"]
+        assert body["runtime_metadata"]["vinted_session_action"] == "prepared"
+        assert body["runtime_metadata"]["vinted_session_datadome_present"] is False
+        assert len(FakeSessionPreparingProvider.created) == 1
+        assert FakeSessionPreparingProvider.created[0].closed is True
+        assert FakeSessionPreparingProvider.created[0].bootstrap_calls == [(source_url, True)]
+        assert FakeSessionPreparingProvider.created[0].probe_calls == [source_url]
+
+        with SessionLocal() as db:
+            session = db.scalar(
+                select(VintedSession).where(VintedSession.source_id == source_id, VintedSession.proxy_profile_id == proxy_id)
+            )
+            assert session is not None
+            assert session.status == "ready"
+            assert session.request_count == 1
+            events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == body["id"]).order_by(RunEvent.id.asc())))
+            phases = [event.phase for event in events]
+            assert "vinted_session_prepare_start" in phases
+            assert "vinted_session_prepare_result" in phases
+            assert "catalog_search_start" not in phases
+            assert "baseline_snapshot_seeded" not in phases
+            assert "redis_check_start" not in phases
+            assert db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%"))) == 0
+            assert db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id)) == 0
+            stats = get_monitor_stats(db, source_id, range_name="all")
+            assert stats.historical_summary.runs_count == 0
+            assert sum(point.runs_count for point in stats.chart_points) == 0
+    finally:
+        cleanup_source(source_id)
 
 
 def test_monitor_run_persists_refreshed_prepared_vinted_session_context(source_id: int) -> None:

@@ -52,7 +52,7 @@ export function RunActivityList({
               <div>
                 <strong>{getSourceName(run.source_id)}</strong>
                 <span>
-                  Run #{run.id} - {run.trigger}
+                  Run #{run.id} - {triggerLabel(run.trigger)}
                 </span>
               </div>
               <span className={`run-status ${run.status}`}>{run.status}</span>
@@ -317,6 +317,12 @@ function eventLabel(phase: string): string {
     anonymous_session_refresh_start: 'Refrescando sesion anonima',
     catalog_session_context_ready: 'Contexto de catalogo listo',
     catalog_session_context_incomplete: 'Contexto de catalogo incompleto',
+    vinted_session_prepare_start: 'Preparando sesion Vinted',
+    vinted_session_prepare_result: 'Sesion Vinted preparada',
+    datadome_collector_start: 'Recolector DataDome iniciado',
+    datadome_collector_success: 'Recolector DataDome completado',
+    datadome_collector_failed: 'Recolector DataDome fallido',
+    datadome_collector_skipped: 'Recolector DataDome omitido',
     navigation_home_request_start: 'Visitando home',
     navigation_home_request_success: 'Home respondio',
     navigation_home_request_error: 'Error visitando home',
@@ -351,6 +357,16 @@ function eventLabel(phase: string): string {
     monitor_session_closed: 'Sesion de monitor cerrada'
   };
   return labels[phase] ?? phase.replaceAll('_', ' ');
+}
+
+function triggerLabel(trigger: string): string {
+  const labels: Record<string, string> = {
+    manual: 'puntual',
+    scheduler: 'scheduler',
+    baseline: 'snapshot inicial',
+    session_prepare: 'preparar sesion'
+  };
+  return labels[trigger] ?? trigger;
 }
 
 function proxyLabel(metadata: Record<string, unknown>): string {

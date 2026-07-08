@@ -423,6 +423,10 @@ export function calibrateMonitorBaseline(sourceId: number): Promise<Run> {
   return postJson<Run>(`/api/monitors/${sourceId}/baseline`);
 }
 
+export function prepareMonitorVintedSession(sourceId: number): Promise<Run> {
+  return postJson<Run>(`/api/monitors/${sourceId}/vinted-session/prepare`);
+}
+
 export function fetchOpportunities(query: OpportunityQuery = {}): Promise<Page<OpportunityResult>> {
   return getJson<Page<OpportunityResult>>(`/api/opportunities${toQueryString(query)}`);
 }

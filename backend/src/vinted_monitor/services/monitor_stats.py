@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from vinted_monitor.db.models import MonitorSession, Run, SearchSource
 
 STATS_RANGES = {"minutes", "hours", "days", "month", "all"}
+NON_METRIC_RUN_TRIGGERS = {"session_prepare"}
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,11 @@ def get_monitor_stats(db: Session, monitor_id: int, *, range_name: str = "hours"
             .order_by(MonitorSession.started_at.asc(), MonitorSession.id.asc())
         )
     )
-    runs = list(db.scalars(select(Run).where(Run.source_id == monitor_id).order_by(Run.started_at.asc(), Run.id.asc())))
+    runs = [
+        run
+        for run in db.scalars(select(Run).where(Run.source_id == monitor_id).order_by(Run.started_at.asc(), Run.id.asc()))
+        if run.trigger not in NON_METRIC_RUN_TRIGGERS
+    ]
     active_session = next((session for session in reversed(sessions) if session.stopped_at is None), None)
     latest_session = active_session or next((session for session in reversed(sessions) if session.stopped_at is not None), None)
     session_runs = [run for run in runs if latest_session is not None and run.monitor_session_id == latest_session.id]

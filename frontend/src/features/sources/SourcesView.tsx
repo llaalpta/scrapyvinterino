@@ -1,5 +1,5 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Eraser, FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
+import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
 import { monitorEventsStreamUrl, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { eventSearchText, RunEventEntry } from '../runs/RunsView';
@@ -21,6 +21,7 @@ export function SourcesView({
   onLoadMonitorRuns,
   onLoadMonitorStats,
   onRefreshRuntime,
+  onPrepareVintedSession,
   onRecalibrateBaseline,
   onSaveSourceSchedule,
   onStartSession,
@@ -48,6 +49,7 @@ export function SourcesView({
   onLoadMonitorRuns: (sourceId: number) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onRefreshRuntime: () => Promise<void>;
+  onPrepareVintedSession: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
@@ -227,6 +229,7 @@ export function SourcesView({
           onClearMonitorEventsView={onClearMonitorEventsView}
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
+          onPrepareVintedSession={onPrepareVintedSession}
           onRecalibrateBaseline={onRecalibrateBaseline}
           onSaveSourceSchedule={onSaveSourceSchedule}
           onStartSession={onStartSession}
@@ -628,6 +631,7 @@ function MonitorDetail({
   onClearMonitorEventsView,
   onDeleteSource,
   onLoadMonitorStats,
+  onPrepareVintedSession,
   onRecalibrateBaseline,
   onSaveSourceSchedule,
   onStartSession,
@@ -648,6 +652,7 @@ function MonitorDetail({
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
+  onPrepareVintedSession: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
@@ -732,6 +737,21 @@ function MonitorDetail({
               <button type="button" disabled={savingSourceId === source.id || !hasUnsavedChanges} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
                 <Save size={16} />
                 Guardar
+              </button>
+              <button
+                type="button"
+                disabled={savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges || launchBlockedByFilters}
+                title={
+                  hasUnsavedChanges
+                    ? 'Guarda los cambios antes de preparar la sesion Vinted'
+                    : launchBlockedByFilters
+                      ? 'Corrige los filtros de URL no soportados antes de preparar la sesion Vinted'
+                      : 'Preparar y probar sesion Vinted'
+                }
+                onClick={() => onPrepareVintedSession(source)}
+              >
+                <KeyRound size={16} />
+                Preparar sesion
               </button>
               <button
                 type="button"

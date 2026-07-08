@@ -38,7 +38,7 @@ from vinted_monitor.services.items import (
 from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success, proxy_url_with_sticky_session
 from vinted_monitor.services.run_events import record_run_event
-from vinted_monitor.services.scheduler import RunEgress, choose_run_egress, get_scheduler_runtime_config
+from vinted_monitor.services.scheduler import RunEgress, SchedulerCapacityError, choose_run_egress, get_scheduler_runtime_config
 from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
 from vinted_monitor.services.vinted_sessions import (
@@ -61,6 +61,7 @@ FAILED = "failed"
 MANUAL_TRIGGER = "manual"
 SCHEDULER_TRIGGER = "scheduler"
 BASELINE_TRIGGER = "baseline"
+SESSION_PREPARE_TRIGGER = "session_prepare"
 SESSION_ITEM_PASSED = "passed"
 SESSION_ITEM_DISCARDED = "discarded"
 SESSION_ITEM_PASSED_WITHOUT_FILTERS = "passed_without_filters"
@@ -406,6 +407,195 @@ def execute_monitor_baseline(
         failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
+
+
+def execute_monitor_session_prepare(
+    db: Session,
+    source_id: int,
+    egress: RunEgress | None = None,
+) -> Run:
+    source = db.get(SearchSource, source_id)
+    if source is None or source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.is_active:
+        raise RunAlreadyActiveError("Deten la sesion antes de preparar la sesion Vinted")
+    if _active_source_run_exists(db, source_id=source.id):
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
+    try:
+        validate_vinted_catalog_url(source.url)
+    except ValueError as exc:
+        raise SearchSourceConfigError(str(exc)) from exc
+    catalog_filters = catalog_filter_compatibility(source.url)
+
+    settings = get_settings()
+    runtime_config = get_scheduler_runtime_config(db, settings)
+    selected_egress = egress or choose_run_egress(db, settings)
+    if selected_egress.proxy_profile_id is None:
+        raise VintedSessionRequiredError("Configura un proxy activo antes de preparar una sesion Vinted")
+    proxy_profile = db.get(ProxyProfile, selected_egress.proxy_profile_id)
+    if proxy_profile is None:
+        raise SchedulerCapacityError(f"Proxy profile {selected_egress.proxy_profile_id} no longer exists")
+
+    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    run = Run(
+        source_id=source.id,
+        monitor_session_id=None,
+        status=RUNNING,
+        trigger=SESSION_PREPARE_TRIGGER,
+        items_found=0,
+        items_new=0,
+        items_filter_passed=0,
+        items_discarded_by_filters=0,
+        items_filter_pending=0,
+        opportunities_created=0,
+        runtime_metadata={
+            **_run_runtime_metadata(source, selected_egress, runtime_config),
+            "session_prepare_run": True,
+            "target_country_code": settings.vinted_target_country_code.strip().upper(),
+            "proxy_country_code": proxy_profile.country_code,
+            "locale": proxy_profile.locale,
+            "accept_language": proxy_profile.accept_language,
+            "screen": proxy_profile.screen,
+            "vinted_screen": proxy_profile.vinted_screen,
+            "browser_profile": browser_profile.name,
+            "impersonate": browser_profile.impersonate,
+        },
+    )
+    db.add(run)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
+    db.refresh(run)
+
+    proxy_profile_id = proxy_profile.id
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_started",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "trigger": SESSION_PREPARE_TRIGGER,
+            "monitor_mode": source.monitor_mode,
+            "egress_mode": selected_egress.mode,
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_kind": proxy_profile.kind,
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": proxy_profile.country_code,
+            "locale": proxy_profile.locale,
+            "screen": proxy_profile.screen,
+            "vinted_screen": proxy_profile.vinted_screen,
+            "browser_profile": browser_profile.name,
+            "session_prepare_run": True,
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_config_resolved",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "monitor_id": source.id,
+            "trigger": SESSION_PREPARE_TRIGGER,
+            "monitor_mode": source.monitor_mode,
+            "catalog_filter_compatibility": catalog_filters,
+            "runtime_config": {
+                "catalog_per_page": runtime_config.catalog_per_page,
+                "request_timeout_ms": runtime_config.request_timeout_ms,
+            },
+            "session_prepare_run": True,
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="egress_selected",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "egress_mode": selected_egress.mode,
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_name": proxy_profile.name,
+            "proxy_kind": proxy_profile.kind,
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": proxy_profile.country_code,
+            "locale": proxy_profile.locale,
+            "accept_language": proxy_profile.accept_language,
+            "screen": proxy_profile.screen,
+            "vinted_screen": proxy_profile.vinted_screen,
+            "direct_allowed": runtime_config.allow_direct_without_proxy,
+            "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
+            "session_prepare_run": True,
+        },
+    )
+
+    try:
+        event_sink = _build_provider_event_sink(db, run, source, proxy_profile_id)
+        vinted_session, prepared_session, provider_metadata = _prepare_vinted_session_for_run(
+            db,
+            source,
+            proxy_profile,
+            runtime_config,
+            settings,
+            event_sink=event_sink,
+        )
+        proxy_marker = safe_secret_marker("proxy_sticky_session_id", vinted_session.proxy_session_id, kind="proxy_session")
+        _merge_run_metadata(
+            run,
+            {
+                **provider_metadata,
+                "vinted_session_id": vinted_session.id,
+                "vinted_session_status": vinted_session.status,
+                "vinted_session_request_count": vinted_session.request_count,
+                "vinted_session_max_requests": vinted_session.max_requests,
+                "vinted_session_action": "prepared",
+                "vinted_session_datadome_present": bool(
+                    prepared_session.datadome or (prepared_session.cookies or {}).get("datadome")
+                ),
+                "proxy_session_id_prefix": vinted_session.proxy_session_id[:8],
+                "proxy_sticky_session": proxy_marker,
+            },
+        )
+        run.status = SUCCESS
+        run.finished_at = datetime.now(UTC)
+        run.error_message = None
+        mark_proxy_run_success(db, proxy_profile_id)
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="run_succeeded",
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+            details={
+                "session_prepare_run": True,
+                "vinted_session_id": vinted_session.id,
+                "vinted_session_status": vinted_session.status,
+                "vinted_session_use_count": vinted_session.request_count,
+                "vinted_session_max_requests": vinted_session.max_requests,
+                "context": prepared_context_flags(prepared_session),
+                "datadome_required": False,
+                "proxy_session": proxy_marker,
+            },
+        )
+        db.commit()
+        db.refresh(run)
+        return run
+    except Exception as exc:
+        return _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            kind="vinted_session_prepare",
+            penalize_proxy=not isinstance(exc, VintedSessionRequiredError),
+        )
 
 
 def execute_monitor_run(
