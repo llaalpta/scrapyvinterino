@@ -23,6 +23,10 @@ from vinted_monitor.providers.catalog_url import build_catalog_api_params
 from vinted_monitor.providers.datadome import (
     DataDomeChallengeError,
     DataDomeCookieCollector,
+    build_datadome_tags_headers,
+    extract_datadome_client_key,
+    extract_datadome_script_url,
+    extract_datadome_tags_version,
     has_datadome_cookie,
     human_delay,
     is_datadome_challenge,
@@ -292,6 +296,7 @@ class CurlCffiVintedCatalogProvider:
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
+                "default_headers": False,
             },
         )
         started_at = time.perf_counter()
@@ -300,6 +305,7 @@ class CurlCffiVintedCatalogProvider:
                 candidate.url,
                 headers=dict(headers),
                 timeout=self.timeout_ms / 1000,
+                default_headers=False,
             )
             response_details = {
                 "vinted_item_id": candidate.vinted_item_id,
@@ -358,6 +364,7 @@ class CurlCffiVintedCatalogProvider:
                         "http_session": self._session_marker(),
                         "request_headers": safe_headers(headers),
                         "cookies_after": self._cookie_markers(),
+                        "default_headers": False,
                     },
                 )
                 raise VintedCatalogProviderError(
@@ -533,9 +540,9 @@ class CurlCffiVintedCatalogProvider:
             )
         )
         if self._catalog_session_context.anon_id:
-            headers["X-Anon-Id"] = self._catalog_session_context.anon_id
+            headers["x-anon-id"] = self._catalog_session_context.anon_id
         if self._catalog_session_context.csrf_token:
-            headers["X-CSRF-Token"] = self._catalog_session_context.csrf_token
+            headers["x-csrf-token"] = self._catalog_session_context.csrf_token
 
         cookie_names = list(self._session.cookies.keys()) if self._session.cookies else []
         self._emit_event(
@@ -558,6 +565,7 @@ class CurlCffiVintedCatalogProvider:
                 "anon_id": _secret_marker_or_none("anon_id", self._catalog_session_context.anon_id),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
+                "default_headers": False,
             },
         )
         started_at = time.perf_counter()
@@ -567,6 +575,7 @@ class CurlCffiVintedCatalogProvider:
                 params=params,
                 headers=headers,
                 timeout=self.timeout_ms / 1000,
+                default_headers=False,
             )
         except Exception as exc:
             self._emit_event(
@@ -748,9 +757,9 @@ class CurlCffiVintedCatalogProvider:
             )
         )
         if self._catalog_session_context.anon_id:
-            headers["X-Anon-Id"] = self._catalog_session_context.anon_id
+            headers["x-anon-id"] = self._catalog_session_context.anon_id
         if self._catalog_session_context.csrf_token:
-            headers["X-CSRF-Token"] = self._catalog_session_context.csrf_token
+            headers["x-csrf-token"] = self._catalog_session_context.csrf_token
 
         request_details = {
             "method": "GET",
@@ -760,6 +769,20 @@ class CurlCffiVintedCatalogProvider:
             "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
             "cookies": self._cookie_markers(),
         }
+        self._emit_event(
+            phase="catalog_api_probe_start",
+            method="GET",
+            url=url,
+            details={
+                "source_url": source_url,
+                "api_params": params,
+                "missing_required": missing_context,
+                "context": context_report,
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
+                "default_headers": False,
+            },
+        )
         started_at = time.perf_counter()
         try:
             response = self._session.get(
@@ -767,9 +790,26 @@ class CurlCffiVintedCatalogProvider:
                 params=params,
                 headers=headers,
                 timeout=self.timeout_ms / 1000,
+                default_headers=False,
             )
         except Exception as exc:
             duration_ms = _elapsed_ms(started_at)
+            self._emit_event(
+                phase="catalog_api_probe_error",
+                method="GET",
+                url=url,
+                duration_ms=duration_ms,
+                level="warning",
+                message=redact_sensitive_text(str(exc)),
+                details={
+                    "outcome": "transport_error",
+                    "source_url": source_url,
+                    "missing_required": missing_context,
+                    "context": context_report,
+                    "request_headers": safe_headers(headers),
+                    "cookies_after": self._cookie_markers(),
+                },
+            )
             return {
                 "outcome": "transport_error",
                 "source_url": source_url,
@@ -821,6 +861,25 @@ class CurlCffiVintedCatalogProvider:
                     outcome = "non_json"
                     response_details["body_snippet"] = redact_sensitive_text(body_snippet)
 
+        event_phase = "catalog_api_probe_success" if outcome == "accepted_json" else "catalog_api_probe_failed"
+        self._emit_event(
+            phase=event_phase,
+            method="GET",
+            url=url,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            level=None if outcome == "accepted_json" else "warning",
+            details={
+                "outcome": outcome,
+                "source_url": source_url,
+                "missing_required": missing_context,
+                "context": context_report,
+                "request_headers": safe_headers(headers),
+                "response": response_details,
+                "cookies_after": self._cookie_markers(),
+                "error": error,
+            },
+        )
         return {
             "outcome": outcome,
             "source_url": source_url,
@@ -868,6 +927,7 @@ class CurlCffiVintedCatalogProvider:
                 bootstrap_url,
                 headers=headers,
                 timeout=self.timeout_ms / 1000,
+                default_headers=False,
             )
         except Exception as exc:
             self._emit_event(
@@ -1050,6 +1110,10 @@ class CurlCffiVintedCatalogProvider:
                 "vinted_screen": self.vinted_screen,
             },
         )
+        datadome_client_key = self.settings.vinted_datadome_client_key or extract_datadome_client_key(self._last_bootstrap_html)
+        tags_url = extract_datadome_script_url(self._last_bootstrap_html, source_url)
+        if not datadome_client_key and tags_url:
+            datadome_client_key = self._fetch_datadome_client_key_from_tags(tags_url=tags_url, source_url=source_url)
         started_at = time.perf_counter()
         result = DataDomeCookieCollector(
             session=self._session,
@@ -1063,7 +1127,8 @@ class CurlCffiVintedCatalogProvider:
             vinted_screen=self.vinted_screen,
             timeout_seconds=self.timeout_ms / 1000,
             default_ddv=self.settings.vinted_datadome_collector_default_ddv,
-            configured_client_key=self.settings.vinted_datadome_client_key,
+            configured_client_key=datadome_client_key,
+            event_sink=self._emit_event,
         ).collect()
         if result.success:
             self._catalog_session_context.datadome = result.datadome_cookie or self._cookie_value("datadome")
@@ -1093,6 +1158,72 @@ class CurlCffiVintedCatalogProvider:
                 "cookies_after": self._cookie_markers(),
             },
         )
+
+    def _fetch_datadome_client_key_from_tags(self, *, tags_url: str, source_url: str) -> str | None:
+        assert self._session is not None
+        headers = build_datadome_tags_headers(
+            source_url=source_url,
+            profile=self.profile,
+            accept_language=self.accept_language,
+        )
+        self._emit_event(
+            phase="datadome_tags_request_start",
+            method="GET",
+            url=tags_url,
+            details={
+                "browser_profile": self.profile.name,
+                "impersonate": self.profile.impersonate,
+                "http_session": self._session_marker(),
+                "proxy_session": self.proxy_session_marker,
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
+                "default_headers": False,
+            },
+        )
+        started_at = time.perf_counter()
+        try:
+            response = self._session.get(
+                tags_url,
+                headers=dict(headers),
+                timeout=self.timeout_ms / 1000,
+                default_headers=False,
+            )
+        except Exception as exc:
+            self._emit_event(
+                phase="datadome_tags_request_error",
+                method="GET",
+                url=tags_url,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message=str(exc),
+                details={
+                    "request_headers": safe_headers(headers),
+                    "cookies_after": self._cookie_markers(),
+                },
+            )
+            return None
+
+        script_text = response.text or ""
+        ddk = extract_datadome_client_key(script_text)
+        ddv = extract_datadome_tags_version(tags_url) or self.settings.vinted_datadome_collector_default_ddv
+        self._emit_event(
+            phase="datadome_tags_request_success" if response.status_code < 400 else "datadome_tags_request_error",
+            method="GET",
+            url=tags_url,
+            status_code=response.status_code,
+            duration_ms=_elapsed_ms(started_at),
+            level=None if response.status_code < 400 else "warning",
+            details={
+                "ddv": ddv,
+                "ddk_found": ddk is not None,
+                "ddk_length": len(ddk) if ddk else None,
+                "script_length": len(script_text),
+                "request_headers": safe_headers(headers),
+                "response_headers": safe_headers(dict(response.headers)),
+                "cookies_after": self._cookie_markers(),
+            },
+        )
+        return ddk if response.status_code < 400 else None
 
     def _build_catalog_session_context(self, response: Any) -> CatalogSessionContext:
         headers = dict(response.headers)

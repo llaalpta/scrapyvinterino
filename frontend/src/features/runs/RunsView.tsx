@@ -210,14 +210,42 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   appendBooleanToken(parts, 'v_udt', event.details, 'v_udt_found');
   appendBooleanToken(parts, 'geo', event.details, 'egress_country_match');
   appendBooleanToken(parts, 'locale_ok', event.details, 'locale_configured');
-  appendBooleanToken(parts, 'screen_ok', event.details, 'screen_configured');
+  appendBooleanToken(parts, 'viewport_ok', event.details, 'viewport_configured');
+  appendBooleanToken(parts, 'x_screen_ok', event.details, 'vinted_screen_configured');
+  appendBooleanToken(parts, 'response_screen_ok', event.details, 'response_screen_matches');
+  appendBooleanToken(parts, 'ddk', event.details, 'ddk_found');
+  appendBooleanToken(parts, 'dd_cookie', event.details, 'cookie_found');
   const locale = detailString(event.details, 'locale');
   if (locale) {
     parts.push(`locale=${locale}`);
   }
-  const screen = detailString(event.details, 'screen');
-  if (screen) {
-    parts.push(`screen=${screen}`);
+  const viewport = detailString(event.details, 'viewport_size') || detailString(event.details, 'screen');
+  if (viewport) {
+    parts.push(`viewport=${viewport}`);
+  }
+  const vintedScreen = detailString(event.details, 'vinted_screen') || detailString(event.details, 'response_screen');
+  if (vintedScreen) {
+    parts.push(`x_screen=${vintedScreen}`);
+  }
+  const jsType = detailString(event.details, 'js_type');
+  if (jsType) {
+    parts.push(`js=${jsType}`);
+  }
+  const ddv = detailString(event.details, 'ddv');
+  if (ddv) {
+    parts.push(`ddv=${ddv}`);
+  }
+  const probeOutcome = detailString(event.details, 'probe_outcome') || detailString(event.details, 'outcome');
+  if (probeOutcome) {
+    parts.push(`probe=${probeOutcome}`);
+  }
+  const probeStatus = detailString(event.details, 'probe_status_code');
+  if (probeStatus) {
+    parts.push(`probe_status=${probeStatus}`);
+  }
+  const probeDuration = detailString(event.details, 'probe_duration_ms');
+  if (probeDuration) {
+    parts.push(`probe_ms=${probeDuration}`);
   }
   if (event.phase === 'catalog_candidates_received') {
     appendNumberToken(parts, 'items', event.details, 'candidate_count');
@@ -319,7 +347,17 @@ function eventLabel(phase: string): string {
     catalog_session_context_incomplete: 'Contexto de catalogo incompleto',
     vinted_session_prepare_start: 'Preparando sesion Vinted',
     vinted_session_prepare_result: 'Sesion Vinted preparada',
+    catalog_api_probe_start: 'Probando API de catalogo',
+    catalog_api_probe_success: 'Probe API aceptado',
+    catalog_api_probe_failed: 'Probe API fallido',
+    catalog_api_probe_error: 'Error en probe API',
+    datadome_tags_request_start: 'Cargando tags DataDome',
+    datadome_tags_request_success: 'Tags DataDome cargados',
+    datadome_tags_request_error: 'Error cargando tags DataDome',
     datadome_collector_start: 'Recolector DataDome iniciado',
+    datadome_collector_attempt_start: 'Intento DataDome iniciado',
+    datadome_collector_attempt_success: 'Intento DataDome completado',
+    datadome_collector_attempt_failed: 'Intento DataDome fallido',
     datadome_collector_success: 'Recolector DataDome completado',
     datadome_collector_failed: 'Recolector DataDome fallido',
     datadome_collector_skipped: 'Recolector DataDome omitido',

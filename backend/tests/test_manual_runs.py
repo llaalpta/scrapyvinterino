@@ -258,7 +258,7 @@ def _create_ready_vinted_session(
     *,
     proxy_session_id: str = "pytestsession",
 ) -> None:
-    profile = profile_for_impersonate("chrome146")
+    profile = profile_for_impersonate("chrome149")
     save_prepared_vinted_session(
         db,
         source,
@@ -424,7 +424,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeOwnedProvider)
     monkeypatch.setattr(
         "vinted_monitor.services.runs.get_settings",
-        lambda: Settings(proxy_sticky_username_template="{username}-sessid-{session_id}"),
+        lambda: Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}"),
     )
 
     with SessionLocal() as db:

@@ -101,6 +101,8 @@ def _redacted_details(details: dict) -> dict:
 
 
 def _redact_value(value: Any, *, key: str | None = None) -> Any:
+    if value is None or isinstance(value, bool | int | float):
+        return value
     if key is not None and _is_sensitive_key(key) and not _is_safe_marker(value):
         return "<redacted>"
     if isinstance(value, str):

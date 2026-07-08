@@ -29,9 +29,9 @@ class BrowserProfile:
         """Return ordered headers for the HTML bootstrap request."""
         headers = OrderedDict(self.bootstrap_headers)
         if accept_language:
-            headers["Accept-Language"] = accept_language
+            headers["accept-language"] = accept_language
         if referer:
-            headers["Referer"] = referer
+            headers["referer"] = referer
         return headers
 
     def build_api_headers(
@@ -45,12 +45,12 @@ class BrowserProfile:
         """Return ordered headers for the JSON catalog API request."""
         headers = OrderedDict(self.api_headers)
         if accept_language:
-            headers["Accept-Language"] = accept_language
+            headers["accept-language"] = accept_language
         if locale:
-            headers["Locale"] = locale
-        if screen:
-            headers["X-Screen"] = screen
-        headers["Referer"] = referer
+            headers["locale"] = locale
+        if screen and "x-screen" in headers:
+            headers["x-screen"] = screen
+        headers["referer"] = referer
         return headers
 
 
@@ -66,30 +66,36 @@ def _chrome_bootstrap_headers(
 ) -> dict[str, str]:
     """Chrome-ordered headers for a top-level navigation (document) request."""
     headers = OrderedDict([
-        ("sec-ch-ua", sec_ch_ua),
-        ("sec-ch-ua-mobile", "?0"),
-        ("sec-ch-ua-platform", sec_ch_ua_platform),
-        ("Upgrade-Insecure-Requests", "1"),
-        ("User-Agent", user_agent),
         (
-            "Accept",
+            "accept",
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,image/apng,*/*;q=0.8,"
             "application/signed-exchange;v=b3;q=0.7",
         ),
-        ("Sec-Fetch-Site", "none"),
-        ("Sec-Fetch-Mode", "navigate"),
-        ("Sec-Fetch-User", "?1"),
-        ("Sec-Fetch-Dest", "document"),
-        ("Accept-Encoding", accept_encoding),
-        ("Accept-Language", accept_language),
+        ("accept-encoding", accept_encoding),
+        ("accept-language", accept_language),
     ])
     if cache_control:
-        headers["Cache-Control"] = cache_control
+        headers["cache-control"] = cache_control
     if pragma:
-        headers["Pragma"] = pragma
+        headers["pragma"] = pragma
     if priority:
-        headers["Priority"] = priority
+        headers["priority"] = priority
+    headers.update(
+        OrderedDict(
+            [
+                ("sec-ch-ua", sec_ch_ua),
+                ("sec-ch-ua-mobile", "?0"),
+                ("sec-ch-ua-platform", sec_ch_ua_platform),
+                ("sec-fetch-dest", "document"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-site", "none"),
+                ("sec-fetch-user", "?1"),
+                ("upgrade-insecure-requests", "1"),
+                ("user-agent", user_agent),
+            ]
+        )
+    )
     return dict(headers)
 
 
@@ -105,21 +111,30 @@ def _chrome_api_headers(
 ) -> dict[str, str]:
     """Chrome-ordered headers for an XHR/fetch JSON API request."""
     headers = OrderedDict([
-        ("sec-ch-ua", sec_ch_ua),
-        ("Accept", accept),
-        ("sec-ch-ua-mobile", "?0"),
-        ("User-Agent", user_agent),
-        ("sec-ch-ua-platform", sec_ch_ua_platform),
-        ("Sec-Fetch-Site", "same-origin"),
-        ("Sec-Fetch-Mode", "cors"),
-        ("Sec-Fetch-Dest", "empty"),
-        ("Accept-Encoding", accept_encoding),
-        ("Accept-Language", accept_language),
+        ("accept", accept),
+        ("accept-encoding", accept_encoding),
+        ("accept-language", accept_language),
     ])
+    headers["cache-control"] = "no-cache"
     if locale:
-        headers["Locale"] = locale
+        headers["locale"] = locale
+    headers["pragma"] = "no-cache"
     if priority:
-        headers["Priority"] = priority
+        headers["priority"] = priority
+    headers.update(
+        OrderedDict(
+            [
+                ("referer", ""),
+                ("sec-ch-ua", sec_ch_ua),
+                ("sec-ch-ua-mobile", "?0"),
+                ("sec-ch-ua-platform", sec_ch_ua_platform),
+                ("sec-fetch-dest", "empty"),
+                ("sec-fetch-mode", "cors"),
+                ("sec-fetch-site", "same-origin"),
+                ("user-agent", user_agent),
+            ]
+        )
+    )
     return dict(headers)
 
 
@@ -140,6 +155,12 @@ _CHROME120_UA = (
 )
 _CHROME120_SEC_CH_UA = '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
 _CHROME120_ACCEPT_ENCODING = "gzip, deflate, br"
+_CHROME149_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/149.0.0.0 Safari/537.36"
+)
+_CHROME149_SEC_CH_UA = '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
 
 BROWSER_PROFILES: list[BrowserProfile] = [
     BrowserProfile(
@@ -264,6 +285,33 @@ BROWSER_PROFILES: list[BrowserProfile] = [
             sec_ch_ua='"Not-A.Brand";v="24", "Chromium";v="146"',
             sec_ch_ua_platform='"Windows"',
             accept_language=_LANG_CHROME146,
+            accept="application/json,text/plain,*/*,image/webp",
+            locale="es-ES",
+            priority="u=3",
+        ),
+    ),
+    BrowserProfile(
+        name="chrome_149_win10",
+        impersonate="chrome149",
+        user_agent=_CHROME149_UA,
+        sec_ch_ua=_CHROME149_SEC_CH_UA,
+        sec_ch_ua_mobile="?0",
+        sec_ch_ua_platform='"Windows"',
+        accept_language=_LANG_ES,
+        bootstrap_headers=_chrome_bootstrap_headers(
+            user_agent=_CHROME149_UA,
+            sec_ch_ua=_CHROME149_SEC_CH_UA,
+            sec_ch_ua_platform='"Windows"',
+            accept_language=_LANG_ES,
+            cache_control="no-cache",
+            pragma="no-cache",
+            priority="u=0, i",
+        ),
+        api_headers=_chrome_api_headers(
+            user_agent=_CHROME149_UA,
+            sec_ch_ua=_CHROME149_SEC_CH_UA,
+            sec_ch_ua_platform='"Windows"',
+            accept_language=_LANG_ES,
             accept="application/json,text/plain,*/*,image/webp",
             locale="es-ES",
             priority="u=3",

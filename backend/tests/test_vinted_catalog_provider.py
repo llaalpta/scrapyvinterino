@@ -53,13 +53,14 @@ class FakeCurlSession:
         self.cookies: dict[str, str] = {}
         self.closed = False
 
-    def get(self, url, *, params=None, headers=None, timeout=None):
+    def get(self, url, *, params=None, headers=None, timeout=None, default_headers=None):
         call = {
             "method": "GET",
             "url": url,
             "params": params or {},
             "headers": headers or {},
             "timeout": timeout,
+            "default_headers": default_headers,
             "impersonate": self.impersonate,
             "proxies": self.proxies,
             "cookies": dict(self.cookies),
@@ -69,13 +70,14 @@ class FakeCurlSession:
         self._store_response_cookies(response)
         return response
 
-    def post(self, url, *, data=None, headers=None, timeout=None):
+    def post(self, url, *, data=None, headers=None, timeout=None, default_headers=None):
         call = {
             "method": "POST",
             "url": url,
             "data": data or {},
             "headers": headers or {},
             "timeout": timeout,
+            "default_headers": default_headers,
             "impersonate": self.impersonate,
             "proxies": self.proxies,
             "cookies": dict(self.cookies),
@@ -123,19 +125,19 @@ def test_curl_provider_defaults_to_configured_chrome120_profile() -> None:
     assert provider.profile.name == "chrome_120_win10"
     assert provider.profile.user_agent == CHROME120_UA
     assert provider.profile.sec_ch_ua == CHROME120_SEC_CH_UA
-    assert provider.profile.build_bootstrap_headers()["Accept-Encoding"] == CHROME120_ACCEPT_ENCODING
-    assert provider.profile.build_api_headers("https://www.vinted.es/catalog")["Accept-Encoding"] == CHROME120_ACCEPT_ENCODING
+    assert provider.profile.build_bootstrap_headers()["accept-encoding"] == CHROME120_ACCEPT_ENCODING
+    assert provider.profile.build_api_headers("https://www.vinted.es/catalog")["accept-encoding"] == CHROME120_ACCEPT_ENCODING
     assert captured_sessions == [{"impersonate": "chrome120", "proxies": None}]
 
 
-def test_curl_provider_default_runtime_profile_is_chrome146_without_env_file() -> None:
+def test_curl_provider_default_runtime_profile_is_chrome149_without_env_file() -> None:
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(_env_file=None),
         session_factory=lambda **_: FakeCurlSession(lambda _call: FakeResponse(200), []),
     )
 
-    assert provider.profile.name == "chrome_146_win10"
-    assert provider.profile.impersonate == "chrome146"
+    assert provider.profile.name == "chrome_149_win10"
+    assert provider.profile.impersonate == "chrome149"
 
 
 def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_headers() -> None:
@@ -146,57 +148,60 @@ def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_heade
     api_headers = profile.build_api_headers("https://www.vinted.es/catalog?search_text=tommy")
 
     assert list(bootstrap_headers) == [
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "cache-control",
         "sec-ch-ua",
         "sec-ch-ua-mobile",
         "sec-ch-ua-platform",
-        "Upgrade-Insecure-Requests",
-        "User-Agent",
-        "Accept",
-        "Sec-Fetch-Site",
-        "Sec-Fetch-Mode",
-        "Sec-Fetch-User",
-        "Sec-Fetch-Dest",
-        "Accept-Encoding",
-        "Accept-Language",
-        "Cache-Control",
-        "Referer",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+        "sec-fetch-user",
+        "upgrade-insecure-requests",
+        "user-agent",
+        "referer",
     ]
     assert list(api_headers) == [
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "cache-control",
+        "pragma",
+        "referer",
         "sec-ch-ua",
-        "Accept",
         "sec-ch-ua-mobile",
-        "User-Agent",
         "sec-ch-ua-platform",
-        "Sec-Fetch-Site",
-        "Sec-Fetch-Mode",
-        "Sec-Fetch-Dest",
-        "Accept-Encoding",
-        "Accept-Language",
-        "Referer",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+        "user-agent",
     ]
-    assert "Connection" not in bootstrap_headers
-    assert "TE" not in bootstrap_headers
-    assert "Connection" not in api_headers
-    assert "TE" not in api_headers
+    assert "connection" not in bootstrap_headers
+    assert "te" not in bootstrap_headers
+    assert "connection" not in api_headers
+    assert "te" not in api_headers
 
 
-def test_chrome146_runtime_headers_match_observed_catalog_flow() -> None:
-    profile = get_profile_by_name("chrome_146_win10")
+def test_chrome149_runtime_headers_match_observed_catalog_flow() -> None:
+    profile = get_profile_by_name("chrome_149_win10")
     assert profile is not None
 
     bootstrap_headers = profile.build_bootstrap_headers()
     api_headers = profile.build_api_headers("https://www.vinted.es/catalog?catalog[]=2050")
 
-    assert profile.impersonate == "chrome146"
-    assert profile.user_agent.endswith("Chrome/146.0.0.0 Safari/537.36")
-    assert bootstrap_headers["sec-ch-ua"] == '"Not-A.Brand";v="24", "Chromium";v="146"'
-    assert bootstrap_headers["Accept-Language"] == "en-GB,en;q=0.9"
-    assert bootstrap_headers["Priority"] == "u=0, i"
-    assert "Cache-Control" not in bootstrap_headers
-    assert api_headers["Accept"] == "application/json,text/plain,*/*,image/webp"
-    assert api_headers["Locale"] == "es-ES"
-    assert api_headers["Priority"] == "u=3"
-    assert api_headers["Referer"] == "https://www.vinted.es/catalog?catalog[]=2050"
+    assert profile.impersonate == "chrome149"
+    assert profile.user_agent.endswith("Chrome/149.0.0.0 Safari/537.36")
+    assert bootstrap_headers["sec-ch-ua"] == '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
+    assert bootstrap_headers["accept-language"] == "es-ES,es;q=0.9,en;q=0.8"
+    assert bootstrap_headers["priority"] == "u=0, i"
+    assert bootstrap_headers["cache-control"] == "no-cache"
+    assert bootstrap_headers["pragma"] == "no-cache"
+    assert api_headers["accept"] == "application/json,text/plain,*/*,image/webp"
+    assert api_headers["locale"] == "es-ES"
+    assert api_headers["priority"] == "u=3"
+    assert api_headers["referer"] == "https://www.vinted.es/catalog?catalog[]=2050"
 
 
 @pytest.fixture(autouse=True)
@@ -454,26 +459,28 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
         if path(call) == "/api/v2/catalog/items":
             assert call["params"]["per_page"] == 5
             assert call["params"]["order"] == "newest_first"
-            assert call["headers"]["Accept"] == "application/json,text/plain,*/*,image/webp"
-            assert call["headers"]["X-CSRF-Token"] == "csrf-secret-value"
-            assert call["headers"]["X-Anon-Id"] == "anon-secret-value"
-            assert call["headers"]["Locale"] == "es-ES"
-            assert call["headers"]["X-Screen"] == "catalog"
-            assert call["headers"]["Priority"] == "u=3"
-            assert call["headers"]["Referer"] == source().url
+            assert call["headers"]["accept"] == "application/json,text/plain,*/*,image/webp"
+            assert call["headers"]["x-csrf-token"] == "csrf-secret-value"
+            assert call["headers"]["x-anon-id"] == "anon-secret-value"
+            assert call["headers"]["locale"] == "es-ES"
+            assert "x-screen" not in call["headers"]
+            assert call["headers"]["priority"] == "u=3"
+            assert call["headers"]["referer"] == source().url
+            assert call["default_headers"] is False
             assert call["cookies"]["access_token_web"] == "anon"
             return FakeResponse(200, json_data=fixture, headers={"content-type": "application/json"})
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip", curl_impersonate_browser="chrome146"),
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip", curl_impersonate_browser="chrome149"),
         session_factory=fake_session_factory(handler, calls),
     )
     result = provider.search(source())
 
     assert len(result.items) == 2
     assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
-    assert "Referer" not in calls[1]["headers"]
+    assert "referer" not in calls[1]["headers"]
+    assert calls[1]["default_headers"] is False
 
 
 def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
@@ -653,8 +660,9 @@ def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_cont
                 },
             )
         if path(call) == "/api/v2/catalog/items":
-            assert call["headers"]["X-CSRF-Token"] == "csrf-secret-value"
-            assert call["headers"]["X-Anon-Id"] == "anon-secret-value"
+            assert call["headers"]["x-csrf-token"] == "csrf-secret-value"
+            assert call["headers"]["x-anon-id"] == "anon-secret-value"
+            assert call["default_headers"] is False
             assert call["cookies"]["access_token_web"] == "access-secret-value"
             assert "datadome" not in call["cookies"]
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
@@ -764,7 +772,6 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
                 200,
                 text=(
                     '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
-                    '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
                     '{"CSRF_TOKEN":"csrf-secret-value"}'
                 ),
                 headers={
@@ -775,12 +782,21 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
                     "x-screen": "catalog",
                 },
             )
+        if path(call) == "/datadome/5.7.0/tags.js":
+            assert call["method"] == "GET"
+            assert call["headers"]["sec-fetch-dest"] == "script"
+            assert call["headers"]["sec-fetch-site"] == "cross-site"
+            assert call["default_headers"] is False
+            return FakeResponse(200, text='window.ddk="TESTDATADOMEKEY1234567890";', headers={"content-type": "application/javascript"})
         if path(call) == "/js":
             assert call["method"] == "POST"
             assert call["data"]["jsType"] == "ch"
             assert call["data"]["ddv"] == "5.7.0"
             assert call["data"]["ddk"] == "TESTDATADOMEKEY1234567890"
-            assert call["headers"]["Sec-Fetch-Site"] == "cross-site"
+            assert call["headers"]["sec-fetch-site"] == "cross-site"
+            assert call["headers"]["accept"] == "*/*"
+            assert call["headers"]["priority"] == "u=1, i"
+            assert call["default_headers"] is False
             return FakeResponse(
                 200,
                 json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure; SameSite=Lax"},
@@ -800,8 +816,14 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
     assert report["datadome_cookie"] is True
     assert prepared.datadome == "dd-cookie-secret"
     assert prepared.cookies["datadome"] == "dd-cookie-secret"
-    assert [path(call) for call in calls] == ["/ip", "/catalog", "/js"]
-    assert [event["phase"] for event in events][-2:] == ["datadome_collector_start", "datadome_collector_success"]
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/datadome/5.7.0/tags.js", "/js"]
+    phases = [event["phase"] for event in events]
+    assert "datadome_tags_request_start" in phases
+    assert "datadome_tags_request_success" in phases
+    assert "datadome_collector_start" in phases
+    assert "datadome_collector_attempt_start" in phases
+    assert "datadome_collector_attempt_success" in phases
+    assert phases[-1] == "datadome_collector_success"
     serialized_events = json.dumps(events)
     assert "dd-cookie-secret" not in serialized_events
     assert "TESTDATADOMEKEY1234567890" not in serialized_events
@@ -902,7 +924,8 @@ def test_curl_provider_preflight_collector_keeps_incomplete_when_no_cookie_retur
     assert "datadome" in provider._missing_session_context(report)
     assert prepared.datadome is None
     assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
-    assert events[-1]["phase"] == "datadome_collector_failed"
+    assert [event["phase"] for event in events][-1] == "datadome_collector_failed"
+    assert [event["phase"] for event in events].count("datadome_collector_attempt_failed") == 2
 
 
 def test_curl_provider_preflight_collector_skips_when_base_context_is_incomplete() -> None:
@@ -1059,8 +1082,9 @@ def test_curl_provider_respects_retry_after_before_silent_refresh(monkeypatch: p
                     text='{"error":"rate_limited"}',
                     headers={"content-type": "application/json", "Retry-After": "2"},
                 )
-            assert call["headers"]["X-CSRF-Token"] == "csrf-2"
-            assert call["headers"]["X-Anon-Id"] == "anon-2"
+            assert call["headers"]["x-csrf-token"] == "csrf-2"
+            assert call["headers"]["x-anon-id"] == "anon-2"
+            assert call["default_headers"] is False
             assert call["cookies"]["access_token_web"] == "fresh"
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
         return FakeResponse(404)
@@ -1241,8 +1265,10 @@ def test_curl_provider_standard_flow_visits_catalog_document_then_api() -> None:
     provider.search(source())
 
     assert [path(call) for call in calls] == ["/ip", "/catalog", "/api/v2/catalog/items"]
-    assert "Referer" not in calls[1]["headers"]
-    assert calls[2]["headers"]["Referer"] == source().url
+    assert "referer" not in calls[1]["headers"]
+    assert calls[1]["default_headers"] is False
+    assert calls[2]["headers"]["referer"] == source().url
+    assert calls[2]["default_headers"] is False
 
 
 def test_get_profile_by_name_scans_all_profiles() -> None:

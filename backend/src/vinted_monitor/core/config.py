@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     worker_max_retry_attempts: int = 3
 
     # curl_cffi / anti-bot evasion
-    curl_impersonate_browser: str = "chrome146"
+    curl_impersonate_browser: str = "chrome149"
     vinted_direct_catalog_enabled: bool = False
     vinted_target_country_code: str = "ES"
     vinted_target_locale: str = "es-ES"
