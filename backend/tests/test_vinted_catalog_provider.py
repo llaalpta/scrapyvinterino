@@ -1,22 +1,27 @@
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from email.utils import format_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 
 from vinted_monitor.core.config import Settings
+from vinted_monitor.providers import vinted_catalog as catalog_provider
 from vinted_monitor.providers.browser_profiles import get_profile_by_name
 from vinted_monitor.providers.datadome import (
     DataDomeChallengeError,
     extract_datadome_client_key,
     extract_datadome_cookie_from_response_cookie,
     extract_datadome_tags_version,
+    is_datadome_challenge,
 )
 from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
     VintedCatalogProviderError,
+    VintedCatalogRateLimitError,
     build_catalog_api_params,
     decode_next_flight_payload,
     extract_csrf_token,
@@ -308,6 +313,49 @@ def test_extract_datadome_bootstrap_metadata() -> None:
     assert extract_datadome_client_key(html) == "TESTDATADOMEKEY1234567890"
     assert extract_datadome_cookie_from_response_cookie("datadome=dd-cookie-secret; Path=/; Secure") == "dd-cookie-secret"
     assert extract_datadome_cookie_from_response_cookie("session=other; Path=/") is None
+
+
+def test_datadome_challenge_detection_uses_signals_not_status_only() -> None:
+    assert is_datadome_challenge(
+        429,
+        {"content-type": "application/json"},
+        '{"error":"rate_limited"}',
+    ) is False
+    assert is_datadome_challenge(
+        403,
+        {"x-datadome-traffic-rule-response": "captcha"},
+        "",
+    ) is True
+    assert is_datadome_challenge(
+        200,
+        {"set-cookie": "datadome=dd-cookie-secret; Path=/; Secure"},
+        "",
+    ) is False
+    assert is_datadome_challenge(
+        403,
+        {"set-cookie": "datadome=dd-cookie-secret; Path=/; Secure"},
+        "",
+    ) is True
+    assert is_datadome_challenge(
+        200,
+        {"set-cookie": "datadome=; Max-Age=-1; Path=/;"},
+        "",
+    ) is False
+    assert is_datadome_challenge(
+        403,
+        {"content-type": "text/html"},
+        "<html>geo.captcha-delivery.com</html>",
+    ) is True
+
+
+def test_retry_after_parser_supports_missing_seconds_http_date_and_invalid_values() -> None:
+    now = datetime(2026, 7, 8, 10, 0, tzinfo=UTC)
+    retry_at = now + timedelta(seconds=7)
+
+    assert catalog_provider._retry_after_seconds(None, now=now) == (5.0, "missing")
+    assert catalog_provider._retry_after_seconds("2", now=now) == (2.0, "seconds")
+    assert catalog_provider._retry_after_seconds(format_datetime(retry_at), now=now) == (7.0, "http_date")
+    assert catalog_provider._retry_after_seconds("soon", now=now) == (None, "invalid")
 
 
 def test_parse_catalog_html_allows_empty_catalog_results() -> None:
@@ -943,6 +991,7 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
     calls: list[dict] = []
     api_calls = 0
     bootstrap_calls = 0
+    sessions = 0
 
     def handler(call: dict) -> FakeResponse:
         nonlocal api_calls, bootstrap_calls
@@ -956,6 +1005,66 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
             return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
         return FakeResponse(404)
 
+    def factory(*, impersonate=None, proxies=None):
+        nonlocal sessions
+        sessions += 1
+        return FakeCurlSession(handler, calls, impersonate=impersonate, proxies=proxies)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=factory,
+        require_complete_session_context=False,
+    )
+
+    result = provider.search(source())
+
+    assert len(result.items) == 2
+    assert api_calls == 2
+    assert bootstrap_calls == 2
+    assert sessions == 1
+    assert provider.prepared_session_refreshed is True
+
+
+def test_curl_provider_respects_retry_after_before_silent_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+    sleeps: list[float] = []
+    api_calls = 0
+    bootstrap_calls = 0
+
+    monkeypatch.setattr("vinted_monitor.providers.vinted_catalog._rate_limit_jitter_seconds", lambda: 0.0)
+    monkeypatch.setattr("vinted_monitor.providers.vinted_catalog.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    def handler(call: dict) -> FakeResponse:
+        nonlocal api_calls, bootstrap_calls
+        if path(call) == "/catalog":
+            bootstrap_calls += 1
+            if bootstrap_calls == 2:
+                assert call["cookies"]["access_token_web"] == "initial"
+            return FakeResponse(
+                200,
+                text=f'{{"CSRF_TOKEN":"csrf-{bootstrap_calls}"}}',
+                headers={
+                    "set-cookie": f"access_token_web={'initial' if bootstrap_calls == 1 else 'fresh'}; Path=/;",
+                    "x-anon-id": f"anon-{bootstrap_calls}",
+                    "x-v-udt": f"udt-{bootstrap_calls}",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/api/v2/catalog/items":
+            api_calls += 1
+            if api_calls == 1:
+                return FakeResponse(
+                    429,
+                    text='{"error":"rate_limited"}',
+                    headers={"content-type": "application/json", "Retry-After": "2"},
+                )
+            assert call["headers"]["X-CSRF-Token"] == "csrf-2"
+            assert call["headers"]["X-Anon-Id"] == "anon-2"
+            assert call["cookies"]["access_token_web"] == "fresh"
+            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+        return FakeResponse(404)
+
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(handler, calls),
@@ -965,8 +1074,63 @@ def test_curl_provider_refreshes_anonymous_session_once_after_auth_failure() -> 
     result = provider.search(source())
 
     assert len(result.items) == 2
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items", "/catalog", "/api/v2/catalog/items"]
+    assert sleeps == [2.0]
     assert api_calls == 2
-    assert bootstrap_calls == 2
+    assert provider.prepared_session_refreshed is True
+
+
+def test_curl_provider_does_not_refresh_when_retry_after_exceeds_budget() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=initial; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(
+                429,
+                text='{"error":"rate_limited"}',
+                headers={"content-type": "application/json", "Retry-After": "120"},
+            )
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+        require_complete_session_context=False,
+    )
+
+    with pytest.raises(VintedCatalogRateLimitError):
+        provider.search(source())
+
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
+    assert provider.prepared_session_refreshed is False
+
+
+def test_curl_provider_does_not_refresh_invalid_retry_after() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/catalog":
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "access_token_web=initial; Path=/;"})
+        if path(call) == "/api/v2/catalog/items":
+            return FakeResponse(
+                429,
+                text='{"error":"rate_limited"}',
+                headers={"content-type": "application/json", "Retry-After": "soon"},
+            )
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+        require_complete_session_context=False,
+    )
+
+    with pytest.raises(VintedCatalogRateLimitError):
+        provider.search(source())
+
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
 
 
 def test_curl_provider_raises_after_second_session_failure() -> None:

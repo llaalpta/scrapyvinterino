@@ -29,7 +29,8 @@ La investigacion se hizo sin login, sin cuenta personal y sin tokens personales.
 - La sesion observada no usa cuenta personal, login ni token personal.
 - El documento publico de catalogo se usa como bootstrap/renovacion de sesion anonima, pero no debe ser el camino normal de extraccion del catalogo rapido.
 - En HAR de catalogo con Chrome 146 se observo CSRF en el documento/bundle y `x-anon-id` en peticiones posteriores; el proveedor debe extraerlos cuando existan y reenviarlos al API con la misma sesion HTTP.
-- Si el API JSON falla por autenticacion o sesion, el proveedor debe refrescar la sesion anonima y reintentar una vez.
+- Si el API JSON falla por autenticacion o sesion, el proveedor debe refrescar la sesion anonima en la misma sesion HTTP/cookie jar y reintentar una vez.
+- Si el API JSON devuelve `429`, no se asume DataDome solo por el status: se respeta `Retry-After` cuando existe y esta dentro del presupuesto operativo antes de refrescar/reintentar.
 - Si el reintento falla, debe fallar solo la ejecucion/fuente correspondiente y registrar error; no debe detener API, PWA, worker ni otras fuentes.
 
 Benchmarks locales observados para la misma busqueda:
@@ -98,7 +99,8 @@ Decision de rendimiento:
     - `Accept-Language`;
     - `Referer` con la URL publica de busqueda.
     - `X-CSRF-Token` y `X-Anon-Id` cuando el bootstrap los haya obtenido.
-  - Si devuelve `401`, `403`, captcha, HTML inesperado o JSON sin `items`, refrescar sesion anonima y reintentar una vez.
+  - Si devuelve `401`, `403`, HTML inesperado o JSON sin `items`, refrescar sesion anonima en la misma sesion HTTP y reintentar una vez cuando no haya firma DataDome.
+  - Si devuelve `429`, parsear `Retry-After` en segundos o HTTP-date; esperar solo si el valor es valido y no supera el presupuesto operativo, y no clasificarlo como DataDome sin senales adicionales.
   - Si el reintento falla, registrar error y marcar la ejecucion como fallida.
 
 ## Mapeo a `items`
@@ -173,7 +175,8 @@ Vinted usa DataDome como WAF. DataDome analiza multiples capas de la conexion:
 - `curl_cffi` con `impersonate` replica exactamente el ClientHello TLS, HTTP/2 SETTINGS, y orden de pseudo-headers de la version de Chrome especificada.
 - Pool de perfiles de navegador coherentes: cada sesion usa un perfil con `impersonate`, `User-Agent`, y `Sec-Ch-Ua*` alineados.
 - Delay humano con distribucion Beta entre bootstrap y catalogo.
-- Deteccion de challenge: si la respuesta contiene marcadores de DataDome (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la IP inmediatamente.
+- Deteccion de challenge: si la respuesta contiene cabeceras `x-datadome*`, cookie `datadome` no vacia en una respuesta de error, `server` DataDome o marcadores HTML (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la sesion/proxy segun la politica de run. Una cookie `datadome` en `200` de bootstrap puede ser contexto valido y no basta por si sola para declarar challenge.
+- Un `429` sin firmas DataDome se considera rate limit de catalogo, no challenge; se registra `Retry-After`, backoff aplicado y presupuesto maximo antes de reintentar.
 - Proxies residenciales con UUID de sesion sticky por intento. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`.
 - Retry con escalada: nueva IP, nuevo perfil, delay creciente.
 

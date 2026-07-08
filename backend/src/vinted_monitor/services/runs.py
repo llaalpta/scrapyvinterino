@@ -18,6 +18,7 @@ from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDe
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
+    VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
 )
@@ -51,6 +52,7 @@ from vinted_monitor.services.vinted_sessions import (
     missing_prepared_context,
     prepared_context_flags,
     save_prepared_vinted_session,
+    update_vinted_session_context,
 )
 
 RUNNING = "running"
@@ -672,6 +674,7 @@ def execute_monitor_run(
     )
     try:
         result = run_provider.search(source)
+        _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
         record_run_event(
             db,
             run_id=run.id,
@@ -690,6 +693,10 @@ def execute_monitor_run(
         finally:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise
+    except VintedCatalogRateLimitError as exc:
+        failed_run = _record_failed_run(db, run, source, exc, kind="catalog_rate_limited", penalize_proxy=False)
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
     except Exception as exc:
         failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=True)
         _close_owned_provider(run_provider, owned_provider=owned_provider)
@@ -1128,6 +1135,65 @@ def _close_owned_provider(provider: ManualRunProvider, *, owned_provider: bool) 
         close()
 
 
+def _persist_provider_session_refresh(
+    db: Session,
+    provider: ManualRunProvider,
+    run: Run,
+    source: SearchSource,
+    proxy_profile_id: int | None,
+    settings,
+) -> None:
+    if not bool(getattr(provider, "prepared_session_refreshed", False)):
+        return
+    vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
+    if not isinstance(vinted_session_id, int):
+        return
+    export_prepared_session = getattr(provider, "export_prepared_session", None)
+    if not callable(export_prepared_session):
+        return
+    prepared_session = getattr(provider, "prepared_session", None)
+    proxy_session_id = getattr(prepared_session, "proxy_session_id", None)
+    try:
+        refreshed_context = export_prepared_session(proxy_session_id=proxy_session_id)
+    except Exception as exc:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="vinted_session_context_refresh_persist_failed",
+            level="warning",
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+            message=redact_sensitive_text(str(exc)),
+            details={"vinted_session_id": vinted_session_id},
+        )
+        return
+    refreshed_context.session_id = vinted_session_id
+    updated = update_vinted_session_context(
+        db,
+        vinted_session_id,
+        context=refreshed_context,
+        settings=settings,
+        require_datadome=False,
+    )
+    if updated is None:
+        return
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="vinted_session_context_refreshed",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        message="Prepared Vinted session context updated after silent refresh",
+        details={
+            "vinted_session_id": updated.id,
+            "vinted_session_status": updated.status,
+            "context": prepared_context_flags(refreshed_context),
+        },
+    )
+
+
 def _active_source_run_exists(db: Session, *, source_id: int) -> bool:
     return (
         db.scalar(
@@ -1387,6 +1453,11 @@ def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dic
         return {
             "session_end_reason": "catalog_session_rejected",
             "recovery_action": "invalidate_session_and_prepare_new",
+        }
+    if isinstance(exc, VintedCatalogRateLimitError) or kind == "catalog_rate_limited":
+        return {
+            "session_end_reason": "catalog_rate_limited",
+            "recovery_action": "respect_retry_after_and_reduce_rate",
         }
     if isinstance(exc, VintedSessionRequiredError):
         return {

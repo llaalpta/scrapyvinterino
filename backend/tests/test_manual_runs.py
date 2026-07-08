@@ -29,7 +29,7 @@ from vinted_monitor.services.runs import (
 )
 from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
-from vinted_monitor.services.vinted_sessions import save_prepared_vinted_session
+from vinted_monitor.services.vinted_sessions import prepared_context_from_session, save_prepared_vinted_session
 
 
 class FakeSeenCache:
@@ -135,6 +135,34 @@ class FakeEventingProvider(FakeSuccessProvider):
                 details={"session_marker_count": 1},
             )
         return super().search(source, page)
+
+
+class FakeRefreshingProvider(FakeSuccessProvider):
+    prepared_session_refreshed = True
+
+    def __init__(self, *, proxy_session_id: str) -> None:
+        super().__init__(item_count=1, prefix="pytest-run-item-refreshed")
+        self.prepared_session = PreparedCatalogSession(proxy_session_id=proxy_session_id)
+
+    def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
+        resolved_proxy_session_id = proxy_session_id or self.prepared_session.proxy_session_id
+        return PreparedCatalogSession(
+            proxy_session_id=resolved_proxy_session_id,
+            cookies={
+                "access_token_web": "fresh-access-token",
+                "v_udt": "fresh-v-udt-token",
+                "anon_id": "fresh-anon-id",
+            },
+            csrf_token="fresh-csrf-token",
+            anon_id="fresh-anon-id",
+            access_token_web="fresh-access-token",
+            datadome=None,
+            v_udt="fresh-v-udt-token",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.20",
+            egress_country_code="ES",
+        )
 
 
 class FakeDiscardingDetailProvider(FakeSuccessProvider):
@@ -382,6 +410,67 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert selected.details["vinted_session_id"] == run.runtime_metadata["vinted_session_id"]
         assert selected.details["proxy_session"] == run.runtime_metadata["proxy_sticky_session"]
         assert created_providers[0].kwargs["proxy_session_marker"] == run.runtime_metadata["proxy_sticky_session"]
+
+
+def test_monitor_run_persists_refreshed_prepared_vinted_session_context(source_id: int) -> None:
+    proxy_session_id = "refreshpersist01"
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest refresh persist proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8002,
+            username="customer",
+            password=None,
+        )
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        _create_ready_vinted_session(db, source, proxy, proxy_session_id=proxy_session_id)
+        vinted_session = db.scalar(
+            select(VintedSession).where(
+                VintedSession.source_id == source.id,
+                VintedSession.proxy_profile_id == proxy.id,
+                VintedSession.proxy_session_id == proxy_session_id,
+            )
+        )
+        assert vinted_session is not None
+        original_request_count = vinted_session.request_count
+
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeRefreshingProvider(proxy_session_id=proxy_session_id),
+            egress=RunEgress(
+                mode="proxy",
+                proxy_profile_id=proxy.id,
+                proxy_name=proxy.name,
+                proxy_kind=proxy.kind,
+            ),
+            seen_cache=FakeSeenCache(),
+            runtime_metadata_extra={
+                "vinted_session_id": vinted_session.id,
+                "proxy_profile_id": proxy.id,
+            },
+        )
+
+        assert run.status == SUCCESS
+        db.refresh(vinted_session)
+        refreshed = prepared_context_from_session(vinted_session, Settings())
+        assert vinted_session.request_count == original_request_count
+        assert vinted_session.status == "ready"
+        assert refreshed.proxy_session_id == proxy_session_id
+        assert refreshed.access_token_web == "fresh-access-token"
+        assert refreshed.csrf_token == "fresh-csrf-token"
+        assert refreshed.datadome is None
+        assert refreshed.egress_ip == "203.0.113.20"
+        event = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "vinted_session_context_refreshed"))
+        assert event is not None
+        assert event.details["vinted_session_id"] == vinted_session.id
+        assert event.details["vinted_session_status"] == "ready"
+        assert event.details["context"]["user_iso_locale"] is True
+        assert event.details["context"]["vinted_screen"] is True
 
 
 def test_ready_vinted_session_is_scoped_to_monitor(source_id: int) -> None:

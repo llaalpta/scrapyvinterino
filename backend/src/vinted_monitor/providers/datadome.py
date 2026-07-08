@@ -330,19 +330,18 @@ def is_datadome_challenge(status_code: int, headers: dict[str, str], body_snippe
     Returns:
         True if the response appears to be a DataDome challenge.
     """
-    if status_code in (403, 429):
-        return True
-
     server = _header_value(headers, "server")
     if server and "datadome" in server.lower():
         return True
 
-    x_dd = _header_value(headers, "x-datadome")
-    if x_dd:
+    if _has_datadome_response_header(headers):
+        return True
+
+    if status_code >= 400 and _has_datadome_set_cookie(headers):
         return True
 
     content_type = _header_value(headers, "content-type")
-    if content_type and "text/html" in content_type.lower() and status_code == 200:
+    if content_type and "text/html" in content_type.lower():
         lower_snippet = body_snippet.lower()
         return any(marker in lower_snippet for marker in DATADOME_CHALLENGE_MARKERS)
 
@@ -390,8 +389,28 @@ def _header_value(headers: dict[str, str], key: str) -> str | None:
     lower_key = key.lower()
     for header_key, value in headers.items():
         if header_key.lower() == lower_key:
-            return value
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(item) for item in value)
+            return str(value)
     return None
+
+
+def _has_datadome_response_header(headers: dict[str, str]) -> bool:
+    for header_key in headers:
+        if str(header_key).lower().startswith("x-datadome"):
+            return True
+    return False
+
+
+def _has_datadome_set_cookie(headers: dict[str, str]) -> bool:
+    for header_key, value in headers.items():
+        if str(header_key).lower() != "set-cookie":
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for cookie_header in values:
+            if extract_datadome_cookie_from_response_cookie(str(cookie_header)):
+                return True
+    return False
 
 
 def _build_jspl(

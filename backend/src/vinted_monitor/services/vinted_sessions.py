@@ -204,6 +204,43 @@ def mark_vinted_session_invalid(db: Session, session_id: int | None, *, reason: 
     db.flush()
 
 
+def update_vinted_session_context(
+    db: Session,
+    session_id: int | None,
+    *,
+    context: PreparedCatalogSession,
+    settings: Settings | None = None,
+    require_datadome: bool = True,
+    last_error: str | None = None,
+) -> VintedSession | None:
+    if session_id is None:
+        return None
+    session = db.get(VintedSession, session_id)
+    if session is None:
+        return None
+    settings = settings or get_settings()
+    now = datetime.now(UTC)
+    context_payload = context_to_encrypted_payload(context)
+    context_json = json.dumps(context_payload, sort_keys=True, separators=(",", ":"))
+    missing = missing_prepared_context(context, require_datadome=require_datadome)
+    session.context_encrypted = encrypt_text(context_json, settings.app_secret_key)
+    session.context_fingerprint = fingerprint_text(context_json)
+    session.egress_ip = context.egress_ip
+    session.egress_country_code = context.egress_country_code
+    session.status = READY if not missing else INCOMPLETE
+    session.prepared_at = now
+    session.expires_at = now + timedelta(minutes=settings.vinted_session_ttl_minutes)
+    session.invalidated_at = None if not missing else session.invalidated_at
+    if missing:
+        session.last_error = redact_sensitive_text(f"Prepared Vinted session missing context: {', '.join(missing)}")
+    elif last_error:
+        session.last_error = redact_sensitive_text(last_error)
+    else:
+        session.last_error = None
+    db.flush()
+    return session
+
+
 def summarize_vinted_session(session: VintedSession, settings: Settings | None = None) -> VintedSessionSummary:
     context_flags: dict[str, bool]
     try:
