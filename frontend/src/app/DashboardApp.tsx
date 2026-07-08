@@ -72,12 +72,15 @@ export function DashboardApp() {
           onToggleProxy={(profile) => void dashboard.onToggleProxy(profile)}
           onToggleScheduler={() => void dashboard.onToggleScheduler()}
           onUpdateSchedulerConfig={(payload) => void dashboard.onUpdateSchedulerConfig(payload)}
+          preparingProxySessionIds={dashboard.preparingProxySessionIds}
           proxyDraft={dashboard.proxyDraft}
+          proxyActionMessages={dashboard.proxyActionMessages}
           proxyProfiles={dashboard.proxyProfiles}
           savingProxy={dashboard.savingProxy}
           savingScheduler={dashboard.savingScheduler}
           scheduler={dashboard.scheduler}
           setProxyDraft={dashboard.setProxyDraft}
+          testingProxyIds={dashboard.testingProxyIds}
         />
       ) : null}
     </DashboardShell>

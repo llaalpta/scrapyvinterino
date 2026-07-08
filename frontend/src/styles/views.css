@@ -188,6 +188,11 @@
   background: #ccfbf1;
 }
 
+.status.failed {
+  color: #842029;
+  background: #f8d7da;
+}
+
 .monitor-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1555,6 +1560,15 @@
   display: grid;
   gap: 4px;
   flex: 1 1 220px;
+}
+
+.proxy-action-message {
+  color: #52606d;
+  font-size: 12px;
+}
+
+.proxy-action-message.failed {
+  color: #842029;
 }
 
 .opportunity-list {

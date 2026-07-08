@@ -263,3 +263,107 @@ def test_proxy_profile_api_imports_vinted_session_without_returning_raw_secrets(
                 db.query(VintedSession).filter(VintedSession.proxy_profile_id == profile.id).delete(synchronize_session=False)
                 db.delete(profile)
                 db.commit()
+
+
+def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"ip": "198.51.100.77"}
+
+    class FakeCurlSession:
+        calls: list[dict] = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def get(self, url: str, *, timeout: int):
+            self.calls.append({"kwargs": self.kwargs, "url": url, "timeout": timeout})
+            return FakeResponse()
+
+    monkeypatch.setattr("vinted_monitor.api.main.CurlSession", FakeCurlSession)
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": unique_name("api proxy test success"),
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7784,
+            "country_code": "ES",
+        },
+    )
+    assert create_response.status_code == 201
+    proxy_payload = create_response.json()
+
+    try:
+        response = client.post(f"/api/proxy-profiles/{proxy_payload['id']}/test")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["last_test_status"] == "success"
+        assert payload["last_test_ip"] == "198.51.100.77"
+        assert payload["last_test_error"] is None
+        assert FakeCurlSession.calls[0]["url"] == "https://api.ipify.org?format=json"
+        assert FakeCurlSession.calls[0]["timeout"] == 10
+        assert FakeCurlSession.calls[0]["kwargs"]["proxies"]["https"] == "http://proxy.example:7784"
+    finally:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, proxy_payload["id"])
+            if profile is not None:
+                db.delete(profile)
+                db.commit()
+
+
+def test_proxy_profile_test_endpoint_records_failure(monkeypatch) -> None:
+    class FakeCurlSession:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def get(self, url: str, *, timeout: int):
+            raise RuntimeError("proxy connection refused")
+
+    monkeypatch.setattr("vinted_monitor.api.main.CurlSession", FakeCurlSession)
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": unique_name("api proxy test failure"),
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7785,
+            "country_code": "ES",
+        },
+    )
+    assert create_response.status_code == 201
+    proxy_payload = create_response.json()
+
+    try:
+        response = client.post(f"/api/proxy-profiles/{proxy_payload['id']}/test")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["last_test_status"] == "failed"
+        assert payload["last_test_ip"] is None
+        assert "proxy connection refused" in payload["last_test_error"]
+    finally:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, proxy_payload["id"])
+            if profile is not None:
+                db.delete(profile)
+                db.commit()

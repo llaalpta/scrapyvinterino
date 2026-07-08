@@ -73,6 +73,9 @@ export function useDashboardController() {
   const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
   const [savingScheduler, setSavingScheduler] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
+  const [testingProxyIds, setTestingProxyIds] = useState<number[]>([]);
+  const [preparingProxySessionIds, setPreparingProxySessionIds] = useState<number[]>([]);
+  const [proxyActionMessages, setProxyActionMessages] = useState<Record<number, string>>({});
   const [loadingOpportunities, setLoadingOpportunities] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
@@ -193,21 +196,41 @@ export function useDashboardController() {
 
   async function onTestProxy(profileId: number) {
     setError(null);
+    setTestingProxyIds((current) => addId(current, profileId));
+    setProxyActionMessages((current) => ({ ...current, [profileId]: 'Probando salida IP...' }));
     try {
       const updated = await testProxyProfile(profileId);
       setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
+      setProxyActionMessages((current) => ({
+        ...current,
+        [profileId]: proxyTestMessage(updated)
+      }));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo probar el proxy');
+      const message = caught instanceof Error ? caught.message : 'No se pudo probar el proxy';
+      setError(message);
+      setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
+    } finally {
+      setTestingProxyIds((current) => current.filter((id) => id !== profileId));
     }
   }
 
   async function onPrepareVintedSession(profileId: number) {
     setError(null);
+    setPreparingProxySessionIds((current) => addId(current, profileId));
+    setProxyActionMessages((current) => ({ ...current, [profileId]: 'Preparando sesion Vinted...' }));
     try {
       const updated = await preflightVintedSession(profileId);
       setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
+      setProxyActionMessages((current) => ({
+        ...current,
+        [profileId]: proxySessionMessage(updated)
+      }));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted');
+      const message = caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted';
+      setError(message);
+      setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
+    } finally {
+      setPreparingProxySessionIds((current) => current.filter((id) => id !== profileId));
     }
   }
 
@@ -538,6 +561,7 @@ export function useDashboardController() {
     opportunityPage,
     proxyDraft,
     proxyProfiles,
+    proxyActionMessages,
     refreshRuntime,
     opportunityFilters,
     opportunitiesPageSize,
@@ -555,6 +579,8 @@ export function useDashboardController() {
     sourceName,
     sources,
     sourceUrl,
+    testingProxyIds,
+    preparingProxySessionIds,
     runs,
     updateOpportunityFilter,
     updateSourceDraft
@@ -585,6 +611,31 @@ export function useDashboardController() {
       }
     });
   }
+}
+
+function addId(current: number[], id: number): number[] {
+  return current.includes(id) ? current : [...current, id];
+}
+
+function proxyTestMessage(profile: ProxyProfile): string {
+  if (profile.last_test_status === 'success') {
+    return `Test IP correcto: ${profile.last_test_ip ?? 'IP no informada'}`;
+  }
+  if (profile.last_test_status === 'failed') {
+    return `Test IP fallido: ${profile.last_test_error ?? 'sin detalle'}`;
+  }
+  return 'Test IP completado sin estado';
+}
+
+function proxySessionMessage(profile: ProxyProfile): string {
+  const session = profile.vinted_session;
+  if (!session) {
+    return 'Sesion Vinted no preparada';
+  }
+  if (session.status === 'ready') {
+    return `Sesion Vinted ready: ${session.egress_ip ?? 'sin IP'}`;
+  }
+  return `Sesion Vinted ${session.status}: ${session.last_error ?? 'contexto incompleto'}`;
 }
 
 function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number): string {

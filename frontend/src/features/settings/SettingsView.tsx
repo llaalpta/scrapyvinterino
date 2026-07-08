@@ -9,12 +9,15 @@ export function SettingsView({
   onToggleProxy,
   onToggleScheduler,
   onUpdateSchedulerConfig,
+  preparingProxySessionIds,
   proxyDraft,
+  proxyActionMessages,
   proxyProfiles,
   savingProxy,
   savingScheduler,
   scheduler,
-  setProxyDraft
+  setProxyDraft,
+  testingProxyIds
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
   onPrepareVintedSession: (profileId: number) => void;
@@ -22,12 +25,15 @@ export function SettingsView({
   onToggleProxy: (profile: ProxyProfile) => void;
   onToggleScheduler: () => void;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
+  preparingProxySessionIds: number[];
   proxyDraft: ProxyDraft;
+  proxyActionMessages: Record<number, string>;
   proxyProfiles: ProxyProfile[];
   savingProxy: boolean;
   savingScheduler: boolean;
   scheduler: SchedulerState | null;
   setProxyDraft: (draft: ProxyDraft) => void;
+  testingProxyIds: number[];
 }) {
   const updateNumber = (field: keyof SchedulerUpdate, value: string) => {
     if (!value) {
@@ -267,40 +273,74 @@ export function SettingsView({
           <p className="empty-inline">Sin proxys configurados. Los runs de catalogo quedan bloqueados mientras el directo este deshabilitado por runtime.</p>
         ) : (
           <div className="proxy-list">
-            {proxyProfiles.map((proxy) => (
-              <article className="proxy-row" key={proxy.id}>
-                <div>
-                  <strong>{proxy.name}</strong>
-                  <span>
-                    {proxy.kind} | {proxy.scheme}://{proxy.username_masked ? `${proxy.username_masked}@` : ''}
-                    {proxy.host}:{proxy.port} | max {proxy.max_concurrent_runs}
+            {proxyProfiles.map((proxy) => {
+              const testing = testingProxyIds.includes(proxy.id);
+              const preparingSession = preparingProxySessionIds.includes(proxy.id);
+              const busy = testing || preparingSession;
+              return (
+                <article className="proxy-row" key={proxy.id}>
+                  <div>
+                    <strong>{proxy.name}</strong>
+                    <span>
+                      {proxy.kind} | {proxy.scheme}://{proxy.username_masked ? `${proxy.username_masked}@` : ''}
+                      {proxy.host}:{proxy.port} | max {proxy.max_concurrent_runs}
+                    </span>
+                    <span>
+                      Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
+                    </span>
+                    <ProxySessionStatus proxy={proxy} />
+                    <ProxyTestStatus proxy={proxy} testing={testing} message={proxyActionMessages[proxy.id]} />
+                  </div>
+                  <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
+                  <span className={proxyTestStatusClass(proxy, testing)}>
+                    {testing ? 'Probando IP...' : proxy.cooldown_until ? 'Cooldown' : proxy.last_test_ip ?? proxy.last_test_status ?? 'Sin test'}
                   </span>
-                  <span>
-                    Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
-                  </span>
-                  <ProxySessionStatus proxy={proxy} />
-                </div>
-                <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
-                <span className="status">{proxy.cooldown_until ? 'Cooldown' : proxy.last_test_ip ?? proxy.last_test_status ?? 'Sin test'}</span>
-                <button type="button" onClick={() => onToggleProxy(proxy)}>
-                  {proxy.is_active ? <Pause size={16} /> : <Play size={16} />}
-                  {proxy.is_active ? 'Pausar' : 'Activar'}
-                </button>
-                <button type="button" onClick={() => onTestProxy(proxy.id)}>
-                  <Play size={16} />
-                  Test IP
-                </button>
-                <button type="button" onClick={() => onPrepareVintedSession(proxy.id)}>
-                  <Play size={16} />
-                  Preparar sesion
-                </button>
-              </article>
-            ))}
+                  <button type="button" disabled={busy} onClick={() => onToggleProxy(proxy)}>
+                    {proxy.is_active ? <Pause size={16} /> : <Play size={16} />}
+                    {proxy.is_active ? 'Pausar' : 'Activar'}
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => onTestProxy(proxy.id)}>
+                    <Play size={16} />
+                    {testing ? 'Probando...' : 'Test IP'}
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => onPrepareVintedSession(proxy.id)}>
+                    <Play size={16} />
+                    {preparingSession ? 'Preparando...' : 'Preparar sesion'}
+                  </button>
+                </article>
+              );
+            })}
           </div>
         )}
       </div>
     </section>
   );
+}
+
+function ProxyTestStatus({ message, proxy, testing }: { message?: string; proxy: ProxyProfile; testing: boolean }) {
+  const status = proxy.last_test_status;
+  const detail = message ?? proxy.last_test_error;
+  if (!testing && !status && !detail) {
+    return null;
+  }
+  return (
+    <span className={status === 'failed' ? 'proxy-action-message failed' : 'proxy-action-message'}>
+      Ultimo test: {testing ? 'probando salida IP...' : detail ?? proxy.last_test_ip ?? status}
+    </span>
+  );
+}
+
+function proxyTestStatusClass(proxy: ProxyProfile, testing: boolean) {
+  if (testing) {
+    return 'status running';
+  }
+  if (proxy.last_test_status === 'success') {
+    return 'status active';
+  }
+  if (proxy.last_test_status === 'failed') {
+    return 'status failed';
+  }
+  return 'status';
 }
 
 function ProxySessionStatus({ proxy }: { proxy: ProxyProfile }) {
