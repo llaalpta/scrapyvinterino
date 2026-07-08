@@ -11,19 +11,19 @@ This project uses Spec Driven Development to keep product intent, architecture, 
 5. Define acceptance criteria.
 6. Implement the smallest useful vertical slice.
 7. Verify with focused checks.
-8. Run a post-implementation audit.
-9. Fix or explicitly defer audit findings.
+8. Run an explicit implementer self-review.
+9. Fix or explicitly defer self-review findings.
 10. Commit the code and documentation together.
 
 Documentation and implementation should move together. A feature is not done if the relevant docs are stale.
 
-## Post-Implementation Audit
+## Post-Implementation Self-Review
 
-Every non-trivial implementation needs a second pass before it is considered done.
+Every non-trivial implementation needs an implementer-owned second pass before it is considered done.
 
-Use a separate agent for the audit when sub-agent tooling is available. The implementing agent should continue to own the final decision: fix valid findings, reject false positives with a reason, or move deferred work into the owning spec or roadmap.
+Do not delegate this review. If the user explicitly asks for an audit later, follow that request separately. The implementing agent owns the final decision: fix valid findings, reject false positives with a reason, or move deferred work into the owning spec or roadmap.
 
-The audit must answer:
+The self-review must answer:
 
 - Does the implementation satisfy the active spec and acceptance criteria?
 - Can the user exercise the promised flow end to end?
@@ -115,9 +115,9 @@ API endpoints, worker jobs, UI flows, settings, or database entities affected.
 
 Commands, tests, or manual checks required.
 
-### Audit
+### Self-Review
 
-Post-implementation audit focus areas for this spec.
+Post-implementation self-review focus areas for this spec.
 ```
 
 ## ADR Rules
@@ -152,8 +152,8 @@ Before considering work done:
 - UI/API/database behavior matches what the user can actually do.
 - Non-trivial frontend changes follow the documented module boundaries instead of adding more mixed responsibility to the app root.
 - For PWA changes, Playwright or equivalent browser QA covered the live app.
-- Post-implementation audit completed or explicitly unavailable.
-- Audit findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
+- Post-implementation self-review completed.
+- Self-review findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
 - Process docs were updated with generalized prevention rules if the work revealed a repeatable quality gap.
 - Checks were run or skipped with a clear reason.
 - Git status is clean after commit.
