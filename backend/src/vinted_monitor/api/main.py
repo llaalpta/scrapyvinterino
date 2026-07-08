@@ -27,11 +27,16 @@ from vinted_monitor.api.schemas import (
     SearchSourceCreate,
     SearchSourceRead,
     SearchSourceUpdate,
+    VintedSessionImportRequest,
+    VintedSessionPreflightRequest,
+    VintedSessionRead,
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.db.models import RunEvent, SearchSource
+from vinted_monitor.db.models import ProxyProfile, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal, get_db
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
+from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider, PreparedCatalogSession
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
     DEFAULT_PAGE,
@@ -48,6 +53,7 @@ from vinted_monitor.services.proxies import (
     mark_proxy_test_result,
     profile_to_public_fields,
     proxy_url_for_profile,
+    proxy_url_with_sticky_session,
     update_proxy_profile,
 )
 from vinted_monitor.services.run_events import list_run_events, redact_run_event_details
@@ -85,6 +91,13 @@ from vinted_monitor.services.search_sources import (
     SearchSourceNotFoundError as SourceUpdateNotFoundError,
 )
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
+from vinted_monitor.services.vinted_sessions import (
+    VintedSessionRequiredError,
+    generate_proxy_session_id,
+    get_latest_vinted_session_summary,
+    parse_cookie_header,
+    save_prepared_vinted_session,
+)
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -118,6 +131,18 @@ def _source_read(source: SearchSource) -> SearchSourceRead:
             "catalog_filter_compatibility": catalog_filter_compatibility(source.url),
         }
     )
+
+
+def _vinted_session_read(summary) -> VintedSessionRead | None:
+    if summary is None:
+        return None
+    return VintedSessionRead(**summary.__dict__)
+
+
+def _proxy_profile_read(profile, db: Session) -> ProxyProfileRead:
+    public = profile_to_public_fields(profile, settings).__dict__
+    public["vinted_session"] = _vinted_session_read(get_latest_vinted_session_summary(db, profile.id, settings))
+    return ProxyProfileRead(**public)
 
 
 @app.get("/api/monitors", response_model=list[SearchSourceRead])
@@ -184,7 +209,7 @@ def post_monitor_start(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (BaselineRequiredError, SeenCacheUnavailableError) as exc:
+    except (BaselineRequiredError, SeenCacheUnavailableError, VintedSessionRequiredError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SearchSourceConfigError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -216,7 +241,7 @@ def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
 
 @app.get("/api/proxy-profiles", response_model=list[ProxyProfileRead])
 def get_proxy_profiles(db: Session = Depends(get_db)) -> list[ProxyProfileRead]:
-    return [ProxyProfileRead(**profile_to_public_fields(profile, settings).__dict__) for profile in list_proxy_profiles(db)]
+    return [_proxy_profile_read(profile, db) for profile in list_proxy_profiles(db)]
 
 
 @app.post("/api/proxy-profiles", response_model=ProxyProfileRead, status_code=201)
@@ -238,7 +263,7 @@ def post_proxy_profile(payload: ProxyProfileCreate, db: Session = Depends(get_db
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ProxyProfileRead(**profile_to_public_fields(profile, settings).__dict__)
+    return _proxy_profile_read(profile, db)
 
 
 @app.patch("/api/proxy-profiles/{profile_id}", response_model=ProxyProfileRead)
@@ -264,7 +289,7 @@ def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Sessio
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ProxyProfileRead(**profile_to_public_fields(profile, settings).__dict__)
+    return _proxy_profile_read(profile, db)
 
 
 @app.post("/api/proxy-profiles/{profile_id}/test", response_model=ProxyProfileRead)
@@ -283,7 +308,110 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
         updated = mark_proxy_test_result(db, profile_id, status="success", ip=str(ip) if ip else None)
     except Exception as exc:
         updated = mark_proxy_test_result(db, profile_id, status="failed", error=str(exc))
-    return ProxyProfileRead(**profile_to_public_fields(updated, settings).__dict__)
+    return _proxy_profile_read(updated, db)
+
+
+@app.post("/api/proxy-profiles/{profile_id}/vinted-session/preflight", response_model=ProxyProfileRead)
+def post_proxy_profile_vinted_session_preflight(
+    profile_id: int,
+    payload: VintedSessionPreflightRequest | None = None,
+    db: Session = Depends(get_db),
+) -> ProxyProfileRead:
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
+    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    proxy_session_id = generate_proxy_session_id()
+    proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
+    source_url = payload.source_url if payload and payload.source_url else f"{settings.vinted_base_url}/catalog?search_text=pepe"
+    provider = CurlCffiVintedCatalogProvider(
+        settings=settings,
+        profile=browser_profile,
+        proxy_url=proxy_url,
+        timeout_ms=settings.vinted_request_timeout_ms,
+        catalog_per_page=settings.vinted_fast_catalog_per_page,
+        request_retries=0,
+        proxy_session_marker=None,
+        expected_country_code=profile.country_code,
+        locale=profile.locale,
+        accept_language=profile.accept_language,
+        screen=profile.vinted_screen,
+        viewport_size=profile.screen,
+    )
+    try:
+        report = provider.bootstrap_for_session(source_url)
+        prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
+        session = save_prepared_vinted_session(
+            db,
+            profile,
+            proxy_session_id=proxy_session_id,
+            profile=browser_profile,
+            context=prepared,
+            settings=settings,
+            last_error=None if not report.get("missing_required") else str(report.get("missing_required")),
+        )
+        db.commit()
+        db.refresh(session)
+    except Exception as exc:
+        prepared = PreparedCatalogSession(
+            proxy_session_id=proxy_session_id,
+            cookies={},
+            user_iso_locale=profile.locale,
+            vinted_screen=profile.vinted_screen,
+        )
+        save_prepared_vinted_session(
+            db,
+            profile,
+            proxy_session_id=proxy_session_id,
+            profile=browser_profile,
+            context=prepared,
+            status="incomplete",
+            settings=settings,
+            last_error=str(exc),
+        )
+        db.commit()
+    finally:
+        provider.close()
+    db.refresh(profile)
+    return _proxy_profile_read(profile, db)
+
+
+@app.post("/api/proxy-profiles/{profile_id}/vinted-session/import", response_model=ProxyProfileRead)
+def post_proxy_profile_vinted_session_import(
+    profile_id: int,
+    payload: VintedSessionImportRequest,
+    db: Session = Depends(get_db),
+) -> ProxyProfileRead:
+    profile = db.get(ProxyProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
+    cookies = {**(parse_cookie_header(payload.cookie_header) if payload.cookie_header else {}), **payload.cookies}
+    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    prepared = PreparedCatalogSession(
+        proxy_session_id=payload.proxy_session_id,
+        cookies=cookies,
+        csrf_token=payload.csrf_token,
+        anon_id=payload.anon_id,
+        access_token_web=payload.access_token_web,
+        datadome=payload.datadome,
+        v_udt=payload.v_udt,
+        user_iso_locale=payload.user_iso_locale,
+        vinted_screen=payload.vinted_screen,
+        egress_ip=payload.egress_ip,
+        egress_country_code=payload.egress_country_code,
+    )
+    session = save_prepared_vinted_session(
+        db,
+        profile,
+        proxy_session_id=payload.proxy_session_id,
+        profile=browser_profile,
+        context=prepared,
+        settings=settings,
+    )
+    db.commit()
+    db.refresh(session)
+    db.refresh(profile)
+    return _proxy_profile_read(profile, db)
 
 
 @app.get("/api/opportunities", response_model=OpportunityResultPageRead)
@@ -403,7 +531,7 @@ def post_monitor_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SearchSourceConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (BaselineRequiredError, SeenCacheUnavailableError) as exc:
+    except (BaselineRequiredError, SeenCacheUnavailableError, VintedSessionRequiredError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -420,6 +548,8 @@ def post_monitor_baseline(
     except RunAlreadyActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except VintedSessionRequiredError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SearchSourceConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     vinted_target_locale: str = "es-ES"
     vinted_target_accept_language: str = "es-ES,es;q=0.9,en;q=0.8"
     vinted_target_screen: str = "1920x1080"
+    vinted_target_vinted_screen: str = "catalog"
+    vinted_prepared_session_required: bool = True
+    vinted_session_max_requests: int = 50
+    vinted_session_ttl_minutes: int = 120
     human_delay_min_seconds: float = 1.2
     human_delay_max_seconds: float = 3.8
     datadome_challenge_penalty_multiplier: int = 2

@@ -45,6 +45,7 @@ export type ProxyProfile = {
   locale: string;
   accept_language: string;
   screen: string;
+  vinted_screen: string;
   is_active: boolean;
   max_concurrent_runs: number;
   cooldown_until: string | null;
@@ -53,6 +54,40 @@ export type ProxyProfile = {
   last_test_status: string | null;
   last_test_ip: string | null;
   last_test_error: string | null;
+  vinted_session: VintedSession | null;
+};
+
+export type VintedSession = {
+  id: number;
+  proxy_profile_id: number;
+  status: 'ready' | 'incomplete' | 'invalid' | string;
+  browser_profile: string;
+  impersonate: string;
+  country_code: string;
+  locale: string;
+  accept_language: string;
+  viewport_size: string;
+  vinted_screen: string;
+  egress_ip: string | null;
+  egress_country_code: string | null;
+  proxy_session: Record<string, unknown> | null;
+  request_count: number;
+  max_requests: number;
+  failure_count: number;
+  prepared_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+  invalidated_at: string | null;
+  last_error: string | null;
+  context: {
+    csrf_token: boolean;
+    anon_id: boolean;
+    access_token_web: boolean;
+    datadome: boolean;
+    v_udt: boolean;
+    user_iso_locale: boolean;
+    vinted_screen: boolean;
+  };
 };
 
 export type SourceSchedulerConfig = {
@@ -368,6 +403,10 @@ export function updateProxyProfile(
 
 export function testProxyProfile(profileId: number): Promise<ProxyProfile> {
   return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/test`);
+}
+
+export function preflightVintedSession(profileId: number): Promise<ProxyProfile> {
+  return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/vinted-session/preflight`, {});
 }
 
 export function startMonitor(sourceId: number): Promise<Run> {

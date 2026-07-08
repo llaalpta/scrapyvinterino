@@ -27,10 +27,10 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Require Redis for per-monitor seen state and processing locks.
 - Do not run a monitor when Redis is unavailable.
 - Require an explicit initial catalog snapshot before any monitor run can process opportunities.
-- Isolate anonymous public Vinted session cookies per provider/run or per egress identity.
-- Use a deterministic fast catalog flow: create one `curl_cffi` session, diagnose egress with it when configured, bootstrap the saved public catalog document URL, extract anonymous session context such as CSRF/anon markers into memory only, apply one human delay, then call `/api/v2/catalog/items` with API parameters translated from the same saved catalog URL and with browser-coherent headers.
+- Isolate anonymous public Vinted session cookies per prepared proxy sticky identity.
+- Use a deterministic fast catalog flow: create one `curl_cffi` session, load the encrypted prepared Vinted session for the same proxy sticky identity, diagnose egress with it when configured, then call `/api/v2/catalog/items` with API parameters translated from the saved catalog URL and with browser-coherent headers.
 - Keep proxy usage globally managed by the scheduler.
-- Support UI-managed proxy profiles with encrypted credentials and a declared proxy country; locale, `Accept-Language`, and screen context are resolved internally from country/domain presets.
+- Support UI-managed proxy profiles with encrypted credentials and a declared proxy country; locale, `Accept-Language`, viewport, and Vinted `x-screen` context are resolved internally from country/domain presets.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
 - Use active global proxies matching the target country before direct outbound access; direct access is allowed only when both the UI setting and the deployment gate permit it.
 
@@ -55,7 +55,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - per-monitor concurrency limit, default `1`;
   - direct-without-proxy UI enable flag and direct concurrency limit;
   - deployment direct-catalog gate `VINTED_DIRECT_CATALOG_ENABLED`, default false;
-  - target Vinted country and internal locale/header/screen presets, with deployment-owned defaults for direct diagnostics;
+  - target Vinted country and internal locale/header/viewport/Vinted-screen presets, with deployment-owned defaults for direct diagnostics;
   - per-proxy run concurrency limit stored on each proxy profile;
   - catalog results per run, detail fetch candidate limit, request timeout, proxy cooldown, and stop-after-failures settings;
   - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
@@ -113,12 +113,12 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Manual and scheduler-triggered runs share the same URL-filter compatibility validation and fast API parameter translation.
 - Manual and scheduler-triggered runs never create the initial snapshot implicitly; recalibration is always an explicit PWA/API action.
 - Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
-- Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data.
+- Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data. Prepared Vinted cookies/tokens are stored only in the database encrypted with the local app secret.
 - Run logs show operational progress with sanitized URLs, request headers after redaction/masking, response headers after redaction/masking, status codes, per-request durations in milliseconds, egress mode, proxy profile id when used, auth mode, IP/country from the egress diagnostic, filter snapshot, Redis/cache decisions, candidate decisions, persistence decisions, opportunity outcomes, and safe counts only.
 - Run logs show the translated fast API parameters and URL filter compatibility in safe structured details.
 - Run logs never expose raw cookie, token, authorization, proxy credential, HTML, or raw Vinted payload values. Cookie/token/session data is represented only as masked/fingerprinted markers; short values show no characters.
 - Run logs show Redis availability, seen-cache hits/misses, seen-cache marks, detail fetch start/success/error/skipped, filter pass/discard, item persisted/reused, and opportunity created/skipped events.
-- Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, screen, egress country match, and any missing required key.
+- Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, viewport, Vinted `x-screen`, egress country match, and any missing required key.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - The PWA Monitors view renders selected monitor accumulated logs as a classic readable console: one text line per event with run id, exact time, level, label, ms, status, URL, message, and collapsible JSON details, whether the monitor is active or stopped.
@@ -142,9 +142,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - Candidates with an already existing opportunity for the same monitor are marked seen and skipped before filter/detail work if Redis lost that seen state.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
-- Anonymous public cookies/tokens are kept in memory only and isolated per provider/session run or per proxy identity.
+- Anonymous public cookies/tokens are encrypted at rest only in prepared Vinted sessions and are isolated per proxy sticky identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
-- Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, and screen are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
+- Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, viewport and Vinted `x-screen` are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
 - Direct requests behave exactly as monitor runs only when global direct fallback is enabled in the UI, `VINTED_DIRECT_CATALOG_ENABLED=true`, and no matching proxy is available.
 - Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
 - Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
@@ -179,7 +179,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
 - Confirm no monitor API or PWA path exposes proxy selection per monitor.
-- Confirm proxy API/PWA writes reject manual `locale`, `Accept-Language`, and screen fields while read views expose only the resolved context for diagnostics.
+- Confirm proxy API/PWA writes reject manual `locale`, `Accept-Language`, viewport and Vinted `x-screen` fields while read views expose only the resolved context for diagnostics.
 - Confirm scheduler capacity reflects active proxy capacity plus allowed direct capacity.
 - Confirm periodic activation is blocked when scheduler is disabled or capacity is exhausted.
 - Confirm run metadata records `egress_mode=proxy` with proxy details when a proxy is selected and `egress_mode=direct` when direct fallback is used.

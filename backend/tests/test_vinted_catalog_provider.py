@@ -363,7 +363,7 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
-                    "x-screen": "1920x1080",
+                    "x-screen": "catalog",
                 },
             )
         if path(call) == "/api/v2/catalog/items":
@@ -373,6 +373,7 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
             assert call["headers"]["X-CSRF-Token"] == "csrf-secret-value"
             assert call["headers"]["X-Anon-Id"] == "anon-secret-value"
             assert call["headers"]["Locale"] == "es-ES"
+            assert call["headers"]["X-Screen"] == "catalog"
             assert call["headers"]["Priority"] == "u=3"
             assert call["headers"]["Referer"] == source().url
             assert call["cookies"]["access_token_web"] == "anon"
@@ -410,7 +411,7 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
-                    "x-screen": "1920x1080",
+                    "x-screen": "catalog",
                 },
             )
         if path(call) == "/api/v2/catalog/items":
@@ -478,7 +479,7 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
-                    "x-screen": "1920x1080",
+                    "x-screen": "catalog",
                 },
             )
         if path(call) == "/api/v2/catalog/items":
@@ -709,7 +710,7 @@ def test_curl_provider_standard_flow_visits_catalog_document_then_api() -> None:
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
-                    "x-screen": "1920x1080",
+                    "x-screen": "catalog",
                 },
             )
         if path(call) == "/api/v2/catalog/items":

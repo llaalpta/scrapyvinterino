@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-import uuid
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -16,7 +15,11 @@ from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_mar
 from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
-from vinted_monitor.providers.vinted_catalog import CurlCffiVintedCatalogProvider
+from vinted_monitor.providers.vinted_catalog import (
+    CurlCffiVintedCatalogProvider,
+    VintedCatalogSessionContextError,
+    VintedCatalogSessionError,
+)
 from vinted_monitor.services.filters import (
     evaluate_exclusion_filters,
     filter_snapshot_term_count,
@@ -36,6 +39,11 @@ from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.scheduler import RunEgress, choose_run_egress, get_scheduler_runtime_config
 from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
 from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
+from vinted_monitor.services.vinted_sessions import (
+    VintedSessionRequiredError,
+    get_ready_vinted_session,
+    mark_vinted_session_invalid,
+)
 
 RUNNING = "running"
 SUCCESS = "success"
@@ -205,7 +213,9 @@ def execute_monitor_baseline(
             "proxy_country_code": (run.runtime_metadata or {}).get("proxy_country_code"),
             "locale": (run.runtime_metadata or {}).get("locale"),
             "screen": (run.runtime_metadata or {}).get("screen"),
+            "vinted_screen": (run.runtime_metadata or {}).get("vinted_screen"),
             "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
+            "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "baseline_run": True,
         },
@@ -248,6 +258,8 @@ def execute_monitor_baseline(
             "locale": (run.runtime_metadata or {}).get("locale"),
             "accept_language": (run.runtime_metadata or {}).get("accept_language"),
             "screen": (run.runtime_metadata or {}).get("screen"),
+            "vinted_screen": (run.runtime_metadata or {}).get("vinted_screen"),
+            "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "direct_allowed": runtime_config.allow_direct_without_proxy,
             "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
@@ -454,7 +466,9 @@ def execute_monitor_run(
             "proxy_country_code": (run.runtime_metadata or {}).get("proxy_country_code"),
             "locale": (run.runtime_metadata or {}).get("locale"),
             "screen": (run.runtime_metadata or {}).get("screen"),
+            "vinted_screen": (run.runtime_metadata or {}).get("vinted_screen"),
             "browser_profile": (run.runtime_metadata or {}).get("browser_profile"),
+            "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_session_id_prefix": (run.runtime_metadata or {}).get("proxy_session_id_prefix"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "task_id": (run.runtime_metadata or {}).get("task_id"),
@@ -506,6 +520,8 @@ def execute_monitor_run(
             "locale": (run.runtime_metadata or {}).get("locale"),
             "accept_language": (run.runtime_metadata or {}).get("accept_language"),
             "screen": (run.runtime_metadata or {}).get("screen"),
+            "vinted_screen": (run.runtime_metadata or {}).get("vinted_screen"),
+            "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "direct_allowed": runtime_config.allow_direct_without_proxy,
             "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
@@ -855,27 +871,39 @@ def _provider_for_egress(
         "locale": settings.vinted_target_locale,
         "accept_language": settings.vinted_target_accept_language,
         "screen": settings.vinted_target_screen,
+        "vinted_screen": settings.vinted_target_vinted_screen,
     }
     provider_country_code = settings.vinted_target_country_code.strip().upper()
     provider_locale = settings.vinted_target_locale
     provider_accept_language = settings.vinted_target_accept_language
-    provider_screen = settings.vinted_target_screen
+    provider_viewport_size = settings.vinted_target_screen
+    provider_vinted_screen = settings.vinted_target_vinted_screen
+    prepared_session = None
     if egress.proxy_profile_id is not None:
         profile = db.get(ProxyProfile, egress.proxy_profile_id)
         if profile is None:
             raise RuntimeError(f"Proxy profile {egress.proxy_profile_id} no longer exists")
-        proxy_session_id = str(uuid.uuid4())
+        vinted_session, prepared_session = get_ready_vinted_session(db, profile, settings=settings)
+        proxy_session_id = vinted_session.proxy_session_id
         proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
         provider_country_code = profile.country_code
         provider_locale = profile.locale
         provider_accept_language = profile.accept_language
-        provider_screen = profile.screen
+        provider_viewport_size = profile.screen
+        provider_vinted_screen = profile.vinted_screen
         metadata["proxy_country_code"] = profile.country_code
         metadata["locale"] = profile.locale
         metadata["accept_language"] = profile.accept_language
         metadata["screen"] = profile.screen
+        metadata["vinted_screen"] = profile.vinted_screen
+        metadata["vinted_session_id"] = vinted_session.id
+        metadata["vinted_session_status"] = vinted_session.status
+        metadata["vinted_session_request_count"] = vinted_session.request_count
+        metadata["vinted_session_max_requests"] = vinted_session.max_requests
         metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
         metadata["proxy_sticky_session"] = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
+    elif settings.vinted_prepared_session_required:
+        raise VintedSessionRequiredError("Prepara una sesion Vinted con proxy antes de lanzar trafico de catalogo")
 
     return CurlCffiVintedCatalogProvider(
         settings=settings,
@@ -887,7 +915,9 @@ def _provider_for_egress(
         expected_country_code=provider_country_code,
         locale=provider_locale,
         accept_language=provider_accept_language,
-        screen=provider_screen,
+        screen=provider_vinted_screen,
+        viewport_size=provider_viewport_size,
+        prepared_session=prepared_session,
     ), metadata
 
 
@@ -998,6 +1028,9 @@ def _record_failed_run(
     run.finished_at = datetime.now(UTC)
     run.error_message = message
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+    vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
+    if isinstance(exc, DataDomeChallengeError | VintedCatalogSessionError | VintedCatalogSessionContextError):
+        mark_vinted_session_invalid(db, vinted_session_id, reason=message)
     cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
     if penalize_proxy:
         mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)

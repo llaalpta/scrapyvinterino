@@ -24,12 +24,12 @@
 3. El scheduler (productor) evalua tiempos, jitter y ventanas, y encola tareas en Redis.
 4. Los workers consumidores escuchan la cola Redis via BRPOP.
 5. Cada tarea usa el perfil de navegador configurado para runtime.
-6. Se genera un UUID de sesion sticky para el proxy residencial y se inyecta con `PROXY_STICKY_USERNAME_TEMPLATE`.
-7. Se crea una sesion `curl_cffi` con `impersonate` para falsificar TLS/JA3.
-8. Se realiza un bootstrap anonimo contra la URL publica de catalogo guardada para obtener cookies/tokens publicos y contexto de sesion en memoria, incluyendo CSRF, anon id y DataDome cuando existan.
-9. Se aplica un delay humano y se verifica que no haya challenge de DataDome.
+6. La API/worker exige una sesion Vinted `ready` preparada para el proxy residencial sticky seleccionado.
+7. Se crea una sesion `curl_cffi` con `impersonate` para falsificar TLS/JA3 y se cargan cookies/tokens cifrados de `vinted_sessions`.
+8. Se diagnostica egress con la misma IP/proxy y se valida pais, locale, viewport, Vinted `x-screen=catalog`, CSRF, anon id, `access_token_web`, DataDome y `v_udt`.
+9. Si el contexto esta incompleto, el run falla antes de pedir `/api/v2/catalog/items`.
 10. Con el mismo cliente, la misma IP y el mismo contexto anonimo, se pide el catalogo JSON.
 11. Se deduplican candidatos contra la cache Redis del monitor.
 12. Se aplican filtros de exclusion y se crean oportunidades.
-13. Se descarta la sesion, el proxy y las cookies al terminar la tarea.
-14. La PWA muestra oportunidades y estado de ejecucion.
+13. La sesion Vinted preparada se conserva cifrada para usos posteriores hasta caducar, agotar contador o invalidarse por rechazo/challenge.
+14. La PWA muestra oportunidades, estado de ejecucion y estado de preparacion de sesion por proxy.

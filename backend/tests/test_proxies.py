@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from vinted_monitor.api.main import app
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import ProxyProfile
+from vinted_monitor.db.models import ProxyProfile, VintedSession
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.proxies import create_proxy_profile, proxy_url_with_sticky_session, resolve_proxy_context, update_proxy_profile
 
@@ -60,6 +60,7 @@ def test_proxy_context_is_resolved_from_country_preset() -> None:
     assert context.locale == "fr-FR"
     assert context.accept_language == "fr-FR,fr;q=0.9,en;q=0.8"
     assert context.screen == "1920x1080"
+    assert context.vinted_screen == "catalog"
 
 
 def test_create_proxy_profile_resolves_context_from_country() -> None:
@@ -80,6 +81,7 @@ def test_create_proxy_profile_resolves_context_from_country() -> None:
             assert profile.locale == "fr-FR"
             assert profile.accept_language == "fr-FR,fr;q=0.9,en;q=0.8"
             assert profile.screen == "1920x1080"
+            assert profile.vinted_screen == "catalog"
         finally:
             db.delete(profile)
             db.commit()
@@ -104,6 +106,7 @@ def test_update_proxy_profile_recomputes_context_from_country() -> None:
             assert updated.locale == "it-IT"
             assert updated.accept_language == "it-IT,it;q=0.9,en;q=0.8"
             assert updated.screen == "1920x1080"
+            assert updated.vinted_screen == "catalog"
         finally:
             db.delete(profile)
             db.commit()
@@ -175,6 +178,7 @@ def test_proxy_profile_api_rejects_manual_context_update_fields() -> None:
             assert profile.locale == "es-ES"
             assert profile.accept_language == "es-ES,es;q=0.9,en;q=0.8"
             assert profile.screen == "1920x1080"
+            assert profile.vinted_screen == "catalog"
     finally:
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, payload["id"])
@@ -204,9 +208,58 @@ def test_proxy_profile_api_resolves_context_from_country_only() -> None:
         assert payload["locale"] == "pt-PT"
         assert payload["accept_language"] == "pt-PT,pt;q=0.9,en;q=0.8"
         assert payload["screen"] == "1920x1080"
+        assert payload["vinted_screen"] == "catalog"
     finally:
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, payload["id"])
             if profile is not None:
+                db.delete(profile)
+                db.commit()
+
+
+def test_proxy_profile_api_imports_vinted_session_without_returning_raw_secrets() -> None:
+    client = TestClient(app)
+    create_response = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": unique_name("api vinted session import proxy"),
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7783,
+            "country_code": "ES",
+        },
+    )
+    assert create_response.status_code == 201
+    proxy_payload = create_response.json()
+
+    try:
+        response = client.post(
+            f"/api/proxy-profiles/{proxy_payload['id']}/vinted-session/import",
+            json={
+                "proxy_session_id": "pytestimport01",
+                "cookie_header": "access_token_web=access-secret; datadome=dd-secret; v_udt=udt-secret; anon_id=anon-secret",
+                "csrf_token": "csrf-secret",
+                "user_iso_locale": "es-ES",
+                "vinted_screen": "catalog",
+                "egress_ip": "203.0.113.10",
+                "egress_country_code": "ES",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["vinted_session"]["status"] == "ready"
+        assert payload["vinted_session"]["context"]["datadome"] is True
+        assert payload["vinted_session"]["context"]["csrf_token"] is True
+        serialized = response.text
+        assert "dd-secret" not in serialized
+        assert "csrf-secret" not in serialized
+        assert "access-secret" not in serialized
+    finally:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, proxy_payload["id"])
+            if profile is not None:
+                db.query(VintedSession).filter(VintedSession.proxy_profile_id == profile.id).delete(synchronize_session=False)
                 db.delete(profile)
                 db.commit()

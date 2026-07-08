@@ -67,6 +67,7 @@ export function DashboardApp() {
       {dashboard.activeSection === 'settings' ? (
         <SettingsView
           onCreateProxy={dashboard.onCreateProxy}
+          onPrepareVintedSession={(profileId) => void dashboard.onPrepareVintedSession(profileId)}
           onTestProxy={(profileId) => void dashboard.onTestProxy(profileId)}
           onToggleProxy={(profile) => void dashboard.onToggleProxy(profile)}
           onToggleScheduler={() => void dashboard.onToggleScheduler()}

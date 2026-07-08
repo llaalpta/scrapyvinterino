@@ -30,7 +30,7 @@ CSRF_TOKEN_PATTERNS = (
     re.compile(r'\\"X-CSRF-Token\\"\s*,\s*\\"([^"\\]+)\\"'),
     re.compile(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
 )
-SCREEN_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
+VIEWPORT_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 
 
 @dataclass
@@ -42,6 +42,22 @@ class CatalogSessionContext:
     v_udt: str | None = None
     user_iso_locale: str | None = None
     screen: str | None = None
+
+
+@dataclass
+class PreparedCatalogSession:
+    session_id: int | None = None
+    proxy_session_id: str | None = None
+    cookies: dict[str, str] | None = None
+    csrf_token: str | None = None
+    anon_id: str | None = None
+    access_token_web: str | None = None
+    datadome: str | None = None
+    v_udt: str | None = None
+    user_iso_locale: str | None = None
+    vinted_screen: str | None = None
+    egress_ip: str | None = None
+    egress_country_code: str | None = None
 
 
 @dataclass
@@ -105,7 +121,9 @@ class CurlCffiVintedCatalogProvider:
         expected_country_code: str | None = "ES",
         locale: str = "es-ES",
         accept_language: str = "es-ES,es;q=0.9,en;q=0.8",
-        screen: str = "1920x1080",
+        screen: str = "catalog",
+        viewport_size: str = "1920x1080",
+        prepared_session: PreparedCatalogSession | None = None,
         require_complete_session_context: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
@@ -122,14 +140,30 @@ class CurlCffiVintedCatalogProvider:
         self.expected_country_code = expected_country_code.strip().upper() if expected_country_code else None
         self.locale = locale
         self.accept_language = accept_language
-        self.screen = screen
+        self.vinted_screen = screen.strip().lower()
+        self.viewport_size = viewport_size.strip().lower()
+        self.prepared_session = prepared_session
         self.require_complete_session_context = require_complete_session_context
         self.http_session_id = str(uuid.uuid4())
         self._session: Session | None = None
-        self._bootstrapped = False
+        self._bootstrapped = prepared_session is not None
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
         self._egress_context = EgressContext()
+        if prepared_session is not None:
+            self._catalog_session_context = CatalogSessionContext(
+                csrf_token=prepared_session.csrf_token,
+                anon_id=prepared_session.anon_id,
+                access_token_web=prepared_session.access_token_web,
+                datadome=prepared_session.datadome or (prepared_session.cookies or {}).get("datadome"),
+                v_udt=prepared_session.v_udt or (prepared_session.cookies or {}).get("v_udt"),
+                user_iso_locale=prepared_session.user_iso_locale,
+                screen=prepared_session.vinted_screen,
+            )
+            self._egress_context = EgressContext(
+                ip=prepared_session.egress_ip,
+                country_code=_normalize_country_code(prepared_session.egress_country_code),
+            )
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
         last_error: VintedCatalogProviderError | None = None
@@ -164,6 +198,33 @@ class CurlCffiVintedCatalogProvider:
                     raise
 
         raise last_error or VintedCatalogProviderError("Vinted catalog API request failed")
+
+    def bootstrap_for_session(self, source_url: str) -> dict[str, Any]:
+        """Warm only the catalog document and return a safe context report."""
+        self._ensure_session()
+        self._diagnose_egress(attempt=1)
+        if not self._bootstrapped:
+            self._bootstrap_anonymous_session(source_url, attempt=1)
+        return self._session_context_report()
+
+    def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
+        if self._session is None or not self._bootstrapped:
+            raise VintedCatalogSessionContextError("Catalog session has not been bootstrapped")
+        context = self._catalog_session_context
+        cookies = self._cookie_values()
+        return PreparedCatalogSession(
+            proxy_session_id=proxy_session_id,
+            cookies=cookies,
+            csrf_token=context.csrf_token,
+            anon_id=context.anon_id,
+            access_token_web=context.access_token_web or cookies.get("access_token_web"),
+            datadome=context.datadome or cookies.get("datadome"),
+            v_udt=context.v_udt or cookies.get("v_udt"),
+            user_iso_locale=context.user_iso_locale,
+            vinted_screen=context.screen,
+            egress_ip=self._egress_context.ip,
+            egress_country_code=self._egress_context.country_code,
+        )
 
     def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
         self._ensure_session()
@@ -280,6 +341,8 @@ class CurlCffiVintedCatalogProvider:
                 impersonate=self.profile.impersonate,
                 proxies=proxy_dict,
             )
+            if self.prepared_session is not None:
+                self._load_prepared_cookies(self.prepared_session)
             self._emit_event(
                 phase="http_session_created",
                 details={
@@ -288,8 +351,28 @@ class CurlCffiVintedCatalogProvider:
                     "impersonate": self.profile.impersonate,
                     "proxy_configured": bool(self.proxy_url),
                     "proxy_session": self.proxy_session_marker,
+                    "prepared_vinted_session_id": self.prepared_session.session_id if self.prepared_session else None,
                 },
             )
+
+    def _load_prepared_cookies(self, prepared: PreparedCatalogSession) -> None:
+        if self._session is None:
+            return
+        for name, value in (prepared.cookies or {}).items():
+            if not value:
+                continue
+            cookies = self._session.cookies
+            set_value = getattr(cookies, "set", None)
+            if callable(set_value):
+                try:
+                    set_value(name, value)
+                    continue
+                except Exception:
+                    pass
+            try:
+                cookies.update({name: value})
+            except Exception:
+                pass
 
     def _reset_session(self) -> None:
         """Close and recreate the session (same proxy, fresh cookies)."""
@@ -327,7 +410,7 @@ class CurlCffiVintedCatalogProvider:
                 referer=source.url,
                 accept_language=self.accept_language,
                 locale=self.locale,
-                screen=self.screen,
+                screen=self.vinted_screen,
             )
         )
         if self._catalog_session_context.anon_id:
@@ -516,7 +599,8 @@ class CurlCffiVintedCatalogProvider:
                 "expected_country_code": self.expected_country_code,
                 "locale": self.locale,
                 "accept_language": self.accept_language,
-                "screen": self.screen,
+                "viewport_size": self.viewport_size,
+                "vinted_screen": self.vinted_screen,
                 "bootstrap_origin": "catalog_document",
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
@@ -619,7 +703,8 @@ class CurlCffiVintedCatalogProvider:
                 "locale": self.locale,
                 "accept_language": self.accept_language,
                 "user_iso_locale": self._catalog_session_context.user_iso_locale,
-                "screen": self.screen,
+                "viewport_size": self.viewport_size,
+                "vinted_screen": self.vinted_screen,
                 "response_screen": self._catalog_session_context.screen,
                 "datadome_cookie_seen_by_detector": dd_present,
                 "csrf_token": _secret_marker_or_none("csrf_token", self._catalog_session_context.csrf_token),
@@ -664,8 +749,9 @@ class CurlCffiVintedCatalogProvider:
         expected_country_code = self.expected_country_code
         egress_country_code = _normalize_country_code(self._egress_context.country_code)
         locale_country = _country_from_locale(self.locale)
-        screen_configured = bool(self.screen and SCREEN_PATTERN.match(self.screen.strip().lower()))
-        response_screen_matches = context.screen is None or context.screen.strip().lower() == self.screen.strip().lower()
+        viewport_configured = bool(self.viewport_size and VIEWPORT_PATTERN.match(self.viewport_size.strip().lower()))
+        vinted_screen_configured = bool(self.vinted_screen == "catalog")
+        response_screen_matches = context.screen is None or context.screen.strip().lower() == self.vinted_screen
         response_locale_matches = response_locale is None or expected_country_code is None or response_locale == expected_country_code
 
         return {
@@ -689,8 +775,10 @@ class CurlCffiVintedCatalogProvider:
             "locale_configured": bool(self.locale and locale_country == expected_country_code),
             "accept_language": self.accept_language,
             "accept_language_configured": self.accept_language.lower().startswith(self.locale.lower()),
-            "screen": self.screen,
-            "screen_configured": screen_configured,
+            "viewport_size": self.viewport_size,
+            "viewport_configured": viewport_configured,
+            "vinted_screen": self.vinted_screen,
+            "vinted_screen_configured": vinted_screen_configured,
             "response_locale": context.user_iso_locale,
             "response_locale_matches": response_locale_matches,
             "response_screen": context.screen,
@@ -714,7 +802,8 @@ class CurlCffiVintedCatalogProvider:
             "v_udt": report.get("v_udt_found"),
             "locale": report.get("locale_configured"),
             "accept_language": report.get("accept_language_configured"),
-            "screen": report.get("screen_configured"),
+            "vinted_screen": report.get("vinted_screen_configured"),
+            "viewport": report.get("viewport_configured"),
             "egress_country_code": report.get("egress_country_match") and bool(report.get("egress_country_code")),
             "response_locale": report.get("response_locale_matches"),
             "response_screen": report.get("response_screen_matches"),
@@ -816,6 +905,26 @@ class CurlCffiVintedCatalogProvider:
         if self._session is None:
             return []
         return safe_cookie_markers(self._session.cookies)
+
+    def _cookie_values(self) -> dict[str, str]:
+        if self._session is None or not self._session.cookies:
+            return {}
+        values: dict[str, str] = {}
+        cookies = self._session.cookies
+        items = getattr(cookies, "items", None)
+        if callable(items):
+            try:
+                return {str(name): str(value) for name, value in items() if value}
+            except Exception:
+                pass
+
+        jar = getattr(cookies, "jar", cookies)
+        for cookie in jar:
+            cookie_name = getattr(cookie, "name", None)
+            cookie_value = getattr(cookie, "value", None)
+            if cookie_name and cookie_value:
+                values[str(cookie_name)] = str(cookie_value)
+        return values
 
     def _cookie_value(self, name: str) -> str | None:
         if self._session is None or not self._session.cookies:

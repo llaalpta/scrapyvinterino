@@ -4,6 +4,7 @@ import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
 
 export function SettingsView({
   onCreateProxy,
+  onPrepareVintedSession,
   onTestProxy,
   onToggleProxy,
   onToggleScheduler,
@@ -16,6 +17,7 @@ export function SettingsView({
   setProxyDraft
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
+  onPrepareVintedSession: (profileId: number) => void;
   onTestProxy: (profileId: number) => void;
   onToggleProxy: (profile: ProxyProfile) => void;
   onToggleScheduler: () => void;
@@ -274,8 +276,9 @@ export function SettingsView({
                     {proxy.host}:{proxy.port} | max {proxy.max_concurrent_runs}
                   </span>
                   <span>
-                    Contexto resuelto: {proxy.country_code} | {proxy.locale} | {proxy.screen}
+                    Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
                   </span>
+                  <ProxySessionStatus proxy={proxy} />
                 </div>
                 <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
                 <span className="status">{proxy.cooldown_until ? 'Cooldown' : proxy.last_test_ip ?? proxy.last_test_status ?? 'Sin test'}</span>
@@ -285,7 +288,11 @@ export function SettingsView({
                 </button>
                 <button type="button" onClick={() => onTestProxy(proxy.id)}>
                   <Play size={16} />
-                  Test
+                  Test IP
+                </button>
+                <button type="button" onClick={() => onPrepareVintedSession(proxy.id)}>
+                  <Play size={16} />
+                  Preparar sesion
                 </button>
               </article>
             ))}
@@ -294,6 +301,41 @@ export function SettingsView({
       </div>
     </section>
   );
+}
+
+function ProxySessionStatus({ proxy }: { proxy: ProxyProfile }) {
+  const session = proxy.vinted_session;
+  if (!session) {
+    return <span>Sesion Vinted: no preparada</span>;
+  }
+  const ok = session.status === 'ready';
+  const checks = [
+    ['csrf', session.context.csrf_token],
+    ['anon', session.context.anon_id],
+    ['access', session.context.access_token_web],
+    ['datadome', session.context.datadome],
+    ['v_udt', session.context.v_udt],
+    ['screen', session.context.vinted_screen]
+  ]
+    .map(([label, value]) => `${label}=${value ? 'ok' : 'missing'}`)
+    .join(' ');
+  const expires = session.expires_at ? ` expira ${formatShortDateTime(session.expires_at)}` : '';
+  return (
+    <span>
+      Sesion Vinted: {ok ? 'ready' : session.status} | {session.egress_ip ?? 'sin IP'} | {checks} | {session.request_count}/{session.max_requests}
+      {expires}
+      {session.last_error ? ` | ${session.last_error}` : ''}
+    </span>
+  );
+}
+
+function formatShortDateTime(value: string) {
+  return new Intl.DateTimeFormat('es-ES', {
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    month: '2-digit'
+  }).format(new Date(value));
 }
 
 function SummaryItem({ label, value }: { label: string; value: string }) {

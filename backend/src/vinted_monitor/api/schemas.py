@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -186,6 +188,7 @@ class ProxyProfileRead(BaseModel):
     locale: str
     accept_language: str
     screen: str
+    vinted_screen: str
     is_active: bool
     max_concurrent_runs: int
     cooldown_until: datetime | None
@@ -194,6 +197,72 @@ class ProxyProfileRead(BaseModel):
     last_test_status: str | None
     last_test_ip: str | None
     last_test_error: str | None
+    vinted_session: VintedSessionRead | None = None
+
+
+class VintedSessionContextRead(BaseModel):
+    csrf_token: bool
+    anon_id: bool
+    access_token_web: bool
+    datadome: bool
+    v_udt: bool
+    user_iso_locale: bool
+    vinted_screen: bool
+
+
+class VintedSessionRead(BaseModel):
+    id: int
+    proxy_profile_id: int
+    status: str
+    browser_profile: str
+    impersonate: str
+    country_code: str
+    locale: str
+    accept_language: str
+    viewport_size: str
+    vinted_screen: str
+    egress_ip: str | None
+    egress_country_code: str | None
+    proxy_session: dict[str, Any] | None
+    request_count: int
+    max_requests: int
+    failure_count: int
+    prepared_at: datetime
+    expires_at: datetime | None
+    last_used_at: datetime | None
+    invalidated_at: datetime | None
+    last_error: str | None
+    context: VintedSessionContextRead
+
+
+class VintedSessionPreflightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_url: str | None = None
+
+    @field_validator("source_url")
+    @classmethod
+    def validate_optional_source_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_vinted_catalog_url(value)
+
+
+class VintedSessionImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proxy_session_id: str
+    cookie_header: str | None = None
+    cookies: dict[str, str] = Field(default_factory=dict)
+    csrf_token: str | None = None
+    anon_id: str | None = None
+    access_token_web: str | None = None
+    datadome: str | None = None
+    v_udt: str | None = None
+    user_iso_locale: str | None = None
+    vinted_screen: str = "catalog"
+    egress_ip: str | None = None
+    egress_country_code: str | None = None
 
 
 class ItemRead(BaseModel):

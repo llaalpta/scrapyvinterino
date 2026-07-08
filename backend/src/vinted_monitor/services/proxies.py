@@ -38,6 +38,7 @@ class ProxyPublicFields:
     locale: str
     accept_language: str
     screen: str
+    vinted_screen: str
     is_active: bool
     max_concurrent_runs: int
     cooldown_until: datetime | None
@@ -54,14 +55,22 @@ class ProxyContextPreset:
     locale: str
     accept_language: str
     screen: str
+    vinted_screen: str
 
 
-def _context_preset(country_code: str, locale: str, accept_language: str, screen: str) -> ProxyContextPreset:
+def _context_preset(
+    country_code: str,
+    locale: str,
+    accept_language: str,
+    screen: str,
+    vinted_screen: str = "catalog",
+) -> ProxyContextPreset:
     return ProxyContextPreset(
         country_code=_validate_country_code(country_code),
         locale=_validate_locale(locale, country_code),
         accept_language=_validate_accept_language(accept_language, locale),
         screen=_validate_screen(screen),
+        vinted_screen=_validate_vinted_screen(vinted_screen),
     )
 
 
@@ -124,6 +133,7 @@ def create_proxy_profile(
         locale=context.locale,
         accept_language=context.accept_language,
         screen=context.screen,
+        vinted_screen=context.vinted_screen,
         max_concurrent_runs=_validate_max_concurrent_runs(max_concurrent_runs),
         is_active=is_active,
     )
@@ -176,6 +186,7 @@ def update_proxy_profile(
         profile.locale = context.locale
         profile.accept_language = context.accept_language
         profile.screen = context.screen
+        profile.vinted_screen = context.vinted_screen
     if max_concurrent_runs is not None:
         profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
@@ -257,6 +268,7 @@ def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = 
         locale=profile.locale,
         accept_language=profile.accept_language,
         screen=profile.screen,
+        vinted_screen=profile.vinted_screen,
         is_active=profile.is_active,
         max_concurrent_runs=profile.max_concurrent_runs,
         cooldown_until=profile.cooldown_until,
@@ -372,6 +384,13 @@ def _validate_screen(value: str) -> str:
     cleaned = value.strip().lower()
     if not SCREEN_PATTERN.match(cleaned):
         raise ValueError("Proxy screen must use WIDTHxHEIGHT format")
+    return cleaned
+
+
+def _validate_vinted_screen(value: str) -> str:
+    cleaned = value.strip().lower()
+    if cleaned != "catalog":
+        raise ValueError("Proxy Vinted screen must be catalog")
     return cleaned
 
 

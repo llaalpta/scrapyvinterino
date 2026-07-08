@@ -10,9 +10,11 @@ from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import ErrorLog, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource
+from vinted_monitor.db.models import ErrorLog, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource, VintedSession
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
+from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.run_events import record_run_event
@@ -26,6 +28,7 @@ from vinted_monitor.services.runs import (
 )
 from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
+from vinted_monitor.services.vinted_sessions import save_prepared_vinted_session
 
 
 class FakeSeenCache:
@@ -162,6 +165,36 @@ def _test_direct_egress() -> RunEgress:
     return RunEgress(mode="direct")
 
 
+def _create_ready_vinted_session(db, proxy: ProxyProfile, *, proxy_session_id: str = "pytestsession") -> None:
+    profile = profile_for_impersonate("chrome146")
+    save_prepared_vinted_session(
+        db,
+        proxy,
+        proxy_session_id=proxy_session_id,
+        profile=profile,
+        context=PreparedCatalogSession(
+            proxy_session_id=proxy_session_id,
+            cookies={
+                "access_token_web": "access-token",
+                "datadome": "datadome-token",
+                "v_udt": "v-udt-token",
+                "anon_id": "anon-id",
+            },
+            csrf_token="csrf-token",
+            anon_id="anon-id",
+            access_token_web="access-token",
+            datadome="datadome-token",
+            v_udt="v-udt-token",
+            user_iso_locale=proxy.locale,
+            vinted_screen=proxy.vinted_screen,
+            egress_ip="203.0.113.10",
+            egress_country_code=proxy.country_code,
+        ),
+        settings=Settings(),
+    )
+    db.flush()
+
+
 def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
     settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
     monkeypatch.setattr("vinted_monitor.api.main.settings", settings)
@@ -211,7 +244,10 @@ def cleanup_source(source_id: int | None) -> None:
             db.query(RunEvent).filter(RunEvent.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(ErrorLog).filter(ErrorLog.source_id.in_(source_ids)).delete(synchronize_session=False)
             db.query(Opportunity).filter(Opportunity.source_id.in_(source_ids)).delete(synchronize_session=False)
-        db.query(ProxyProfile).filter(ProxyProfile.name.like("pytest%")).delete(synchronize_session=False)
+        proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.name.like("pytest%"))))
+        if proxy_ids:
+            db.query(VintedSession).filter(VintedSession.proxy_profile_id.in_(proxy_ids)).delete(synchronize_session=False)
+            db.query(ProxyProfile).filter(ProxyProfile.id.in_(proxy_ids)).delete(synchronize_session=False)
         db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item%")).delete(synchronize_session=False)
         if source_id is not None:
             source = db.get(SearchSource, source_id)
@@ -309,6 +345,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
             username="customer",
             password=None,
         )
+        _create_ready_vinted_session(db, proxy, proxy_session_id="stickytest01")
         run = execute_monitor_run(
             db,
             source_id,
@@ -324,10 +361,11 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert run.status == SUCCESS
         assert len(created_providers) == 1
         assert created_providers[0].closed is True
-        assert created_providers[0].kwargs["proxy_url"].startswith("http://customer-sessid-")
+        assert created_providers[0].kwargs["proxy_url"].startswith("http://customer-sessid-stickytest01")
         assert created_providers[0].kwargs["proxy_url"].endswith(":@proxy.example:8000")
         assert run.runtime_metadata["proxy_profile_id"] == proxy.id
-        assert run.runtime_metadata["proxy_session_id_prefix"]
+        assert run.runtime_metadata["proxy_session_id_prefix"] == "stickyte"
+        assert run.runtime_metadata["vinted_session_id"]
         assert run.runtime_metadata["proxy_sticky_session"]["masked"]
         run_started = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "run_started"))
         assert run_started is not None

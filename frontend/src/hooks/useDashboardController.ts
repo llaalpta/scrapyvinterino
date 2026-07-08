@@ -12,6 +12,7 @@ import {
   fetchRuns,
   fetchScheduler,
   fetchSources,
+  preflightVintedSession,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -197,6 +198,16 @@ export function useDashboardController() {
       setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo probar el proxy');
+    }
+  }
+
+  async function onPrepareVintedSession(profileId: number) {
+    setError(null);
+    try {
+      const updated = await preflightVintedSession(profileId);
+      setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted');
     }
   }
 
@@ -515,6 +526,7 @@ export function useDashboardController() {
     onStartSession,
     onStopMonitor,
     onTestProxy,
+    onPrepareVintedSession,
     onToggleProxy,
     onToggleScheduler,
     onUpdateSchedulerConfig,
