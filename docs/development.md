@@ -45,28 +45,19 @@ Las migraciones Alembic pueden compactarse o romper compatibilidad con datos loc
 
 ## PWA QA estable
 
-Para QA de la PWA, usa la ruta aislada:
+Para QA de la PWA con Playwright, usa la ruta aislada en `5176`:
 
 ```powershell
+.\scripts\qa-pwa.ps1 stop
 .\scripts\qa-pwa.ps1 start
+.\scripts\qa-pwa.ps1 status
+Invoke-WebRequest http://localhost:8000/health
+Invoke-WebRequest http://127.0.0.1:5176
 ```
 
-El script levanta backend/worker/cache con Docker Compose, arranca Vite local en `http://127.0.0.1:5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`. No mata procesos ajenos: si el puerto esta ocupado por otro proceso, falla con un mensaje claro.
+Abre Playwright contra `http://127.0.0.1:5176`. El script apaga el servicio Docker `frontend` de `5173`, levanta `postgres`, `redis`, `api` y `worker` con Docker Compose, arranca Vite local en `5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`.
 
-Antes de recrear contenedores o arrancar otro Vite:
-
-```powershell
-.\scripts\qa-pwa.ps1 stop
-docker compose ps
-```
-
-Usa una sola ruta para cada pasada de QA: frontend Docker en `5173` o QA aislada en `5176`. Si hay conflicto de puerto, identifica el proceso antes de relanzar servicios. No reconstruyas Postgres, Redis, API o worker solo para refrescar una pantalla si el cambio esta limitado al frontend.
-
-Para cerrar solo el Vite lanzado por el script:
-
-```powershell
-.\scripts\qa-pwa.ps1 stop
-```
+No uses `http://localhost:5173` para esta pasada. Ese puerto pertenece al frontend Docker y en Windows puede aparecer como publicado aunque el host no responda. `status` debe mostrar el Vite QA en `5176` y avisar si queda algo escuchando en `5173`.
 
 ## Frontend Structure
 
