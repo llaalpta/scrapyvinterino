@@ -202,9 +202,36 @@ export type Run = {
   runtime_metadata: Record<string, unknown>;
 };
 
+export type ItemDetailProbeAttempt = {
+  variant_id?: string | null;
+  endpoint?: string | null;
+  endpoint_role?: string | null;
+  referer_mode?: string | null;
+  pre_navigation?: boolean | null;
+  client_hints?: boolean | null;
+  outcome?: string | null;
+  status_code?: number | null;
+  duration_ms?: number | null;
+  content_type?: string | null;
+  cf_mitigated?: string | null;
+  cf_ray?: string | null;
+  error?: string | null;
+};
+
+export type ItemDetailProbePayload = Record<string, unknown> & {
+  outcome?: string;
+  status_code?: number | null;
+  duration_ms?: number | null;
+  matrix_duration_ms?: number | null;
+  attempt_count?: number | null;
+  control_outcome?: string | null;
+  detail_summary?: Record<string, unknown>;
+  attempts?: ItemDetailProbeAttempt[];
+};
+
 export type ItemDetailProbeResult = {
   run: Run;
-  result: Record<string, unknown>;
+  result: ItemDetailProbePayload;
 };
 
 export type MonitorStatsRange = 'minutes' | 'hours' | 'days' | 'month' | 'all';
