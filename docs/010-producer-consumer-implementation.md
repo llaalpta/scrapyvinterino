@@ -90,6 +90,13 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`.
 - The DataDome collector keeps the HAR-shaped `ch` then `le` sequence and does not stop after a `ch` cookie; the final returned cookie is kept in the same `curl_cffi.Session` cookie jar.
 
+## Detail Probe Session Hardening 2026-07-09
+
+- The item detail API probe now reuses or prepares the monitor-owned Vinted session through the same proxy sticky identity and Chrome 146 runtime profile as catalog runs.
+- A detail probe records a `detail_probe` audit run, emits `detail_probe_finished` and `run_succeeded` on terminal success, and remains excluded from monitor metrics, item persistence, opportunities and Redis seen state.
+- A DataDome challenge during the detail probe invalidates the prepared Vinted session and records safe diagnostics without silently rotating into an unprepared proxy identity.
+- Host verification passed with service URLs overridden for Windows host access: `ruff check backend/src backend/alembic` and the focused 010 pytest suite (`144 passed`).
+
 ## Continuous Direct Scheduler Validation 2026-07-06
 
 - Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity on the then-current Chrome 120 profile.
