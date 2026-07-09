@@ -49,6 +49,8 @@ MAX_RATE_LIMIT_RETRY_AFTER_SECONDS = 30.0
 DETAIL_API_CONTROL_ENDPOINT = "info_banners"
 DETAIL_API_DETAILS_ENDPOINT = "item_details"
 DETAIL_API_LEGACY_ENDPOINT = "item_legacy"
+DETAIL_API_MORE_ENDPOINT = "item_more"
+DETAIL_API_SERVICES_ENDPOINT = "item_services"
 
 
 @dataclass
@@ -186,6 +188,7 @@ class CurlCffiVintedCatalogProvider:
         self._catalog_session_context = CatalogSessionContext()
         self._egress_context = EgressContext()
         self._last_bootstrap_html = ""
+        self._last_item_document_html = ""
         self.prepared_session_refreshed = False
         if prepared_session is not None:
             self._catalog_session_context = CatalogSessionContext(
@@ -409,6 +412,7 @@ class CurlCffiVintedCatalogProvider:
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
         self._last_bootstrap_html = ""
+        self._last_item_document_html = ""
 
     def _ensure_session(self) -> None:
         if self._session is None:
@@ -951,6 +955,18 @@ class CurlCffiVintedCatalogProvider:
         )
         matrix_started_at = time.perf_counter()
 
+        navigation = self._probe_item_document_navigation(item_url, referer_url=referer_url, warmup=True)
+        attempts.append(navigation)
+        if navigation.get("outcome") == "document_ok":
+            self._try_datadome_collector(
+                item_url,
+                page_html=self._last_item_document_html,
+                expected_screen="item",
+                bootstrap_origin="item_document",
+            )
+            context_report = self._session_context_report(expected_screen="item", bootstrap_origin="item_document")
+            missing_context = self._missing_session_context(context_report)
+
         for variant in fast_variants:
             attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
 
@@ -965,21 +981,8 @@ class CurlCffiVintedCatalogProvider:
             ):
                 attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
 
-        if self._should_run_item_document_variant(attempts):
-            navigation = self._probe_item_document_navigation(item_url, referer_url=referer_url)
-            attempts.append(navigation)
-            if navigation.get("outcome") == "document_ok":
-                for variant in self._detail_probe_variants(
-                    item_id,
-                    catalog_referer=referer_url,
-                    item_referer=item_url,
-                    referer_modes=("item",),
-                    pre_navigation=True,
-                ):
-                    attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
-
         selected = _select_detail_probe_attempt(attempts)
-        final_context_report = self._session_context_report()
+        final_context_report = self._session_context_report(expected_screen="item", bootstrap_origin="item_document")
         matrix_duration_ms = _elapsed_ms(matrix_started_at)
         detail_summary = selected.get("detail_summary") if isinstance(selected.get("detail_summary"), dict) else {}
         response_details = selected.get("response") if isinstance(selected.get("response"), dict) else {}
@@ -1067,6 +1070,18 @@ class CurlCffiVintedCatalogProvider:
                     "endpoint_role": "detail",
                     "url": urljoin(base_url, f"/api/v2/items/{item_id}"),
                     "params": {"localize": "true"},
+                },
+                {
+                    "endpoint": DETAIL_API_MORE_ENDPOINT,
+                    "endpoint_role": "support",
+                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/more"),
+                    "params": {"content_source": "catalog", "screen": "item"},
+                },
+                {
+                    "endpoint": DETAIL_API_SERVICES_ENDPOINT,
+                    "endpoint_role": "support",
+                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/services"),
+                    "params": None,
                 },
             ]
         )
@@ -1180,7 +1195,7 @@ class CurlCffiVintedCatalogProvider:
                 referer=referer_url,
                 accept_language=self.accept_language,
                 locale=self.locale,
-                screen=self.vinted_screen,
+                screen=self._catalog_session_context.screen or self.vinted_screen,
             )
         )
         if client_hints:
@@ -1245,9 +1260,15 @@ class CurlCffiVintedCatalogProvider:
                     outcome = "accepted_json" if isinstance(payload, (Mapping, list)) else "invalid_json"
                     if isinstance(payload, Mapping):
                         response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                elif variant["endpoint_role"] == "support":
+                    outcome = "accepted_json" if isinstance(payload, (Mapping, list)) else "invalid_json"
+                    if isinstance(payload, Mapping):
+                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                    elif isinstance(payload, list):
+                        response_details["items_count"] = len(payload)
                 elif isinstance(payload, Mapping):
                     item_payload = payload.get("item") if isinstance(payload.get("item"), Mapping) else payload
-                    if isinstance(item_payload, Mapping):
+                    if isinstance(item_payload, Mapping) and _looks_like_item_detail_payload(item_payload, item_id):
                         outcome = "accepted_json"
                         response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
                         response_details["item_keys"] = sorted(str(key) for key in item_payload.keys())[:40]
@@ -1318,13 +1339,7 @@ class CurlCffiVintedCatalogProvider:
             for attempt in detail_attempts
         )
 
-    def _should_run_item_document_variant(self, attempts: list[dict[str, Any]]) -> bool:
-        detail_attempts = [attempt for attempt in attempts if attempt.get("endpoint_role") == "detail"]
-        if any(attempt.get("outcome") == "accepted_json" for attempt in detail_attempts):
-            return False
-        return any(attempt.get("outcome") == "cloudflare_challenge" for attempt in detail_attempts)
-
-    def _probe_item_document_navigation(self, item_url: str, *, referer_url: str) -> dict[str, Any]:
+    def _probe_item_document_navigation(self, item_url: str, *, referer_url: str, warmup: bool = False) -> dict[str, Any]:
         assert self._session is not None
         headers = dict(self.profile.build_bootstrap_headers(referer=referer_url, accept_language=self.accept_language))
         headers["sec-fetch-site"] = "same-origin"
@@ -1345,6 +1360,7 @@ class CurlCffiVintedCatalogProvider:
                 "endpoint": "item_document",
                 "endpoint_role": "document",
                 "referer_url": referer_url,
+                "warmup": warmup,
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
                 "default_headers": False,
@@ -1366,7 +1382,7 @@ class CurlCffiVintedCatalogProvider:
                 "endpoint": "item_document",
                 "endpoint_role": "document",
                 "referer_mode": "catalog",
-                "pre_navigation": False,
+                "pre_navigation": warmup,
                 "client_hints": False,
                 "url": item_url,
                 "outcome": "transport_error",
@@ -1382,7 +1398,15 @@ class CurlCffiVintedCatalogProvider:
             return attempt
 
         duration_ms = _elapsed_ms(started_at)
+        self._last_item_document_html = getattr(response, "text", "") or ""
+        self._catalog_session_context.csrf_token = (
+            extract_csrf_token(self._last_item_document_html) or self._catalog_session_context.csrf_token
+        )
         self._catalog_session_context.anon_id = _header_value(response.headers, "x-anon-id") or self._catalog_session_context.anon_id
+        self._catalog_session_context.access_token_web = (
+            self._cookie_value("access_token_web") or self._catalog_session_context.access_token_web
+        )
+        self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
         self._catalog_session_context.v_udt = (
             _header_value(response.headers, "x-v-udt") or self._cookie_value("v_udt") or self._catalog_session_context.v_udt
         )
@@ -1404,7 +1428,7 @@ class CurlCffiVintedCatalogProvider:
             "endpoint": "item_document",
             "endpoint_role": "document",
             "referer_mode": "catalog",
-            "pre_navigation": False,
+            "pre_navigation": warmup,
             "client_hints": False,
             "url": item_url,
             "outcome": outcome,
@@ -1563,13 +1587,28 @@ class CurlCffiVintedCatalogProvider:
             },
         )
 
-    def _try_datadome_collector(self, source_url: str) -> None:
+    def _try_datadome_collector(
+        self,
+        source_url: str,
+        *,
+        page_html: str | None = None,
+        expected_screen: str | None = None,
+        bootstrap_origin: str = "catalog_document",
+    ) -> None:
         assert self._session is not None
         collector_url = str(self.settings.vinted_datadome_collector_url)
+        html = self._last_bootstrap_html if page_html is None else page_html
+        screen = (expected_screen or self.vinted_screen).strip().lower()
         if not self.settings.vinted_datadome_collector_enabled:
             self._emit_event(
                 phase="datadome_collector_skipped",
-                details={"reason": "disabled", "post_sent": False, "collector_endpoint": collector_url},
+                details={
+                    "reason": "disabled",
+                    "post_sent": False,
+                    "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
+                },
             )
             return
         if self._catalog_session_context.datadome:
@@ -1580,20 +1619,28 @@ class CurlCffiVintedCatalogProvider:
                     "datadome_cookie": True,
                     "post_sent": False,
                     "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
                     "cookies_after": self._cookie_markers(),
                     "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
                 },
             )
             return
-        if not self._last_bootstrap_html:
+        if not html:
             self._emit_event(
                 phase="datadome_collector_skipped",
                 level="warning",
-                details={"reason": "bootstrap_html_missing", "post_sent": False, "collector_endpoint": collector_url},
+                details={
+                    "reason": "bootstrap_html_missing",
+                    "post_sent": False,
+                    "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
+                },
             )
             return
 
-        report = self._session_context_report()
+        report = self._session_context_report(expected_screen=screen, bootstrap_origin=bootstrap_origin)
         missing_without_datadome = [name for name in self._missing_session_context(report) if name != "datadome"]
         if missing_without_datadome:
             self._emit_event(
@@ -1603,6 +1650,8 @@ class CurlCffiVintedCatalogProvider:
                     "reason": "base_context_incomplete",
                     "post_sent": False,
                     "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
                     "missing_required": missing_without_datadome,
                     **report,
                 },
@@ -1623,12 +1672,13 @@ class CurlCffiVintedCatalogProvider:
                 "locale": self.locale,
                 "accept_language": self.accept_language,
                 "viewport_size": self.viewport_size,
-                "vinted_screen": self.vinted_screen,
+                "vinted_screen": screen,
+                "bootstrap_origin": bootstrap_origin,
                 **_context_summary(report, self._cookie_values()),
             },
         )
-        datadome_client_key = self.settings.vinted_datadome_client_key or extract_datadome_client_key(self._last_bootstrap_html)
-        tags_url = extract_datadome_script_url(self._last_bootstrap_html, source_url)
+        datadome_client_key = self.settings.vinted_datadome_client_key or extract_datadome_client_key(html)
+        tags_url = extract_datadome_script_url(html, source_url)
         if not datadome_client_key and tags_url:
             datadome_client_key = self._fetch_datadome_client_key_from_tags(tags_url=tags_url, source_url=source_url)
         started_at = time.perf_counter()
@@ -1637,11 +1687,11 @@ class CurlCffiVintedCatalogProvider:
             profile=self.profile,
             collector_url=collector_url,
             source_url=source_url,
-            page_html=self._last_bootstrap_html,
+            page_html=html,
             accept_language=self.accept_language,
             locale=self.locale,
             viewport_size=self.viewport_size,
-            vinted_screen=self.vinted_screen,
+            vinted_screen=screen,
             timeout_seconds=self.timeout_ms / 1000,
             default_ddv=self.settings.vinted_datadome_collector_default_ddv,
             configured_client_key=datadome_client_key,
@@ -1654,8 +1704,10 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 details={
                     **result.safe_details(),
-                    "context": self._session_context_report(),
+                    "context": self._session_context_report(expected_screen=screen, bootstrap_origin=bootstrap_origin),
                     "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
                     "non_blocking": not self.require_datadome_cookie,
                     "cookies_after": self._cookie_markers(),
                     "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
@@ -1670,8 +1722,10 @@ class CurlCffiVintedCatalogProvider:
             message="DataDome collector did not return a cookie",
             details={
                 **result.safe_details(),
-                "context": self._session_context_report(),
+                "context": self._session_context_report(expected_screen=screen, bootstrap_origin=bootstrap_origin),
                 "collector_endpoint": collector_url,
+                "bootstrap_origin": bootstrap_origin,
+                "vinted_screen": screen,
                 "non_blocking": not self.require_datadome_cookie,
                 "cookies_after": self._cookie_markers(),
                 "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
@@ -1758,22 +1812,28 @@ class CurlCffiVintedCatalogProvider:
             screen=_header_value(headers, "x-screen"),
         )
 
-    def _session_context_report(self) -> dict[str, Any]:
+    def _session_context_report(
+        self,
+        *,
+        expected_screen: str | None = None,
+        bootstrap_origin: str = "catalog_document",
+    ) -> dict[str, Any]:
         context = self._catalog_session_context
+        expected_vinted_screen = (expected_screen or self.vinted_screen).strip().lower()
         response_locale = _normalize_country_code(context.user_iso_locale)
         expected_country_code = self.expected_country_code
         egress_country_code = _normalize_country_code(self._egress_context.country_code)
         locale_country = _country_from_locale(self.locale)
         viewport_configured = bool(self.viewport_size and VIEWPORT_PATTERN.match(self.viewport_size.strip().lower()))
-        vinted_screen_configured = bool(self.vinted_screen == "catalog")
-        response_screen_matches = bool(context.screen and context.screen.strip().lower() == self.vinted_screen)
+        vinted_screen_configured = bool(expected_vinted_screen in {"catalog", "item"})
+        response_screen_matches = bool(context.screen and context.screen.strip().lower() == expected_vinted_screen)
         response_locale_matches = bool(response_locale and (expected_country_code is None or response_locale == expected_country_code))
 
         return {
             "browser_profile": self.profile.name,
             "impersonate": self.profile.impersonate,
             "impersonate_ready": self.profile.impersonate.startswith("chrome"),
-            "bootstrap_origin": "catalog_document",
+            "bootstrap_origin": bootstrap_origin,
             "expected_country_code": expected_country_code,
             "egress_ip": self._egress_context.ip,
             "egress_country": self._egress_context.country,
@@ -1792,7 +1852,7 @@ class CurlCffiVintedCatalogProvider:
             "accept_language_configured": _accept_language_configured(self.accept_language),
             "viewport_size": self.viewport_size,
             "viewport_configured": viewport_configured,
-            "vinted_screen": self.vinted_screen,
+            "vinted_screen": expected_vinted_screen,
             "vinted_screen_configured": vinted_screen_configured,
             "response_locale": context.user_iso_locale,
             "response_locale_matches": response_locale_matches,
@@ -2106,6 +2166,17 @@ def _response_requests_client_hints(response_details: Mapping[str, Any]) -> bool
         or summary.get("accept_ch")
         or summary.get("critical_ch")
     )
+
+
+def _looks_like_item_detail_payload(payload: Mapping[str, Any], item_id: str) -> bool:
+    raw_id = payload.get("id")
+    if raw_id is not None and str(raw_id) == str(item_id):
+        return True
+    item_url = payload.get("url")
+    if isinstance(item_url, str) and f"/items/{item_id}" in item_url:
+        return True
+    public_item_fields = {"title", "description", "price", "brand", "brand_dto", "photos", "user"}
+    return bool(public_item_fields.intersection(payload.keys()) and (raw_id is not None or item_url))
 
 
 def _headers_with_chrome146_client_hints(headers: Mapping[str, str]) -> dict[str, str]:
