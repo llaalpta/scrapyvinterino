@@ -56,5 +56,5 @@ class VintedCatalogProvider(Protocol):
     def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
         """Return public catalog items for a configured Vinted source."""
 
-    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
         """Return public detail data for a catalog item candidate."""

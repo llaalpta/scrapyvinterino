@@ -339,9 +339,13 @@ def test_extract_datadome_bootstrap_metadata() -> None:
         '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
         '<script>window.ddjskey="TESTDATADOMEKEY1234567890";</script>'
     )
+    next_payload = '{"DATADOME_CLIENT_SIDE_KEY":"NEXTDATADOMEKEY1234567890"}'
+    escaped_payload = r'{\"DATADOME_CLIENT_SIDE_KEY\":\"ESCAPEDDATADOMEKEY123456\"}'
 
     assert extract_datadome_tags_version(html) == "5.7.0"
     assert extract_datadome_client_key(html) == "TESTDATADOMEKEY1234567890"
+    assert extract_datadome_client_key(next_payload) == "NEXTDATADOMEKEY1234567890"
+    assert extract_datadome_client_key(escaped_payload) == "ESCAPEDDATADOMEKEY123456"
     assert extract_datadome_cookie_from_response_cookie("datadome=dd-cookie-secret; Path=/; Secure") == "dd-cookie-secret"
     assert extract_datadome_cookie_from_response_cookie("session=other; Path=/") is None
 
@@ -1091,6 +1095,11 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
             assert call["headers"]["sec-fetch-site"] == "cross-site"
             assert call["headers"]["accept"] == "*/*"
             assert call["headers"]["priority"] == "u=1, i"
+            assert all(header == header.lower() for header in call["headers"])
+            assert not any(header.startswith(":") for header in call["headers"])
+            assert "host" not in call["headers"]
+            assert "cookie" not in call["headers"]
+            assert "content-length" not in call["headers"]
             assert call["default_headers"] is False
             return FakeResponse(
                 200,
@@ -1127,6 +1136,54 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
     assert "csrf-secret-value" not in serialized_events
     assert "anon-secret-value" not in serialized_events
     assert "udt-secret-value" not in serialized_events
+
+
+def test_curl_provider_preflight_collector_uses_next_datadome_client_side_key() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text=(
+                    '{"CSRF_TOKEN":"csrf-secret-value",'
+                    '"DATADOME_CLIENT_SIDE_KEY":"NEXTDATADOMEKEY1234567890"}'
+                ),
+                headers={
+                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/datadome/5.7.0/tags.js":
+            raise AssertionError("tags.js should not be fetched when HTML exposes DATADOME_CLIENT_SIDE_KEY")
+        if path(call) == "/js":
+            assert call["data"]["ddk"] == "NEXTDATADOMEKEY1234567890"
+            return FakeResponse(
+                200,
+                json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure; SameSite=Lax"},
+                headers={"content-type": "application/json"},
+            )
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    provider.bootstrap_for_session(source().url, collect_datadome=True)
+    prepared = provider.export_prepared_session(proxy_session_id="pytestproxy01")
+
+    assert prepared.datadome == "dd-cookie-secret"
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/js", "/js"]
 
 
 def test_curl_provider_preflight_collector_tries_le_after_ch_without_cookie() -> None:
@@ -1313,6 +1370,48 @@ def test_curl_provider_preflight_collector_skips_when_base_context_is_incomplete
     skipped = next(event for event in events if event["phase"] == "datadome_collector_skipped")
     assert skipped["details"]["reason"] == "base_context_incomplete"
     assert set(skipped["details"]["missing_required"]) >= {"access_token_web", "v_udt"}
+
+
+def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    product_json = {
+        "@type": "Product",
+        "description": "Detalle publico",
+        "color": "Azul",
+        "category": "Polos",
+        "image": ["https://images.example.test/detail.webp"],
+        "offers": {"availability": "https://schema.org/InStock"},
+    }
+    html = f'<script type="application/ld+json">{json.dumps(product_json)}</script>'
+
+    def handler(call: dict) -> FakeResponse:
+        assert call["method"] == "GET"
+        assert call["url"] == candidate.url
+        assert call["default_headers"] is False
+        assert call["headers"]["referer"] == source().url
+        assert call["headers"]["sec-fetch-site"] == "same-origin"
+        assert "cookie" not in call["headers"]
+        return FakeResponse(200, text=html, headers={"content-type": "text/html", "set-cookie": "datadome=dd; Path=/"})
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    detail = provider.fetch_detail(candidate, referer_url=source().url)
+
+    assert detail.description == "Detalle publico"
+    assert detail.photos == ["https://images.example.test/detail.webp", "https://images.example.test/item-1000000001.webp"]
+    assert [event["phase"] for event in events] == [
+        "http_session_created",
+        "detail_http_request_start",
+        "detail_http_request_success",
+        "detail_parse_success",
+    ]
+    assert provider._catalog_session_context.datadome == "dd"
 
 
 def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:
@@ -1668,3 +1767,10 @@ def test_parse_item_detail_html_extracts_sanitized_public_detail() -> None:
         "https://images.example.test/full-3.webp",
         "https://images.example.test/item-1000000001.webp",
     ]
+
+
+def test_parse_item_detail_html_rejects_document_without_detail_data() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+
+    with pytest.raises(ValueError, match="No public item detail data"):
+        parse_item_detail_html("<html><title>Vinted</title></html>", candidate)

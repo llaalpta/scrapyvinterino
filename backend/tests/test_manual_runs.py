@@ -106,7 +106,7 @@ class FakeSuccessProvider:
             provider_metadata={"provider": "fake"},
         )
 
-    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
         self.detail_calls.append(candidate.vinted_item_id)
         return CatalogItemDetail(
             vinted_item_id=candidate.vinted_item_id,
@@ -168,7 +168,7 @@ class FakeRefreshingProvider(FakeSuccessProvider):
 
 
 class FakeDiscardingDetailProvider(FakeSuccessProvider):
-    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
         self.detail_calls.append(candidate.vinted_item_id)
         return CatalogItemDetail(
             vinted_item_id=candidate.vinted_item_id,
@@ -182,7 +182,7 @@ class FakeDiscardingDetailProvider(FakeSuccessProvider):
 class FakeFailingDetailProvider(FakeSuccessProvider):
     settings = SimpleNamespace(vinted_detail_max_candidates_per_run=5, vinted_detail_concurrency=1)
 
-    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
         self.detail_calls.append(candidate.vinted_item_id)
         raise RuntimeError("detail boom cookie=session-secret")
 
@@ -418,10 +418,13 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         assert "egress_selected" in phases
         assert "catalog_candidates_received" in phases
         assert phases.count("candidate_evaluation_start") == 2
-        assert phases.count("candidate_detail_not_required") == 2
+        assert phases.count("candidate_detail_required") == 2
+        assert phases.count("detail_fetch_success") == 2
         assert phases.count("candidate_filter_decision") == 2
         assert phases.count("item_persisted") == 2
+        assert phases.count("item_detail_persisted") == 2
         assert phases.count("opportunity_created") == 2
+        assert sorted(provider.detail_calls) == ["pytest-run-item-0", "pytest-run-item-1"]
         assert "redis_seen_marked" in phases
         assert next(event for event in events if event.phase == "catalog_candidates_received").details["candidate_count"] == 2
         assert next(event for event in events if event.phase == "redis_seen_marked").details["marked_seen_count"] == 2
@@ -1731,7 +1734,7 @@ def test_discarded_item_is_not_persisted(source_id: int) -> None:
         assert opportunity_count == 0
 
 
-def test_detail_failure_creates_opportunity_with_redacted_error(source_id: int) -> None:
+def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) -> None:
     with SessionLocal() as db:
         source = db.get(SearchSource, source_id)
         assert source is not None
@@ -1739,22 +1742,27 @@ def test_detail_failure_creates_opportunity_with_redacted_error(source_id: int) 
         db.commit()
 
     with SessionLocal() as db:
+        provider = FakeFailingDetailProvider(item_count=1)
         run = execute_monitor_run(
             db,
             source_id,
-            provider=FakeFailingDetailProvider(item_count=1),
+            provider=provider,
             seen_cache=FakeSeenCache(),
             egress=_test_direct_egress(),
         )
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
         item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
+        error_event = db.scalar(
+            select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "detail_fetch_error").order_by(RunEvent.id.desc())
+        )
 
-        assert run.opportunities_created == 1
+        assert run.opportunities_created == 0
         assert run.items_filter_pending == 1
-        assert opportunity is not None
-        assert opportunity.evaluation_status == "detail_error"
-        assert item is not None
-        assert "session-secret" not in (item.detail_error or "")
+        assert opportunity is None
+        assert item is None
+        assert provider.detail_calls == ["pytest-run-item-0"]
+        assert error_event is not None
+        assert "session-secret" not in (error_event.message or "")
 
 
 def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:

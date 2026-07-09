@@ -18,7 +18,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Use short-lived Redis processing locks to avoid concurrent duplicate work for the same monitor/item.
 - Use `items.vinted_item_id` as normalized catalog identity only for items that become opportunities.
 - Count `items_new` as candidates newly claimed by Redis for that monitor/policy in that run.
-- Fetch item detail only for Redis-new candidates that need it for filtering, except controlled retries for missing or failed details.
+- Fetch item detail for every Redis-new candidate before filter evaluation and opportunity creation, bounded by the configured per-run limit.
 - Extract detail fields needed for second-stage filtering and opportunity display: description, semantic color, category, shipping price, buyer protection fee, total price, full photo set, seller rating, seller badges, and item availability flags when visible.
 - Leave opportunity creation behavior to local filter evaluation in spec 006.
 
@@ -62,8 +62,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Changing the monitor URL or monitor-owned filter definition changes the policy hash and can reevaluate visible items.
 - Changing the monitor URL or monitor-owned filter definition also requires a new explicit initial snapshot for the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
-- Details are fetched only for monitor-new candidates that need detail and are bounded by the configured per-run limit.
-- Detail failures are recorded without crashing the service.
+- Details are fetched for monitor-new candidates before opportunity creation and are bounded by the configured per-run limit.
+- Detail failures are recorded without crashing the service; non-DataDome detail failures do not create opportunities during the current pre-production phase.
 - Redis seen state is marked after each candidate reaches a terminal outcome.
 - A processing lock expiring allows retry instead of permanently losing a candidate.
 

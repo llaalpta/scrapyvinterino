@@ -26,6 +26,8 @@ DATADOME_CHALLENGE_MARKERS = [
 DATADOME_TAGS_VERSION_PATTERN = re.compile(r"/datadome/([0-9]+(?:\.[0-9]+)*)/tags\.js", re.IGNORECASE)
 DATADOME_SCRIPT_PATTERN = re.compile(r"""<script[^>]+src=["']([^"']*/datadome/[^"']*/tags\.js[^"']*)["']""", re.IGNORECASE)
 DATADOME_CLIENT_KEY_PATTERNS = (
+    re.compile(r'"DATADOME_CLIENT_SIDE_KEY"\s*:\s*"([A-Za-z0-9_-]{12,})"', re.IGNORECASE),
+    re.compile(r'\\"DATADOME_CLIENT_SIDE_KEY\\"\s*:\s*\\"([A-Za-z0-9_-]{12,})\\"', re.IGNORECASE),
     re.compile(r"""(?:ddjskey|ddk|datadomeKey|clientKey)["']?\s*[:=]\s*["']([A-Za-z0-9_-]{12,})["']""", re.IGNORECASE),
     re.compile(r"""["']ddk["']\s*,\s*["']([A-Za-z0-9_-]{12,})["']""", re.IGNORECASE),
     re.compile(r'\\"(?:ddjskey|ddk|datadomeKey|clientKey)\\"\s*[:=]\s*\\"([A-Za-z0-9_-]{12,})\\"', re.IGNORECASE),
@@ -368,44 +370,39 @@ def build_datadome_collector_headers(*, source_url: str, profile: BrowserProfile
     origin = _origin(source_url)
     return OrderedDict(
         [
-            ("accept", "*/*"),
-            ("accept-encoding", "gzip, deflate, br, zstd"),
-            ("accept-language", accept_language),
-            ("cache-control", "no-cache"),
-            ("content-type", "application/x-www-form-urlencoded"),
-            ("origin", origin),
-            ("pragma", "no-cache"),
-            ("priority", "u=1, i"),
-            ("referer", f"{origin}/"),
-            ("sec-ch-ua", profile.sec_ch_ua),
-            ("sec-ch-ua-mobile", profile.sec_ch_ua_mobile),
             ("sec-ch-ua-platform", profile.sec_ch_ua_platform),
-            ("sec-fetch-dest", "empty"),
-            ("sec-fetch-mode", "cors"),
-            ("sec-fetch-site", "cross-site"),
             ("user-agent", profile.user_agent),
+            ("sec-ch-ua", profile.sec_ch_ua),
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("sec-ch-ua-mobile", profile.sec_ch_ua_mobile),
+            ("accept-language", accept_language),
+            ("accept", "*/*"),
+            ("origin", origin),
+            ("sec-fetch-site", "cross-site"),
+            ("sec-fetch-mode", "cors"),
+            ("sec-fetch-dest", "empty"),
+            ("referer", source_url),
+            ("accept-encoding", "gzip, deflate, br, zstd"),
+            ("priority", "u=1, i"),
         ]
     )
 
 
 def build_datadome_tags_headers(*, source_url: str, profile: BrowserProfile, accept_language: str) -> OrderedDict[str, str]:
-    origin = _origin(source_url)
     return OrderedDict(
         [
-            ("accept", "*/*"),
-            ("accept-encoding", "gzip, deflate, br, zstd"),
-            ("accept-language", accept_language),
-            ("cache-control", "no-cache"),
-            ("pragma", "no-cache"),
-            ("referer", f"{origin}/"),
-            ("sec-ch-ua", profile.sec_ch_ua),
-            ("sec-ch-ua-mobile", profile.sec_ch_ua_mobile),
             ("sec-ch-ua-platform", profile.sec_ch_ua_platform),
-            ("sec-fetch-dest", "script"),
-            ("sec-fetch-mode", "no-cors"),
-            ("sec-fetch-site", "cross-site"),
-            ("sec-fetch-storage-access", "active"),
             ("user-agent", profile.user_agent),
+            ("sec-ch-ua", profile.sec_ch_ua),
+            ("accept-language", accept_language),
+            ("sec-ch-ua-mobile", profile.sec_ch_ua_mobile),
+            ("accept", "*/*"),
+            ("sec-fetch-site", "cross-site"),
+            ("sec-fetch-mode", "no-cors"),
+            ("sec-fetch-dest", "script"),
+            ("sec-fetch-storage-access", "active"),
+            ("referer", source_url),
+            ("accept-encoding", "gzip, deflate, br, zstd"),
         ]
     )
 
