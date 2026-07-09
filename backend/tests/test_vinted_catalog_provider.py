@@ -576,19 +576,20 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
     assert "udt-secret-value" not in serialized
 
 
-def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> None:
+def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers() -> None:
     calls: list[dict] = []
     events: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
         if path(call) == "/ip":
+            assert call["cookies"] == {}
             return FakeResponse(
                 200,
                 json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES", "connection": {"asn": 64500, "org": "Test ISP"}},
                 headers={"content-type": "application/json", "set-cookie": "diagnostic_cookie=diag-secret-value; Path=/;"},
             )
         if path(call) == "/catalog":
-            assert call["cookies"]["diagnostic_cookie"] == "diag-secret-value"
+            assert "diagnostic_cookie" not in call["cookies"]
             return FakeResponse(
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
@@ -633,6 +634,8 @@ def test_curl_provider_diagnoses_egress_with_same_session_and_safe_markers() -> 
         "org": "Test ISP",
     }
     assert egress_event["details"]["proxy_session"] == proxy_session
+    assert egress_event["details"]["diagnostic_session"] == "isolated"
+    assert egress_event["details"]["cookies_sent"] is False
     assert "diag-secret-value" not in json.dumps(events)
     assert "anonymous-secret-value" not in json.dumps(events)
     assert "csrf-secret-value" not in json.dumps(events)
@@ -877,6 +880,167 @@ def test_curl_provider_item_detail_api_probe_uses_prepared_session_and_summarize
     assert start["details"]["x_v_udt_sent"] is False
     success = next(event for event in events if event["phase"] == "detail_api_probe_success")
     assert success["details"]["detail_summary"]["photo_count"] == 2
+
+
+def test_curl_provider_egress_diagnostic_is_cookie_free_with_prepared_session() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        parsed = urlparse(call["url"])
+        if parsed.hostname == "ipwho.is":
+            assert call["default_headers"] is False
+            assert call["cookies"] == {}
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        assert path(call) == "/api/v2/items/9356705635/details"
+        assert call["cookies"]["access_token_web"] == "access-secret-value"
+        assert call["cookies"]["v_udt"] == "udt-secret-value"
+        return FakeResponse(
+            200,
+            json_data={"item": {"id": 9356705635, "title": "Dead cowboy"}},
+            headers={"content-type": "application/json"},
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://ipwho.is/"),
+        proxy_url="http://user:pass@proxy.example:8000",
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "refresh_token_web": "refresh-secret-value",
+                "datadome": "datadome-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            datadome="datadome-secret-value",
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
+
+    assert probe["outcome"] == "accepted_json"
+    diagnostic_calls = [call for call in calls if urlparse(call["url"]).hostname == "ipwho.is"]
+    detail_calls = [call for call in calls if path(call) == "/api/v2/items/9356705635/details"]
+    assert len(diagnostic_calls) == 1
+    assert len(detail_calls) == 1
+    assert diagnostic_calls[0]["cookies"] == {}
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_outcome", "expected_status"),
+    [
+        (
+            FakeResponse(404, text="not found", headers={"content-type": "text/plain"}),
+            "not_found",
+            404,
+        ),
+        (
+            FakeResponse(429, text="slow down", headers={"content-type": "text/plain", "retry-after": "7"}),
+            "rate_limited",
+            429,
+        ),
+        (
+            FakeResponse(403, text="DataDome challenge", headers={"content-type": "text/html", "x-datadome": "blocked"}),
+            "datadome_challenge",
+            403,
+        ),
+        (
+            FakeResponse(500, text="server error", headers={"content-type": "text/plain"}),
+            "http_error",
+            500,
+        ),
+        (
+            FakeResponse(200, text="<html>not json</html>", headers={"content-type": "text/html"}),
+            "invalid_json",
+            200,
+        ),
+    ],
+)
+def test_curl_provider_item_detail_api_probe_classifies_terminal_outcomes(
+    response: FakeResponse,
+    expected_outcome: str,
+    expected_status: int,
+) -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        assert path(call) == "/api/v2/items/9356705635/details"
+        return response
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            datadome=None,
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
+
+    assert probe["outcome"] == expected_outcome
+    assert probe["status_code"] == expected_status
+    if expected_outcome == "rate_limited":
+        assert probe["response"]["retry_after_seconds"] == 7
+
+
+def test_curl_provider_item_detail_api_probe_reports_transport_error() -> None:
+    def handler(_call: dict) -> FakeResponse:
+        raise RuntimeError("proxy timeout access_token_web=raw-secret")
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            datadome=None,
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, []),
+    )
+
+    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
+
+    assert probe["outcome"] == "transport_error"
+    assert probe["status_code"] is None
+    assert "raw-secret" not in json.dumps(probe)
 
 
 def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_returned() -> None:

@@ -1550,34 +1550,50 @@ class CurlCffiVintedCatalogProvider:
     def _diagnose_egress(self, *, attempt: int) -> None:
         if self._egress_diagnosed or not self.settings.egress_diagnostic_url:
             return
-        assert self._session is not None
         url = str(self.settings.egress_diagnostic_url)
-        headers = {"Accept": "application/json", "User-Agent": self.profile.user_agent}
+        proxy_dict = {"https": self.proxy_url, "http": self.proxy_url} if self.proxy_url else None
+        diagnostic_session = self.session_factory(
+            impersonate=self.profile.impersonate,
+            proxies=proxy_dict,
+        )
+        headers = {"accept": "application/json", "user-agent": self.profile.user_agent}
         self._emit_event(
             phase="egress_diagnostic_start",
             method="GET",
             url=url,
             details={
                 "attempt": attempt,
-                "http_session": self._session_marker(),
+                "diagnostic_session": "isolated",
+                "vinted_http_session": self._session_marker(),
                 "proxy_configured": bool(self.proxy_url),
                 "proxy_session": self.proxy_session_marker,
                 "request_headers": safe_headers(headers),
+                "cookies_sent": False,
+                "default_headers": False,
             },
         )
         started_at = time.perf_counter()
         try:
-            response = self._session.get(url, headers=headers, timeout=self.timeout_ms / 1000)
+            response = diagnostic_session.get(
+                url,
+                headers=headers,
+                timeout=self.timeout_ms / 1000,
+                default_headers=False,
+            )
             payload = response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {}
             self._egress_context = _egress_context_from_payload(payload)
             details = {
                 "attempt": attempt,
-                "http_session": self._session_marker(),
+                "diagnostic_session": "isolated",
+                "vinted_http_session": self._session_marker(),
                 "proxy_configured": bool(self.proxy_url),
                 "proxy_session": self.proxy_session_marker,
                 "egress": _egress_details_from_payload(payload),
                 "response_headers": safe_headers(dict(response.headers)),
-                "cookies_after": self._cookie_markers(),
+                "diagnostic_cookies_after": safe_cookie_markers(diagnostic_session.cookies),
+                "vinted_cookies_after": self._cookie_markers(),
+                "cookies_sent": False,
+                "default_headers": False,
             }
             self._emit_event(
                 phase="egress_diagnostic_success" if response.status_code < 400 else "egress_diagnostic_error",
@@ -1599,12 +1615,21 @@ class CurlCffiVintedCatalogProvider:
                 message=str(exc),
                 details={
                     "attempt": attempt,
-                    "http_session": self._session_marker(),
+                    "diagnostic_session": "isolated",
+                    "vinted_http_session": self._session_marker(),
                     "proxy_configured": bool(self.proxy_url),
                     "proxy_session": self.proxy_session_marker,
+                    "cookies_sent": False,
+                    "default_headers": False,
                 },
             )
         finally:
+            close = getattr(diagnostic_session, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
             self._egress_diagnosed = True
 
     def _session_marker(self) -> dict[str, Any]:

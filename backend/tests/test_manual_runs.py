@@ -276,6 +276,21 @@ class FakeSessionPreparingProvider:
         self.closed = True
 
 
+class FakeDataDomeDetailProvider(FakeSessionPreparingProvider):
+    def probe_item_detail_api(self, item_ref: str, *, referer_url: str | None = None) -> dict:
+        self.detail_probe_calls.append((item_ref, referer_url))
+        return {
+            "outcome": "datadome_challenge",
+            "item_id": item_ref,
+            "detail_api_url": f"https://www.vinted.es/api/v2/items/{item_ref}/details",
+            "status_code": 403,
+            "duration_ms": 17,
+            "detail_summary": {},
+            "missing_required": [],
+            "error": None,
+        }
+
+
 def _test_direct_egress() -> RunEgress:
     return RunEgress(mode="direct")
 
@@ -648,6 +663,7 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
             assert "vinted_session_prepare_start" in phases
             assert "detail_api_probe_success" in phases
             assert "detail_probe_finished" in phases
+            assert "run_succeeded" in phases
             assert "catalog_search_start" not in phases
             assert "baseline_snapshot_seeded" not in phases
             assert "redis_check_start" not in phases
@@ -656,6 +672,73 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
             stats = get_monitor_stats(db, source_id, range_name="all")
             assert stats.historical_summary.runs_count == 0
             assert sum(point.runs_count for point in stats.chart_points) == 0
+    finally:
+        cleanup_source(source_id)
+
+
+def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    FakeSessionPreparingProvider.created = []
+    monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeDataDomeDetailProvider)
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.get_settings",
+        lambda: Settings(
+            scheduler_enabled=True,
+            proxy_sticky_username_template="{username}-sessid-{session_id}",
+            vinted_prepared_session_required=True,
+        ),
+    )
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest detail datadome proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8012,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest detail datadome monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        _create_ready_vinted_session(db, source, proxy, proxy_session_id="detaildatadome01")
+        db.commit()
+        source_id = source.id
+        proxy_id = proxy.id
+
+    try:
+        response = client.post(
+            f"/api/monitors/{source_id}/items/detail-probe",
+            json={"item_ref": "9356705635"},
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["run"]["status"] == SUCCESS
+        assert body["result"]["outcome"] == "datadome_challenge"
+        assert len(FakeSessionPreparingProvider.created) == 1
+
+        with SessionLocal() as db:
+            session = db.scalar(
+                select(VintedSession).where(VintedSession.source_id == source_id, VintedSession.proxy_profile_id == proxy_id)
+            )
+            assert session is not None
+            assert session.status == "invalid"
+            assert session.failure_count == 1
+            assert "DataDome challenge" in (session.last_error or "")
+            events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == body["run"]["id"]).order_by(RunEvent.id.asc())))
+            phases = [event.phase for event in events]
+            assert "detail_probe_finished" in phases
+            assert "run_succeeded" in phases
     finally:
         cleanup_source(source_id)
 
@@ -1007,6 +1090,47 @@ def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filt
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
         response = client.post(f"/api/monitors/{source_id}/baseline")
+
+        assert response.status_code == 422
+        assert "color_ids" in response.json()["detail"]
+        with SessionLocal() as db:
+            assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == source_id)) == 0
+    finally:
+        cleanup_source(source_id)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        ("runs", None),
+        ("vinted-session/prepare", None),
+        ("items/detail-probe", {"item_ref": "9356705635"}),
+    ],
+)
+def test_monitor_traffic_actions_reject_unsupported_url_filter_before_creating_run(
+    endpoint: str,
+    payload: dict | None,
+) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name=f"pytest unsupported {endpoint}",
+            url="https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12",
+            normalized_query={"catalog[]": ["76"], "color_ids[]": ["12"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        if payload is None:
+            response = client.post(f"/api/monitors/{source_id}/{endpoint}")
+        else:
+            response = client.post(f"/api/monitors/{source_id}/{endpoint}", json=payload)
 
         assert response.status_code == 422
         assert "color_ids" in response.json()["detail"]

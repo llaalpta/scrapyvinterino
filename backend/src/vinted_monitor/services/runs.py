@@ -135,16 +135,28 @@ def ensure_monitor_baseline_ready(db: Session, source_id: int, seen_cache: SeenC
     source = db.get(SearchSource, source_id)
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
-    try:
-        validate_vinted_catalog_url(source.url)
-    except ValueError as exc:
-        raise SearchSourceConfigError(str(exc)) from exc
+    _validated_catalog_filter_compatibility(source)
     cache = seen_cache or get_seen_cache()
     policy_hash = monitor_policy_hash(source)
     cache.require_available()
     if not cache.has_baseline(source.id, policy_hash):
         raise BaselineRequiredError("Recalibra el listado inicial antes de ejecutar este monitor")
     return policy_hash
+
+
+def _validated_catalog_filter_compatibility(source: SearchSource) -> dict[str, Any]:
+    try:
+        validate_vinted_catalog_url(source.url)
+    except ValueError as exc:
+        raise SearchSourceConfigError(str(exc)) from exc
+    compatibility = catalog_filter_compatibility(source.url)
+    if not compatibility.get("compatible", False):
+        unsupported = compatibility.get("unsupported") or {}
+        unsupported_filters = ", ".join(sorted(str(key) for key in unsupported)) or "desconocidos"
+        raise SearchSourceConfigError(
+            f"Filtros de URL no soportados por el catalogo rapido: {unsupported_filters}"
+        )
+    return compatibility
 
 
 def execute_monitor_baseline(
@@ -161,11 +173,7 @@ def execute_monitor_baseline(
         raise RunAlreadyActiveError("Deten la sesion antes de recalibrar el listado inicial")
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
-    try:
-        validate_vinted_catalog_url(source.url)
-    except ValueError as exc:
-        raise SearchSourceConfigError(str(exc)) from exc
-    catalog_filters = catalog_filter_compatibility(source.url)
+    catalog_filters = _validated_catalog_filter_compatibility(source)
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
@@ -423,11 +431,7 @@ def execute_monitor_session_prepare(
         raise RunAlreadyActiveError("Deten la sesion antes de preparar la sesion Vinted")
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
-    try:
-        validate_vinted_catalog_url(source.url)
-    except ValueError as exc:
-        raise SearchSourceConfigError(str(exc)) from exc
-    catalog_filters = catalog_filter_compatibility(source.url)
+    catalog_filters = _validated_catalog_filter_compatibility(source)
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
@@ -617,11 +621,7 @@ def execute_monitor_item_detail_probe(
     item_id = extract_vinted_item_id(item_ref)
     if item_id is None:
         raise SearchSourceConfigError("Introduce un ID numerico de Vinted o una URL de item valida")
-    try:
-        validate_vinted_catalog_url(source.url)
-    except ValueError as exc:
-        raise SearchSourceConfigError(str(exc)) from exc
-    catalog_filters = catalog_filter_compatibility(source.url)
+    catalog_filters = _validated_catalog_filter_compatibility(source)
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
@@ -799,6 +799,26 @@ def execute_monitor_item_detail_probe(
                 "error": result.get("error"),
             },
         )
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="run_succeeded",
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+            status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
+            duration_ms=result.get("duration_ms") if isinstance(result.get("duration_ms"), int) else None,
+            details={
+                "detail_probe_run": True,
+                "item_id": item_id,
+                "outcome": result.get("outcome"),
+                "status_code": result.get("status_code"),
+                "duration_ms": result.get("duration_ms"),
+                "endpoint": result.get("detail_api_url"),
+                "detail_summary": result.get("detail_summary") or {},
+                "error": result.get("error"),
+            },
+        )
         db.commit()
         db.refresh(run)
         return run, result
@@ -837,11 +857,7 @@ def execute_monitor_run(
         raise SearchSourceInactiveError(f"Search source {source_id} is inactive")
     if _active_source_run_exists(db, source_id=source.id):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
-    try:
-        validate_vinted_catalog_url(source.url)
-    except ValueError as exc:
-        raise SearchSourceConfigError(str(exc)) from exc
-    catalog_filters = catalog_filter_compatibility(source.url)
+    catalog_filters = _validated_catalog_filter_compatibility(source)
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
