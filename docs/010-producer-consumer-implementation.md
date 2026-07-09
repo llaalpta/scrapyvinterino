@@ -87,7 +87,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 - The attempted `chrome149` runtime profile was removed because the installed `curl_cffi` build rejects live requests with `Impersonating chrome149 is not supported`.
 - `profile_for_impersonate()` now validates configured runtime targets against the installed `curl_cffi` impersonation literals before a proxy test, session prepare, or run reaches network I/O.
-- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`.
+- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`; `0011_normalize_vinted_session_invalid_status` normalizes any already-migrated `invalidated` rows back to the canonical `invalid` status.
 - The DataDome collector keeps the HAR-shaped `ch` then `le` sequence and does not stop after a `ch` cookie; the final returned cookie is kept in the same `curl_cffi.Session` cookie jar.
 
 ## Detail Probe Session Hardening 2026-07-09

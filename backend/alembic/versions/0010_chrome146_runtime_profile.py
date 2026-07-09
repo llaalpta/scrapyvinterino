@@ -28,7 +28,7 @@ def upgrade() -> None:
     op.execute(
         """
         UPDATE vinted_sessions
-        SET status = 'invalidated',
+        SET status = 'invalid',
             invalidated_at = COALESCE(invalidated_at, now()),
             last_error = 'Runtime profile chrome149 is not supported by installed curl_cffi; session invalidated by migration 0010.',
             updated_at = now()
