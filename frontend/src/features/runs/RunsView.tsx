@@ -218,6 +218,11 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   catalog_session_context_incomplete: { area: 'session_context', action: 'checking', result: 'incomplete', tone: 'error' },
   vinted_session_prepare_start: { area: 'prepare_session', action: 'preparing', result: null, tone: 'neutral' },
   vinted_session_prepare_result: { area: 'session', action: 'saving', result: 'ok', tone: 'success' },
+  detail_api_probe_start: { area: 'detail_api', action: 'probing', result: null, tone: 'neutral' },
+  detail_api_probe_success: { area: 'detail_api', action: 'probing', result: 'ok', tone: 'success' },
+  detail_api_probe_failed: { area: 'detail_api', action: 'probing', result: 'rejected', tone: 'warning' },
+  detail_api_probe_error: { area: 'detail_api', action: 'probing', result: 'failed', tone: 'error' },
+  detail_probe_finished: { area: 'detail_probe', action: 'finishing', result: 'ok', tone: 'success' },
   catalog_api_probe_start: { area: 'api', action: 'probing', result: null, tone: 'neutral' },
   catalog_api_probe_success: { area: 'api', action: 'probing', result: 'ok', tone: 'success' },
   catalog_api_probe_failed: { area: 'api', action: 'probing', result: 'rejected', tone: 'warning' },
@@ -271,13 +276,19 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
 function eventNarrative(event: RunEvent): EventNarrative {
   if (event.phase === 'run_started') {
     const trigger = detailString(event.details, 'trigger');
-    return { area: trigger === 'session_prepare' ? 'prepare_session' : trigger === 'baseline' ? 'baseline' : 'run', action: 'starting', result: null, tone: 'neutral' };
+    return {
+      area: trigger === 'session_prepare' ? 'prepare_session' : trigger === 'baseline' ? 'baseline' : trigger === 'detail_probe' ? 'detail_probe' : 'run',
+      action: 'starting',
+      result: null,
+      tone: 'neutral'
+    };
   }
   if (event.phase === 'run_succeeded' || event.phase === 'run_failed') {
     const sessionPrepare = event.details.session_prepare_run === true;
     const baseline = event.details.baseline_run === true;
+    const detailProbe = event.details.detail_probe_run === true;
     return {
-      area: sessionPrepare ? 'prepare_session' : baseline ? 'baseline' : 'run',
+      area: sessionPrepare ? 'prepare_session' : baseline ? 'baseline' : detailProbe ? 'detail_probe' : 'run',
       action: 'finishing',
       result: event.phase === 'run_succeeded' ? 'ok' : 'failed',
       tone: event.phase === 'run_succeeded' ? 'success' : 'error'
@@ -413,7 +424,7 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (event.details.default_headers === false) {
     parts.push('default_headers=off');
   }
-  const itemId = detailString(event.details, 'vinted_item_id');
+  const itemId = detailString(event.details, 'vinted_item_id') || detailString(event.details, 'item_id');
   if (itemId) {
     parts.push(`item=${itemId}`);
   }
@@ -591,6 +602,10 @@ function eventChecklistDetailLines(event: RunEvent): string[] {
   if (responseLine) {
     lines.push(`Respuesta: ${responseLine}`);
   }
+  const detailSummary = formatDetailSummary(detailRecord(event.details, 'detail_summary'));
+  if (detailSummary) {
+    lines.push(`Detalle: ${detailSummary}`);
+  }
   return lines;
 }
 
@@ -616,7 +631,7 @@ function headerSetToken(event: RunEvent): string | null {
   if (event.phase.startsWith('anonymous_session_bootstrap')) {
     return 'bootstrap_har146';
   }
-  if (event.phase.startsWith('catalog_api')) {
+  if (event.phase.startsWith('catalog_api') || event.phase.startsWith('detail_api')) {
     return 'api_har146';
   }
   if (event.phase.startsWith('datadome_tags')) {
@@ -784,6 +799,23 @@ function formatResponseSummary(summary: Record<string, unknown> | null): string 
   return tokens.length > 0 ? tokens.join(' ') : null;
 }
 
+function formatDetailSummary(summary: Record<string, unknown> | null): string | null {
+  if (!summary) {
+    return null;
+  }
+  const tokens = [
+    summary.title_present === true ? 'title=ok' : summary.title_present === false ? 'title=missing' : null,
+    typeof summary.photo_count === 'number' ? `photos=${summary.photo_count}` : null,
+    typeof summary.description_length === 'number' ? `description_chars=${summary.description_length}` : null,
+    summary.seller_present === true ? 'seller=ok' : summary.seller_present === false ? 'seller=missing' : null,
+    typeof summary.brand === 'string' && summary.brand ? `brand=${formatTokenValue(summary.brand)}` : null,
+    typeof summary.size === 'string' && summary.size ? `size=${formatTokenValue(summary.size)}` : null,
+    typeof summary.price_amount === 'string' && summary.price_amount ? `price=${formatTokenValue(summary.price_amount)}` : null,
+    typeof summary.currency === 'string' && summary.currency ? `currency=${formatTokenValue(summary.currency)}` : null
+  ].filter(Boolean);
+  return tokens.length > 0 ? tokens.join(' ') : null;
+}
+
 function formatTokenValue(value: string): string {
   const compact = value.replace(/\s+/g, '_');
   return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact;
@@ -839,6 +871,11 @@ function eventLabel(phase: string): string {
     catalog_session_context_incomplete: 'Contexto de catalogo incompleto',
     vinted_session_prepare_start: 'Preparando sesion Vinted',
     vinted_session_prepare_result: 'Sesion Vinted preparada',
+    detail_api_probe_start: 'Probando API de detalle',
+    detail_api_probe_success: 'Detalle API aceptado',
+    detail_api_probe_failed: 'Detalle API no aceptado',
+    detail_api_probe_error: 'Error en API de detalle',
+    detail_probe_finished: 'Probe de detalle completado',
     catalog_api_probe_start: 'Probando API de catalogo',
     catalog_api_probe_success: 'Probe API aceptado',
     catalog_api_probe_failed: 'Probe API fallido',
@@ -894,7 +931,8 @@ function triggerLabel(trigger: string): string {
     manual: 'puntual',
     scheduler: 'scheduler',
     baseline: 'snapshot inicial',
-    session_prepare: 'preparar sesion'
+    session_prepare: 'preparar sesion',
+    detail_probe: 'probe detalle'
   };
   return labels[trigger] ?? trigger;
 }

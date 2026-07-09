@@ -9,7 +9,12 @@ import pytest
 
 from vinted_monitor.core.config import Settings
 from vinted_monitor.providers import vinted_catalog as catalog_provider
-from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES, get_profile_by_name, profile_for_impersonate, supported_curl_impersonates
+from vinted_monitor.providers.browser_profiles import (
+    BROWSER_PROFILES,
+    get_profile_by_name,
+    profile_for_impersonate,
+    supported_curl_impersonates,
+)
 from vinted_monitor.providers.datadome import (
     DataDomeChallengeError,
     extract_datadome_client_key,
@@ -20,11 +25,13 @@ from vinted_monitor.providers.datadome import (
 from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
+    PreparedCatalogSession,
     VintedCatalogProviderError,
     VintedCatalogRateLimitError,
     build_catalog_api_params,
     decode_next_flight_payload,
     extract_csrf_token,
+    extract_vinted_item_id,
     map_catalog_item,
     parse_catalog_api_payload,
     parse_catalog_html,
@@ -789,6 +796,87 @@ def test_curl_provider_catalog_api_probe_reports_transport_error() -> None:
     assert probe["outcome"] == "transport_error"
     assert probe["status_code"] is None
     assert "raw-secret" not in json.dumps(probe)
+
+
+def test_extract_vinted_item_id_accepts_id_or_item_url() -> None:
+    assert extract_vinted_item_id("9356705635") == "9356705635"
+    assert extract_vinted_item_id("https://www.vinted.es/items/9356705635-dead-cowboy?referrer=catalog") == "9356705635"
+    assert extract_vinted_item_id("https://www.vinted.es/catalog?search_text=foo") is None
+
+
+def test_curl_provider_item_detail_api_probe_uses_prepared_session_and_summarizes_json() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        assert path(call) == "/api/v2/items/9356705635/details"
+        assert call["default_headers"] is False
+        assert call["headers"]["x-csrf-token"] == "csrf-secret-value"
+        assert call["headers"]["x-anon-id"] == "anon-secret-value"
+        assert "x-v-udt" not in call["headers"]
+        assert call["cookies"]["access_token_web"] == "access-secret-value"
+        assert call["cookies"]["v_udt"] == "udt-secret-value"
+        return FakeResponse(
+            200,
+            json_data={
+                "code": 0,
+                "item": {
+                    "id": 9356705635,
+                    "title": "Dead cowboy",
+                    "description": "Detalle publico",
+                    "price": {"amount": "6.00", "currency_code": "EUR"},
+                    "brand_dto": {"title": "Vintage"},
+                    "size_title": "L",
+                    "status": "Muy bueno",
+                    "photos": [{"full_size_url": "https://images.example/1.jpg"}, {"url": "https://images.example/2.jpg"}],
+                    "user": {"login": "seller"},
+                    "favourite_count": 3,
+                    "url": "https://www.vinted.es/items/9356705635-dead-cowboy",
+                },
+            },
+            headers={"content-type": "application/json; charset=utf-8"},
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            datadome=None,
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
+
+    assert probe["outcome"] == "accepted_json"
+    assert probe["status_code"] == 200
+    assert probe["detail_summary"]["description_present"] is True
+    assert probe["detail_summary"]["photo_count"] == 2
+    assert probe["detail_summary"]["brand"] == "Vintage"
+    serialized = json.dumps(probe)
+    assert "access-secret-value" not in serialized
+    assert "csrf-secret-value" not in serialized
+    assert "anon-secret-value" not in serialized
+    assert "udt-secret-value" not in serialized
+    start = next(event for event in events if event["phase"] == "detail_api_probe_start")
+    assert start["details"]["request_profile"] == "api_har146"
+    assert start["details"]["x_v_udt_sent"] is False
+    success = next(event for event in events if event["phase"] == "detail_api_probe_success")
+    assert success["details"]["detail_summary"]["photo_count"] == 2
 
 
 def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_returned() -> None:

@@ -35,6 +35,8 @@ export function DashboardApp() {
 
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
+          detailProbeMessages={dashboard.detailProbeMessages}
+          detailProbeRefs={dashboard.detailProbeRefs}
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
           monitorRunsBySource={dashboard.monitorRunsBySource}
@@ -49,6 +51,7 @@ export function DashboardApp() {
           onLoadMonitorRuns={(sourceId) => void dashboard.loadMonitorRuns(sourceId)}
           onRefreshRuntime={dashboard.refreshRuntime}
           onPrepareVintedSession={(source) => void dashboard.onPrepareVintedSession(source)}
+          onProbeItemDetail={(source) => void dashboard.onProbeItemDetail(source)}
           onRecalibrateBaseline={(source) => void dashboard.onRecalibrateBaseline(source)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
@@ -61,6 +64,7 @@ export function DashboardApp() {
           sourceUrl={dashboard.sourceUrl}
           setSourceName={dashboard.setSourceName}
           setSourceUrl={dashboard.setSourceUrl}
+          updateDetailProbeRef={dashboard.updateDetailProbeRef}
           updateSourceDraft={dashboard.updateSourceDraft}
         />
       ) : null}

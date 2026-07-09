@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from curl_cffi.requests import Session
 
@@ -261,6 +261,15 @@ class CurlCffiVintedCatalogProvider:
         if not self._bootstrapped:
             self._bootstrap_anonymous_session(source_url, attempt=1)
         return self._probe_catalog_api_request(source_url)
+
+    def probe_item_detail_api(self, item_ref: str, *, referer_url: str | None = None) -> dict[str, Any]:
+        """Probe the internal item detail API once and return safe diagnostics."""
+        item_id = extract_vinted_item_id(item_ref)
+        if item_id is None:
+            raise ValueError("item_ref must be a Vinted item id or item URL")
+        self._ensure_session()
+        self._diagnose_egress(attempt=1)
+        return self._probe_item_detail_api_request(item_id, referer_url=referer_url or str(self.settings.vinted_base_url))
 
     def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
         if self._session is None or not self._bootstrapped:
@@ -906,6 +915,194 @@ class CurlCffiVintedCatalogProvider:
             "missing_required": missing_context,
             "request": request_details,
             "response": response_details,
+            "error": error,
+        }
+
+    def _probe_item_detail_api_request(self, item_id: str, *, referer_url: str) -> dict[str, Any]:
+        assert self._session is not None
+        url = urljoin(str(self.settings.vinted_base_url), f"/api/v2/items/{item_id}/details")
+        context_report = self._session_context_report()
+        missing_context = self._missing_session_context(context_report)
+        headers = dict(
+            self.profile.build_api_headers(
+                referer=referer_url,
+                accept_language=self.accept_language,
+                locale=self.locale,
+                screen=self.vinted_screen,
+            )
+        )
+        if self._catalog_session_context.anon_id:
+            headers["x-anon-id"] = self._catalog_session_context.anon_id
+        if self._catalog_session_context.csrf_token:
+            headers["x-csrf-token"] = self._catalog_session_context.csrf_token
+
+        request_details = {
+            "method": "GET",
+            "url": url,
+            "headers": safe_headers(headers),
+            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
+            "cookies": self._cookie_markers(),
+        }
+        self._emit_event(
+            phase="detail_api_probe_start",
+            method="GET",
+            url=url,
+            details={
+                "item_id": item_id,
+                "referer_url": referer_url,
+                "request_profile": "api_har146",
+                "missing_required": missing_context,
+                "context": context_report,
+                **_context_summary(context_report, self._cookie_values()),
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
+                "default_headers": False,
+                "x_v_udt_sent": False,
+            },
+        )
+        started_at = time.perf_counter()
+        try:
+            response = self._session.get(
+                url,
+                headers=headers,
+                timeout=self.timeout_ms / 1000,
+                default_headers=False,
+            )
+        except Exception as exc:
+            duration_ms = _elapsed_ms(started_at)
+            error = redact_sensitive_text(str(exc))
+            self._emit_event(
+                phase="detail_api_probe_error",
+                method="GET",
+                url=url,
+                duration_ms=duration_ms,
+                level="warning",
+                message=error,
+                details={
+                    "item_id": item_id,
+                    "outcome": "transport_error",
+                    "referer_url": referer_url,
+                    "missing_required": missing_context,
+                    "context": context_report,
+                    "request_headers": safe_headers(headers),
+                    "cookies_after": self._cookie_markers(),
+                },
+            )
+            return {
+                "outcome": "transport_error",
+                "item_id": item_id,
+                "detail_api_url": url,
+                "status_code": None,
+                "duration_ms": duration_ms,
+                "egress_ip": self._egress_context.ip,
+                "egress_country_code": self._egress_context.country_code,
+                "context": context_report,
+                "missing_required": missing_context,
+                "request": request_details,
+                "response": {},
+                "detail_summary": {},
+                "error": error,
+            }
+
+        duration_ms = _elapsed_ms(started_at)
+        self._catalog_session_context.access_token_web = (
+            self._cookie_value("access_token_web") or self._catalog_session_context.access_token_web
+        )
+        self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
+        self._catalog_session_context.v_udt = self._cookie_value("v_udt") or self._catalog_session_context.v_udt
+        refreshed_context_report = self._session_context_report()
+        content_type = str(response.headers.get("content-type", ""))
+        response_details: dict[str, Any] = {
+            "headers": safe_headers(dict(response.headers)),
+            "content_type": content_type,
+        }
+        outcome = "http_error"
+        error: str | None = None
+        detail_summary: dict[str, Any] = {}
+        body_snippet = getattr(response, "text", "")[:1200]
+
+        if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
+            outcome = "datadome_challenge"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif response.status_code == 404:
+            outcome = "not_found"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif response.status_code == 429:
+            outcome = "rate_limited"
+            retry_after_seconds, retry_after_source = _retry_after_seconds(response.headers.get("retry-after"))
+            response_details["retry_after_seconds"] = retry_after_seconds
+            response_details["retry_after_source"] = retry_after_source
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif response.status_code >= 400:
+            outcome = "http_error"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif "json" not in content_type.lower():
+            outcome = "invalid_json"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        else:
+            try:
+                payload = response.json()
+            except Exception as exc:
+                outcome = "invalid_json"
+                error = redact_sensitive_text(str(exc))
+                response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+            else:
+                if isinstance(payload, Mapping):
+                    item_payload = payload.get("item") if isinstance(payload.get("item"), Mapping) else payload
+                    if isinstance(item_payload, Mapping):
+                        outcome = "accepted_json"
+                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                        response_details["item_keys"] = sorted(str(key) for key in item_payload.keys())[:40]
+                        detail_summary = summarize_item_detail_api_payload(item_payload)
+                    else:
+                        outcome = "invalid_json"
+                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                        response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+                else:
+                    outcome = "invalid_json"
+                    response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+
+        event_phase = "detail_api_probe_success" if outcome == "accepted_json" else "detail_api_probe_failed"
+        self._emit_event(
+            phase=event_phase,
+            method="GET",
+            url=url,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            level=None if outcome == "accepted_json" else "warning",
+            details={
+                "item_id": item_id,
+                "outcome": outcome,
+                "referer_url": referer_url,
+                "missing_required": missing_context,
+                "context": refreshed_context_report,
+                **_context_summary(refreshed_context_report, self._cookie_values()),
+                "request_profile": "api_har146",
+                "response_summary": _response_summary(response.headers),
+                "content_type": response_details.get("content_type"),
+                "json_keys": response_details.get("json_keys"),
+                "item_keys": response_details.get("item_keys"),
+                "detail_summary": detail_summary,
+                "request_headers": safe_headers(headers),
+                "response": response_details,
+                "cookies_after": self._cookie_markers(),
+                "error": error,
+                "x_v_udt_sent": False,
+            },
+        )
+        return {
+            "outcome": outcome,
+            "item_id": item_id,
+            "detail_api_url": url,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+            "egress_ip": self._egress_context.ip,
+            "egress_country_code": self._egress_context.country_code,
+            "context": refreshed_context_report,
+            "missing_required": missing_context,
+            "request": request_details,
+            "response": response_details,
+            "detail_summary": detail_summary,
             "error": error,
         }
 
@@ -1667,6 +1864,51 @@ def parse_catalog_api_payload(payload: Mapping[str, Any], base_url: str = "https
         next_page=next_page,
         provider_metadata={"source": "catalog_api_json"},
     )
+
+
+def extract_vinted_item_id(item_ref: str) -> str | None:
+    text = str(item_ref or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return text
+    parsed = urlparse(text)
+    path_parts = parsed.path.strip("/").split("/")
+    if len(path_parts) >= 2 and path_parts[0] == "items":
+        candidate = path_parts[1].split("-", 1)[0]
+        return candidate if candidate.isdigit() else None
+    match = re.search(r"/items/(\d+)", text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def summarize_item_detail_api_payload(item: Mapping[str, Any]) -> dict[str, Any]:
+    photos = item.get("photos")
+    photo_count = len(photos) if isinstance(photos, list) else 0
+    description = _optional_str(item.get("description"))
+    price = item.get("price") if isinstance(item.get("price"), Mapping) else {}
+    brand = item.get("brand_dto") if isinstance(item.get("brand_dto"), Mapping) else {}
+    user = item.get("user") if isinstance(item.get("user"), Mapping) else {}
+    return {
+        "id": _optional_str(item.get("id")),
+        "title_present": bool(_optional_str(item.get("title"))),
+        "description_present": bool(description),
+        "description_length": len(description or ""),
+        "photo_count": photo_count,
+        "brand": _optional_str(brand.get("title")) or _optional_str(item.get("brand")),
+        "size": _optional_str(item.get("size_title")) or _optional_str(item.get("size")),
+        "status": _optional_str(item.get("status")),
+        "color": _optional_str(item.get("color")),
+        "category": _optional_str(item.get("category")),
+        "price_amount": _optional_str(price.get("amount")) or _optional_str(item.get("price")),
+        "currency": _optional_str(price.get("currency_code")) or _optional_str(item.get("currency")),
+        "favorite_count": _optional_int(item.get("favourite_count") or item.get("favorite_count")),
+        "seller_present": bool(user),
+        "seller_rating": _optional_str(user.get("feedback_reputation")),
+        "created_at": _optional_str(item.get("created_at_ts")) or _optional_str(item.get("created_at")),
+        "url_present": bool(_optional_str(item.get("url"))),
+    }
 
 
 def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> CatalogItemDetail:

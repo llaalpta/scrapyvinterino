@@ -13,6 +13,7 @@ import {
   fetchScheduler,
   fetchSources,
   prepareMonitorVintedSession,
+  probeMonitorItemDetail,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -65,6 +66,8 @@ export function useDashboardController() {
   const [monitorHiddenEventIdsBySource, setMonitorHiddenEventIdsBySource] = useState<Record<number, number[]>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
+  const [detailProbeRefs, setDetailProbeRefs] = useState<Record<number, string>>({});
+  const [detailProbeMessages, setDetailProbeMessages] = useState<Record<number, string>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
@@ -335,6 +338,50 @@ export function useDashboardController() {
     }
   }
 
+  async function onProbeItemDetail(source: SearchSource) {
+    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    const itemRef = (detailProbeRefs[source.id] ?? '').trim();
+    setError(null);
+    if (sourceDraftHasChanges(source, draft)) {
+      setError('Guarda los cambios antes de probar el detalle de un item');
+      return;
+    }
+    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+      setError('Corrige los filtros de URL no soportados antes de probar el detalle de un item');
+      return;
+    }
+    if (!itemRef) {
+      setError('Introduce un ID o URL de item Vinted para probar el detalle');
+      return;
+    }
+    setSavingSourceId(source.id);
+    setDetailProbeMessages((current) => ({ ...current, [source.id]: 'Probando detalle...' }));
+    try {
+      const probe = await probeMonitorItemDetail(source.id, itemRef);
+      const [sourceData, runData, proxyData] = await Promise.all([fetchSources(), fetchRuns(), fetchProxyProfiles()]);
+      setSources(sourceData);
+      setSourceDrafts(buildSourceDrafts(sourceData));
+      setRuns([probe.run, ...runData.filter((entry) => entry.id !== probe.run.id)].slice(0, 50));
+      setProxyProfiles(proxyData);
+      setMonitorRunsBySource((current) => ({
+        ...current,
+        [source.id]: [probe.run, ...(current[source.id] ?? []).filter((entry) => entry.id !== probe.run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+      }));
+      await loadMonitorStats(source.id);
+      await loadMonitorEvents(source.id);
+      setDetailProbeMessages((current) => ({ ...current, [source.id]: detailProbeMessage(probe.result) }));
+      if (probe.run.status !== 'success') {
+        setError(probe.run.error_message || 'No se pudo probar el detalle del item');
+      }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'No se pudo probar el detalle del item';
+      setError(message);
+      setDetailProbeMessages((current) => ({ ...current, [source.id]: message }));
+    } finally {
+      setSavingSourceId(null);
+    }
+  }
+
   async function onStopMonitor(sourceId: number) {
     setError(null);
     setSavingSourceId(sourceId);
@@ -458,6 +505,18 @@ export function useDashboardController() {
     }));
   }
 
+  function updateDetailProbeRef(sourceId: number, value: string) {
+    setDetailProbeRefs((current) => ({ ...current, [sourceId]: value }));
+    setDetailProbeMessages((current) => {
+      if (!current[sourceId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[sourceId];
+      return next;
+    });
+  }
+
   function updateOpportunityFilter(field: keyof OpportunityFilters, value: string) {
     setOpportunityFilters((current) => ({ ...current, [field]: value }));
   }
@@ -544,6 +603,8 @@ export function useDashboardController() {
     activeTitle,
     changeResultsPageSize,
     clearOpportunityFilters,
+    detailProbeMessages,
+    detailProbeRefs,
     error,
     getSourceName,
     loadOpportunities,
@@ -560,6 +621,7 @@ export function useDashboardController() {
     onLoadRunEvents: fetchRunEvents,
     onSaveSourceSchedule,
     onPrepareVintedSession,
+    onProbeItemDetail,
     onRecalibrateBaseline,
     onStartSession,
     onStopMonitor,
@@ -596,6 +658,7 @@ export function useDashboardController() {
     testingProxyIds,
     runs,
     updateOpportunityFilter,
+    updateDetailProbeRef,
     updateSourceDraft
   };
 
@@ -629,6 +692,35 @@ export function useDashboardController() {
       }
     });
   }
+}
+
+function detailProbeMessage(result: Record<string, unknown>): string {
+  const outcome = typeof result.outcome === 'string' ? result.outcome : 'unknown';
+  const status = typeof result.status_code === 'number' ? `status=${result.status_code}` : null;
+  const duration = typeof result.duration_ms === 'number' ? `ms=${result.duration_ms}` : null;
+  const summary = recordValue(result.detail_summary);
+  const photos = numberOrString(summary?.photo_count);
+  const description = numberOrString(summary?.description_length);
+  const seller = summary?.seller_present === true ? 'seller=ok' : summary?.seller_present === false ? 'seller=missing' : null;
+  const title = summary?.title_present === true ? 'title=ok' : summary?.title_present === false ? 'title=missing' : null;
+  const tokens = [status, duration, title, photos ? `photos=${photos}` : null, description ? `description_chars=${description}` : null, seller]
+    .filter(Boolean)
+    .join(' ');
+  return tokens ? `Detalle ${outcome}: ${tokens}` : `Detalle ${outcome}`;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function numberOrString(value: unknown): string | null {
+  if (typeof value === 'number' || typeof value === 'string') {
+    return String(value);
+  }
+  return null;
 }
 
 function addId(current: number[], id: number): number[] {

@@ -310,6 +310,17 @@ class RunRead(BaseModel):
     runtime_metadata: dict[str, Any]
 
 
+class ItemDetailProbeCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_ref: str = Field(min_length=1, max_length=500)
+
+
+class ItemDetailProbeRead(BaseModel):
+    run: RunRead
+    result: dict[str, Any]
+
+
 class MonitorChartPointRead(BaseModel):
     bucket_start: datetime
     bucket_end: datetime

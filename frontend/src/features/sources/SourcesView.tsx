@@ -1,5 +1,5 @@
 import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
+import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Search, Square, Trash2 } from 'lucide-react';
 import { monitorEventsStreamUrl, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { eventSearchText, RunEventEntry } from '../runs/RunsView';
@@ -8,6 +8,8 @@ import { buildSourceDraft, filterTermLabelFromDraft, filterTermLabelFromSource, 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
+  detailProbeMessages,
+  detailProbeRefs,
   monitorEventsBySource,
   monitorHiddenEventIdsBySource,
   monitorRunsBySource,
@@ -22,6 +24,7 @@ export function SourcesView({
   onLoadMonitorStats,
   onRefreshRuntime,
   onPrepareVintedSession,
+  onProbeItemDetail,
   onRecalibrateBaseline,
   onSaveSourceSchedule,
   onStartSession,
@@ -34,8 +37,11 @@ export function SourcesView({
   sourceUrl,
   setSourceName,
   setSourceUrl,
+  updateDetailProbeRef,
   updateSourceDraft,
 }: {
+  detailProbeMessages: Record<number, string>;
+  detailProbeRefs: Record<number, string>;
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorHiddenEventIdsBySource: Record<number, number[]>;
   monitorRunsBySource: Record<number, Run[]>;
@@ -50,6 +56,7 @@ export function SourcesView({
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onRefreshRuntime: () => Promise<void>;
   onPrepareVintedSession: (source: SearchSource) => void;
+  onProbeItemDetail: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
@@ -62,6 +69,7 @@ export function SourcesView({
   sourceUrl: string;
   setSourceName: (value: string) => void;
   setSourceUrl: (value: string) => void;
+  updateDetailProbeRef: (sourceId: number, value: string) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
   const activeSources = useMemo(() => sources.filter((source) => source.is_active), [sources]);
@@ -222,6 +230,8 @@ export function SourcesView({
           {selectedSource ? <span>{selectedSource.is_active ? 'Activo' : 'Inactivo'}</span> : <span>Sin seleccion</span>}
         </div>
         <MonitorDetail
+          detailProbeMessage={selectedSource ? (detailProbeMessages[selectedSource.id] ?? '') : ''}
+          detailProbeRef={selectedSource ? (detailProbeRefs[selectedSource.id] ?? '') : ''}
           hiddenEventIds={selectedSource ? (monitorHiddenEventIdsBySource[selectedSource.id] ?? []) : []}
           loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
           monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
@@ -230,6 +240,7 @@ export function SourcesView({
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
           onPrepareVintedSession={onPrepareVintedSession}
+          onProbeItemDetail={onProbeItemDetail}
           onRecalibrateBaseline={onRecalibrateBaseline}
           onSaveSourceSchedule={onSaveSourceSchedule}
           onStartSession={onStartSession}
@@ -241,6 +252,7 @@ export function SourcesView({
           stats={selectedSource ? (monitorStatsBySource[selectedSource.id] ?? null) : null}
           statsRange={selectedSource ? (monitorStatsRangeBySource[selectedSource.id] ?? 'all') : 'all'}
           streamStatus={streamStatus}
+          updateDetailProbeRef={updateDetailProbeRef}
           updateSourceDraft={updateSourceDraft}
         />
       </section>
@@ -624,6 +636,8 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
+  detailProbeMessage,
+  detailProbeRef,
   hiddenEventIds,
   loadingMonitorEvents,
   monitorEvents,
@@ -632,6 +646,7 @@ function MonitorDetail({
   onDeleteSource,
   onLoadMonitorStats,
   onPrepareVintedSession,
+  onProbeItemDetail,
   onRecalibrateBaseline,
   onSaveSourceSchedule,
   onStartSession,
@@ -643,8 +658,11 @@ function MonitorDetail({
   stats,
   statsRange,
   streamStatus,
+  updateDetailProbeRef,
   updateSourceDraft
 }: {
+  detailProbeMessage: string;
+  detailProbeRef: string;
   hiddenEventIds: number[];
   loadingMonitorEvents: boolean;
   monitorEvents: RunEvent[];
@@ -653,6 +671,7 @@ function MonitorDetail({
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onPrepareVintedSession: (source: SearchSource) => void;
+  onProbeItemDetail: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
@@ -664,6 +683,7 @@ function MonitorDetail({
   stats: MonitorStats | null;
   statsRange: MonitorStatsRange;
   streamStatus: 'connecting' | 'connected' | 'error';
+  updateDetailProbeRef: (sourceId: number, value: string) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
   const [archiveSource, setArchiveSource] = useState<SearchSource | null>(null);
@@ -693,6 +713,7 @@ function MonitorDetail({
   const hasUnsavedChanges = sourceDraftHasChanges(source, sourceDraft);
   const launchBlockedByBaseline = !source.baseline_ready;
   const launchBlockedByFilters = source.catalog_filter_compatibility ? !source.catalog_filter_compatibility.compatible : false;
+  const detailProbeBlocked = savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges || launchBlockedByFilters || detailProbeRef.trim() === '';
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -720,6 +741,41 @@ function MonitorDetail({
           {source.baseline_policy_hash ? <code>{source.baseline_policy_hash}</code> : null}
         </div>
         <CatalogFilterCompatibilityStatus source={source} />
+        {!source.is_active ? (
+          <div className="detail-probe-panel">
+            <div className="detail-probe-heading">
+              <strong>Detalle de item</strong>
+              <span>/api/v2/items/id/details</span>
+            </div>
+            <div className="detail-probe-controls">
+              <input
+                aria-label="ID o URL de item para probar detalle"
+                disabled={savingSourceId === source.id || runningSessionId !== null}
+                placeholder="ID o URL de item Vinted"
+                value={detailProbeRef}
+                onChange={(event) => updateDetailProbeRef(source.id, event.target.value)}
+              />
+              <button
+                type="button"
+                disabled={detailProbeBlocked}
+                title={
+                  hasUnsavedChanges
+                    ? 'Guarda los cambios antes de probar detalle'
+                    : launchBlockedByFilters
+                      ? 'Corrige los filtros de URL no soportados antes de probar detalle'
+                      : detailProbeRef.trim() === ''
+                        ? 'Introduce un ID o URL de item Vinted'
+                        : 'Probar detalle'
+                }
+                onClick={() => onProbeItemDetail(source)}
+              >
+                <Search size={16} />
+                Probar detalle
+              </button>
+            </div>
+            {detailProbeMessage ? <p className="detail-probe-message">{detailProbeMessage}</p> : null}
+          </div>
+        ) : null}
         <MonitorConfigEditor
           disabled={source.is_active}
           source={source}

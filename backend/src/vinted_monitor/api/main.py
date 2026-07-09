@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from vinted_monitor.api.schemas import (
     ActionRequestCreate,
     ActionRequestRead,
+    ItemDetailProbeCreate,
+    ItemDetailProbeRead,
     ItemRead,
     MonitorStatsRead,
     OpportunityResultPageRead,
@@ -61,6 +63,7 @@ from vinted_monitor.services.runs import (
     ensure_monitor_baseline_ready,
     execute_manual_run,
     execute_monitor_baseline,
+    execute_monitor_item_detail_probe,
     execute_monitor_run,
     execute_monitor_session_prepare,
     list_runs,
@@ -481,6 +484,27 @@ def post_monitor_vinted_session_prepare(
 ):
     try:
         return execute_monitor_session_prepare(db, monitor_id)
+    except SearchSourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerCapacityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except VintedSessionRequiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/monitors/{monitor_id}/items/detail-probe", response_model=ItemDetailProbeRead, status_code=201)
+def post_monitor_item_detail_probe(
+    monitor_id: int,
+    payload: ItemDetailProbeCreate,
+    db: Session = Depends(get_db),
+):
+    try:
+        run, result = execute_monitor_item_detail_probe(db, monitor_id, item_ref=payload.item_ref)
+        return ItemDetailProbeRead(run=RunRead.model_validate(run), result=result)
     except SearchSourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:

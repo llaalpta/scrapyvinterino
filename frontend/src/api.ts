@@ -202,6 +202,11 @@ export type Run = {
   runtime_metadata: Record<string, unknown>;
 };
 
+export type ItemDetailProbeResult = {
+  run: Run;
+  result: Record<string, unknown>;
+};
+
 export type MonitorStatsRange = 'minutes' | 'hours' | 'days' | 'month' | 'all';
 
 export type MonitorStatsSummary = {
@@ -425,6 +430,10 @@ export function calibrateMonitorBaseline(sourceId: number): Promise<Run> {
 
 export function prepareMonitorVintedSession(sourceId: number): Promise<Run> {
   return postJson<Run>(`/api/monitors/${sourceId}/vinted-session/prepare`);
+}
+
+export function probeMonitorItemDetail(sourceId: number, itemRef: string): Promise<ItemDetailProbeResult> {
+  return postJson<ItemDetailProbeResult>(`/api/monitors/${sourceId}/items/detail-probe`, { item_ref: itemRef });
 }
 
 export function fetchOpportunities(query: OpportunityQuery = {}): Promise<Page<OpportunityResult>> {

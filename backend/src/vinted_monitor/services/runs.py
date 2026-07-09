@@ -21,6 +21,7 @@ from vinted_monitor.providers.vinted_catalog import (
     VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
+    extract_vinted_item_id,
 )
 from vinted_monitor.services.filters import (
     evaluate_exclusion_filters,
@@ -62,6 +63,7 @@ MANUAL_TRIGGER = "manual"
 SCHEDULER_TRIGGER = "scheduler"
 BASELINE_TRIGGER = "baseline"
 SESSION_PREPARE_TRIGGER = "session_prepare"
+DETAIL_PROBE_TRIGGER = "detail_probe"
 SESSION_ITEM_PASSED = "passed"
 SESSION_ITEM_DISCARDED = "discarded"
 SESSION_ITEM_PASSED_WITHOUT_FILTERS = "passed_without_filters"
@@ -596,6 +598,224 @@ def execute_monitor_session_prepare(
             kind="vinted_session_prepare",
             penalize_proxy=not isinstance(exc, VintedSessionRequiredError),
         )
+
+
+def execute_monitor_item_detail_probe(
+    db: Session,
+    source_id: int,
+    *,
+    item_ref: str,
+    egress: RunEgress | None = None,
+) -> tuple[Run, dict[str, Any]]:
+    source = db.get(SearchSource, source_id)
+    if source is None or source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.is_active:
+        raise RunAlreadyActiveError("Deten la sesion antes de probar el detalle de un item")
+    if _active_source_run_exists(db, source_id=source.id):
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
+    item_id = extract_vinted_item_id(item_ref)
+    if item_id is None:
+        raise SearchSourceConfigError("Introduce un ID numerico de Vinted o una URL de item valida")
+    try:
+        validate_vinted_catalog_url(source.url)
+    except ValueError as exc:
+        raise SearchSourceConfigError(str(exc)) from exc
+    catalog_filters = catalog_filter_compatibility(source.url)
+
+    settings = get_settings()
+    runtime_config = get_scheduler_runtime_config(db, settings)
+    selected_egress = egress or choose_run_egress(db, settings)
+    if selected_egress.proxy_profile_id is None:
+        raise VintedSessionRequiredError("Configura un proxy activo antes de probar el detalle de un item")
+    proxy_profile = db.get(ProxyProfile, selected_egress.proxy_profile_id)
+    if proxy_profile is None:
+        raise SchedulerCapacityError(f"Proxy profile {selected_egress.proxy_profile_id} no longer exists")
+
+    browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    run = Run(
+        source_id=source.id,
+        monitor_session_id=None,
+        status=RUNNING,
+        trigger=DETAIL_PROBE_TRIGGER,
+        items_found=0,
+        items_new=0,
+        items_filter_passed=0,
+        items_discarded_by_filters=0,
+        items_filter_pending=0,
+        opportunities_created=0,
+        runtime_metadata={
+            **_run_runtime_metadata(source, selected_egress, runtime_config),
+            "detail_probe_run": True,
+            "item_ref": item_ref,
+            "item_id": item_id,
+            "target_country_code": settings.vinted_target_country_code.strip().upper(),
+            "proxy_country_code": proxy_profile.country_code,
+            "locale": proxy_profile.locale,
+            "accept_language": proxy_profile.accept_language,
+            "screen": proxy_profile.screen,
+            "vinted_screen": proxy_profile.vinted_screen,
+            "browser_profile": browser_profile.name,
+            "impersonate": browser_profile.impersonate,
+        },
+    )
+    db.add(run)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
+    db.refresh(run)
+
+    proxy_profile_id = proxy_profile.id
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_started",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "trigger": DETAIL_PROBE_TRIGGER,
+            "monitor_mode": source.monitor_mode,
+            "egress_mode": selected_egress.mode,
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_kind": proxy_profile.kind,
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": proxy_profile.country_code,
+            "locale": proxy_profile.locale,
+            "screen": proxy_profile.screen,
+            "vinted_screen": proxy_profile.vinted_screen,
+            "browser_profile": browser_profile.name,
+            "detail_probe_run": True,
+            "item_id": item_id,
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_config_resolved",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "monitor_id": source.id,
+            "trigger": DETAIL_PROBE_TRIGGER,
+            "monitor_mode": source.monitor_mode,
+            "catalog_filter_compatibility": catalog_filters,
+            "runtime_config": {
+                "request_timeout_ms": runtime_config.request_timeout_ms,
+            },
+            "detail_probe_run": True,
+            "item_id": item_id,
+            "endpoint": f"/api/v2/items/{item_id}/details",
+        },
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="egress_selected",
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "egress_mode": selected_egress.mode,
+            "proxy_profile_id": proxy_profile_id,
+            "proxy_name": proxy_profile.name,
+            "proxy_kind": proxy_profile.kind,
+            "target_country_code": (run.runtime_metadata or {}).get("target_country_code"),
+            "proxy_country_code": proxy_profile.country_code,
+            "locale": proxy_profile.locale,
+            "accept_language": proxy_profile.accept_language,
+            "screen": proxy_profile.screen,
+            "vinted_screen": proxy_profile.vinted_screen,
+            "detail_probe_run": True,
+        },
+    )
+
+    provider: CurlCffiVintedCatalogProvider | None = None
+    result: dict[str, Any] = {
+        "outcome": "failed",
+        "item_id": item_id,
+        "error": None,
+    }
+    try:
+        provider, provider_metadata = _provider_for_egress(
+            db,
+            source,
+            selected_egress,
+            runtime_config,
+            settings,
+            run=run,
+        )
+        _merge_run_metadata(run, {**provider_metadata, "detail_probe_run": True, "item_id": item_id})
+        result = provider.probe_item_detail_api(item_ref, referer_url=source.url)
+        vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
+        if isinstance(vinted_session_id, int):
+            provider_prepared_session = getattr(provider, "prepared_session", None)
+            refreshed_context = provider.export_prepared_session(
+                proxy_session_id=(provider_prepared_session.proxy_session_id if provider_prepared_session else None)
+            )
+            refreshed_context.session_id = vinted_session_id
+            update_vinted_session_context(
+                db,
+                vinted_session_id,
+                context=refreshed_context,
+                settings=settings,
+                require_datadome=False,
+            )
+            if result.get("outcome") == "datadome_challenge":
+                mark_vinted_session_invalid(db, vinted_session_id, reason="DataDome challenge on item detail API probe")
+        _merge_run_metadata(
+            run,
+            {
+                "detail_probe_outcome": result.get("outcome"),
+                "detail_probe_status_code": result.get("status_code"),
+                "detail_probe_duration_ms": result.get("duration_ms"),
+                "detail_probe_item_id": item_id,
+            },
+        )
+        run.status = SUCCESS
+        run.finished_at = datetime.now(UTC)
+        run.error_message = None
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="detail_probe_finished",
+            proxy_profile_id=proxy_profile_id,
+            auth_mode="public_anonymous",
+            status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
+            duration_ms=result.get("duration_ms") if isinstance(result.get("duration_ms"), int) else None,
+            level="info" if result.get("outcome") == "accepted_json" else "warning",
+            details={
+                "detail_probe_run": True,
+                "item_id": item_id,
+                "outcome": result.get("outcome"),
+                "status_code": result.get("status_code"),
+                "duration_ms": result.get("duration_ms"),
+                "endpoint": result.get("detail_api_url"),
+                "detail_summary": result.get("detail_summary") or {},
+                "error": result.get("error"),
+            },
+        )
+        db.commit()
+        db.refresh(run)
+        return run, result
+    except Exception as exc:
+        failed_run = _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            kind="detail_probe",
+            penalize_proxy=False,
+        )
+        result["error"] = redact_sensitive_text(str(exc))
+        return failed_run, result
+    finally:
+        if provider is not None:
+            provider.close()
 
 
 def execute_monitor_run(

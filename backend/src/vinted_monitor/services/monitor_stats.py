@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from vinted_monitor.db.models import MonitorSession, Run, SearchSource
 
 STATS_RANGES = {"minutes", "hours", "days", "month", "all"}
-NON_METRIC_RUN_TRIGGERS = {"session_prepare"}
+NON_METRIC_RUN_TRIGGERS = {"detail_probe", "session_prepare"}
 
 
 @dataclass(frozen=True)
