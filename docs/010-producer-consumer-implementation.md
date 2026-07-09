@@ -97,6 +97,12 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - A DataDome challenge during the detail probe invalidates the prepared Vinted session and records safe diagnostics without silently rotating into an unprepared proxy identity.
 - Host verification passed with service URLs overridden for Windows host access: `ruff check backend/src backend/alembic` and the focused 010 pytest suite (`144 passed`).
 
+## DataDome Key and Detail HTML Runtime 2026-07-09
+
+- The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
+- Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That endpoint remains a diagnostic probe only.
+- Business runs now require the public `/items/...` HTML/Next detail document before creating opportunities. Non-DataDome detail failures are terminal pending outcomes without opportunities; DataDome detail challenges still fail the run and invalidate the prepared Vinted session.
+
 ## Continuous Direct Scheduler Validation 2026-07-06
 
 - Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity on the then-current Chrome 120 profile.

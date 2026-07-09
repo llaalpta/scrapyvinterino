@@ -34,7 +34,6 @@ from vinted_monitor.services.items import (
     apply_item_detail_data,
     build_transient_catalog_item,
     get_or_persist_catalog_item,
-    record_item_detail_error,
 )
 from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success, proxy_url_with_sticky_session
@@ -75,7 +74,7 @@ class ManualRunProvider(Protocol):
     def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
         """Return public catalog candidates for a monitor run."""
 
-    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
         """Return public detail data for a candidate."""
 
 
@@ -1213,6 +1212,7 @@ def execute_monitor_run(
             monitor_new_candidates,
             filter_snapshot,
         )
+        _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
         processed_ids = [candidate.vinted_item_id for candidate in monitor_new_candidates]
         run.status = SUCCESS
         run.finished_at = datetime.now(UTC)
@@ -1604,6 +1604,10 @@ def _persist_provider_session_refresh(
     )
     if updated is None:
         return
+    try:
+        provider.prepared_session_refreshed = False
+    except Exception:
+        pass
     record_run_event(
         db,
         run_id=run.id,
@@ -1988,122 +1992,116 @@ def _evaluate_monitor_candidates(
         detail: CatalogItemDetail | None = None
         detail_error: str | None = None
 
-        if filters:
-            if detail_attempts < max_detail_candidates:
-                detail_attempts += 1
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="candidate_detail_required",
-                    url=candidate.url,
-                    proxy_profile_id=proxy_profile_id,
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "attempt": detail_attempts,
-                        "max_detail_candidates": max_detail_candidates,
-                    },
-                )
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_start",
-                    method="GET",
-                    url=candidate.url,
-                    proxy_profile_id=proxy_profile_id,
-                    user_agent=None,
-                    auth_mode="public_anonymous",
-                    details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
-                )
-                detail_started_at = time.perf_counter()
-                try:
-                    detail = provider.fetch_detail(candidate)
-                    apply_item_detail_data(transient_item, detail)
-                    record_run_event(
-                        db,
-                        run_id=run.id,
-                        source_id=source.id,
-                        phase="detail_fetch_success",
-                        method="GET",
-                        url=candidate.url,
-                        duration_ms=_elapsed_ms(detail_started_at),
-                        proxy_profile_id=proxy_profile_id,
-                        user_agent=None,
-                        auth_mode="public_anonymous",
-                        details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
-                    )
-                except DataDomeChallengeError as exc:
-                    record_run_event(
-                        db,
-                        run_id=run.id,
-                        source_id=source.id,
-                        phase="detail_fetch_error",
-                        method="GET",
-                        url=candidate.url,
-                        duration_ms=_elapsed_ms(detail_started_at),
-                        level="error",
-                        proxy_profile_id=proxy_profile_id,
-                        user_agent=None,
-                        auth_mode="public_anonymous",
-                        message=redact_sensitive_text(str(exc)),
-                        details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "kind": "datadome_challenge"},
-                    )
-                    raise
-                except Exception as exc:
-                    pending += 1
-                    evaluation_status = SESSION_ITEM_DETAIL_ERROR
-                    detail_error = redact_sensitive_text(str(exc))
-                    record_run_event(
-                        db,
-                        run_id=run.id,
-                        source_id=source.id,
-                        phase="detail_fetch_error",
-                        method="GET",
-                        url=candidate.url,
-                        duration_ms=_elapsed_ms(detail_started_at),
-                        level="error",
-                        proxy_profile_id=proxy_profile_id,
-                        user_agent=None,
-                        auth_mode="public_anonymous",
-                        message=detail_error,
-                        details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts},
-                    )
-            else:
-                pending += 1
-                evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_skipped",
-                    level="warning",
-                    url=candidate.url,
-                    proxy_profile_id=proxy_profile_id,
-                    message="Detail fetch limit reached; opportunity can still be created without detail filters",
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "max_detail_candidates": max_detail_candidates,
-                    },
-                )
-
-            if evaluation_status == SESSION_ITEM_PASSED:
-                decision = evaluate_exclusion_filters(transient_item, filters)
-                evaluation_status = decision.status
-                matched_terms = decision.matched_terms
-        else:
+        if detail_attempts < max_detail_candidates:
+            detail_attempts += 1
             record_run_event(
                 db,
                 run_id=run.id,
                 source_id=source.id,
-                phase="candidate_detail_not_required",
+                phase="candidate_detail_required",
                 url=candidate.url,
                 proxy_profile_id=proxy_profile_id,
                 details={
                     "vinted_item_id": candidate.vinted_item_id,
-                    "reason": "no_filters_configured",
+                    "attempt": detail_attempts,
+                    "max_detail_candidates": max_detail_candidates,
+                    "reason": "filters_configured" if filters else "opportunity_enrichment",
                 },
             )
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="detail_fetch_start",
+                method="GET",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                user_agent=None,
+                auth_mode="public_anonymous",
+                details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "referer_url": source.url},
+            )
+            detail_started_at = time.perf_counter()
+            try:
+                detail = provider.fetch_detail(candidate, referer_url=source.url)
+                apply_item_detail_data(transient_item, detail)
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_success",
+                    method="GET",
+                    url=candidate.url,
+                    duration_ms=_elapsed_ms(detail_started_at),
+                    proxy_profile_id=proxy_profile_id,
+                    user_agent=None,
+                    auth_mode="public_anonymous",
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt": detail_attempts,
+                        "has_description": bool(detail.description),
+                        "photo_count": len(detail.photos),
+                        "has_total_price": detail.total_price_amount is not None,
+                    },
+                )
+            except DataDomeChallengeError as exc:
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_error",
+                    method="GET",
+                    url=candidate.url,
+                    duration_ms=_elapsed_ms(detail_started_at),
+                    level="error",
+                    proxy_profile_id=proxy_profile_id,
+                    user_agent=None,
+                    auth_mode="public_anonymous",
+                    message=redact_sensitive_text(str(exc)),
+                    details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "kind": "datadome_challenge"},
+                )
+                raise
+            except Exception as exc:
+                pending += 1
+                evaluation_status = SESSION_ITEM_DETAIL_ERROR
+                detail_error = redact_sensitive_text(str(exc))
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_error",
+                    method="GET",
+                    url=candidate.url,
+                    duration_ms=_elapsed_ms(detail_started_at),
+                    level="error",
+                    proxy_profile_id=proxy_profile_id,
+                    user_agent=None,
+                    auth_mode="public_anonymous",
+                    message=detail_error,
+                    details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "terminal": "no_opportunity"},
+                )
+        else:
+            pending += 1
+            evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="detail_fetch_skipped",
+                level="warning",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                message="Detail fetch limit reached; opportunity will not be created without detail",
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "max_detail_candidates": max_detail_candidates,
+                    "terminal": "no_opportunity",
+                },
+            )
+
+        if detail is not None and evaluation_status == SESSION_ITEM_PASSED:
+            decision = evaluate_exclusion_filters(transient_item, filters)
+            evaluation_status = decision.status
+            matched_terms = decision.matched_terms
 
         record_run_event(
             db,
@@ -2133,6 +2131,24 @@ def _evaluate_monitor_candidates(
                 proxy_profile_id=proxy_profile_id,
                 message=f"Matched blacklist terms: {', '.join(matched_terms)}",
                 details={"vinted_item_id": candidate.vinted_item_id, "matched_terms": matched_terms},
+            )
+            continue
+
+        if detail is None:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="opportunity_skipped_missing_detail",
+                level="warning",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                message="Opportunity skipped because item detail was not available",
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "evaluation_status": evaluation_status,
+                    "detail_error": detail_error,
+                },
             )
             continue
 
@@ -2180,22 +2196,6 @@ def _evaluate_monitor_candidates(
                     "photo_count": len(detail.photos),
                     "has_description": bool(detail.description),
                     "has_total_price": detail.total_price_amount is not None,
-                },
-            )
-        if detail_error is not None:
-            record_item_detail_error(db, item, detail_error)
-            record_run_event(
-                db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="item_detail_error_recorded",
-                level="warning",
-                url=candidate.url,
-                proxy_profile_id=proxy_profile_id,
-                message=detail_error,
-                details={
-                    "vinted_item_id": candidate.vinted_item_id,
-                    "item_id": item.id,
                 },
             )
         _, created = _get_or_create_monitor_opportunity(db, source, run, item, evaluation_status, filters)

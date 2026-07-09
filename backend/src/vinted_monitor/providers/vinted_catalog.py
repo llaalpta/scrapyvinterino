@@ -46,6 +46,17 @@ CSRF_TOKEN_PATTERNS = (
 VIEWPORT_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 5.0
 MAX_RATE_LIMIT_RETRY_AFTER_SECONDS = 30.0
+SESSION_REFRESH_COOKIE_NAMES = {
+    "__cf_bm",
+    "_vinted_fr_session",
+    "access_token_web",
+    "anon_id",
+    "csrf_token",
+    "datadome",
+    "refresh_token_web",
+    "v_sid",
+    "v_udt",
+}
 
 
 @dataclass
@@ -291,17 +302,22 @@ class CurlCffiVintedCatalogProvider:
             egress_country_code=self._egress_context.country_code,
         )
 
-    def fetch_detail(self, candidate: CatalogItemCandidate) -> CatalogItemDetail:
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
         self._ensure_session()
         self._diagnose_egress(attempt=1)
         assert self._session is not None
-        headers = self.profile.build_bootstrap_headers(accept_language=self.accept_language)
+        cookies_before_request = self._cookie_values()
+        context_before_request = self._session_context_values()
+        headers = self.profile.build_bootstrap_headers(referer=referer_url, accept_language=self.accept_language)
+        if referer_url:
+            headers["sec-fetch-site"] = "same-origin"
         self._emit_event(
             phase="detail_http_request_start",
             method="GET",
             url=candidate.url,
             details={
                 "vinted_item_id": candidate.vinted_item_id,
+                "referer_url": referer_url,
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
@@ -316,12 +332,19 @@ class CurlCffiVintedCatalogProvider:
                 timeout=self.timeout_ms / 1000,
                 default_headers=False,
             )
+            refreshed_markers = self._refresh_session_context_from_cookies(
+                cookies_before=cookies_before_request,
+                context_before=context_before_request,
+            )
             response_details = {
                 "vinted_item_id": candidate.vinted_item_id,
+                "referer_url": referer_url,
                 "http_session": self._session_marker(),
                 "request_headers": safe_headers(headers),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
+                "session_context_refreshed": bool(refreshed_markers),
+                "refreshed_markers": refreshed_markers,
             }
             if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
                 self._emit_event(
@@ -357,19 +380,60 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 details=response_details,
             )
+            try:
+                detail = parse_item_detail_html(response.text, candidate)
+            except Exception as exc:
+                safe_error = redact_sensitive_text(str(exc))
+                self._emit_event(
+                    phase="detail_parse_error",
+                    method="GET",
+                    url=candidate.url,
+                    status_code=response.status_code,
+                    duration_ms=_elapsed_ms(started_at),
+                    level="error",
+                    message=safe_error,
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "referer_url": referer_url,
+                        "html_length": len(response.text or ""),
+                        "error": safe_error,
+                    },
+                )
+                raise VintedCatalogProviderError(
+                    f"Vinted detail parse failed for {candidate.vinted_item_id}: {safe_error}"
+                ) from exc
+            self._emit_event(
+                phase="detail_parse_success",
+                method="GET",
+                url=candidate.url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "referer_url": referer_url,
+                    "html_length": len(response.text or ""),
+                    "has_description": bool(detail.description),
+                    "photo_count": len(detail.photos),
+                    "has_total_price": detail.total_price_amount is not None,
+                    "availability_flags": sorted(detail.availability_flags.keys()),
+                },
+            )
+            return detail
         except DataDomeChallengeError:
             raise
         except Exception as exc:
             if not isinstance(exc, VintedCatalogProviderError):
+                safe_error = redact_sensitive_text(str(exc))
                 self._emit_event(
                     phase="detail_http_request_error",
                     method="GET",
                     url=candidate.url,
                     duration_ms=_elapsed_ms(started_at),
                     level="error",
-                    message=str(exc),
+                    message=safe_error,
                     details={
                         "vinted_item_id": candidate.vinted_item_id,
+                        "referer_url": referer_url,
                         "http_session": self._session_marker(),
                         "request_headers": safe_headers(headers),
                         "cookies_after": self._cookie_markers(),
@@ -377,11 +441,9 @@ class CurlCffiVintedCatalogProvider:
                     },
                 )
                 raise VintedCatalogProviderError(
-                    f"Vinted detail request failed for {candidate.vinted_item_id}: {exc}"
+                    f"Vinted detail request failed for {candidate.vinted_item_id}: {safe_error}"
                 ) from exc
             raise
-
-        return parse_item_detail_html(response.text, candidate)
 
     def close(self) -> None:
         """Discard the session, cookies, and proxy connection."""
@@ -1660,6 +1722,40 @@ class CurlCffiVintedCatalogProvider:
                 values[str(cookie_name)] = str(cookie_value)
         return values
 
+    def _session_context_values(self) -> dict[str, str | None]:
+        return {
+            "access_token_web": self._catalog_session_context.access_token_web,
+            "datadome": self._catalog_session_context.datadome,
+            "v_udt": self._catalog_session_context.v_udt,
+        }
+
+    def _refresh_session_context_from_cookies(
+        self,
+        *,
+        cookies_before: Mapping[str, str],
+        context_before: Mapping[str, str | None],
+    ) -> list[str]:
+        cookies_after = self._cookie_values()
+        for cookie_name in ("access_token_web", "datadome", "v_udt"):
+            value = cookies_after.get(cookie_name)
+            if value:
+                setattr(self._catalog_session_context, cookie_name, value)
+
+        context_after = self._session_context_values()
+        refreshed = {
+            name
+            for name in SESSION_REFRESH_COOKIE_NAMES
+            if cookies_after.get(name) and cookies_after.get(name) != cookies_before.get(name)
+        }
+        refreshed.update(
+            name
+            for name, value in context_after.items()
+            if value and value != context_before.get(name)
+        )
+        if refreshed:
+            self.prepared_session_refreshed = True
+        return sorted(refreshed)
+
     def _cookie_value(self, name: str) -> str | None:
         if self._session is None or not self._session.cookies:
             return None
@@ -1939,6 +2035,8 @@ def summarize_item_detail_api_payload(item: Mapping[str, Any]) -> dict[str, Any]
 def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> CatalogItemDetail:
     product_data = extract_product_json_ld(html)
     embedded_data = extract_embedded_detail_data(html)
+    if not product_data and not embedded_data:
+        raise ValueError("No public item detail data found in item document")
     raw_detail = sanitize_item_detail(product_data)
 
     return CatalogItemDetail(

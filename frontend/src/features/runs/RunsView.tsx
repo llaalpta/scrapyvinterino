@@ -266,9 +266,9 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   item_persisted: { area: 'item', action: 'persisting', result: 'ok', tone: 'success' },
   item_reused: { area: 'item', action: 'persisting', result: 'reused', tone: 'success' },
   item_detail_persisted: { area: 'item', action: 'persisting_detail', result: 'ok', tone: 'success' },
-  item_detail_error_recorded: { area: 'item', action: 'persisting_detail_error', result: 'ok', tone: 'warning' },
   item_discarded: { area: 'item', action: 'evaluating', result: 'discarded', tone: 'warning' },
   opportunity_created: { area: 'opportunity', action: 'creating', result: 'ok', tone: 'success' },
+  opportunity_skipped_missing_detail: { area: 'opportunity', action: 'creating', result: 'missing_detail', tone: 'warning' },
   opportunity_skipped: { area: 'opportunity', action: 'creating', result: 'already_exists', tone: 'warning' },
   monitor_session_closed: { area: 'monitor_session', action: 'closing', result: 'ok', tone: 'success' }
 };
@@ -917,9 +917,9 @@ function eventLabel(phase: string): string {
     item_persisted: 'Item persistido',
     item_reused: 'Item reutilizado',
     item_detail_persisted: 'Detalle persistido',
-    item_detail_error_recorded: 'Error de detalle persistido',
     item_discarded: 'Item descartado',
     opportunity_created: 'Oportunidad creada',
+    opportunity_skipped_missing_detail: 'Oportunidad omitida sin detalle',
     opportunity_skipped: 'Oportunidad ya existente',
     monitor_session_closed: 'Sesion de monitor cerrada'
   };
