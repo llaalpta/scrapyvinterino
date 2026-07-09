@@ -46,7 +46,7 @@ Allow the user to manually execute a configured monitor and record the execution
 - A failed run does not crash the worker.
 - API/PWA can show recent run state from the monitor view.
 - Manual run events include safe configuration, egress, HTTP/session, request-duration, Redis/cache, candidate, filter, persistence, and opportunity/no-op decisions without raw secrets.
-- The PWA log console presents those events as non-interactive operational checklist entries; large JSON diagnostics are not rendered in the main timeline.
+- The PWA log console presents those events as non-interactive operational checklist blocks with wrapped visible lines; large JSON diagnostics are not rendered in the main timeline.
 - A manual run without a current initial snapshot is rejected with a clear message to recalibrate the listing first.
 - The PWA does not expose a separate Activity navigation item for run history.
 - `items_found` counts provider candidates.
@@ -60,7 +60,7 @@ Allow the user to manually execute a configured monitor and record the execution
 - Confirm the manual run has `monitor_session_id` and the session has `stopped_at`.
 - Simulate provider failure and confirm persisted error.
 - Confirm worker keeps running after failure.
-- Confirm manual run logs are visible in the monitor log console as one line per event and expose only masked/fingerprinted cookie, token, HTTP session, and proxy session markers.
+- Confirm manual run logs are visible in the monitor log console as one wrapped block per event and expose only masked/fingerprinted cookie, token, HTTP session, and proxy session markers.
 - Confirm a manual run cannot start until `Recalibrar listado inicial` has seeded the current monitor/policy snapshot.
 - Confirm items table remains unchanged after a run.
 - Confirm PWA can trigger a run from `Monitores` and display its activity there.

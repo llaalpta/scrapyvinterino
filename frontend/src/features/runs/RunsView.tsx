@@ -124,9 +124,7 @@ export function RunActivityList({
 export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; showRunId?: boolean }) {
   const narrative = eventNarrative(event);
   const status = eventChecklistStatus(event, narrative);
-  const tokens = eventLineTokens(event, showRunId);
-  const message = eventMessageToken(event);
-  const detailLines = eventChecklistDetailLines(event);
+  const logLines = eventRenderedLogLines(event, showRunId);
   return (
     <article className={`run-event-entry ${event.level}`}>
       <div className="event-console-line">
@@ -137,16 +135,18 @@ export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; s
         <div className="event-check-body">
           <div className="event-check-heading">
             <span className="event-check-title">{eventLabel(event.phase)}</span>
+            {' '}
             <span className="event-check-phase">{narrative.area}.{narrative.action}</span>
-            {narrative.result ? <span className={`event-result ${narrative.tone}`}>{narrative.result}</span> : null}
+            {narrative.result ? (
+              <>
+                {' '}
+                <span className={`event-result ${narrative.tone}`}>{narrative.result}</span>
+              </>
+            ) : null}
           </div>
-          {tokens.length > 0 ? (
-            <div className="event-token-line">{tokens.join(' ')}</div>
-          ) : null}
-          {detailLines.map((line) => (
-            <div className="event-check-detail" key={line}>{line}</div>
+          {logLines.map((line, index) => (
+            <div className={`event-log-line ${line.kind}`} key={`${line.kind}-${index}`}>{line.text}</div>
           ))}
-          {message ? <div className="event-message">{message}</div> : null}
         </div>
       </div>
     </article>
@@ -164,8 +164,7 @@ export function eventSearchText(event: RunEvent): string {
     narrative.action,
     narrative.result,
     event.run_id ? `run#${event.run_id}` : null,
-    eventLineTokens(event, true).join(' '),
-    eventChecklistDetailLines(event).join(' ')
+    eventRenderedLogLines(event, true).map((line) => line.text).join(' ')
   ].filter(Boolean).join(' ').toLowerCase();
 }
 
@@ -181,6 +180,11 @@ type EventNarrative = {
 type ChecklistStatus = {
   label: 'INFO' | 'OK' | 'SKIP' | 'WARN' | 'FAIL';
   tone: EventTone;
+};
+
+type EventLogLine = {
+  kind: 'operation' | 'context' | 'request' | 'checks' | 'outcome' | 'detail' | 'message';
+  text: string;
 };
 
 const PHASE_NARRATIVES: Record<string, EventNarrative> = {
@@ -309,6 +313,77 @@ function eventChecklistStatus(event: RunEvent, narrative: EventNarrative): Check
     return { label: 'OK', tone: 'success' };
   }
   return { label: 'INFO', tone: 'neutral' };
+}
+
+function eventRenderedLogLines(event: RunEvent, showRunId: boolean): EventLogLine[] {
+  const grouped = groupEventLineTokens(eventLineTokens(event, showRunId));
+  const lines: EventLogLine[] = [];
+  if (grouped.operation.length > 0) {
+    lines.push({ kind: 'operation', text: grouped.operation.join(' ') });
+  }
+  if (grouped.context.length > 0) {
+    lines.push({ kind: 'context', text: grouped.context.join(' ') });
+  }
+  if (grouped.request.length > 0) {
+    lines.push({ kind: 'request', text: grouped.request.join(' ') });
+  }
+  if (grouped.checks.length > 0) {
+    lines.push({ kind: 'checks', text: grouped.checks.join(' ') });
+  }
+  if (grouped.outcome.length > 0) {
+    lines.push({ kind: 'outcome', text: grouped.outcome.join(' ') });
+  }
+  for (const detailLine of eventChecklistDetailLines(event)) {
+    if (detailLine.startsWith('Configurado:') && grouped.request.length > 0) {
+      continue;
+    }
+    lines.push({ kind: 'detail', text: detailLine });
+  }
+  const message = eventMessageToken(event);
+  if (message) {
+    lines.push({ kind: 'message', text: message });
+  }
+  return lines;
+}
+
+function groupEventLineTokens(tokens: string[]): Record<EventLogLine['kind'], string[]> {
+  const grouped: Record<EventLogLine['kind'], string[]> = {
+    operation: [],
+    context: [],
+    request: [],
+    checks: [],
+    outcome: [],
+    detail: [],
+    message: []
+  };
+  for (const token of tokens) {
+    grouped[eventTokenGroup(token)].push(token);
+  }
+  return grouped;
+}
+
+function eventTokenGroup(token: string): EventLogLine['kind'] {
+  if (isHttpMethodToken(token) || tokenStartsWith(token, ['run#', 'url=', 'status=', 'ms=', 'auth=', 'item=', 'items=', 'unique=', 'total=', 'marked=', 'seen=', 'new=', 'endpoint='])) {
+    return 'operation';
+  }
+  if (tokenStartsWith(token, ['session=', 'proxy_session=', 'ip=', 'country=', 'imp=', 'browser=', 'locale=', 'viewport=', 'x_screen='])) {
+    return 'context';
+  }
+  if (tokenStartsWith(token, ['headers=', 'default_headers=', 'cookies=', 'x-anon-id=', 'x-csrf-token=', 'x-v-udt=', 'post_sent=', 'non_blocking=', 'js=', 'ddv=', 'ddk=', 'dd_cookie='])) {
+    return 'request';
+  }
+  if (tokenStartsWith(token, ['csrf=', 'anon=', 'access=', 'datadome=', 'v_udt=', 'cf_bm=', 'v_sid=', 'geo=', 'locale_ok=', 'viewport_ok=', 'x_screen_ok=', 'response_screen_ok='])) {
+    return 'checks';
+  }
+  return 'outcome';
+}
+
+function tokenStartsWith(token: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => token.startsWith(prefix));
+}
+
+function isHttpMethodToken(token: string): boolean {
+  return ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(token);
 }
 
 function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {

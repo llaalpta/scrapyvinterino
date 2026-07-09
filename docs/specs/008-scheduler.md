@@ -125,7 +125,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
-- The PWA Monitors view renders selected monitor accumulated logs as a non-interactive operational checklist: one wrapped text entry per event with run id, exact time, state, label, method, URL, status, ms, recovered/missing context, safe cookie flags, API parameters, and failure/skip reason when available, whether the monitor is active or stopped.
+- The PWA Monitors view renders selected monitor accumulated logs as a non-interactive operational checklist: one wrapped multi-line block per event with run id, exact time, state, label, method, URL, status, ms, recovered/missing context, safe cookie flags, API parameters, and failure/skip reason when available, whether the monitor is active or stopped.
 - Redacted JSON `run_events.details` remains available through API/database for technical audit, but the main PWA log timeline does not render expandable JSON details.
 - The selected monitor log console supports local level filtering and text search without mutating persisted `run_events`.
 - The selected monitor log timeline can be cleared locally with `Limpiar vista`; this stores the currently visible event IDs as hidden in the browser session and never deletes persisted `run_events`.
@@ -173,7 +173,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Confirm `Limpiar vista` hides the selected monitor's visible timeline without deleting events from `/api/monitors/{monitor_id}/events`, and new event IDs remain visible after the cleanup.
 - Confirm monitor logs include run configuration resolution, selected egress, HTTP session creation/close, egress IP/country when available, Redis decisions, candidate evaluation, detail requirements, filter decisions, item persistence/reuse, opportunity outcomes, exact timestamps, and request durations in milliseconds.
 - Confirm safe cookie/token/session/proxy markers use masked/fingerprinted values only and never include raw secret values.
-- Confirm the PWA log console renders one non-interactive checklist entry per event, level filtering, text search, no visible JSON details, and no horizontal overflow on mobile.
+- Confirm the PWA log console renders one non-interactive wrapped checklist block per event, level filtering, text search, no visible JSON details, and no horizontal overflow on mobile.
 - Confirm the Monitors view renders three top-level cards for creation, list, and selected detail without nesting the table or detail inside another card.
 - Confirm the compact monitor table selects active and inactive monitors, updates the full-width detail panel, and scrolls the detail into view on mobile without horizontal overflow.
 - Confirm active monitor details show read-only configuration, stop/log controls, and do not show save, archive, or punctual launch controls.

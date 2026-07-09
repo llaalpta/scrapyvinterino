@@ -1185,7 +1185,7 @@
 
 .run-event-entry {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   border-bottom: 1px solid rgb(148 163 184 / 0.22);
   color: #dbeafe;
   font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
@@ -1197,15 +1197,15 @@
 
 .event-console-line {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: 128px minmax(0, 1fr);
   align-items: start;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  padding: 7px 10px;
+  padding: 10px 12px;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -1218,14 +1218,15 @@
 
 .event-check-meta {
   display: grid;
-  gap: 4px;
+  align-content: start;
+  gap: 6px;
   justify-items: start;
 }
 
 .event-check-body {
   display: grid;
   min-width: 0;
-  gap: 3px;
+  gap: 4px;
 }
 
 .event-check-heading {
@@ -1248,10 +1249,47 @@
 .event-token-line {
   min-width: 0;
   color: #94a3b8;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .event-check-detail {
   color: #cbd5e1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.event-log-line {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.event-log-line.operation {
+  color: #dbeafe;
+}
+
+.event-log-line.context {
+  color: #bfdbfe;
+}
+
+.event-log-line.request {
+  color: #c4b5fd;
+}
+
+.event-log-line.checks {
+  color: #bbf7d0;
+}
+
+.event-log-line.outcome,
+.event-log-line.detail {
+  color: #cbd5e1;
+}
+
+.event-log-line.message {
+  color: #fca5a5;
 }
 
 .event-time {
@@ -1358,6 +1396,7 @@
 .event-message {
   color: #fca5a5;
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 640px) {
