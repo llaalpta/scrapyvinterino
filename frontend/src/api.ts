@@ -85,6 +85,7 @@ export type VintedSession = {
     anon_id: boolean;
     access_token_web: boolean;
     datadome: boolean;
+    cf_bm: boolean;
     v_udt: boolean;
     user_iso_locale: boolean;
     vinted_screen: boolean;

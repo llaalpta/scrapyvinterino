@@ -29,8 +29,12 @@ DATADOME_CLIENT_KEY_PATTERNS = (
     re.compile(r'"DATADOME_CLIENT_SIDE_KEY"\s*:\s*"([A-Za-z0-9_-]{12,})"', re.IGNORECASE),
     re.compile(r'\\"DATADOME_CLIENT_SIDE_KEY\\"\s*:\s*\\"([A-Za-z0-9_-]{12,})\\"', re.IGNORECASE),
     re.compile(r"""(?:ddjskey|ddk|datadomeKey|clientKey)["']?\s*[:=]\s*["']([A-Za-z0-9_-]{12,})["']""", re.IGNORECASE),
+    re.compile(r"""DATADOME_CLIENT_SIDE_KEY["']?\s*[:=]\s*["']([A-Za-z0-9_-]{12,})["']""", re.IGNORECASE),
     re.compile(r"""["']ddk["']\s*,\s*["']([A-Za-z0-9_-]{12,})["']""", re.IGNORECASE),
+    re.compile(r"""["']([A-Z0-9]{24,40})["']\s*={2,3}\s*window\.ddjskey"""),
+    re.compile(r"""window\.ddjskey\s*={2,3}\s*["']([A-Z0-9]{24,40})["']"""),
     re.compile(r'\\"(?:ddjskey|ddk|datadomeKey|clientKey)\\"\s*[:=]\s*\\"([A-Za-z0-9_-]{12,})\\"', re.IGNORECASE),
+    re.compile(r'\\"DATADOME_CLIENT_SIDE_KEY\\"\s*:\s*\\"([A-Za-z0-9_-]{12,})\\"', re.IGNORECASE),
 )
 
 

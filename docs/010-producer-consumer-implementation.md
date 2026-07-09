@@ -87,7 +87,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 - The attempted `chrome149` runtime profile was removed because the installed `curl_cffi` build rejects live requests with `Impersonating chrome149 is not supported`.
 - `profile_for_impersonate()` now validates configured runtime targets against the installed `curl_cffi` impersonation literals before a proxy test, session prepare, or run reaches network I/O.
-- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`.
+- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`; `0011_normalize_vinted_session_invalid_status` normalizes any already-migrated `invalidated` rows back to the canonical `invalid` status.
 - The DataDome collector keeps the HAR-shaped `ch` then `le` sequence and does not stop after a `ch` cookie; the final returned cookie is kept in the same `curl_cffi.Session` cookie jar.
 
 ## Detail Probe Session Hardening 2026-07-09
@@ -102,6 +102,14 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
 - Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That endpoint remains a diagnostic probe only.
 - Business runs now require the public `/items/...` HTML/Next detail document before creating opportunities. Non-DataDome detail failures are terminal pending outcomes without opportunities; DataDome detail challenges still fail the run and invalidate the prepared Vinted session.
+
+## Prepared Session Hardening 2026-07-09
+
+- A monitor-owned Vinted session is reusable only after strict context is present: CSRF token, anon id, `access_token_web`, `v_udt`, `__cf_bm`, `datadome`, target country match, locale, `Accept-Language`, viewport and `x-screen=catalog`.
+- Session preparation may still call the catalog API probe after a failed DataDome collector to collect diagnostics, but a successful JSON probe no longer overrides missing `datadome` or `__cf_bm`; the saved row remains `incomplete` and the run fails clearly.
+- Runtime provider selection, explicit `Preparar sesion`, silent context refreshes and item detail probes now all use the same strict prepared-session requirement.
+- The provider receives the configured human pacing bounds from settings instead of hardcoded defaults.
+- Recalibrating the initial catalog snapshot reuses the accepted JSON payload from the preparation probe when the run had to prepare a new session, avoiding an immediate duplicate catalog API request. The explicit `Preparar sesion` action remains non-business: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
 
 ## Continuous Direct Scheduler Validation 2026-07-06
 

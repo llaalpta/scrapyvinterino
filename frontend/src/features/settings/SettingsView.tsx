@@ -349,6 +349,7 @@ function ProxySessionStatus({ proxy }: { proxy: ProxyProfile }) {
     ['anon', session.context.anon_id],
     ['access', session.context.access_token_web],
     ['datadome', session.context.datadome],
+    ['cf_bm', session.context.cf_bm],
     ['v_udt', session.context.v_udt],
     ['screen', session.context.vinted_screen]
   ]

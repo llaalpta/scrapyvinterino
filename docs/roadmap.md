@@ -27,6 +27,8 @@ Status values:
 | 12 | done | Professional monitor logs | `docs/specs/008-scheduler.md`, `docs/security.md` | Structured run events with levels, safe session diagnostics, durations, Redis/cache events, and PWA log timeline. |
 
 | 13 | in-progress | Producer-Consumer + DataDome bypass | `docs/specs/010-producer-consumer-bypass.md` | Persistent prepared Vinted sessions added; live residential session warm-up/validation remains pending before `done`. |
+| 13.1 | done | Prepared session hardening | `docs/specs/010-producer-consumer-bypass.md` | Require strict prepared context (`datadome`, `__cf_bm`, CSRF, anon, access, `v_udt`, geo/locale/screen) before a monitor-owned session becomes reusable. |
+| 13.2 | not-started | Direct item detail API unlock | `docs/specs/010-producer-consumer-bypass.md` | Continue the API-direct detail spike after prepared sessions consistently carry browser-grade context. |
 
 ## Next
 
