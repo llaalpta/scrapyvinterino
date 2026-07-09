@@ -25,6 +25,7 @@ from vinted_monitor.services.runs import (
     SESSION_PREPARE_TRIGGER,
     SUCCESS,
     SearchSourceInactiveError,
+    _persist_provider_session_refresh,
     execute_manual_run,
     execute_monitor_baseline,
     execute_monitor_run,
@@ -163,6 +164,38 @@ class FakeRefreshingProvider(FakeSuccessProvider):
             user_iso_locale="es-ES",
             vinted_screen="catalog",
             egress_ip="203.0.113.20",
+            egress_country_code="ES",
+        )
+
+
+class FakeDetailRefreshingProvider(FakeSuccessProvider):
+    prepared_session_refreshed = True
+
+    def __init__(self, *, proxy_session_id: str) -> None:
+        super().__init__(item_count=1, prefix="pytest-run-item-detail-refreshed")
+        self.prepared_session = PreparedCatalogSession(proxy_session_id=proxy_session_id)
+
+    def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
+        resolved_proxy_session_id = proxy_session_id or self.prepared_session.proxy_session_id
+        return PreparedCatalogSession(
+            proxy_session_id=resolved_proxy_session_id,
+            cookies={
+                "__cf_bm": "fresh-cf-bm",
+                "_vinted_fr_session": "fresh-vinted-session",
+                "access_token_web": "detail-access-token",
+                "anon_id": "detail-anon-id",
+                "datadome": "detail-datadome-token",
+                "v_sid": "detail-v-sid",
+                "v_udt": "detail-v-udt-token",
+            },
+            csrf_token="detail-csrf-token",
+            anon_id="detail-anon-id",
+            access_token_web="detail-access-token",
+            datadome="detail-datadome-token",
+            v_udt="detail-v-udt-token",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.55",
             egress_country_code="ES",
         )
 
@@ -805,6 +838,60 @@ def test_monitor_run_persists_refreshed_prepared_vinted_session_context(source_i
         assert event.details["vinted_session_status"] == "ready"
         assert event.details["context"]["user_iso_locale"] is True
         assert event.details["context"]["vinted_screen"] is True
+
+
+def test_run_persists_prepared_vinted_session_context_refreshed_by_detail(source_id: int) -> None:
+    proxy_session_id = "detailrefresh01"
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest detail refresh persist proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8003,
+            username="customer",
+            password=None,
+        )
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        _create_ready_vinted_session(db, source, proxy, proxy_session_id=proxy_session_id)
+        vinted_session = db.scalar(
+            select(VintedSession).where(
+                VintedSession.source_id == source.id,
+                VintedSession.proxy_profile_id == proxy.id,
+                VintedSession.proxy_session_id == proxy_session_id,
+            )
+        )
+        assert vinted_session is not None
+        run = Run(
+            source_id=source.id,
+            status="running",
+            trigger="manual",
+            started_at=datetime.now(UTC),
+            runtime_metadata={
+                "vinted_session_id": vinted_session.id,
+                "proxy_profile_id": proxy.id,
+            },
+        )
+        db.add(run)
+        db.flush()
+        provider = FakeDetailRefreshingProvider(proxy_session_id=proxy_session_id)
+
+        _persist_provider_session_refresh(db, provider, run, source, proxy.id, Settings())
+
+        db.refresh(vinted_session)
+        refreshed = prepared_context_from_session(vinted_session, Settings())
+        assert provider.prepared_session_refreshed is False
+        assert refreshed.proxy_session_id == proxy_session_id
+        assert refreshed.datadome == "detail-datadome-token"
+        assert refreshed.cookies is not None
+        assert refreshed.cookies["datadome"] == "detail-datadome-token"
+        assert refreshed.cookies["_vinted_fr_session"] == "fresh-vinted-session"
+        assert refreshed.cookies["__cf_bm"] == "fresh-cf-bm"
+        event = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "vinted_session_context_refreshed"))
+        assert event is not None
+        assert event.details["context"]["datadome"] is True
 
 
 def test_ready_vinted_session_is_scoped_to_monitor(source_id: int) -> None:

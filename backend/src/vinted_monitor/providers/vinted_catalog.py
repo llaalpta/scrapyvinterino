@@ -46,6 +46,17 @@ CSRF_TOKEN_PATTERNS = (
 VIEWPORT_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 5.0
 MAX_RATE_LIMIT_RETRY_AFTER_SECONDS = 30.0
+SESSION_REFRESH_COOKIE_NAMES = {
+    "__cf_bm",
+    "_vinted_fr_session",
+    "access_token_web",
+    "anon_id",
+    "csrf_token",
+    "datadome",
+    "refresh_token_web",
+    "v_sid",
+    "v_udt",
+}
 
 
 @dataclass
@@ -295,6 +306,8 @@ class CurlCffiVintedCatalogProvider:
         self._ensure_session()
         self._diagnose_egress(attempt=1)
         assert self._session is not None
+        cookies_before_request = self._cookie_values()
+        context_before_request = self._session_context_values()
         headers = self.profile.build_bootstrap_headers(referer=referer_url, accept_language=self.accept_language)
         if referer_url:
             headers["sec-fetch-site"] = "same-origin"
@@ -319,11 +332,10 @@ class CurlCffiVintedCatalogProvider:
                 timeout=self.timeout_ms / 1000,
                 default_headers=False,
             )
-            self._catalog_session_context.access_token_web = (
-                self._cookie_value("access_token_web") or self._catalog_session_context.access_token_web
+            refreshed_markers = self._refresh_session_context_from_cookies(
+                cookies_before=cookies_before_request,
+                context_before=context_before_request,
             )
-            self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
-            self._catalog_session_context.v_udt = self._cookie_value("v_udt") or self._catalog_session_context.v_udt
             response_details = {
                 "vinted_item_id": candidate.vinted_item_id,
                 "referer_url": referer_url,
@@ -331,6 +343,8 @@ class CurlCffiVintedCatalogProvider:
                 "request_headers": safe_headers(headers),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
+                "session_context_refreshed": bool(refreshed_markers),
+                "refreshed_markers": refreshed_markers,
             }
             if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
                 self._emit_event(
@@ -1707,6 +1721,40 @@ class CurlCffiVintedCatalogProvider:
             if cookie_name and cookie_value:
                 values[str(cookie_name)] = str(cookie_value)
         return values
+
+    def _session_context_values(self) -> dict[str, str | None]:
+        return {
+            "access_token_web": self._catalog_session_context.access_token_web,
+            "datadome": self._catalog_session_context.datadome,
+            "v_udt": self._catalog_session_context.v_udt,
+        }
+
+    def _refresh_session_context_from_cookies(
+        self,
+        *,
+        cookies_before: Mapping[str, str],
+        context_before: Mapping[str, str | None],
+    ) -> list[str]:
+        cookies_after = self._cookie_values()
+        for cookie_name in ("access_token_web", "datadome", "v_udt"):
+            value = cookies_after.get(cookie_name)
+            if value:
+                setattr(self._catalog_session_context, cookie_name, value)
+
+        context_after = self._session_context_values()
+        refreshed = {
+            name
+            for name in SESSION_REFRESH_COOKIE_NAMES
+            if cookies_after.get(name) and cookies_after.get(name) != cookies_before.get(name)
+        }
+        refreshed.update(
+            name
+            for name, value in context_after.items()
+            if value and value != context_before.get(name)
+        )
+        if refreshed:
+            self.prepared_session_refreshed = True
+        return sorted(refreshed)
 
     def _cookie_value(self, name: str) -> str | None:
         if self._session is None or not self._session.cookies:

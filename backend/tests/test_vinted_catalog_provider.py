@@ -1412,6 +1412,7 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
         "detail_parse_success",
     ]
     assert provider._catalog_session_context.datadome == "dd"
+    assert provider.prepared_session_refreshed is True
 
 
 def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:

@@ -5,7 +5,6 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import Item
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail
 
@@ -107,12 +106,6 @@ def apply_item_detail_data(item: Item, detail: CatalogItemDetail, now: datetime 
     item.detail_last_fetched_at = resolved_now
     item.detail_error = None
     item.last_seen_at = resolved_now
-
-
-def record_item_detail_error(db: Session, item: Item, message: str) -> None:
-    item.detail_error = redact_sensitive_text(message)
-    item.detail_last_fetched_at = datetime.now(UTC)
-    db.flush()
 
 
 def _deduplicate_candidates(candidates: list[CatalogItemCandidate]) -> dict[str, CatalogItemCandidate]:

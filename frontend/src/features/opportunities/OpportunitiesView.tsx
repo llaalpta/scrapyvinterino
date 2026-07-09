@@ -138,8 +138,6 @@ export function OpportunitiesView({
               <option value="">Todos</option>
               <option value="passed">Filtrada OK</option>
               <option value="passed_without_filters">Sin filtros</option>
-              <option value="passed_without_detail">Sin detalle</option>
-              <option value="detail_error">Error detalle</option>
             </select>
           </label>
         </div>

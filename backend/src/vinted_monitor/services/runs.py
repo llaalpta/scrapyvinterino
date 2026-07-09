@@ -34,7 +34,6 @@ from vinted_monitor.services.items import (
     apply_item_detail_data,
     build_transient_catalog_item,
     get_or_persist_catalog_item,
-    record_item_detail_error,
 )
 from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success, proxy_url_with_sticky_session
@@ -1213,6 +1212,7 @@ def execute_monitor_run(
             monitor_new_candidates,
             filter_snapshot,
         )
+        _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
         processed_ids = [candidate.vinted_item_id for candidate in monitor_new_candidates]
         run.status = SUCCESS
         run.finished_at = datetime.now(UTC)
@@ -1604,6 +1604,10 @@ def _persist_provider_session_refresh(
     )
     if updated is None:
         return
+    try:
+        provider.prepared_session_refreshed = False
+    except Exception:
+        pass
     record_run_event(
         db,
         run_id=run.id,
@@ -2192,22 +2196,6 @@ def _evaluate_monitor_candidates(
                     "photo_count": len(detail.photos),
                     "has_description": bool(detail.description),
                     "has_total_price": detail.total_price_amount is not None,
-                },
-            )
-        if detail_error is not None:
-            record_item_detail_error(db, item, detail_error)
-            record_run_event(
-                db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="item_detail_error_recorded",
-                level="warning",
-                url=candidate.url,
-                proxy_profile_id=proxy_profile_id,
-                message=detail_error,
-                details={
-                    "vinted_item_id": candidate.vinted_item_id,
-                    "item_id": item.id,
                 },
             )
         _, created = _get_or_create_monitor_opportunity(db, source, run, item, evaluation_status, filters)

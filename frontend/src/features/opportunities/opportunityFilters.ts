@@ -72,12 +72,6 @@ export function evaluationLabel(status: string): string {
   if (status === 'passed_without_filters') {
     return 'Sin filtros';
   }
-  if (status === 'passed_without_detail') {
-    return 'Sin detalle';
-  }
-  if (status === 'detail_error') {
-    return 'Error detalle';
-  }
   if (status === 'passed') {
     return 'Filtrada OK';
   }
