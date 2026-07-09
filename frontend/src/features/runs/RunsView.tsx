@@ -1,4 +1,5 @@
-import { FileText, RefreshCw } from 'lucide-react';
+import { useState } from 'react';
+import { Code2, FileText, RefreshCw } from 'lucide-react';
 import type { Run, RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
 import { type RunActivityController, useRunActivity } from './runActivity';
@@ -123,23 +124,40 @@ export function RunActivityList({
 
 export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; showRunId?: boolean }) {
   const hasDetails = Object.keys(event.details).length > 0;
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const narrative = eventNarrative(event);
   const tokens = eventLineTokens(event, showRunId);
+  const message = eventMessageToken(event);
   return (
     <article className={`run-event-entry ${event.level}`}>
-      <div className="event-console-line">
-        <span className="event-time">{formatLogTimestamp(event.created_at)}</span>
-        <span className={`event-level ${event.level}`}>{event.level.toUpperCase()}</span>
-        {tokens.map((token) => (
-          <span className="event-token" key={token}>{token}</span>
-        ))}
-        <strong>{eventLabel(event.phase)}</strong>
-        {event.message ? <span className="event-message">{event.message}</span> : null}
-        {event.url ? <code className="event-url">{event.url}</code> : null}
-        {hasDetails ? (
-          <details className="event-details">
-            <summary>json</summary>
+      <div className="event-console-row">
+        <div className="event-console-line">
+          <span className="event-time">{formatLogTimestamp(event.created_at)}</span>
+          <span className={`event-level ${event.level}`}>{event.level.toUpperCase()}</span>
+          <span className="event-area">{narrative.area}</span>
+          <span className="event-action">{narrative.action}</span>
+          {narrative.result ? <span className={`event-result ${narrative.tone}`}>{narrative.result}</span> : null}
+          {tokens.map((token) => (
+            <span className="event-token" key={token}>{token}</span>
+          ))}
+          {message ? <span className="event-message">{message}</span> : null}
+          {hasDetails ? (
+            <button
+              aria-expanded={detailsOpen}
+              className="event-details-toggle"
+              title="Mostrar detalles tecnicos saneados"
+              type="button"
+              onClick={() => setDetailsOpen((current) => !current)}
+            >
+              <Code2 size={13} />
+              Detalles
+            </button>
+          ) : null}
+        </div>
+        {detailsOpen ? (
+          <pre className="event-details-panel">
             <code>{JSON.stringify(event.details, null, 2)}</code>
-          </details>
+          </pre>
         ) : null}
       </div>
     </article>
@@ -147,15 +165,140 @@ export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; s
 }
 
 export function eventSearchText(event: RunEvent): string {
+  const narrative = eventNarrative(event);
   return [
     event.phase,
     event.level,
     event.message,
     event.url,
+    narrative.area,
+    narrative.action,
+    narrative.result,
     event.run_id ? `run#${event.run_id}` : null,
     eventLineTokens(event, true).join(' '),
     JSON.stringify(event.details)
   ].filter(Boolean).join(' ').toLowerCase();
+}
+
+type EventTone = 'neutral' | 'success' | 'warning' | 'error';
+
+type EventNarrative = {
+  area: string;
+  action: string;
+  result: string | null;
+  tone: EventTone;
+};
+
+const PHASE_NARRATIVES: Record<string, EventNarrative> = {
+  run_started: { area: 'prepare_session', action: 'starting', result: null, tone: 'neutral' },
+  run_config_resolved: { area: 'config', action: 'resolving', result: 'ok', tone: 'success' },
+  run_succeeded: { area: 'run', action: 'finishing', result: 'ok', tone: 'success' },
+  run_failed: { area: 'run', action: 'finishing', result: 'failed', tone: 'error' },
+  baseline_required: { area: 'baseline', action: 'checking', result: 'required', tone: 'warning' },
+  baseline_snapshot_seeded: { area: 'baseline', action: 'seeding', result: 'ok', tone: 'success' },
+  egress_selected: { area: 'egress', action: 'selecting', result: 'ok', tone: 'success' },
+  http_session_created: { area: 'http', action: 'opening', result: 'ok', tone: 'success' },
+  http_session_closed: { area: 'http', action: 'closing', result: 'ok', tone: 'success' },
+  egress_diagnostic_start: { area: 'egress', action: 'probing', result: null, tone: 'neutral' },
+  egress_diagnostic_success: { area: 'egress', action: 'probing', result: 'ok', tone: 'success' },
+  egress_diagnostic_error: { area: 'egress', action: 'probing', result: 'failed', tone: 'error' },
+  redis_check_start: { area: 'redis', action: 'checking', result: null, tone: 'neutral' },
+  redis_check_success: { area: 'redis', action: 'checking', result: 'ok', tone: 'success' },
+  redis_check_error: { area: 'redis', action: 'checking', result: 'failed', tone: 'error' },
+  redis_seen_result: { area: 'redis', action: 'evaluating_seen', result: 'ok', tone: 'success' },
+  redis_seen_marked: { area: 'redis', action: 'marking_seen', result: 'ok', tone: 'success' },
+  candidate_seen_skipped: { area: 'candidate', action: 'deduplicating', result: 'skipped', tone: 'warning' },
+  catalog_search_start: { area: 'catalog', action: 'searching', result: null, tone: 'neutral' },
+  catalog_search_success: { area: 'catalog', action: 'searching', result: 'ok', tone: 'success' },
+  catalog_candidates_received: { area: 'catalog', action: 'receiving_candidates', result: 'ok', tone: 'success' },
+  anonymous_session_bootstrap_start: { area: 'bootstrap', action: 'requesting', result: null, tone: 'neutral' },
+  anonymous_session_bootstrap_success: { area: 'bootstrap', action: 'extracting_context', result: 'ok', tone: 'success' },
+  anonymous_session_bootstrap_error: { area: 'bootstrap', action: 'requesting', result: 'failed', tone: 'error' },
+  anonymous_session_refresh_start: { area: 'bootstrap', action: 'refreshing', result: null, tone: 'warning' },
+  anonymous_session_refresh_success: { area: 'bootstrap', action: 'refreshing', result: 'ok', tone: 'success' },
+  catalog_session_context_ready: { area: 'session_context', action: 'checking', result: 'ok', tone: 'success' },
+  catalog_session_context_incomplete: { area: 'session_context', action: 'checking', result: 'incomplete', tone: 'error' },
+  vinted_session_prepare_start: { area: 'prepare_session', action: 'preparing', result: null, tone: 'neutral' },
+  vinted_session_prepare_result: { area: 'session', action: 'saving', result: 'ok', tone: 'success' },
+  catalog_api_probe_start: { area: 'api', action: 'probing', result: null, tone: 'neutral' },
+  catalog_api_probe_success: { area: 'api', action: 'probing', result: 'ok', tone: 'success' },
+  catalog_api_probe_failed: { area: 'api', action: 'probing', result: 'rejected', tone: 'warning' },
+  catalog_api_probe_error: { area: 'api', action: 'probing', result: 'failed', tone: 'error' },
+  catalog_api_rate_limit_backoff: { area: 'api', action: 'waiting', result: 'rate_limited', tone: 'warning' },
+  catalog_api_rate_limited: { area: 'api', action: 'requesting', result: 'rate_limited', tone: 'warning' },
+  datadome_tags_request_start: { area: 'datadome', action: 'loading_tags', result: null, tone: 'neutral' },
+  datadome_tags_request_success: { area: 'datadome', action: 'loading_tags', result: 'ok', tone: 'success' },
+  datadome_tags_request_error: { area: 'datadome', action: 'loading_tags', result: 'failed', tone: 'warning' },
+  datadome_collector_start: { area: 'datadome', action: 'checking', result: null, tone: 'neutral' },
+  datadome_collector_attempt_start: { area: 'datadome', action: 'posting', result: null, tone: 'neutral' },
+  datadome_collector_attempt_success: { area: 'datadome', action: 'posting', result: 'ok', tone: 'success' },
+  datadome_collector_attempt_failed: { area: 'datadome', action: 'posting', result: 'no_cookie', tone: 'warning' },
+  datadome_collector_success: { area: 'datadome', action: 'collecting', result: 'ok', tone: 'success' },
+  datadome_collector_failed: { area: 'datadome', action: 'collecting', result: 'skipped', tone: 'warning' },
+  datadome_collector_skipped: { area: 'datadome', action: 'checking', result: 'skipped', tone: 'warning' },
+  datadome_challenge_detected: { area: 'datadome', action: 'detecting_challenge', result: 'challenge', tone: 'warning' },
+  navigation_home_request_start: { area: 'navigation', action: 'visiting_home', result: null, tone: 'neutral' },
+  navigation_home_request_success: { area: 'navigation', action: 'visiting_home', result: 'ok', tone: 'success' },
+  navigation_home_request_error: { area: 'navigation', action: 'visiting_home', result: 'failed', tone: 'error' },
+  navigation_delay_applied: { area: 'pacing', action: 'waiting', result: 'ok', tone: 'success' },
+  human_delay_applied: { area: 'pacing', action: 'waiting', result: 'ok', tone: 'success' },
+  catalog_api_request_start: { area: 'api', action: 'requesting', result: null, tone: 'neutral' },
+  catalog_api_request_success: { area: 'api', action: 'requesting', result: 'ok', tone: 'success' },
+  catalog_api_request_error: { area: 'api', action: 'requesting', result: 'failed', tone: 'error' },
+  catalog_api_session_rejected: { area: 'api', action: 'requesting', result: 'rejected', tone: 'warning' },
+  catalog_api_parse_error: { area: 'api', action: 'parsing', result: 'failed', tone: 'error' },
+  candidate_evaluation_start: { area: 'candidate', action: 'evaluating', result: null, tone: 'neutral' },
+  candidate_existing_opportunity_skipped: { area: 'candidate', action: 'checking_opportunity', result: 'skipped', tone: 'warning' },
+  candidate_detail_required: { area: 'detail', action: 'checking_requirement', result: 'required', tone: 'neutral' },
+  candidate_detail_not_required: { area: 'detail', action: 'checking_requirement', result: 'skipped', tone: 'success' },
+  candidate_filter_decision: { area: 'filters', action: 'deciding', result: 'ok', tone: 'success' },
+  detail_http_request_start: { area: 'detail', action: 'requesting', result: null, tone: 'neutral' },
+  detail_http_request_success: { area: 'detail', action: 'requesting', result: 'ok', tone: 'success' },
+  detail_http_request_error: { area: 'detail', action: 'requesting', result: 'failed', tone: 'error' },
+  detail_fetch_start: { area: 'detail', action: 'fetching', result: null, tone: 'neutral' },
+  detail_fetch_success: { area: 'detail', action: 'fetching', result: 'ok', tone: 'success' },
+  detail_fetch_error: { area: 'detail', action: 'fetching', result: 'failed', tone: 'error' },
+  detail_fetch_skipped: { area: 'detail', action: 'fetching', result: 'skipped', tone: 'warning' },
+  filter_passed: { area: 'filters', action: 'evaluating', result: 'passed', tone: 'success' },
+  item_persisted: { area: 'item', action: 'persisting', result: 'ok', tone: 'success' },
+  item_reused: { area: 'item', action: 'persisting', result: 'reused', tone: 'success' },
+  item_detail_persisted: { area: 'item', action: 'persisting_detail', result: 'ok', tone: 'success' },
+  item_detail_error_recorded: { area: 'item', action: 'persisting_detail_error', result: 'ok', tone: 'warning' },
+  item_discarded: { area: 'item', action: 'evaluating', result: 'discarded', tone: 'warning' },
+  opportunity_created: { area: 'opportunity', action: 'creating', result: 'ok', tone: 'success' },
+  opportunity_skipped: { area: 'opportunity', action: 'creating', result: 'already_exists', tone: 'warning' },
+  monitor_session_closed: { area: 'monitor_session', action: 'closing', result: 'ok', tone: 'success' }
+};
+
+function eventNarrative(event: RunEvent): EventNarrative {
+  if (event.phase === 'run_started') {
+    const trigger = detailString(event.details, 'trigger');
+    return { area: trigger === 'session_prepare' ? 'prepare_session' : trigger === 'baseline' ? 'baseline' : 'run', action: 'starting', result: null, tone: 'neutral' };
+  }
+  if (event.phase === 'run_succeeded' || event.phase === 'run_failed') {
+    const sessionPrepare = event.details.session_prepare_run === true;
+    const baseline = event.details.baseline_run === true;
+    return {
+      area: sessionPrepare ? 'prepare_session' : baseline ? 'baseline' : 'run',
+      action: 'finishing',
+      result: event.phase === 'run_succeeded' ? 'ok' : 'failed',
+      tone: event.phase === 'run_succeeded' ? 'success' : 'error'
+    };
+  }
+  const configured = PHASE_NARRATIVES[event.phase];
+  if (configured) {
+    if (event.phase === 'vinted_session_prepare_result' && event.level === 'error') {
+      return { ...configured, result: 'failed', tone: 'error' };
+    }
+    return configured;
+  }
+  const [area, ...rest] = event.phase.split('_');
+  return {
+    area: area || 'event',
+    action: rest.length > 0 ? rest.join('_') : event.phase,
+    result: event.level === 'error' ? 'failed' : event.level === 'warning' ? 'warning' : null,
+    tone: event.level === 'error' ? 'error' : event.level === 'warning' ? 'warning' : 'neutral'
+  };
 }
 
 function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
@@ -166,6 +309,9 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (event.method) {
     parts.push(event.method);
   }
+  if (event.url) {
+    parts.push(`url=${formatLogUrl(event.url)}`);
+  }
   if (event.status_code) {
     parts.push(`status=${event.status_code}`);
   }
@@ -174,6 +320,13 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   }
   if (event.auth_mode) {
     parts.push(`auth=${event.auth_mode}`);
+  }
+  const headerSet = headerSetToken(event);
+  if (headerSet) {
+    parts.push(`headers=${headerSet}`);
+  }
+  if (event.details.default_headers === false) {
+    parts.push('default_headers=off');
   }
   const itemId = detailString(event.details, 'vinted_item_id');
   if (itemId) {
@@ -203,6 +356,11 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (impersonate) {
     parts.push(`imp=${impersonate}`);
   }
+  const browserProfile = detailString(event.details, 'browser_profile');
+  if (browserProfile) {
+    parts.push(`browser=${browserProfile}`);
+  }
+  appendCookieCount(parts, event.details);
   appendBooleanToken(parts, 'csrf', event.details, 'csrf_token_found');
   appendBooleanToken(parts, 'anon', event.details, 'anon_id_found');
   appendBooleanToken(parts, 'access', event.details, 'access_token_found');
@@ -215,6 +373,10 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   appendBooleanToken(parts, 'response_screen_ok', event.details, 'response_screen_matches');
   appendBooleanToken(parts, 'ddk', event.details, 'ddk_found');
   appendBooleanToken(parts, 'dd_cookie', event.details, 'cookie_found');
+  if (typeof event.details.post_sent === 'boolean') {
+    parts.push(`post_sent=${event.details.post_sent ? 'true' : 'false'}`);
+  }
+  appendDynamicHeaderTokens(parts, event.details);
   const locale = detailString(event.details, 'locale');
   if (locale) {
     parts.push(`locale=${locale}`);
@@ -247,10 +409,26 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (probeDuration) {
     parts.push(`probe_ms=${probeDuration}`);
   }
+  const contentType = detailString(event.details, 'content_type') || nestedDetailString(event.details, 'response', 'content_type');
+  if (contentType) {
+    parts.push(`content=${formatContentType(contentType)}`);
+  }
+  const error = detailString(event.details, 'error');
+  if (error) {
+    parts.push(`reason=${formatTokenValue(error)}`);
+  }
   if (event.phase === 'catalog_candidates_received') {
     appendNumberToken(parts, 'items', event.details, 'candidate_count');
     appendNumberToken(parts, 'unique', event.details, 'unique_candidate_count');
     appendNumberToken(parts, 'total', event.details, 'total_entries');
+  }
+  const directItems = detailString(event.details, 'items_count') || detailString(event.details, 'item_count');
+  if (directItems) {
+    parts.push(`items=${directItems}`);
+  }
+  const responseItems = directItems ? null : nestedDetailString(event.details, 'response', 'items_count');
+  if (responseItems) {
+    parts.push(`items=${responseItems}`);
   }
   if (event.phase === 'baseline_snapshot_seeded' || event.phase === 'redis_seen_marked') {
     appendNumberToken(parts, 'marked', event.details, 'marked_seen_count');
@@ -259,7 +437,100 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
     appendNumberToken(parts, 'seen', event.details, 'seen_hit_count');
     appendNumberToken(parts, 'new', event.details, 'seen_miss_count');
   }
+  const missingRequired = detailArray(event.details, 'missing_required');
+  if (missingRequired.length > 0) {
+    parts.push(`missing=${missingRequired.join('|')}`);
+  }
+  const retryAfter = detailString(event.details, 'retry_after_seconds');
+  if (retryAfter) {
+    parts.push(`retry_after=${retryAfter}s`);
+  }
+  const backoff = detailString(event.details, 'backoff_seconds');
+  if (backoff) {
+    parts.push(`backoff=${backoff}s`);
+  }
+  const savedSessionId = detailString(event.details, 'vinted_session_id');
+  if (savedSessionId) {
+    parts.push(`session_id=${savedSessionId}`);
+  }
+  const status = detailString(event.details, 'status') || detailString(event.details, 'vinted_session_status');
+  if (status) {
+    parts.push(`session_status=${status}`);
+  }
+  const useCount = detailString(event.details, 'vinted_session_use_count');
+  const maxCount = detailString(event.details, 'vinted_session_max_requests');
+  if (useCount && maxCount) {
+    parts.push(`use_count=${useCount}/${maxCount}`);
+  }
   return parts;
+}
+
+function eventMessageToken(event: RunEvent): string | null {
+  if (!event.message || event.level === 'info') {
+    return null;
+  }
+  const error = detailString(event.details, 'error');
+  if (error) {
+    return null;
+  }
+  return `reason=${formatTokenValue(event.message)}`;
+}
+
+function headerSetToken(event: RunEvent): string | null {
+  if (!detailRecord(event.details, 'request_headers')) {
+    return null;
+  }
+  if (event.phase.startsWith('anonymous_session_bootstrap')) {
+    return 'bootstrap_har146';
+  }
+  if (event.phase.startsWith('catalog_api')) {
+    return 'api_har146';
+  }
+  if (event.phase.startsWith('datadome_tags')) {
+    return 'datadome_tags';
+  }
+  if (event.phase.startsWith('datadome_collector')) {
+    return 'datadome_collector';
+  }
+  if (event.phase.startsWith('detail_http')) {
+    return 'detail_har146';
+  }
+  return 'custom';
+}
+
+function appendCookieCount(parts: string[], details: Record<string, unknown>): void {
+  const explicitCount = detailString(details, 'cookie_count') || detailString(details, 'session_marker_count');
+  if (explicitCount) {
+    parts.push(`cookies=${explicitCount}`);
+    return;
+  }
+  const cookiesAfter = detailArray(details, 'cookies_after');
+  if (cookiesAfter.length > 0) {
+    parts.push(`cookies=${cookiesAfter.length}`);
+    return;
+  }
+  const cookiesBefore = detailArray(details, 'cookies_before');
+  if (cookiesBefore.length > 0) {
+    parts.push(`cookies=${cookiesBefore.length}`);
+  }
+}
+
+function appendDynamicHeaderTokens(parts: string[], details: Record<string, unknown>): void {
+  const headers = detailRecord(details, 'request_headers');
+  if (!headers) {
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(headers, 'x-anon-id')) {
+    parts.push('x-anon-id=ok');
+  }
+  if (Object.prototype.hasOwnProperty.call(headers, 'x-csrf-token')) {
+    parts.push('x-csrf-token=ok');
+  }
+  if (Object.prototype.hasOwnProperty.call(headers, 'x-v-udt')) {
+    parts.push('x-v-udt=sent');
+  } else if (Object.prototype.hasOwnProperty.call(headers, 'x-anon-id') || Object.prototype.hasOwnProperty.call(headers, 'x-csrf-token')) {
+    parts.push('x-v-udt=not_sent');
+  }
 }
 
 function appendBooleanToken(parts: string[], label: string, details: Record<string, unknown>, key: string): void {
@@ -287,6 +558,19 @@ function detailString(details: Record<string, unknown>, key: string): string | n
   return null;
 }
 
+function detailArray(details: Record<string, unknown>, key: string): unknown[] {
+  const value = details[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function detailRecord(details: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = details[key];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
 function nestedDetailString(details: Record<string, unknown>, parent: string, key: string): string | null {
   const value = details[parent];
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -295,15 +579,33 @@ function nestedDetailString(details: Record<string, unknown>, parent: string, ke
   return detailString(value as Record<string, unknown>, key);
 }
 
+function formatLogUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const suffix = parsed.search ? '?...' : '';
+    return `${host}${parsed.pathname}${suffix}`;
+  } catch {
+    return formatTokenValue(value);
+  }
+}
+
+function formatContentType(value: string): string {
+  return value.split(';')[0].trim() || value;
+}
+
+function formatTokenValue(value: string): string {
+  const compact = value.replace(/\s+/g, '_');
+  return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact;
+}
+
 function formatLogTimestamp(value: string): string {
   const date = new Date(value);
-  return new Intl.DateTimeFormat('es-ES', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    fractionalSecondDigits: 3,
-    hour12: false
-  }).format(date);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  const millis = String(date.getMilliseconds()).padStart(3, '0');
+  return `${hours}:${minutes}:${seconds}.${millis}`;
 }
 
 function streamLabel(status: 'connecting' | 'connected' | 'error'): string {

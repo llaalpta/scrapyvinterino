@@ -70,6 +70,7 @@ class DataDomeCollectorResult:
     def safe_details(self) -> dict[str, Any]:
         return {
             "success": self.success,
+            "post_sent": bool(self.attempts),
             "attempts": [attempt.safe_details() for attempt in self.attempts],
             "ddv": self.ddv,
             "ddk_found": self.ddk_found,

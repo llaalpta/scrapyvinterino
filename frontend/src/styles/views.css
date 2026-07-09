@@ -1184,6 +1184,8 @@
 }
 
 .run-event-entry {
+  min-width: 0;
+  overflow: hidden;
   border-bottom: 1px solid rgb(148 163 184 / 0.22);
   color: #dbeafe;
   font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
@@ -1196,17 +1198,22 @@
 .event-console-line {
   display: flex;
   align-items: baseline;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 5px 8px;
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
   padding: 7px 10px;
   font-size: 12px;
   line-height: 1.45;
+  white-space: nowrap;
 }
 
-.event-console-line strong {
-  color: #f8fafc;
-  font-weight: 700;
+.event-console-row {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .event-time {
@@ -1217,6 +1224,41 @@
 .event-token {
   color: #94a3b8;
   white-space: nowrap;
+}
+
+.event-area {
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.event-action {
+  color: #c4b5fd;
+}
+
+.event-result {
+  border-radius: 4px;
+  padding: 0 5px;
+  font-weight: 700;
+}
+
+.event-result.neutral {
+  color: #cbd5e1;
+  background: rgb(148 163 184 / 0.14);
+}
+
+.event-result.success {
+  color: #bbf7d0;
+  background: rgb(34 197 94 / 0.16);
+}
+
+.event-result.warning {
+  color: #fde68a;
+  background: rgb(245 158 11 / 0.18);
+}
+
+.event-result.error {
+  color: #fecaca;
+  background: rgb(239 68 68 / 0.18);
 }
 
 .event-level {
@@ -1245,40 +1287,45 @@
   background: rgb(239 68 68 / 0.18);
 }
 
-.event-url,
-.event-details code {
-  display: block;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.event-url {
-  max-width: 100%;
-  color: #bae6fd;
-}
-
 .event-message {
-  color: #e2e8f0;
-  overflow-wrap: anywhere;
+  color: #fca5a5;
+  white-space: nowrap;
 }
 
-.event-details {
+.event-details-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-height: 22px;
+  border: 1px solid rgb(148 163 184 / 0.34);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #cbd5e1;
+  background: rgb(15 23 42 / 0.5);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.event-details-toggle:hover {
+  border-color: rgb(203 213 225 / 0.56);
+  color: #f8fafc;
+}
+
+.event-details-panel {
   min-width: 0;
   max-width: 100%;
-}
-
-.event-details summary {
-  cursor: pointer;
-  color: #cbd5e1;
-  font-size: 12px;
-}
-
-.event-details code {
-  margin-top: 6px;
-  border-radius: 6px;
+  margin: 0;
+  border-top: 1px solid rgb(148 163 184 / 0.22);
   padding: 8px;
+  overflow-x: auto;
   color: #d1fae5;
   background: rgb(2 6 23 / 0.64);
+  white-space: pre;
+}
+
+.event-details-panel code {
+  font-family: inherit;
 }
 
 .empty-inline {
