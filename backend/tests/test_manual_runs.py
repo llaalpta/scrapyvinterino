@@ -154,11 +154,14 @@ class FakeRefreshingProvider(FakeSuccessProvider):
                 "access_token_web": "fresh-access-token",
                 "v_udt": "fresh-v-udt-token",
                 "anon_id": "fresh-anon-id",
+                "datadome": "fresh-datadome-token",
+                "__cf_bm": "fresh-cf-bm-token",
             },
             csrf_token="fresh-csrf-token",
             anon_id="fresh-anon-id",
             access_token_web="fresh-access-token",
-            datadome=None,
+            datadome="fresh-datadome-token",
+            cf_bm="fresh-cf-bm-token",
             v_udt="fresh-v-udt-token",
             user_iso_locale="es-ES",
             vinted_screen="catalog",
@@ -215,16 +218,47 @@ class FakeSessionPreparingProvider:
                 duration_ms=7,
                 details={"anon": True, "v_udt": True},
             )
-        return {"bootstrap": "ok", "datadome_cookie": False}
+        return {"bootstrap": "ok", "datadome_cookie": True, "cf_bm_cookie": True}
 
-    def probe_catalog_api(self, source_url: str) -> dict:
+    def probe_catalog_api(self, source_url: str, *, include_payload: bool = False) -> dict:
         self.probe_calls.append(source_url)
-        return {
+        result = {
             "outcome": "accepted_json",
             "status_code": 200,
             "duration_ms": 11,
             "missing_required": [],
         }
+        if include_payload:
+            result["payload"] = {
+                "items": [
+                    {
+                        "id": 9100000001,
+                        "title": "Prepared probe item 1",
+                        "brand_title": "Prepared",
+                        "price": {"amount": "3.00", "currency_code": "EUR"},
+                        "path": "/items/9100000001-prepared-probe-item-1",
+                        "size_title": "M",
+                        "status": "Muy bueno",
+                        "favourite_count": 0,
+                        "photo": {"url": "https://images.example/1.jpg"},
+                        "user": {"login": "prepared_seller"},
+                    },
+                    {
+                        "id": 9100000002,
+                        "title": "Prepared probe item 2",
+                        "brand_title": "Prepared",
+                        "price": {"amount": "4.00", "currency_code": "EUR"},
+                        "path": "/items/9100000002-prepared-probe-item-2",
+                        "size_title": "L",
+                        "status": "Bueno",
+                        "favourite_count": 1,
+                        "photo": {"url": "https://images.example/2.jpg"},
+                        "user": {"login": "prepared_seller"},
+                    },
+                ],
+                "pagination": {"current_page": 1, "total_pages": 1, "total_entries": 2, "per_page": 5},
+            }
+        return result
 
     def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
         return PreparedCatalogSession(
@@ -233,11 +267,14 @@ class FakeSessionPreparingProvider:
                 "access_token_web": "prepared-access-token",
                 "v_udt": "prepared-v-udt",
                 "anon_id": "prepared-anon",
+                "datadome": "prepared-datadome",
+                "__cf_bm": "prepared-cf-bm",
             },
             csrf_token="prepared-csrf",
             anon_id="prepared-anon",
             access_token_web="prepared-access-token",
-            datadome=None,
+            datadome="prepared-datadome",
+            cf_bm="prepared-cf-bm",
             v_udt="prepared-v-udt",
             user_iso_locale=self.kwargs["locale"],
             vinted_screen=self.kwargs["screen"],
@@ -291,6 +328,38 @@ class FakeDataDomeDetailProvider(FakeSessionPreparingProvider):
         }
 
 
+class FakeSessionPreparingProviderWithoutDataDome(FakeSessionPreparingProvider):
+    def bootstrap_for_session(self, source_url: str, *, collect_datadome: bool = False) -> dict:
+        super().bootstrap_for_session(source_url, collect_datadome=collect_datadome)
+        return {"bootstrap": "ok", "datadome_cookie": False, "cf_bm_cookie": True}
+
+    def probe_catalog_api(self, source_url: str, *, include_payload: bool = False) -> dict:
+        self.probe_calls.append(source_url)
+        return {
+            "outcome": "accepted_json",
+            "status_code": 200,
+            "duration_ms": 11,
+            "missing_required": ["datadome"],
+        }
+
+    def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
+        prepared = super().export_prepared_session(proxy_session_id=proxy_session_id)
+        return PreparedCatalogSession(
+            proxy_session_id=prepared.proxy_session_id,
+            cookies={key: value for key, value in prepared.cookies.items() if key != "datadome"},
+            csrf_token=prepared.csrf_token,
+            anon_id=prepared.anon_id,
+            access_token_web=prepared.access_token_web,
+            datadome=None,
+            cf_bm=prepared.cf_bm,
+            v_udt=prepared.v_udt,
+            user_iso_locale=prepared.user_iso_locale,
+            vinted_screen=prepared.vinted_screen,
+            egress_ip=prepared.egress_ip,
+            egress_country_code=prepared.egress_country_code,
+        )
+
+
 def _test_direct_egress() -> RunEgress:
     return RunEgress(mode="direct")
 
@@ -314,6 +383,7 @@ def _create_ready_vinted_session(
             cookies={
                 "access_token_web": "access-token",
                 "datadome": "datadome-token",
+                "__cf_bm": "cf-bm-token",
                 "v_udt": "v-udt-token",
                 "anon_id": "anon-id",
             },
@@ -321,6 +391,7 @@ def _create_ready_vinted_session(
             anon_id="anon-id",
             access_token_web="access-token",
             datadome="datadome-token",
+            cf_bm="cf-bm-token",
             v_udt="v-udt-token",
             user_iso_locale=proxy.locale,
             vinted_screen=proxy.vinted_screen,
@@ -563,7 +634,8 @@ def test_monitor_session_prepare_api_creates_ready_session_without_business_effe
         assert body["opportunities_created"] == 0
         assert body["runtime_metadata"]["vinted_session_id"]
         assert body["runtime_metadata"]["vinted_session_action"] == "prepared"
-        assert body["runtime_metadata"]["vinted_session_datadome_present"] is False
+        assert body["runtime_metadata"]["vinted_session_datadome_present"] is True
+        assert body["runtime_metadata"]["vinted_session_cf_bm_present"] is True
         assert len(FakeSessionPreparingProvider.created) == 1
         assert FakeSessionPreparingProvider.created[0].closed is True
         assert FakeSessionPreparingProvider.created[0].bootstrap_calls == [(source_url, True)]
@@ -588,6 +660,69 @@ def test_monitor_session_prepare_api_creates_ready_session_without_business_effe
             stats = get_monitor_stats(db, source_id, range_name="all")
             assert stats.historical_summary.runs_count == 0
             assert sum(point.runs_count for point in stats.chart_points) == 0
+    finally:
+        cleanup_source(source_id)
+
+
+def test_monitor_session_prepare_api_rejects_session_without_datadome(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    FakeSessionPreparingProvider.created = []
+    monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProviderWithoutDataDome)
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.get_settings",
+        lambda: Settings(
+            scheduler_enabled=True,
+            proxy_sticky_username_template="{username}-sessid-{session_id}",
+            vinted_prepared_session_required=True,
+        ),
+    )
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest prepare no datadome proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8012,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest prepare no datadome monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+        proxy_id = proxy.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/vinted-session/prepare")
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["trigger"] == SESSION_PREPARE_TRIGGER
+        assert body["status"] == FAILED
+        assert "datadome" in body["error_message"]
+        with SessionLocal() as db:
+            session = db.scalar(
+                select(VintedSession).where(VintedSession.source_id == source_id, VintedSession.proxy_profile_id == proxy_id)
+            )
+            assert session is not None
+            assert session.status == "incomplete"
+            assert session.request_count == 0
+            assert session.last_error is not None
+            assert "datadome" in session.last_error
+            events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == body["id"]).order_by(RunEvent.id.asc())))
+            result_event = next(event for event in events if event.phase == "vinted_session_prepare_result")
+            assert result_event.level == "error"
+            assert result_event.details["datadome_required"] is True
+            assert "datadome" in result_event.details["missing_required"]
     finally:
         cleanup_source(source_id)
 
@@ -794,7 +929,8 @@ def test_monitor_run_persists_refreshed_prepared_vinted_session_context(source_i
         assert refreshed.proxy_session_id == proxy_session_id
         assert refreshed.access_token_web == "fresh-access-token"
         assert refreshed.csrf_token == "fresh-csrf-token"
-        assert refreshed.datadome is None
+        assert refreshed.datadome == "fresh-datadome-token"
+        assert refreshed.cf_bm == "fresh-cf-bm-token"
         assert refreshed.egress_ip == "203.0.113.20"
         event = db.scalar(select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "vinted_session_context_refreshed"))
         assert event is not None
@@ -834,7 +970,7 @@ def test_ready_vinted_session_is_scoped_to_monitor(source_id: int) -> None:
         from vinted_monitor.services.vinted_sessions import VintedSessionRequiredError, get_ready_vinted_session
 
         with pytest.raises(VintedSessionRequiredError):
-            get_ready_vinted_session(db, other_source, proxy, settings=Settings(), require_datadome=False)
+            get_ready_vinted_session(db, other_source, proxy, settings=Settings())
 
     cleanup_source(other_source_id)
 
@@ -965,6 +1101,75 @@ def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_i
         assert "baseline_snapshot_seeded" in phases
         assert "filter_passed" not in phases
         assert "opportunity_created" not in phases
+
+
+def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    FakeSessionPreparingProvider.created = []
+    monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.get_settings",
+        lambda: Settings(
+            scheduler_enabled=True,
+            proxy_sticky_username_template="{username}-sessid-{session_id}",
+            vinted_prepared_session_required=True,
+        ),
+    )
+    cache = FakeSeenCache(baseline_ready=False)
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest baseline prepare proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8013,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest baseline prepare monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+        proxy_id = proxy.id
+
+    try:
+        with SessionLocal() as db:
+            run = execute_monitor_baseline(
+                db,
+                source_id,
+                seen_cache=cache,
+                egress=RunEgress(
+                    mode="proxy",
+                    proxy_profile_id=proxy_id,
+                    proxy_name="pytest baseline prepare proxy",
+                    proxy_kind="residential",
+                ),
+            )
+            events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+            success_event = next(event for event in events if event.phase == "catalog_search_success")
+            session = db.scalar(select(VintedSession).where(VintedSession.source_id == source_id, VintedSession.proxy_profile_id == proxy_id))
+
+            assert run.status == SUCCESS
+            assert run.items_found == 2
+            assert sorted(cache.marked_seen) == ["9100000001", "9100000002"]
+            assert success_event.details["provider"]["reused_prepare_probe"] is True
+            assert session is not None
+            assert session.status == "ready"
+            assert session.request_count == 1
+            assert len(FakeSessionPreparingProvider.created) == 2
+            assert FakeSessionPreparingProvider.created[0].probe_calls == [
+                "https://www.vinted.es/catalog?search_text=&order=newest_first"
+            ]
+    finally:
+        cleanup_source(source_id)
 
 
 def test_monitor_run_without_baseline_fails_before_catalog(source_id: int) -> None:

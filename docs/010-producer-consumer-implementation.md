@@ -97,6 +97,14 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - A DataDome challenge during the detail probe invalidates the prepared Vinted session and records safe diagnostics without silently rotating into an unprepared proxy identity.
 - Host verification passed with service URLs overridden for Windows host access: `ruff check backend/src backend/alembic` and the focused 010 pytest suite (`144 passed`).
 
+## Prepared Session Hardening 2026-07-09
+
+- A monitor-owned Vinted session is reusable only after strict context is present: CSRF token, anon id, `access_token_web`, `v_udt`, `__cf_bm`, `datadome`, target country match, locale, `Accept-Language`, viewport and `x-screen=catalog`.
+- Session preparation may still call the catalog API probe after a failed DataDome collector to collect diagnostics, but a successful JSON probe no longer overrides missing `datadome` or `__cf_bm`; the saved row remains `incomplete` and the run fails clearly.
+- Runtime provider selection, explicit `Preparar sesion`, silent context refreshes and item detail probes now all use the same strict prepared-session requirement.
+- The provider receives the configured human pacing bounds from settings instead of hardcoded defaults.
+- Recalibrating the initial catalog snapshot reuses the accepted JSON payload from the preparation probe when the run had to prepare a new session, avoiding an immediate duplicate catalog API request. The explicit `Preparar sesion` action remains non-business: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
+
 ## Continuous Direct Scheduler Validation 2026-07-06
 
 - Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity on the then-current Chrome 120 profile.

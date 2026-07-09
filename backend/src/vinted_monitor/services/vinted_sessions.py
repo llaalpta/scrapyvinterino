@@ -26,6 +26,7 @@ REQUIRED_CONTEXT_FLAGS = (
     "anon_id",
     "access_token_web",
     "datadome",
+    "cf_bm",
     "v_udt",
     "user_iso_locale",
     "vinted_screen",
@@ -291,6 +292,7 @@ def prepared_context_from_session(session: VintedSession, settings: Settings) ->
         anon_id=_optional_payload_string(payload.get("anon_id")),
         access_token_web=_optional_payload_string(payload.get("access_token_web")),
         datadome=_optional_payload_string(payload.get("datadome")),
+        cf_bm=_optional_payload_string(payload.get("cf_bm")),
         v_udt=_optional_payload_string(payload.get("v_udt")),
         user_iso_locale=_optional_payload_string(payload.get("user_iso_locale")),
         vinted_screen=_optional_payload_string(payload.get("vinted_screen")),
@@ -302,6 +304,7 @@ def prepared_context_from_session(session: VintedSession, settings: Settings) ->
 def context_to_encrypted_payload(context: PreparedCatalogSession) -> dict[str, Any]:
     cookies = context.cookies or {}
     datadome = context.datadome or cookies.get("datadome")
+    cf_bm = context.cf_bm or cookies.get("__cf_bm")
     access_token = context.access_token_web or cookies.get("access_token_web")
     v_udt = context.v_udt or cookies.get("v_udt")
     anon_id = context.anon_id or cookies.get("anon_id")
@@ -311,6 +314,7 @@ def context_to_encrypted_payload(context: PreparedCatalogSession) -> dict[str, A
         "anon_id": anon_id,
         "access_token_web": access_token,
         "datadome": datadome,
+        "cf_bm": cf_bm,
         "v_udt": v_udt,
         "user_iso_locale": context.user_iso_locale,
         "vinted_screen": context.vinted_screen,
@@ -324,6 +328,7 @@ def prepared_context_flags(context: PreparedCatalogSession) -> dict[str, bool]:
         "anon_id": bool(payload.get("anon_id")),
         "access_token_web": bool(payload.get("access_token_web")),
         "datadome": bool(payload.get("datadome")),
+        "cf_bm": bool(payload.get("cf_bm")),
         "v_udt": bool(payload.get("v_udt")),
         "user_iso_locale": bool(payload.get("user_iso_locale")),
         "vinted_screen": bool(payload.get("vinted_screen")),

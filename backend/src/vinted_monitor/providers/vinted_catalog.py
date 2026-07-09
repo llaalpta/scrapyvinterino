@@ -54,6 +54,7 @@ class CatalogSessionContext:
     anon_id: str | None = None
     access_token_web: str | None = None
     datadome: str | None = None
+    cf_bm: str | None = None
     v_udt: str | None = None
     user_iso_locale: str | None = None
     screen: str | None = None
@@ -68,6 +69,7 @@ class PreparedCatalogSession:
     anon_id: str | None = None
     access_token_web: str | None = None
     datadome: str | None = None
+    cf_bm: str | None = None
     v_udt: str | None = None
     user_iso_locale: str | None = None
     vinted_screen: str | None = None
@@ -190,6 +192,7 @@ class CurlCffiVintedCatalogProvider:
                 anon_id=prepared_session.anon_id,
                 access_token_web=prepared_session.access_token_web,
                 datadome=prepared_session.datadome or (prepared_session.cookies or {}).get("datadome"),
+                cf_bm=prepared_session.cf_bm or (prepared_session.cookies or {}).get("__cf_bm"),
                 v_udt=prepared_session.v_udt or (prepared_session.cookies or {}).get("v_udt"),
                 user_iso_locale=prepared_session.user_iso_locale,
                 screen=prepared_session.vinted_screen,
@@ -249,7 +252,7 @@ class CurlCffiVintedCatalogProvider:
             self._try_datadome_collector(source_url)
         return self._session_context_report()
 
-    def probe_catalog_api(self, source_url: str) -> dict[str, Any]:
+    def probe_catalog_api(self, source_url: str, *, include_payload: bool = False) -> dict[str, Any]:
         """Probe the catalog API once and return a safe diagnostic report.
 
         This intentionally bypasses the conservative prepared-session gate but
@@ -260,7 +263,7 @@ class CurlCffiVintedCatalogProvider:
         self._diagnose_egress(attempt=1)
         if not self._bootstrapped:
             self._bootstrap_anonymous_session(source_url, attempt=1)
-        return self._probe_catalog_api_request(source_url)
+        return self._probe_catalog_api_request(source_url, include_payload=include_payload)
 
     def probe_item_detail_api(self, item_ref: str, *, referer_url: str | None = None) -> dict[str, Any]:
         """Probe the internal item detail API once and return safe diagnostics."""
@@ -284,6 +287,7 @@ class CurlCffiVintedCatalogProvider:
             anon_id=context.anon_id,
             access_token_web=context.access_token_web or cookies.get("access_token_web"),
             datadome=context.datadome or cookies.get("datadome"),
+            cf_bm=context.cf_bm or cookies.get("__cf_bm"),
             v_udt=context.v_udt or cookies.get("v_udt"),
             user_iso_locale=context.user_iso_locale,
             vinted_screen=context.screen,
@@ -756,7 +760,7 @@ class CurlCffiVintedCatalogProvider:
         )
         return payload
 
-    def _probe_catalog_api_request(self, source_url: str) -> dict[str, Any]:
+    def _probe_catalog_api_request(self, source_url: str, *, include_payload: bool = False) -> dict[str, Any]:
         assert self._session is not None
         url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
         params = build_catalog_api_params(source_url, None, self.catalog_per_page)
@@ -850,6 +854,7 @@ class CurlCffiVintedCatalogProvider:
         }
         outcome = "rejected"
         error: str | None = None
+        accepted_payload: Mapping[str, Any] | None = None
         body_snippet = getattr(response, "text", "")[:1200]
 
         if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
@@ -871,6 +876,7 @@ class CurlCffiVintedCatalogProvider:
             else:
                 if isinstance(payload, Mapping):
                     outcome = "accepted_json"
+                    accepted_payload = payload
                     items = payload.get("items")
                     response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
                     response_details["items_count"] = len(items) if isinstance(items, list) else None
@@ -903,7 +909,7 @@ class CurlCffiVintedCatalogProvider:
                 "error": error,
             },
         )
-        return {
+        result = {
             "outcome": outcome,
             "source_url": source_url,
             "catalog_api_url": url,
@@ -917,6 +923,9 @@ class CurlCffiVintedCatalogProvider:
             "response": response_details,
             "error": error,
         }
+        if include_payload and accepted_payload is not None:
+            result["payload"] = accepted_payload
+        return result
 
     def _probe_item_detail_api_request(self, item_id: str, *, referer_url: str) -> dict[str, Any]:
         assert self._session is not None
@@ -1434,6 +1443,7 @@ class CurlCffiVintedCatalogProvider:
             anon_id=_header_value(headers, "x-anon-id") or self._cookie_value("anon_id"),
             access_token_web=self._cookie_value("access_token_web"),
             datadome=self._cookie_value("datadome"),
+            cf_bm=self._cookie_value("__cf_bm"),
             v_udt=_header_value(headers, "x-v-udt") or self._cookie_value("v_udt"),
             user_iso_locale=_header_value(headers, "x-user-iso-locale"),
             screen=_header_value(headers, "x-screen"),
@@ -1466,6 +1476,7 @@ class CurlCffiVintedCatalogProvider:
             "anon_id_found": context.anon_id is not None,
             "access_token_found": context.access_token_web is not None,
             "datadome_cookie": context.datadome is not None,
+            "cf_bm_cookie": (context.cf_bm is not None) or bool(self._cookie_value("__cf_bm")),
             "v_udt_found": context.v_udt is not None,
             "locale": self.locale,
             "locale_configured": bool(self.locale and locale_country == expected_country_code),
@@ -1483,6 +1494,7 @@ class CurlCffiVintedCatalogProvider:
             "anon_id": _secret_marker_or_none("anon_id", context.anon_id),
             "access_token_web": _secret_marker_or_none("access_token_web", context.access_token_web),
             "datadome": _secret_marker_or_none("datadome", context.datadome),
+            "cf_bm": _secret_marker_or_none("__cf_bm", context.cf_bm or self._cookie_value("__cf_bm")),
             "v_udt": _secret_marker_or_none("v_udt", context.v_udt),
             "cookies_after_bootstrap": self._cookie_markers(),
             **_context_summary(
@@ -1517,6 +1529,7 @@ class CurlCffiVintedCatalogProvider:
         }
         if self.require_datadome_cookie:
             required_truthy_flags["datadome"] = report.get("datadome_cookie")
+            required_truthy_flags["cf_bm"] = report.get("cf_bm_cookie")
         for name, present in required_truthy_flags.items():
             if not present:
                 missing.append(name)

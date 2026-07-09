@@ -475,7 +475,11 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": ["access_token_web=anon; Path=/;", "datadome=dd-secret-value; Path=/;"],
+                    "set-cookie": [
+                        "access_token_web=anon; Path=/;",
+                        "datadome=dd-secret-value; Path=/;",
+                        "__cf_bm=cf-secret-value; Path=/;",
+                    ],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -525,7 +529,11 @@ def test_curl_provider_emits_safe_session_and_catalog_events() -> None:
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "datadome=public-marker; Path=/;"],
+                    "set-cookie": [
+                        "access_token_web=access-secret-value; Path=/;",
+                        "datadome=public-marker; Path=/;",
+                        "__cf_bm=cf-secret-value; Path=/;",
+                    ],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -594,7 +602,11 @@ def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers()
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": ["access_token_web=anonymous-secret-value; Path=/;", "datadome=dd-secret-value; Path=/;"],
+                    "set-cookie": [
+                        "access_token_web=anonymous-secret-value; Path=/;",
+                        "datadome=dd-secret-value; Path=/;",
+                        "__cf_bm=cf-secret-value; Path=/;",
+                    ],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -682,7 +694,7 @@ def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_cont
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                        "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -723,6 +735,7 @@ def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_cont
         "anon_id",
         "access_token_web",
         "v_udt",
+        "__cf_bm",
         "locale",
         "x_screen",
     ]
@@ -741,7 +754,7 @@ def test_curl_provider_catalog_api_probe_reports_challenge_without_raising() -> 
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                        "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -778,7 +791,7 @@ def test_curl_provider_catalog_api_probe_reports_transport_error() -> None:
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                        "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -1062,7 +1075,7 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
                     '{"CSRF_TOKEN":"csrf-secret-value"}'
                 ),
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -1148,7 +1161,7 @@ def test_curl_provider_preflight_collector_tries_le_after_ch_without_cookie() ->
                     '{"CSRF_TOKEN":"csrf-secret-value"}'
                 ),
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -1196,7 +1209,7 @@ def test_curl_provider_preflight_collector_keeps_incomplete_when_no_cookie_retur
                     '{"CSRF_TOKEN":"csrf-secret-value"}'
                 ),
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",
@@ -1563,7 +1576,7 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
 
     def handler(call: dict) -> FakeResponse:
         if path(call) == "/catalog":
-            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": "datadome=ok; Path=/;"})
+            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": ["datadome=ok; Path=/;", "__cf_bm=cf-secret-value; Path=/;"]})
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, text="<html>geo.captcha-delivery.com</html>", headers={"content-type": "text/html"})
         return FakeResponse(404)
@@ -1593,7 +1606,7 @@ def test_curl_provider_standard_flow_visits_catalog_document_then_api() -> None:
                 200,
                 text='{"CSRF_TOKEN":"csrf-secret-value"}',
                 headers={
-                    "set-cookie": ["access_token_web=anon; Path=/;", "datadome=ok; Path=/;"],
+                    "set-cookie": ["access_token_web=anon; Path=/;", "datadome=ok; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",

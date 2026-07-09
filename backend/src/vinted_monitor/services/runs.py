@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -22,6 +23,7 @@ from vinted_monitor.providers.vinted_catalog import (
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
     extract_vinted_item_id,
+    parse_catalog_api_payload,
 )
 from vinted_monitor.services.filters import (
     evaluate_exclusion_filters,
@@ -180,6 +182,7 @@ def execute_monitor_baseline(
     selected_egress = egress or choose_run_egress(db, settings)
     owned_provider = provider is None
     run_provider: ManualRunProvider | None = provider
+    prepared_catalog_result: CatalogSearchResult | None = None
 
     filter_snapshot = monitor_filter_snapshot(source.filter_definition)
     policy_hash = _policy_hash(source, filter_snapshot)
@@ -305,13 +308,14 @@ def execute_monitor_baseline(
         )
         try:
             if run_provider is None:
-                run_provider, provider_runtime_metadata = _provider_for_egress(
+                run_provider, provider_runtime_metadata, prepared_catalog_result = _provider_for_egress(
                     db,
                     source,
                     selected_egress,
                     runtime_config,
                     settings,
                     run=run,
+                    include_catalog_payload=True,
                 )
                 _merge_run_metadata(run, provider_runtime_metadata)
                 db.flush()
@@ -332,7 +336,7 @@ def execute_monitor_baseline(
             proxy_profile_id=proxy_profile_id,
             auth_mode="public_anonymous",
         )
-        result = run_provider.search(source)
+        result = prepared_catalog_result or run_provider.search(source)
         record_run_event(
             db,
             run_id=run.id,
@@ -543,7 +547,7 @@ def execute_monitor_session_prepare(
 
     try:
         event_sink = _build_provider_event_sink(db, run, source, proxy_profile_id)
-        vinted_session, prepared_session, provider_metadata = _prepare_vinted_session_for_run(
+        vinted_session, prepared_session, provider_metadata, _prepared_catalog_result = _prepare_vinted_session_for_run(
             db,
             source,
             proxy_profile,
@@ -563,6 +567,9 @@ def execute_monitor_session_prepare(
                 "vinted_session_action": "prepared",
                 "vinted_session_datadome_present": bool(
                     prepared_session.datadome or (prepared_session.cookies or {}).get("datadome")
+                ),
+                "vinted_session_cf_bm_present": bool(
+                    prepared_session.cf_bm or (prepared_session.cookies or {}).get("__cf_bm")
                 ),
                 "proxy_session_id_prefix": vinted_session.proxy_session_id[:8],
                 "proxy_sticky_session": proxy_marker,
@@ -586,7 +593,7 @@ def execute_monitor_session_prepare(
                 "vinted_session_use_count": vinted_session.request_count,
                 "vinted_session_max_requests": vinted_session.max_requests,
                 "context": prepared_context_flags(prepared_session),
-                "datadome_required": False,
+                "datadome_required": True,
                 "proxy_session": proxy_marker,
             },
         )
@@ -740,7 +747,7 @@ def execute_monitor_item_detail_probe(
         "error": None,
     }
     try:
-        provider, provider_metadata = _provider_for_egress(
+        provider, provider_metadata, _prepared_catalog_result = _provider_for_egress(
             db,
             source,
             selected_egress,
@@ -762,7 +769,6 @@ def execute_monitor_item_detail_probe(
                 vinted_session_id,
                 context=refreshed_context,
                 settings=settings,
-                require_datadome=False,
             )
             if result.get("outcome") == "datadome_challenge":
                 mark_vinted_session_invalid(db, vinted_session_id, reason="DataDome challenge on item detail API probe")
@@ -1069,7 +1075,7 @@ def execute_monitor_run(
 
     try:
         if run_provider is None:
-            run_provider, provider_runtime_metadata = _provider_for_egress(
+            run_provider, provider_runtime_metadata, _prepared_catalog_result = _provider_for_egress(
                 db,
                 source,
                 selected_egress,
@@ -1339,7 +1345,8 @@ def _provider_for_egress(
     settings,
     *,
     run: Run | None = None,
-) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any]]:
+    include_catalog_payload: bool = False,
+) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any], CatalogSearchResult | None]:
     proxy_url = egress.proxy_url
     metadata: dict[str, Any] = {
         "target_country_code": settings.vinted_target_country_code.strip().upper(),
@@ -1354,6 +1361,7 @@ def _provider_for_egress(
     provider_viewport_size = settings.vinted_target_screen
     provider_vinted_screen = settings.vinted_target_vinted_screen
     prepared_session = None
+    prepared_catalog_result: CatalogSearchResult | None = None
     proxy_marker: dict[str, Any] | None = None
     event_sink = _build_provider_event_sink(db, run, source, egress.proxy_profile_id) if run is not None else None
     if egress.proxy_profile_id is not None:
@@ -1366,17 +1374,17 @@ def _provider_for_egress(
                 source,
                 profile,
                 settings=settings,
-                require_datadome=False,
             )
             session_action = "reused"
         except VintedSessionRequiredError:
-            vinted_session, prepared_session, prepared_metadata = _prepare_vinted_session_for_run(
+            vinted_session, prepared_session, prepared_metadata, prepared_catalog_result = _prepare_vinted_session_for_run(
                 db,
                 source,
                 profile,
                 runtime_config,
                 settings,
                 event_sink=event_sink,
+                include_catalog_payload=include_catalog_payload,
             )
             metadata.update(prepared_metadata)
             session_action = "prepared"
@@ -1399,6 +1407,7 @@ def _provider_for_egress(
         metadata["vinted_session_max_requests"] = vinted_session.max_requests
         metadata["vinted_session_action"] = session_action
         metadata["vinted_session_datadome_present"] = bool(prepared_session.datadome or (prepared_session.cookies or {}).get("datadome"))
+        metadata["vinted_session_cf_bm_present"] = bool(prepared_session.cf_bm or (prepared_session.cookies or {}).get("__cf_bm"))
         metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
         metadata["proxy_sticky_session"] = proxy_marker
         if run is not None:
@@ -1416,7 +1425,7 @@ def _provider_for_egress(
                     "vinted_session_use_count": vinted_session.request_count,
                     "vinted_session_max_requests": vinted_session.max_requests,
                     "context": prepared_context_flags(prepared_session),
-                    "datadome_required": False,
+                    "datadome_required": True,
                     "proxy_session": proxy_marker,
                 },
             )
@@ -1429,6 +1438,8 @@ def _provider_for_egress(
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
         request_retries=settings.vinted_request_retries,
+        human_delay_min=settings.human_delay_min_seconds,
+        human_delay_max=settings.human_delay_max_seconds,
         event_sink=event_sink,
         proxy_session_marker=metadata.get("proxy_sticky_session"),
         expected_country_code=provider_country_code,
@@ -1437,8 +1448,8 @@ def _provider_for_egress(
         screen=provider_vinted_screen,
         viewport_size=provider_viewport_size,
         prepared_session=prepared_session,
-        require_datadome_cookie=False,
-    ), metadata
+        require_datadome_cookie=True,
+    ), metadata, prepared_catalog_result
 
 
 def _prepare_vinted_session_for_run(
@@ -1449,7 +1460,8 @@ def _prepare_vinted_session_for_run(
     settings,
     *,
     event_sink,
-) -> tuple[Any, Any, dict[str, Any]]:
+    include_catalog_payload: bool = False,
+) -> tuple[Any, Any, dict[str, Any], CatalogSearchResult | None]:
     browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
     proxy_session_id = generate_proxy_session_id()
     proxy_url = proxy_url_with_sticky_session(proxy_profile, proxy_session_id, settings)
@@ -1464,7 +1476,7 @@ def _prepare_vinted_session_for_run(
                 "browser_profile": browser_profile.name,
                 "impersonate": browser_profile.impersonate,
                 "proxy_session": proxy_marker,
-                "datadome_required": False,
+                "datadome_required": True,
                 "source_url": source.url,
             },
         )
@@ -1475,6 +1487,8 @@ def _prepare_vinted_session_for_run(
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
         request_retries=0,
+        human_delay_min=settings.human_delay_min_seconds,
+        human_delay_max=settings.human_delay_max_seconds,
         event_sink=event_sink,
         proxy_session_marker=proxy_marker,
         expected_country_code=proxy_profile.country_code,
@@ -1482,17 +1496,17 @@ def _prepare_vinted_session_for_run(
         accept_language=proxy_profile.accept_language,
         screen=proxy_profile.vinted_screen,
         viewport_size=proxy_profile.screen,
-        require_datadome_cookie=False,
+        require_datadome_cookie=True,
     )
     try:
         context_report = provider.bootstrap_for_session(source.url, collect_datadome=True)
-        probe = provider.probe_catalog_api(source.url)
+        probe = provider.probe_catalog_api(source.url, include_payload=include_catalog_payload)
         prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
     finally:
         provider.close()
 
     missing_context = list(probe.get("missing_required") or [])
-    missing_prepared = missing_prepared_context(prepared, require_datadome=False)
+    missing_prepared = missing_prepared_context(prepared)
     probe_outcome = str(probe.get("outcome") or "unknown")
     usable = probe_outcome == "accepted_json" and not missing_context and not missing_prepared
     if not usable:
@@ -1506,6 +1520,24 @@ def _prepare_vinted_session_for_run(
         last_error = "Prepared Vinted session rejected: " + "; ".join(reasons or ["unknown"])
     else:
         last_error = None
+    catalog_result: CatalogSearchResult | None = None
+    if usable and include_catalog_payload:
+        payload = probe.get("payload")
+        if isinstance(payload, dict):
+            catalog_result = parse_catalog_api_payload(payload, base_url=str(settings.vinted_base_url))
+            catalog_result = replace(
+                catalog_result,
+                provider_metadata={
+                    **catalog_result.provider_metadata,
+                    "source": "catalog_api_probe_json",
+                    "reused_prepare_probe": True,
+                    "probe_status_code": probe.get("status_code"),
+                    "probe_duration_ms": probe.get("duration_ms"),
+                },
+            )
+        else:
+            usable = False
+            last_error = "Prepared Vinted session rejected: probe payload unavailable for recalibration"
 
     saved = save_prepared_vinted_session(
         db,
@@ -1517,7 +1549,6 @@ def _prepare_vinted_session_for_run(
         status=READY if usable else INCOMPLETE,
         settings=settings,
         last_error=last_error,
-        require_datadome=False,
     )
     if usable:
         mark_vinted_session_used(db, saved)
@@ -1537,7 +1568,7 @@ def _prepare_vinted_session_for_run(
                 "context_report": context_report,
                 "missing_required": missing_context,
                 "missing_prepared": missing_prepared,
-                "datadome_required": False,
+                "datadome_required": True,
                 "proxy_session": proxy_marker,
                 "vinted_session_use_count": saved.request_count,
                 "vinted_session_max_requests": saved.max_requests,
@@ -1550,7 +1581,7 @@ def _prepare_vinted_session_for_run(
         "vinted_session_prepare_probe_outcome": probe_outcome,
         "vinted_session_prepare_probe_status_code": probe.get("status_code"),
         "vinted_session_prepare_probe_duration_ms": probe.get("duration_ms"),
-    }
+    }, catalog_result
 
 
 def _close_owned_provider(provider: ManualRunProvider, *, owned_provider: bool) -> None:
@@ -1600,7 +1631,6 @@ def _persist_provider_session_refresh(
         vinted_session_id,
         context=refreshed_context,
         settings=settings,
-        require_datadome=False,
     )
     if updated is None:
         return
