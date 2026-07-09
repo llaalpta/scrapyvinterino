@@ -346,6 +346,12 @@ def test_extract_datadome_bootstrap_metadata() -> None:
     assert extract_datadome_client_key(html) == "TESTDATADOMEKEY1234567890"
     assert extract_datadome_client_key(next_payload) == "NEXTDATADOMEKEY1234567890"
     assert extract_datadome_client_key(escaped_payload) == "ESCAPEDDATADOMEKEY123456"
+    assert extract_datadome_client_key('{"DATADOME_CLIENT_SIDE_KEY":"E6EAF460AA2A8322D66B42C85B62F9"}') == (
+        "E6EAF460AA2A8322D66B42C85B62F9"
+    )
+    assert extract_datadome_client_key('"E6EAF460AA2A8322D66B42C85B62F9"==window.ddjskey') == (
+        "E6EAF460AA2A8322D66B42C85B62F9"
+    )
     assert extract_datadome_cookie_from_response_cookie("datadome=dd-cookie-secret; Path=/; Secure") == "dd-cookie-secret"
     assert extract_datadome_cookie_from_response_cookie("session=other; Path=/") is None
 
@@ -829,13 +835,40 @@ def test_curl_provider_item_detail_api_probe_uses_prepared_session_and_summarize
     events: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        assert path(call) == "/api/v2/items/9356705635/details"
+        if path(call) == "/items/9356705635":
+            assert call["method"] == "GET"
+            assert call["default_headers"] is False
+            assert call["headers"]["sec-fetch-dest"] == "document"
+            assert call["headers"]["sec-fetch-site"] == "same-origin"
+            assert call["headers"]["referer"] == source().url
+            return FakeResponse(
+                200,
+                text="<html>item document</html>",
+                headers={
+                    "content-type": "text/html; charset=utf-8",
+                    "set-cookie": ["v_sid=vsid-secret-value; Path=/;", "_vinted_fr_session=session-secret-value; Path=/;"],
+                    "x-anon-id": "item-anon-secret-value",
+                    "x-v-udt": "item-udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "item",
+                },
+            )
+        if path(call) == "/api/v2/info_banners/item":
+            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json; charset=utf-8"})
+        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
+            return FakeResponse(200, json_data={"code": 0, "items": []}, headers={"content-type": "application/json"})
+        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
         assert call["default_headers"] is False
         assert call["headers"]["x-csrf-token"] == "csrf-secret-value"
-        assert call["headers"]["x-anon-id"] == "anon-secret-value"
+        assert call["headers"]["x-anon-id"] == "item-anon-secret-value"
         assert "x-v-udt" not in call["headers"]
+        assert "cookie" not in call["headers"]
+        assert "host" not in call["headers"]
+        assert not any(str(header).startswith(":") for header in call["headers"])
         assert call["cookies"]["access_token_web"] == "access-secret-value"
         assert call["cookies"]["v_udt"] == "udt-secret-value"
+        assert call["cookies"]["v_sid"] == "vsid-secret-value"
+        assert call["cookies"]["_vinted_fr_session"] == "session-secret-value"
         return FakeResponse(
             200,
             json_data={
@@ -891,12 +924,168 @@ def test_curl_provider_item_detail_api_probe_uses_prepared_session_and_summarize
     assert "access-secret-value" not in serialized
     assert "csrf-secret-value" not in serialized
     assert "anon-secret-value" not in serialized
+    assert "item-anon-secret-value" not in serialized
     assert "udt-secret-value" not in serialized
+    assert "item-udt-secret-value" not in serialized
     start = next(event for event in events if event["phase"] == "detail_api_probe_start")
     assert start["details"]["request_profile"] == "api_har146"
     assert start["details"]["x_v_udt_sent"] is False
-    success = next(event for event in events if event["phase"] == "detail_api_probe_success")
+    assert probe["attempt_count"] == 11
+    assert probe["control_outcome"] == "accepted_json"
+    attempts = probe["attempts"]
+    document = next(attempt for attempt in attempts if attempt["endpoint_role"] == "document")
+    assert document["outcome"] == "document_ok"
+    assert document["pre_navigation"] is True
+    assert {attempt["referer_mode"] for attempt in attempts if attempt["endpoint_role"] == "detail"} == {"catalog", "item"}
+    assert {attempt["endpoint"] for attempt in attempts if attempt["endpoint_role"] == "support"} == {"item_more", "item_services"}
+    success = next(
+        event
+        for event in events
+        if event["phase"] == "detail_api_probe_attempt_finished"
+        and event["details"]["endpoint"] == "item_details"
+        and event["details"]["outcome"] == "accepted_json"
+    )
     assert success["details"]["detail_summary"]["photo_count"] == 2
+
+
+def test_curl_provider_item_detail_api_probe_preserves_item_url_as_item_referer() -> None:
+    calls: list[dict] = []
+    item_url = "https://www.vinted.es/items/9356705635-dead-cowboy?referrer=catalog"
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/items/9356705635-dead-cowboy":
+            return FakeResponse(
+                200,
+                text="<html>item</html>",
+                headers={
+                    "content-type": "text/html",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "item",
+                },
+            )
+        if path(call) == "/api/v2/info_banners/item":
+            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
+        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
+            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
+        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
+        return FakeResponse(
+            200,
+            json_data={"item": {"id": 9356705635, "title": "Dead cowboy"}},
+            headers={"content-type": "application/json"},
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    provider.probe_item_detail_api(item_url, referer_url=source().url)
+
+    item_referer_calls = [
+        call
+        for call in calls
+        if path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
+        and call["headers"]["referer"] == item_url
+    ]
+    assert len(item_referer_calls) == 2
+
+
+def test_curl_provider_item_detail_api_probe_collects_datadome_after_item_warmup() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/items/9356705635":
+            return FakeResponse(
+                200,
+                text=(
+                    '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
+                    '{"DATADOME_CLIENT_SIDE_KEY":"E6EAF460AA2A8322D66B42C85B62F9"}'
+                ),
+                headers={
+                    "content-type": "text/html",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "item",
+                },
+            )
+        if path(call) == "/js":
+            assert call["method"] == "POST"
+            assert call["default_headers"] is False
+            assert "content-length" not in call["headers"]
+            assert call["headers"]["sec-fetch-site"] == "cross-site"
+            assert call["data"]["ddk"] == "E6EAF460AA2A8322D66B42C85B62F9"
+            assert call["data"]["request"] == "/items/9356705635?referrer=catalog"
+            assert call["data"]["Referer"] == "https://www.vinted.es/items/9356705635?referrer=catalog"
+            return FakeResponse(
+                200,
+                json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure; SameSite=Lax"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/api/v2/info_banners/item":
+            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
+        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
+            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
+        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
+        assert call["cookies"]["datadome"] == "dd-cookie-secret"
+        assert "x-v-udt" not in call["headers"]
+        return FakeResponse(
+            200,
+            json_data={"item": {"id": 9356705635, "title": "Dead cowboy"}},
+            headers={"content-type": "application/json"},
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(
+            egress_diagnostic_url=None,
+            vinted_datadome_collector_url="https://dd.vinted.lt/js",
+        ),
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
+
+    assert probe["outcome"] == "accepted_json"
+    assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
+    assert any(event["phase"] == "datadome_collector_success" for event in events)
+    assert "dd-cookie-secret" not in json.dumps(events)
+    assert "E6EAF460AA2A8322D66B42C85B62F9" not in json.dumps(events)
 
 
 def test_curl_provider_egress_diagnostic_is_cookie_free_with_prepared_session() -> None:
@@ -912,7 +1101,23 @@ def test_curl_provider_egress_diagnostic_is_cookie_free_with_prepared_session() 
                 json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
                 headers={"content-type": "application/json"},
             )
-        assert path(call) == "/api/v2/items/9356705635/details"
+        if path(call) == "/items/9356705635":
+            return FakeResponse(
+                200,
+                text="<html>item</html>",
+                headers={
+                    "content-type": "text/html",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "item",
+                },
+            )
+        if path(call) == "/api/v2/info_banners/item":
+            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
+        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
+            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
+        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
         assert call["cookies"]["access_token_web"] == "access-secret-value"
         assert call["cookies"]["v_udt"] == "udt-secret-value"
         return FakeResponse(
@@ -952,7 +1157,7 @@ def test_curl_provider_egress_diagnostic_is_cookie_free_with_prepared_session() 
     diagnostic_calls = [call for call in calls if urlparse(call["url"]).hostname == "ipwho.is"]
     detail_calls = [call for call in calls if path(call) == "/api/v2/items/9356705635/details"]
     assert len(diagnostic_calls) == 1
-    assert len(detail_calls) == 1
+    assert len(detail_calls) == 2
     assert diagnostic_calls[0]["cookies"] == {}
 
 
@@ -975,6 +1180,11 @@ def test_curl_provider_egress_diagnostic_is_cookie_free_with_prepared_session() 
             403,
         ),
         (
+            FakeResponse(403, text="<html>challenge</html>", headers={"content-type": "text/html", "cf-mitigated": "challenge"}),
+            "cloudflare_challenge",
+            403,
+        ),
+        (
             FakeResponse(500, text="server error", headers={"content-type": "text/plain"}),
             "http_error",
             500,
@@ -994,7 +1204,13 @@ def test_curl_provider_item_detail_api_probe_classifies_terminal_outcomes(
     calls: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
-        assert path(call) == "/api/v2/items/9356705635/details"
+        if path(call) == "/api/v2/info_banners/item":
+            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
+        if path(call) == "/items/9356705635":
+            return FakeResponse(200, text="<html>item</html>", headers={"content-type": "text/html"})
+        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
+            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
+        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
         return response
 
     provider = CurlCffiVintedCatalogProvider(
@@ -1025,6 +1241,83 @@ def test_curl_provider_item_detail_api_probe_classifies_terminal_outcomes(
     assert probe["status_code"] == expected_status
     if expected_outcome == "rate_limited":
         assert probe["response"]["retry_after_seconds"] == 7
+
+
+def test_curl_provider_item_detail_api_probe_retries_with_client_hints_when_requested() -> None:
+    calls: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/items/9356705635":
+            return FakeResponse(
+                200,
+                text="<html>item</html>",
+                headers={
+                    "content-type": "text/html",
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "item",
+                },
+            )
+        if path(call) == "/api/v2/info_banners/item":
+            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
+        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
+            return FakeResponse(
+                403,
+                text="<html>challenge</html>",
+                headers={
+                    "content-type": "text/html",
+                    "cf-mitigated": "challenge",
+                    "accept-ch": "Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform-Version",
+                },
+            )
+        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
+        assert "x-v-udt" not in call["headers"]
+        if "sec-ch-ua-full-version-list" in call["headers"]:
+            return FakeResponse(
+                200,
+                json_data={"item": {"id": 9356705635, "title": "Dead cowboy", "description": "Detalle publico"}},
+                headers={"content-type": "application/json"},
+            )
+        return FakeResponse(
+            403,
+            text="<html>challenge</html>",
+            headers={
+                "content-type": "text/html",
+                "cf-mitigated": "challenge",
+                "accept-ch": "Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform-Version",
+            },
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=PreparedCatalogSession(
+            cookies={
+                "access_token_web": "access-secret-value",
+                "v_udt": "udt-secret-value",
+                "anon_id": "anon-secret-value",
+            },
+            csrf_token="csrf-secret-value",
+            anon_id="anon-secret-value",
+            access_token_web="access-secret-value",
+            datadome=None,
+            v_udt="udt-secret-value",
+            user_iso_locale="es-ES",
+            vinted_screen="catalog",
+            egress_ip="203.0.113.10",
+            egress_country_code="ES",
+        ),
+        require_datadome_cookie=False,
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
+
+    assert probe["outcome"] == "accepted_json"
+    assert any(attempt["client_hints"] is True for attempt in probe["attempts"] if attempt["endpoint_role"] == "detail")
+    hinted_calls = [call for call in calls if "sec-ch-ua-full-version-list" in call["headers"]]
+    assert hinted_calls
+    assert all("cookie" not in call["headers"] for call in hinted_calls)
 
 
 def test_curl_provider_item_detail_api_probe_reports_transport_error() -> None:
@@ -1169,7 +1462,7 @@ def test_curl_provider_preflight_collector_uses_next_datadome_client_side_key() 
                     '"DATADOME_CLIENT_SIDE_KEY":"NEXTDATADOMEKEY1234567890"}'
                 ),
                 headers={
-                    "set-cookie": "access_token_web=access-secret-value; Path=/;",
+                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
                     "x-anon-id": "anon-secret-value",
                     "x-v-udt": "udt-secret-value",
                     "x-user-iso-locale": "ES",

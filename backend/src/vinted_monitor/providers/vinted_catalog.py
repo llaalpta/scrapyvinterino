@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 from curl_cffi.requests import Session
 
@@ -57,6 +57,11 @@ SESSION_REFRESH_COOKIE_NAMES = {
     "v_sid",
     "v_udt",
 }
+DETAIL_API_CONTROL_ENDPOINT = "info_banners"
+DETAIL_API_DETAILS_ENDPOINT = "item_details"
+DETAIL_API_LEGACY_ENDPOINT = "item_legacy"
+DETAIL_API_MORE_ENDPOINT = "item_more"
+DETAIL_API_SERVICES_ENDPOINT = "item_services"
 
 
 @dataclass
@@ -196,6 +201,7 @@ class CurlCffiVintedCatalogProvider:
         self._catalog_session_context = CatalogSessionContext()
         self._egress_context = EgressContext()
         self._last_bootstrap_html = ""
+        self._last_item_document_html = ""
         self.prepared_session_refreshed = False
         if prepared_session is not None:
             self._catalog_session_context = CatalogSessionContext(
@@ -283,7 +289,11 @@ class CurlCffiVintedCatalogProvider:
             raise ValueError("item_ref must be a Vinted item id or item URL")
         self._ensure_session()
         self._diagnose_egress(attempt=1)
-        return self._probe_item_detail_api_request(item_id, referer_url=referer_url or str(self.settings.vinted_base_url))
+        return self._probe_item_detail_api_request(
+            item_id,
+            item_ref=item_ref,
+            referer_url=referer_url or str(self.settings.vinted_base_url),
+        )
 
     def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
         if self._session is None or not self._bootstrapped:
@@ -468,6 +478,7 @@ class CurlCffiVintedCatalogProvider:
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
         self._last_bootstrap_html = ""
+        self._last_item_document_html = ""
 
     def _ensure_session(self) -> None:
         if self._session is None:
@@ -989,52 +1000,226 @@ class CurlCffiVintedCatalogProvider:
             result["payload"] = accepted_payload
         return result
 
-    def _probe_item_detail_api_request(self, item_id: str, *, referer_url: str) -> dict[str, Any]:
+    def _probe_item_detail_api_request(self, item_id: str, *, item_ref: str, referer_url: str) -> dict[str, Any]:
         assert self._session is not None
-        url = urljoin(str(self.settings.vinted_base_url), f"/api/v2/items/{item_id}/details")
+        item_url = _item_public_url(item_id, item_ref=item_ref, base_url=str(self.settings.vinted_base_url))
         context_report = self._session_context_report()
         missing_context = self._missing_session_context(context_report)
-        headers = dict(
-            self.profile.build_api_headers(
-                referer=referer_url,
-                accept_language=self.accept_language,
-                locale=self.locale,
-                screen=self.vinted_screen,
-            )
-        )
-        if self._catalog_session_context.anon_id:
-            headers["x-anon-id"] = self._catalog_session_context.anon_id
-        if self._catalog_session_context.csrf_token:
-            headers["x-csrf-token"] = self._catalog_session_context.csrf_token
-
-        request_details = {
-            "method": "GET",
-            "url": url,
-            "headers": safe_headers(headers),
-            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
-            "cookies": self._cookie_markers(),
-        }
+        attempts: list[dict[str, Any]] = []
+        fast_variants = self._detail_probe_variants(item_id, catalog_referer=referer_url, item_referer=item_url)
         self._emit_event(
             phase="detail_api_probe_start",
             method="GET",
-            url=url,
+            url=urljoin(str(self.settings.vinted_base_url), f"/api/v2/items/{item_id}/details"),
             details={
                 "item_id": item_id,
-                "referer_url": referer_url,
+                "item_url": item_url,
                 "request_profile": "api_har146",
+                "variant_count": len(fast_variants),
                 "missing_required": missing_context,
                 "context": context_report,
                 **_context_summary(context_report, self._cookie_values()),
-                "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
                 "default_headers": False,
                 "x_v_udt_sent": False,
             },
         )
+        matrix_started_at = time.perf_counter()
+
+        navigation = self._probe_item_document_navigation(item_url, referer_url=referer_url, warmup=True)
+        attempts.append(navigation)
+        if navigation.get("outcome") == "document_ok":
+            self._try_datadome_collector(
+                item_url,
+                page_html=self._last_item_document_html,
+                expected_screen="item",
+                bootstrap_origin="item_document",
+            )
+            context_report = self._session_context_report(expected_screen="item", bootstrap_origin="item_document")
+            missing_context = self._missing_session_context(context_report)
+
+        for variant in fast_variants:
+            attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
+
+        if self._should_retry_detail_with_client_hints(attempts):
+            for variant in self._detail_probe_variants(
+                item_id,
+                catalog_referer=referer_url,
+                item_referer=item_url,
+                include_control=False,
+                referer_modes=("item",),
+                client_hints=True,
+            ):
+                attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
+
+        selected = _select_detail_probe_attempt(attempts)
+        final_context_report = self._session_context_report(expected_screen="item", bootstrap_origin="item_document")
+        matrix_duration_ms = _elapsed_ms(matrix_started_at)
+        detail_summary = selected.get("detail_summary") if isinstance(selected.get("detail_summary"), dict) else {}
+        response_details = selected.get("response") if isinstance(selected.get("response"), dict) else {}
+        request_details = selected.get("request") if isinstance(selected.get("request"), dict) else {}
+        result = {
+            "outcome": selected.get("outcome", "transport_error"),
+            "item_id": item_id,
+            "detail_api_url": selected.get("url"),
+            "status_code": selected.get("status_code"),
+            "duration_ms": selected.get("duration_ms"),
+            "matrix_duration_ms": matrix_duration_ms,
+            "attempt_count": len(attempts),
+            "egress_ip": self._egress_context.ip,
+            "egress_country_code": self._egress_context.country_code,
+            "context": final_context_report,
+            "missing_required": missing_context,
+            "request": request_details,
+            "response": response_details,
+            "detail_summary": detail_summary,
+            "attempts": [_safe_detail_probe_attempt(attempt) for attempt in attempts],
+            "control_outcome": _first_endpoint_outcome(attempts, DETAIL_API_CONTROL_ENDPOINT),
+            "error": selected.get("error"),
+        }
+        self._emit_event(
+            phase="detail_api_probe_finished",
+            method="GET",
+            url=result.get("detail_api_url") if isinstance(result.get("detail_api_url"), str) else None,
+            status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
+            duration_ms=matrix_duration_ms,
+            level=None if result["outcome"] == "accepted_json" else "warning",
+            details={
+                "item_id": item_id,
+                "outcome": result["outcome"],
+                "attempt_count": len(attempts),
+                "control_outcome": result["control_outcome"],
+                "selected_variant": selected.get("variant_id"),
+                "selected_endpoint": selected.get("endpoint"),
+                "selected_referer_mode": selected.get("referer_mode"),
+                "matrix": result["attempts"],
+                "context": final_context_report,
+                **_context_summary(final_context_report, self._cookie_values()),
+                "cookies_after": self._cookie_markers(),
+                "detail_summary": detail_summary,
+                "x_v_udt_sent": False,
+            },
+        )
+        return result
+
+    def _detail_probe_variants(
+        self,
+        item_id: str,
+        *,
+        catalog_referer: str,
+        item_referer: str,
+        include_control: bool = True,
+        referer_modes: tuple[str, ...] = ("catalog", "item"),
+        client_hints: bool = False,
+        pre_navigation: bool = False,
+    ) -> list[dict[str, Any]]:
+        base_url = str(self.settings.vinted_base_url)
+        referers = {
+            "catalog": catalog_referer,
+            "item": item_referer,
+        }
+        endpoints: list[dict[str, Any]] = []
+        if include_control:
+            endpoints.append(
+                {
+                    "endpoint": DETAIL_API_CONTROL_ENDPOINT,
+                    "endpoint_role": "control",
+                    "url": urljoin(base_url, "/api/v2/info_banners/item"),
+                    "params": None,
+                }
+            )
+        endpoints.extend(
+            [
+                {
+                    "endpoint": DETAIL_API_DETAILS_ENDPOINT,
+                    "endpoint_role": "detail",
+                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/details"),
+                    "params": None,
+                },
+                {
+                    "endpoint": DETAIL_API_LEGACY_ENDPOINT,
+                    "endpoint_role": "detail",
+                    "url": urljoin(base_url, f"/api/v2/items/{item_id}"),
+                    "params": {"localize": "true"},
+                },
+                {
+                    "endpoint": DETAIL_API_MORE_ENDPOINT,
+                    "endpoint_role": "support",
+                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/more"),
+                    "params": {"content_source": "catalog", "screen": "item"},
+                },
+                {
+                    "endpoint": DETAIL_API_SERVICES_ENDPOINT,
+                    "endpoint_role": "support",
+                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/services"),
+                    "params": None,
+                },
+            ]
+        )
+        variants: list[dict[str, Any]] = []
+        for referer_mode in referer_modes:
+            for endpoint in endpoints:
+                variants.append(
+                    {
+                        **endpoint,
+                        "referer_mode": referer_mode,
+                        "referer_url": referers[referer_mode],
+                        "client_hints": client_hints,
+                        "pre_navigation": pre_navigation,
+                        "variant_id": (
+                            f"{endpoint['endpoint']}:{referer_mode}:"
+                            f"{'ch' if client_hints else 'base'}:{'prenav' if pre_navigation else 'fast'}"
+                        ),
+                    }
+                )
+        return variants
+
+    def _probe_detail_api_variant(
+        self,
+        item_id: str,
+        variant: dict[str, Any],
+        *,
+        missing_context: list[str],
+    ) -> dict[str, Any]:
+        assert self._session is not None
+        url = str(variant["url"])
+        params = variant.get("params")
+        headers = self._build_detail_api_headers(str(variant["referer_url"]), client_hints=bool(variant["client_hints"]))
+        request_details = {
+            "method": "GET",
+            "url": _url_with_params(url, params),
+            "headers": safe_headers(headers),
+            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
+            "cookies": self._cookie_markers(),
+            "default_headers": False,
+        }
+        event_details = {
+            "item_id": item_id,
+            "variant_id": variant["variant_id"],
+            "endpoint": variant["endpoint"],
+            "endpoint_role": variant["endpoint_role"],
+            "referer_mode": variant["referer_mode"],
+            "referer_url": variant["referer_url"],
+            "pre_navigation": variant["pre_navigation"],
+            "client_hints": variant["client_hints"],
+            "request_profile": "api_har146",
+            "missing_required": missing_context,
+            "request_headers": safe_headers(headers),
+            "cookies_before": self._cookie_markers(),
+            "default_headers": False,
+            "x_v_udt_sent": False,
+        }
+        self._emit_event(
+            phase="detail_api_probe_attempt_start",
+            method="GET",
+            url=url,
+            details=event_details,
+        )
         started_at = time.perf_counter()
         try:
             response = self._session.get(
                 url,
+                params=params,
                 headers=headers,
                 timeout=self.timeout_ms / 1000,
                 default_headers=False,
@@ -1042,38 +1227,21 @@ class CurlCffiVintedCatalogProvider:
         except Exception as exc:
             duration_ms = _elapsed_ms(started_at)
             error = redact_sensitive_text(str(exc))
-            self._emit_event(
-                phase="detail_api_probe_error",
-                method="GET",
-                url=url,
-                duration_ms=duration_ms,
-                level="warning",
-                message=error,
-                details={
-                    "item_id": item_id,
-                    "outcome": "transport_error",
-                    "referer_url": referer_url,
-                    "missing_required": missing_context,
-                    "context": context_report,
-                    "request_headers": safe_headers(headers),
-                    "cookies_after": self._cookie_markers(),
-                },
-            )
-            return {
-                "outcome": "transport_error",
+            attempt = {
+                **_variant_public_fields(variant),
                 "item_id": item_id,
-                "detail_api_url": url,
+                "url": _url_with_params(url, params),
+                "outcome": "transport_error",
                 "status_code": None,
                 "duration_ms": duration_ms,
-                "egress_ip": self._egress_context.ip,
-                "egress_country_code": self._egress_context.country_code,
-                "context": context_report,
-                "missing_required": missing_context,
+                "content_type": None,
                 "request": request_details,
                 "response": {},
                 "detail_summary": {},
                 "error": error,
             }
+            self._emit_detail_attempt_finished(attempt, level="warning")
+            return attempt
 
         duration_ms = _elapsed_ms(started_at)
         self._catalog_session_context.access_token_web = (
@@ -1081,19 +1249,60 @@ class CurlCffiVintedCatalogProvider:
         )
         self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
         self._catalog_session_context.v_udt = self._cookie_value("v_udt") or self._catalog_session_context.v_udt
-        refreshed_context_report = self._session_context_report()
+        attempt = self._classify_detail_api_response(
+            item_id=item_id,
+            variant=variant,
+            url=_url_with_params(url, params),
+            response=response,
+            duration_ms=duration_ms,
+            request_details=request_details,
+        )
+        self._emit_detail_attempt_finished(attempt, level=None if attempt["outcome"] == "accepted_json" else "warning")
+        return attempt
+
+    def _build_detail_api_headers(self, referer_url: str, *, client_hints: bool = False) -> dict[str, str]:
+        headers = dict(
+            self.profile.build_api_headers(
+                referer=referer_url,
+                accept_language=self.accept_language,
+                locale=self.locale,
+                screen=self._catalog_session_context.screen or self.vinted_screen,
+            )
+        )
+        if client_hints:
+            headers = _headers_with_chrome146_client_hints(headers)
+        if self._catalog_session_context.anon_id:
+            headers["x-anon-id"] = self._catalog_session_context.anon_id
+        if self._catalog_session_context.csrf_token:
+            headers["x-csrf-token"] = self._catalog_session_context.csrf_token
+        return headers
+
+    def _classify_detail_api_response(
+        self,
+        *,
+        item_id: str,
+        variant: dict[str, Any],
+        url: str,
+        response: Any,
+        duration_ms: int,
+        request_details: dict[str, Any],
+    ) -> dict[str, Any]:
         content_type = str(response.headers.get("content-type", ""))
+        body_snippet = getattr(response, "text", "")[:1200]
         response_details: dict[str, Any] = {
             "headers": safe_headers(dict(response.headers)),
             "content_type": content_type,
+            "summary": _response_summary(response.headers),
         }
         outcome = "http_error"
         error: str | None = None
         detail_summary: dict[str, Any] = {}
-        body_snippet = getattr(response, "text", "")[:1200]
 
         if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
             outcome = "datadome_challenge"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif is_cloudflare_challenge(response.status_code, dict(response.headers)):
+            outcome = "cloudflare_challenge"
             response_details["body_snippet"] = redact_sensitive_text(body_snippet)
         elif response.status_code == 404:
             outcome = "not_found"
@@ -1118,9 +1327,19 @@ class CurlCffiVintedCatalogProvider:
                 error = redact_sensitive_text(str(exc))
                 response_details["body_snippet"] = redact_sensitive_text(body_snippet)
             else:
-                if isinstance(payload, Mapping):
+                if variant["endpoint_role"] == "control":
+                    outcome = "accepted_json" if isinstance(payload, (Mapping, list)) else "invalid_json"
+                    if isinstance(payload, Mapping):
+                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                elif variant["endpoint_role"] == "support":
+                    outcome = "accepted_json" if isinstance(payload, (Mapping, list)) else "invalid_json"
+                    if isinstance(payload, Mapping):
+                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
+                    elif isinstance(payload, list):
+                        response_details["items_count"] = len(payload)
+                elif isinstance(payload, Mapping):
                     item_payload = payload.get("item") if isinstance(payload.get("item"), Mapping) else payload
-                    if isinstance(item_payload, Mapping):
+                    if isinstance(item_payload, Mapping) and _looks_like_item_detail_payload(item_payload, item_id):
                         outcome = "accepted_json"
                         response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
                         response_details["item_keys"] = sorted(str(key) for key in item_payload.keys())[:40]
@@ -1133,49 +1352,173 @@ class CurlCffiVintedCatalogProvider:
                     outcome = "invalid_json"
                     response_details["body_snippet"] = redact_sensitive_text(body_snippet)
 
-        event_phase = "detail_api_probe_success" if outcome == "accepted_json" else "detail_api_probe_failed"
-        self._emit_event(
-            phase=event_phase,
-            method="GET",
-            url=url,
-            status_code=response.status_code,
-            duration_ms=duration_ms,
-            level=None if outcome == "accepted_json" else "warning",
-            details={
-                "item_id": item_id,
-                "outcome": outcome,
-                "referer_url": referer_url,
-                "missing_required": missing_context,
-                "context": refreshed_context_report,
-                **_context_summary(refreshed_context_report, self._cookie_values()),
-                "request_profile": "api_har146",
-                "response_summary": _response_summary(response.headers),
-                "content_type": response_details.get("content_type"),
-                "json_keys": response_details.get("json_keys"),
-                "item_keys": response_details.get("item_keys"),
-                "detail_summary": detail_summary,
-                "request_headers": safe_headers(headers),
-                "response": response_details,
-                "cookies_after": self._cookie_markers(),
-                "error": error,
-                "x_v_udt_sent": False,
-            },
-        )
         return {
-            "outcome": outcome,
+            **_variant_public_fields(variant),
             "item_id": item_id,
-            "detail_api_url": url,
+            "url": url,
+            "outcome": outcome,
             "status_code": response.status_code,
             "duration_ms": duration_ms,
-            "egress_ip": self._egress_context.ip,
-            "egress_country_code": self._egress_context.country_code,
-            "context": refreshed_context_report,
-            "missing_required": missing_context,
+            "content_type": content_type,
+            "cf_mitigated": _header_value(response.headers, "cf-mitigated"),
+            "cf_ray": _header_value(response.headers, "cf-ray"),
             "request": request_details,
             "response": response_details,
             "detail_summary": detail_summary,
             "error": error,
         }
+
+    def _emit_detail_attempt_finished(self, attempt: dict[str, Any], *, level: str | None) -> None:
+        self._emit_event(
+            phase="detail_api_probe_attempt_finished",
+            method="GET",
+            url=attempt.get("url") if isinstance(attempt.get("url"), str) else None,
+            status_code=attempt.get("status_code") if isinstance(attempt.get("status_code"), int) else None,
+            duration_ms=attempt.get("duration_ms") if isinstance(attempt.get("duration_ms"), int) else None,
+            level=level,
+            details={
+                "item_id": attempt.get("item_id"),
+                "variant_id": attempt.get("variant_id"),
+                "endpoint": attempt.get("endpoint"),
+                "endpoint_role": attempt.get("endpoint_role"),
+                "referer_mode": attempt.get("referer_mode"),
+                "pre_navigation": attempt.get("pre_navigation"),
+                "client_hints": attempt.get("client_hints"),
+                "outcome": attempt.get("outcome"),
+                "status_code": attempt.get("status_code"),
+                "duration_ms": attempt.get("duration_ms"),
+                "content_type": attempt.get("content_type"),
+                "cf_mitigated": attempt.get("cf_mitigated"),
+                "cf_ray": attempt.get("cf_ray"),
+                "response_summary": (attempt.get("response") or {}).get("summary")
+                if isinstance(attempt.get("response"), dict)
+                else {},
+                "detail_summary": attempt.get("detail_summary") or {},
+                "error": attempt.get("error"),
+                "cookies_after": self._cookie_markers(),
+                "x_v_udt_sent": False,
+            },
+        )
+
+    def _should_retry_detail_with_client_hints(self, attempts: list[dict[str, Any]]) -> bool:
+        detail_attempts = [attempt for attempt in attempts if attempt.get("endpoint_role") == "detail"]
+        if any(attempt.get("outcome") == "accepted_json" for attempt in detail_attempts):
+            return False
+        return any(
+            attempt.get("outcome") == "cloudflare_challenge"
+            and _response_requests_client_hints(attempt.get("response") if isinstance(attempt.get("response"), dict) else {})
+            for attempt in detail_attempts
+        )
+
+    def _probe_item_document_navigation(self, item_url: str, *, referer_url: str, warmup: bool = False) -> dict[str, Any]:
+        assert self._session is not None
+        headers = dict(self.profile.build_bootstrap_headers(referer=referer_url, accept_language=self.accept_language))
+        headers["sec-fetch-site"] = "same-origin"
+        request_details = {
+            "method": "GET",
+            "url": item_url,
+            "headers": safe_headers(headers),
+            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
+            "cookies": self._cookie_markers(),
+            "default_headers": False,
+        }
+        self._emit_event(
+            phase="detail_item_document_request_start",
+            method="GET",
+            url=item_url,
+            details={
+                "variant_id": "item_document:navigate",
+                "endpoint": "item_document",
+                "endpoint_role": "document",
+                "referer_url": referer_url,
+                "warmup": warmup,
+                "request_headers": safe_headers(headers),
+                "cookies_before": self._cookie_markers(),
+                "default_headers": False,
+            },
+        )
+        started_at = time.perf_counter()
+        try:
+            response = self._session.get(
+                item_url,
+                headers=headers,
+                timeout=self.timeout_ms / 1000,
+                default_headers=False,
+            )
+        except Exception as exc:
+            duration_ms = _elapsed_ms(started_at)
+            error = redact_sensitive_text(str(exc))
+            attempt = {
+                "variant_id": "item_document:navigate",
+                "endpoint": "item_document",
+                "endpoint_role": "document",
+                "referer_mode": "catalog",
+                "pre_navigation": warmup,
+                "client_hints": False,
+                "url": item_url,
+                "outcome": "transport_error",
+                "status_code": None,
+                "duration_ms": duration_ms,
+                "content_type": None,
+                "request": request_details,
+                "response": {},
+                "detail_summary": {},
+                "error": error,
+            }
+            self._emit_detail_attempt_finished(attempt, level="warning")
+            return attempt
+
+        duration_ms = _elapsed_ms(started_at)
+        self._last_item_document_html = getattr(response, "text", "") or ""
+        self._catalog_session_context.csrf_token = (
+            extract_csrf_token(self._last_item_document_html) or self._catalog_session_context.csrf_token
+        )
+        self._catalog_session_context.anon_id = _header_value(response.headers, "x-anon-id") or self._catalog_session_context.anon_id
+        self._catalog_session_context.access_token_web = (
+            self._cookie_value("access_token_web") or self._catalog_session_context.access_token_web
+        )
+        self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
+        self._catalog_session_context.v_udt = (
+            _header_value(response.headers, "x-v-udt") or self._cookie_value("v_udt") or self._catalog_session_context.v_udt
+        )
+        self._catalog_session_context.user_iso_locale = (
+            _header_value(response.headers, "x-user-iso-locale") or self._catalog_session_context.user_iso_locale
+        )
+        self._catalog_session_context.screen = _header_value(response.headers, "x-screen") or self._catalog_session_context.screen
+        body_snippet = getattr(response, "text", "")[:1200]
+        if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
+            outcome = "datadome_challenge"
+        elif is_cloudflare_challenge(response.status_code, dict(response.headers)):
+            outcome = "cloudflare_challenge"
+        elif response.status_code >= 400:
+            outcome = "http_error"
+        else:
+            outcome = "document_ok"
+        attempt = {
+            "variant_id": "item_document:navigate",
+            "endpoint": "item_document",
+            "endpoint_role": "document",
+            "referer_mode": "catalog",
+            "pre_navigation": warmup,
+            "client_hints": False,
+            "url": item_url,
+            "outcome": outcome,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+            "content_type": str(response.headers.get("content-type", "")),
+            "cf_mitigated": _header_value(response.headers, "cf-mitigated"),
+            "cf_ray": _header_value(response.headers, "cf-ray"),
+            "request": request_details,
+            "response": {
+                "headers": safe_headers(dict(response.headers)),
+                "content_type": str(response.headers.get("content-type", "")),
+                "summary": _response_summary(response.headers),
+            },
+            "detail_summary": {},
+            "error": None,
+        }
+        self._emit_detail_attempt_finished(attempt, level=None if outcome == "document_ok" else "warning")
+        return attempt
 
     def _bootstrap_anonymous_session(self, source_url: str, *, attempt: int) -> None:
         assert self._session is not None
@@ -1315,13 +1658,28 @@ class CurlCffiVintedCatalogProvider:
             },
         )
 
-    def _try_datadome_collector(self, source_url: str) -> None:
+    def _try_datadome_collector(
+        self,
+        source_url: str,
+        *,
+        page_html: str | None = None,
+        expected_screen: str | None = None,
+        bootstrap_origin: str = "catalog_document",
+    ) -> None:
         assert self._session is not None
         collector_url = str(self.settings.vinted_datadome_collector_url)
+        html = self._last_bootstrap_html if page_html is None else page_html
+        screen = (expected_screen or self.vinted_screen).strip().lower()
         if not self.settings.vinted_datadome_collector_enabled:
             self._emit_event(
                 phase="datadome_collector_skipped",
-                details={"reason": "disabled", "post_sent": False, "collector_endpoint": collector_url},
+                details={
+                    "reason": "disabled",
+                    "post_sent": False,
+                    "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
+                },
             )
             return
         if self._catalog_session_context.datadome:
@@ -1332,20 +1690,28 @@ class CurlCffiVintedCatalogProvider:
                     "datadome_cookie": True,
                     "post_sent": False,
                     "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
                     "cookies_after": self._cookie_markers(),
                     "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
                 },
             )
             return
-        if not self._last_bootstrap_html:
+        if not html:
             self._emit_event(
                 phase="datadome_collector_skipped",
                 level="warning",
-                details={"reason": "bootstrap_html_missing", "post_sent": False, "collector_endpoint": collector_url},
+                details={
+                    "reason": "bootstrap_html_missing",
+                    "post_sent": False,
+                    "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
+                },
             )
             return
 
-        report = self._session_context_report()
+        report = self._session_context_report(expected_screen=screen, bootstrap_origin=bootstrap_origin)
         missing_without_datadome = [name for name in self._missing_session_context(report) if name != "datadome"]
         if missing_without_datadome:
             self._emit_event(
@@ -1355,6 +1721,8 @@ class CurlCffiVintedCatalogProvider:
                     "reason": "base_context_incomplete",
                     "post_sent": False,
                     "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
                     "missing_required": missing_without_datadome,
                     **report,
                 },
@@ -1375,12 +1743,13 @@ class CurlCffiVintedCatalogProvider:
                 "locale": self.locale,
                 "accept_language": self.accept_language,
                 "viewport_size": self.viewport_size,
-                "vinted_screen": self.vinted_screen,
+                "vinted_screen": screen,
+                "bootstrap_origin": bootstrap_origin,
                 **_context_summary(report, self._cookie_values()),
             },
         )
-        datadome_client_key = self.settings.vinted_datadome_client_key or extract_datadome_client_key(self._last_bootstrap_html)
-        tags_url = extract_datadome_script_url(self._last_bootstrap_html, source_url)
+        datadome_client_key = self.settings.vinted_datadome_client_key or extract_datadome_client_key(html)
+        tags_url = extract_datadome_script_url(html, source_url)
         if not datadome_client_key and tags_url:
             datadome_client_key = self._fetch_datadome_client_key_from_tags(tags_url=tags_url, source_url=source_url)
         started_at = time.perf_counter()
@@ -1389,11 +1758,11 @@ class CurlCffiVintedCatalogProvider:
             profile=self.profile,
             collector_url=collector_url,
             source_url=source_url,
-            page_html=self._last_bootstrap_html,
+            page_html=html,
             accept_language=self.accept_language,
             locale=self.locale,
             viewport_size=self.viewport_size,
-            vinted_screen=self.vinted_screen,
+            vinted_screen=screen,
             timeout_seconds=self.timeout_ms / 1000,
             default_ddv=self.settings.vinted_datadome_collector_default_ddv,
             configured_client_key=datadome_client_key,
@@ -1406,8 +1775,10 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 details={
                     **result.safe_details(),
-                    "context": self._session_context_report(),
+                    "context": self._session_context_report(expected_screen=screen, bootstrap_origin=bootstrap_origin),
                     "collector_endpoint": collector_url,
+                    "bootstrap_origin": bootstrap_origin,
+                    "vinted_screen": screen,
                     "non_blocking": not self.require_datadome_cookie,
                     "cookies_after": self._cookie_markers(),
                     "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
@@ -1422,8 +1793,10 @@ class CurlCffiVintedCatalogProvider:
             message="DataDome collector did not return a cookie",
             details={
                 **result.safe_details(),
-                "context": self._session_context_report(),
+                "context": self._session_context_report(expected_screen=screen, bootstrap_origin=bootstrap_origin),
                 "collector_endpoint": collector_url,
+                "bootstrap_origin": bootstrap_origin,
+                "vinted_screen": screen,
                 "non_blocking": not self.require_datadome_cookie,
                 "cookies_after": self._cookie_markers(),
                 "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
@@ -1511,22 +1884,28 @@ class CurlCffiVintedCatalogProvider:
             screen=_header_value(headers, "x-screen"),
         )
 
-    def _session_context_report(self) -> dict[str, Any]:
+    def _session_context_report(
+        self,
+        *,
+        expected_screen: str | None = None,
+        bootstrap_origin: str = "catalog_document",
+    ) -> dict[str, Any]:
         context = self._catalog_session_context
+        expected_vinted_screen = (expected_screen or self.vinted_screen).strip().lower()
         response_locale = _normalize_country_code(context.user_iso_locale)
         expected_country_code = self.expected_country_code
         egress_country_code = _normalize_country_code(self._egress_context.country_code)
         locale_country = _country_from_locale(self.locale)
         viewport_configured = bool(self.viewport_size and VIEWPORT_PATTERN.match(self.viewport_size.strip().lower()))
-        vinted_screen_configured = bool(self.vinted_screen == "catalog")
-        response_screen_matches = bool(context.screen and context.screen.strip().lower() == self.vinted_screen)
+        vinted_screen_configured = bool(expected_vinted_screen in {"catalog", "item"})
+        response_screen_matches = bool(context.screen and context.screen.strip().lower() == expected_vinted_screen)
         response_locale_matches = bool(response_locale and (expected_country_code is None or response_locale == expected_country_code))
 
         return {
             "browser_profile": self.profile.name,
             "impersonate": self.profile.impersonate,
             "impersonate_ready": self.profile.impersonate.startswith("chrome"),
-            "bootstrap_origin": "catalog_document",
+            "bootstrap_origin": bootstrap_origin,
             "expected_country_code": expected_country_code,
             "egress_ip": self._egress_context.ip,
             "egress_country": self._egress_context.country,
@@ -1546,7 +1925,7 @@ class CurlCffiVintedCatalogProvider:
             "accept_language_configured": _accept_language_configured(self.accept_language),
             "viewport_size": self.viewport_size,
             "viewport_configured": viewport_configured,
-            "vinted_screen": self.vinted_screen,
+            "vinted_screen": expected_vinted_screen,
             "vinted_screen_configured": vinted_screen_configured,
             "response_locale": context.user_iso_locale,
             "response_locale_matches": response_locale_matches,
@@ -1856,8 +2235,11 @@ def _response_summary(headers: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in {
             "cf_ray": _header_value(headers, "cf-ray"),
             "cf_cache_status": _header_value(headers, "cf-cache-status"),
+            "cf_mitigated": _header_value(headers, "cf-mitigated"),
             "request_id": _header_value(headers, "x-request-id"),
             "upstream_ms": _header_value(headers, "x-envoy-upstream-service-time"),
+            "accept_ch": _header_value(headers, "accept-ch"),
+            "critical_ch": _header_value(headers, "critical-ch"),
         }.items()
         if value
     }
@@ -1875,6 +2257,132 @@ def _api_param_summary(params: Mapping[str, Any]) -> dict[str, str]:
         else:
             summary[key] = str(value)
     return summary
+
+
+def is_cloudflare_challenge(status_code: int, headers: Mapping[str, Any]) -> bool:
+    if status_code < 400:
+        return False
+    mitigated = _header_value(headers, "cf-mitigated")
+    return bool(mitigated and mitigated.strip().lower() == "challenge")
+
+
+def _response_requests_client_hints(response_details: Mapping[str, Any]) -> bool:
+    headers = response_details.get("headers") if isinstance(response_details.get("headers"), Mapping) else {}
+    summary = response_details.get("summary") if isinstance(response_details.get("summary"), Mapping) else {}
+    return bool(
+        _header_value(headers, "accept-ch")
+        or _header_value(headers, "critical-ch")
+        or summary.get("accept_ch")
+        or summary.get("critical_ch")
+    )
+
+
+def _looks_like_item_detail_payload(payload: Mapping[str, Any], item_id: str) -> bool:
+    raw_id = payload.get("id")
+    if raw_id is not None and str(raw_id) == str(item_id):
+        return True
+    item_url = payload.get("url")
+    if isinstance(item_url, str) and f"/items/{item_id}" in item_url:
+        return True
+    public_item_fields = {"title", "description", "price", "brand", "brand_dto", "photos", "user"}
+    return bool(public_item_fields.intersection(payload.keys()) and (raw_id is not None or item_url))
+
+
+def _headers_with_chrome146_client_hints(headers: Mapping[str, str]) -> dict[str, str]:
+    updated = dict(headers)
+    additions = {
+        "sec-ch-ua-arch": '"x86"',
+        "sec-ch-ua-bitness": '"64"',
+        "sec-ch-ua-full-version": '"146.0.0.0"',
+        "sec-ch-ua-full-version-list": '"Not-A.Brand";v="24.0.0.0", "Chromium";v="146.0.0.0"',
+        "sec-ch-ua-model": '""',
+        "sec-ch-ua-platform-version": '"10.0.0"',
+        "sec-ch-ua-wow64": "?0",
+    }
+    rebuilt: dict[str, str] = {}
+    for key, value in updated.items():
+        rebuilt[key] = value
+        if key == "sec-ch-ua":
+            rebuilt.update(additions)
+    if not any(key in rebuilt for key in additions):
+        rebuilt.update(additions)
+    return rebuilt
+
+
+def _variant_public_fields(variant: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "variant_id": variant.get("variant_id"),
+        "endpoint": variant.get("endpoint"),
+        "endpoint_role": variant.get("endpoint_role"),
+        "referer_mode": variant.get("referer_mode"),
+        "referer_url": variant.get("referer_url"),
+        "pre_navigation": bool(variant.get("pre_navigation")),
+        "client_hints": bool(variant.get("client_hints")),
+    }
+
+
+def _safe_detail_probe_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
+    response = attempt.get("response") if isinstance(attempt.get("response"), Mapping) else {}
+    summary = response.get("summary") if isinstance(response.get("summary"), Mapping) else {}
+    detail_summary = attempt.get("detail_summary") if isinstance(attempt.get("detail_summary"), Mapping) else {}
+    return {
+        "variant_id": attempt.get("variant_id"),
+        "endpoint": attempt.get("endpoint"),
+        "endpoint_role": attempt.get("endpoint_role"),
+        "referer_mode": attempt.get("referer_mode"),
+        "pre_navigation": attempt.get("pre_navigation"),
+        "client_hints": attempt.get("client_hints"),
+        "outcome": attempt.get("outcome"),
+        "status_code": attempt.get("status_code"),
+        "duration_ms": attempt.get("duration_ms"),
+        "content_type": attempt.get("content_type"),
+        "cf_mitigated": attempt.get("cf_mitigated"),
+        "cf_ray": attempt.get("cf_ray"),
+        "response_summary": dict(summary),
+        "detail_summary": dict(detail_summary),
+        "error": attempt.get("error"),
+    }
+
+
+def _select_detail_probe_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    detail_attempts = [attempt for attempt in attempts if attempt.get("endpoint_role") == "detail"]
+    ordered_outcomes = (
+        "accepted_json",
+        "cloudflare_challenge",
+        "datadome_challenge",
+        "rate_limited",
+        "not_found",
+        "invalid_json",
+        "http_error",
+        "transport_error",
+    )
+    for outcome in ordered_outcomes:
+        for attempt in detail_attempts:
+            if attempt.get("outcome") == outcome:
+                return attempt
+    return detail_attempts[0] if detail_attempts else (attempts[0] if attempts else {"outcome": "transport_error"})
+
+
+def _first_endpoint_outcome(attempts: list[dict[str, Any]], endpoint: str) -> str | None:
+    for attempt in attempts:
+        if attempt.get("endpoint") == endpoint:
+            outcome = attempt.get("outcome")
+            return str(outcome) if outcome else None
+    return None
+
+
+def _item_public_url(item_id: str, *, item_ref: str | None = None, base_url: str) -> str:
+    if item_ref:
+        parsed = urlparse(str(item_ref).strip())
+        if parsed.scheme in {"http", "https"} and parsed.netloc and parsed.path.startswith(f"/items/{item_id}"):
+            return str(item_ref).strip()
+    return urljoin(base_url, f"/items/{item_id}?referrer=catalog")
+
+
+def _url_with_params(url: str, params: Mapping[str, Any] | None) -> str:
+    if not params:
+        return url
+    return f"{url}?{urlencode(params, doseq=True)}"
 
 
 # ---------------------------------------------------------------------------

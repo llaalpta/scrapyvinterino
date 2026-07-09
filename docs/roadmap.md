@@ -28,7 +28,7 @@ Status values:
 
 | 13 | in-progress | Producer-Consumer + DataDome bypass | `docs/specs/010-producer-consumer-bypass.md` | Persistent prepared Vinted sessions added; live residential session warm-up/validation remains pending before `done`. |
 | 13.1 | done | Prepared session hardening | `docs/specs/010-producer-consumer-bypass.md` | Require strict prepared context (`datadome`, `__cf_bm`, CSRF, anon, access, `v_udt`, geo/locale/screen) before a monitor-owned session becomes reusable. |
-| 13.2 | not-started | Direct item detail API unlock | `docs/specs/010-producer-consumer-bypass.md` | Continue the API-direct detail spike after prepared sessions consistently carry browser-grade context. |
+| 13.2 | not-started | Direct item detail API unlock | `docs/specs/010-producer-consumer-bypass.md`, `docs/010-producer-consumer-implementation.md` | Continue the direct API spike after `vinted-api-kit` confirmed the common `/api/v2/items/{id}/details` wrapper but live probes still returned `403 cf-mitigated: challenge`; investigate bundle/HAR-backed parameters or alternate browser-observed API paths before wiring detail extraction into opportunity creation. |
 
 ## Next
 

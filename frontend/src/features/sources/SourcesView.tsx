@@ -745,7 +745,7 @@ function MonitorDetail({
           <div className="detail-probe-panel">
             <div className="detail-probe-heading">
               <strong>Detalle de item</strong>
-              <span>/api/v2/items/id/details</span>
+              <span>Spike API directa</span>
             </div>
             <div className="detail-probe-controls">
               <input

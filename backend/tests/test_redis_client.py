@@ -13,4 +13,3 @@ def test_redis_client_uses_resp2_without_maintenance_notifications() -> None:
     connection = client.connection_pool.make_connection()
     assert getattr(connection, "protocol", None) == 2
     assert getattr(connection, "maint_notifications_config", None) is None
-
