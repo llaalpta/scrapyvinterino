@@ -27,6 +27,8 @@ Status values:
 | 12 | done | Professional monitor logs | `docs/specs/008-scheduler.md`, `docs/security.md` | Structured run events with levels, safe session diagnostics, durations, Redis/cache events, and PWA log timeline. |
 
 | 13 | in-progress | Producer-Consumer + DataDome bypass | `docs/specs/010-producer-consumer-bypass.md` | Persistent prepared Vinted sessions added; live residential session warm-up/validation remains pending before `done`. |
+| 13.1 | not-started | Prepared Vinted session hardening | `docs/specs/010-producer-consumer-bypass.md`, `docs/010-producer-consumer-implementation.md` | Make `Preparar sesion` the fast reusable browser-shaped session path: Chrome 146 `curl_cffi`, ordered HAR headers, sticky proxy, CSRF, anon id, access token, `v_udt`, `__cf_bm`, DataDome collector, catalog API probe, clear operator logs, and persisted encrypted cookie jar for later catalog runs. |
+| 13.2 | not-started | Direct item detail API unlock | `docs/specs/010-producer-consumer-bypass.md`, `docs/010-producer-consumer-implementation.md` | Continue the direct API spike after `vinted-api-kit` confirmed the common `/api/v2/items/{id}/details` wrapper but live probes still returned `403 cf-mitigated: challenge`; investigate bundle/HAR-backed parameters or alternate browser-observed API paths before wiring detail extraction into opportunity creation. |
 
 ## Next
 

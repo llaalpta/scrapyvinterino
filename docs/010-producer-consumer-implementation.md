@@ -97,6 +97,23 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - A DataDome challenge during the detail probe invalidates the prepared Vinted session and records safe diagnostics without silently rotating into an unprepared proxy identity.
 - Host verification passed with service URLs overridden for Windows host access: `ruff check backend/src backend/alembic` and the focused 010 pytest suite (`144 passed`).
 
+## Vinted API Kit Detail Research 2026-07-09
+
+- Reviewed `https://github.com/vlymar1/vinted-api-kit` at commit `90a5655` (`2026-06-06`, release `v1.0.1`) as a reference for direct Vinted item detail extraction.
+- The package does not use a hidden or alternate item detail endpoint. `ItemsAPI.get_details()` extracts the numeric item id from `/items/{id}-...` and calls `GET {base_url}/api/v2/items/{id}/details`, then reads `response.json()["item"]`.
+- Its HTTP layer uses `curl_cffi.AsyncSession`, optional proxy configuration, cookie persistence, `Accept-Language` derived from the Vinted domain, and a cookie refresh path using `HEAD {base_url}` with `impersonate="chrome"`.
+- Its default application headers are minimal: `Cache-Control: max-age=0`, `DNT: 1`, and `X-Money-Object: true`. It does not implement HAR-shaped header ordering, explicit CSRF/anon headers, DataDome collection, Chrome 146 coupling, item-document warmup, or a detail endpoint matrix.
+- Its tests mock the detail response and therefore prove wrapper behavior only; they do not demonstrate that `/api/v2/items/{id}/details` currently works against live Vinted through Cloudflare/DataDome.
+- Actionable takeaway: the reference confirms the common direct detail endpoint but does not explain the current live `403 cf-mitigated: challenge` observed by this project. Useful ideas to retain are cookie persistence, same-session refresh before retrying `401/403`, and explicit `429` handling. The next direct-detail work should focus on discovering missing endpoint parameters or a different browser-observed API path rather than repeatedly probing `/details` with the same matrix.
+
+## Live Detail Probe Findings 2026-07-09
+
+- Controlled live probes prepared one monitor-owned Chrome 146 sticky residential session and then tested two item detail references. Session preparation produced a reusable catalog session with CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, and a collected `datadome` cookie.
+- The item document warmup returned `200` and the item-context DataDome collector could also obtain or reuse a `datadome` cookie in the same session.
+- Control/support endpoints behaved differently from the detail endpoint: `/api/v2/info_banners/item` returned JSON, `/api/v2/items/{id}/services` returned JSON, and `/api/v2/items/{id}/more` returned `400`.
+- The direct detail endpoint `/api/v2/items/{id}/details` remained blocked with `403` and `cf-mitigated: challenge` even after item-document warmup, DataDome presence, item referer, catalog referer, and Chrome 146 Client Hints variants.
+- Current conclusion: DataDome collection is necessary for a high-fidelity prepared session, but it is not sufficient to unlock the direct item detail API. Future detail work should avoid broad request batteries and instead add narrowly targeted probes based on browser bundle/HAR evidence.
+
 ## Continuous Direct Scheduler Validation 2026-07-06
 
 - Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity on the then-current Chrome 120 profile.
