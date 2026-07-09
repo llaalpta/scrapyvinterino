@@ -150,7 +150,7 @@ class CurlCffiVintedCatalogProvider:
         proxy_session_marker: dict[str, Any] | None = None,
         expected_country_code: str | None = "ES",
         locale: str = "es-ES",
-        accept_language: str = "es-ES,es;q=0.9,en;q=0.8",
+        accept_language: str = "en-GB,en;q=0.9",
         screen: str = "catalog",
         viewport_size: str = "1920x1080",
         prepared_session: PreparedCatalogSession | None = None,
@@ -1270,7 +1270,7 @@ class CurlCffiVintedCatalogProvider:
             "locale": self.locale,
             "locale_configured": bool(self.locale and locale_country == expected_country_code),
             "accept_language": self.accept_language,
-            "accept_language_configured": self.accept_language.lower().startswith(self.locale.lower()),
+            "accept_language_configured": _accept_language_configured(self.accept_language),
             "viewport_size": self.viewport_size,
             "viewport_configured": viewport_configured,
             "vinted_screen": self.vinted_screen,
@@ -1490,6 +1490,12 @@ def _country_from_locale(value: str | None) -> str | None:
     if not value or "-" not in value:
         return None
     return _normalize_country_code(value.rsplit("-", 1)[-1])
+
+
+def _accept_language_configured(value: str | None) -> bool:
+    if not value or not value.strip():
+        return False
+    return any(chunk.split(";", 1)[0].strip() for chunk in value.split(","))
 
 
 def extract_csrf_token(html: str) -> str | None:

@@ -131,7 +131,7 @@ class ProxyProfile(Base):
     password_encrypted: Mapped[str | None] = mapped_column(Text)
     country_code: Mapped[str] = mapped_column(String(2), default="ES")
     locale: Mapped[str] = mapped_column(String(20), default="es-ES")
-    accept_language: Mapped[str] = mapped_column(String(120), default="es-ES,es;q=0.9,en;q=0.8")
+    accept_language: Mapped[str] = mapped_column(String(120), default="en-GB,en;q=0.9")
     screen: Mapped[str] = mapped_column(String(40), default="1920x1080")
     vinted_screen: Mapped[str] = mapped_column(String(40), default="catalog")
     max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=1)

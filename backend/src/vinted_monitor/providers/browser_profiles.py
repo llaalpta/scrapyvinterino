@@ -3,6 +3,12 @@ from __future__ import annotations
 import random
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import get_args
+
+try:
+    from curl_cffi.requests.impersonate import BrowserTypeLiteral
+except Exception:  # pragma: no cover - defensive for import-time tooling
+    BrowserTypeLiteral = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -155,13 +161,6 @@ _CHROME120_UA = (
 )
 _CHROME120_SEC_CH_UA = '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
 _CHROME120_ACCEPT_ENCODING = "gzip, deflate, br"
-_CHROME149_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/149.0.0.0 Safari/537.36"
-)
-_CHROME149_SEC_CH_UA = '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
-
 BROWSER_PROFILES: list[BrowserProfile] = [
     BrowserProfile(
         name="chrome_120_win10",
@@ -273,7 +272,8 @@ BROWSER_PROFILES: list[BrowserProfile] = [
             sec_ch_ua='"Not-A.Brand";v="24", "Chromium";v="146"',
             sec_ch_ua_platform='"Windows"',
             accept_language=_LANG_CHROME146,
-            cache_control=None,
+            cache_control="no-cache",
+            pragma="no-cache",
             priority="u=0, i",
         ),
         api_headers=_chrome_api_headers(
@@ -285,33 +285,6 @@ BROWSER_PROFILES: list[BrowserProfile] = [
             sec_ch_ua='"Not-A.Brand";v="24", "Chromium";v="146"',
             sec_ch_ua_platform='"Windows"',
             accept_language=_LANG_CHROME146,
-            accept="application/json,text/plain,*/*,image/webp",
-            locale="es-ES",
-            priority="u=3",
-        ),
-    ),
-    BrowserProfile(
-        name="chrome_149_win10",
-        impersonate="chrome149",
-        user_agent=_CHROME149_UA,
-        sec_ch_ua=_CHROME149_SEC_CH_UA,
-        sec_ch_ua_mobile="?0",
-        sec_ch_ua_platform='"Windows"',
-        accept_language=_LANG_ES,
-        bootstrap_headers=_chrome_bootstrap_headers(
-            user_agent=_CHROME149_UA,
-            sec_ch_ua=_CHROME149_SEC_CH_UA,
-            sec_ch_ua_platform='"Windows"',
-            accept_language=_LANG_ES,
-            cache_control="no-cache",
-            pragma="no-cache",
-            priority="u=0, i",
-        ),
-        api_headers=_chrome_api_headers(
-            user_agent=_CHROME149_UA,
-            sec_ch_ua=_CHROME149_SEC_CH_UA,
-            sec_ch_ua_platform='"Windows"',
-            accept_language=_LANG_ES,
             accept="application/json,text/plain,*/*,image/webp",
             locale="es-ES",
             priority="u=3",
@@ -342,10 +315,24 @@ def get_profile_by_impersonate(impersonate: str) -> BrowserProfile | None:
     return None
 
 
+def supported_curl_impersonates() -> set[str]:
+    """Return impersonate targets exposed by the installed curl_cffi build."""
+    if BrowserTypeLiteral is None:
+        return set()
+    return {str(value) for value in get_args(BrowserTypeLiteral)}
+
+
 def profile_for_impersonate(impersonate: str) -> BrowserProfile:
     """Return the configured profile or fail clearly for invalid deployments."""
     profile = get_profile_by_impersonate(impersonate)
     if profile is None:
         supported = ", ".join(profile.impersonate for profile in BROWSER_PROFILES)
         raise ValueError(f"No browser profile configured for impersonate={impersonate!r}. Supported: {supported}")
+    installed_targets = supported_curl_impersonates()
+    if installed_targets and profile.impersonate not in installed_targets:
+        supported = ", ".join(sorted(installed_targets))
+        raise ValueError(
+            f"curl_cffi does not support impersonate={profile.impersonate!r} in this environment. "
+            f"Installed targets include: {supported}"
+        )
     return profile

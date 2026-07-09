@@ -258,7 +258,7 @@ def _create_ready_vinted_session(
     *,
     proxy_session_id: str = "pytestsession",
 ) -> None:
-    profile = profile_for_impersonate("chrome149")
+    profile = profile_for_impersonate("chrome146")
     save_prepared_vinted_session(
         db,
         source,

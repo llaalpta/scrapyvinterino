@@ -33,6 +33,7 @@ from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
 from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal, get_db
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
     DEFAULT_PAGE,
@@ -293,7 +294,8 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
     try:
         proxy_url = proxy_url_for_profile(profile, settings)
         proxy_dict = {"https": proxy_url, "http": proxy_url} if proxy_url else None
-        with CurlSession(impersonate=settings.curl_impersonate_browser, proxies=proxy_dict) as client:
+        browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+        with CurlSession(impersonate=browser_profile.impersonate, proxies=proxy_dict) as client:
             response = client.get("https://api.ipify.org?format=json", timeout=10)
             if response.status_code != 200:
                 raise RuntimeError(f"HTTP {response.status_code}")

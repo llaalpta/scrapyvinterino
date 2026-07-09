@@ -29,6 +29,7 @@ La investigacion se hizo sin login, sin cuenta personal y sin tokens personales.
 - La sesion observada no usa cuenta personal, login ni token personal.
 - El documento publico de catalogo se usa como bootstrap/renovacion de sesion anonima, pero no debe ser el camino normal de extraccion del catalogo rapido.
 - En HAR de catalogo con Chrome 146 se observo CSRF en el documento/bundle y `x-anon-id` en peticiones posteriores; el proveedor debe extraerlos cuando existan y reenviarlos al API con la misma sesion HTTP.
+- En el HAR valido `www.vinted1462.es.har`, el documento de catalogo usa `User-Agent` Chrome 146 y `sec-ch-ua` Chrome 146 con `Accept-Language: en-GB,en;q=0.9`, mientras la respuesta mantiene `x-user-iso-locale: es-ES` y `x-screen: catalog`. Por tanto, `Accept-Language` no se valida como prefijo obligatorio del locale; se trata como parte del perfil observado.
 - Si el API JSON falla por autenticacion o sesion, el proveedor debe refrescar la sesion anonima en la misma sesion HTTP/cookie jar y reintentar una vez.
 - Si el API JSON devuelve `429`, no se asume DataDome solo por el status: se respeta `Retry-After` cuando existe y esta dentro del presupuesto operativo antes de refrescar/reintentar.
 - Si el reintento falla, debe fallar solo la ejecucion/fuente correspondiente y registrar error; no debe detener API, PWA, worker ni otras fuentes.
@@ -72,7 +73,7 @@ Decision de rendimiento:
 - Headers minimos usados para reproducir la prueba:
   - `User-Agent`: navegador desktop moderno.
   - `Accept`: `text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8`.
-  - `Accept-Language`: `es-ES,es;q=0.9,en;q=0.8`.
+  - `Accept-Language`: `en-GB,en;q=0.9` en el HAR Chrome 146 valido usado como referencia runtime actual; observaciones anteriores usaban `es-ES,es;q=0.9,en;q=0.8`.
 - Cookies requeridas en esta observacion: ninguna.
 - Redirecciones: seguir redirecciones.
 - Respuesta esperada: `200 text/html` con scripts `self.__next_f.push(...)`.

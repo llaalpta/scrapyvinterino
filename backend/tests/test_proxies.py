@@ -63,6 +63,16 @@ def test_proxy_context_is_resolved_from_country_preset() -> None:
     assert context.vinted_screen == "catalog"
 
 
+def test_spanish_proxy_context_keeps_har146_accept_language() -> None:
+    context = resolve_proxy_context("ES")
+
+    assert context.country_code == "ES"
+    assert context.locale == "es-ES"
+    assert context.accept_language == "en-GB,en;q=0.9"
+    assert context.screen == "1920x1080"
+    assert context.vinted_screen == "catalog"
+
+
 def test_create_proxy_profile_resolves_context_from_country() -> None:
     with SessionLocal() as db:
         profile = create_proxy_profile(
@@ -176,7 +186,7 @@ def test_proxy_profile_api_rejects_manual_context_update_fields() -> None:
             assert profile is not None
             assert profile.country_code == "ES"
             assert profile.locale == "es-ES"
-            assert profile.accept_language == "es-ES,es;q=0.9,en;q=0.8"
+            assert profile.accept_language == "en-GB,en;q=0.9"
             assert profile.screen == "1920x1080"
             assert profile.vinted_screen == "catalog"
     finally:
@@ -308,8 +318,11 @@ def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
         assert payload["last_test_status"] == "success"
         assert payload["last_test_ip"] == "198.51.100.77"
         assert payload["last_test_error"] is None
+        assert payload["failure_count"] == 0
+        assert payload["cooldown_until"] is None
         assert FakeCurlSession.calls[0]["url"] == "https://api.ipify.org?format=json"
         assert FakeCurlSession.calls[0]["timeout"] == 10
+        assert FakeCurlSession.calls[0]["kwargs"]["impersonate"] == "chrome146"
         assert FakeCurlSession.calls[0]["kwargs"]["proxies"]["https"] == "http://proxy.example:7784"
     finally:
         with SessionLocal() as db:

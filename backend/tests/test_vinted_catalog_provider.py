@@ -9,7 +9,7 @@ import pytest
 
 from vinted_monitor.core.config import Settings
 from vinted_monitor.providers import vinted_catalog as catalog_provider
-from vinted_monitor.providers.browser_profiles import get_profile_by_name
+from vinted_monitor.providers.browser_profiles import BROWSER_PROFILES, get_profile_by_name, profile_for_impersonate, supported_curl_impersonates
 from vinted_monitor.providers.datadome import (
     DataDomeChallengeError,
     extract_datadome_client_key,
@@ -130,14 +130,23 @@ def test_curl_provider_defaults_to_configured_chrome120_profile() -> None:
     assert captured_sessions == [{"impersonate": "chrome120", "proxies": None}]
 
 
-def test_curl_provider_default_runtime_profile_is_chrome149_without_env_file() -> None:
+def test_curl_provider_default_runtime_profile_is_chrome146_without_env_file() -> None:
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(_env_file=None),
         session_factory=lambda **_: FakeCurlSession(lambda _call: FakeResponse(200), []),
     )
 
-    assert provider.profile.name == "chrome_149_win10"
-    assert provider.profile.impersonate == "chrome149"
+    assert provider.profile.name == "chrome_146_win10"
+    assert provider.profile.impersonate == "chrome146"
+
+
+def test_configured_runtime_profiles_are_supported_by_installed_curl_cffi() -> None:
+    installed_targets = supported_curl_impersonates()
+
+    assert installed_targets
+    assert {profile.impersonate for profile in BROWSER_PROFILES}.issubset(installed_targets)
+    with pytest.raises(ValueError, match="No browser profile configured"):
+        profile_for_impersonate("chrome149")
 
 
 def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_headers() -> None:
@@ -184,24 +193,34 @@ def test_chrome120_runtime_headers_are_ordered_and_do_not_force_hop_by_hop_heade
     assert "te" not in api_headers
 
 
-def test_chrome149_runtime_headers_match_observed_catalog_flow() -> None:
-    profile = get_profile_by_name("chrome_149_win10")
+def test_chrome146_runtime_headers_match_observed_catalog_flow() -> None:
+    profile = get_profile_by_name("chrome_146_win10")
     assert profile is not None
 
     bootstrap_headers = profile.build_bootstrap_headers()
     api_headers = profile.build_api_headers("https://www.vinted.es/catalog?catalog[]=2050")
 
-    assert profile.impersonate == "chrome149"
-    assert profile.user_agent.endswith("Chrome/149.0.0.0 Safari/537.36")
-    assert bootstrap_headers["sec-ch-ua"] == '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
-    assert bootstrap_headers["accept-language"] == "es-ES,es;q=0.9,en;q=0.8"
+    assert profile.impersonate == "chrome146"
+    assert profile.user_agent.endswith("Chrome/146.0.0.0 Safari/537.36")
+    assert bootstrap_headers["sec-ch-ua"] == '"Not-A.Brand";v="24", "Chromium";v="146"'
+    assert bootstrap_headers["accept-language"] == "en-GB,en;q=0.9"
     assert bootstrap_headers["priority"] == "u=0, i"
     assert bootstrap_headers["cache-control"] == "no-cache"
     assert bootstrap_headers["pragma"] == "no-cache"
+    assert all(header == header.lower() for header in bootstrap_headers)
+    assert not any(header.startswith(":") for header in bootstrap_headers)
+    assert "host" not in bootstrap_headers
+    assert "cookie" not in bootstrap_headers
+    assert "content-length" not in bootstrap_headers
     assert api_headers["accept"] == "application/json,text/plain,*/*,image/webp"
     assert api_headers["locale"] == "es-ES"
     assert api_headers["priority"] == "u=3"
     assert api_headers["referer"] == "https://www.vinted.es/catalog?catalog[]=2050"
+    assert all(header == header.lower() for header in api_headers)
+    assert not any(header.startswith(":") for header in api_headers)
+    assert "host" not in api_headers
+    assert "cookie" not in api_headers
+    assert "content-length" not in api_headers
 
 
 @pytest.fixture(autouse=True)
@@ -472,7 +491,7 @@ def test_curl_provider_uses_catalog_api_after_anonymous_bootstrap() -> None:
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip", curl_impersonate_browser="chrome149"),
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip", curl_impersonate_browser="chrome146"),
         session_factory=fake_session_factory(handler, calls),
     )
     result = provider.search(source())
@@ -790,9 +809,17 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
             return FakeResponse(200, text='window.ddk="TESTDATADOMEKEY1234567890";', headers={"content-type": "application/javascript"})
         if path(call) == "/js":
             assert call["method"] == "POST"
-            assert call["data"]["jsType"] == "ch"
+            assert call["data"]["jsType"] in {"ch", "le"}
             assert call["data"]["ddv"] == "5.7.0"
             assert call["data"]["ddk"] == "TESTDATADOMEKEY1234567890"
+            if call["data"]["jsType"] == "ch":
+                assert call["data"]["eventCounters"] == "[]"
+            else:
+                event_counters = json.loads(call["data"]["eventCounters"])
+                assert event_counters["mousemove"] == 26
+                assert event_counters["pointermove"] == 26
+                assert event_counters["keydown"] == 0
+                assert event_counters["keyup"] == 0
             assert call["headers"]["sec-fetch-site"] == "cross-site"
             assert call["headers"]["accept"] == "*/*"
             assert call["headers"]["priority"] == "u=1, i"
@@ -816,7 +843,8 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
     assert report["datadome_cookie"] is True
     assert prepared.datadome == "dd-cookie-secret"
     assert prepared.cookies["datadome"] == "dd-cookie-secret"
-    assert [path(call) for call in calls] == ["/ip", "/catalog", "/datadome/5.7.0/tags.js", "/js"]
+    assert [path(call) for call in calls] == ["/ip", "/catalog", "/datadome/5.7.0/tags.js", "/js", "/js"]
+    assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
     phases = [event["phase"] for event in events]
     assert "datadome_tags_request_start" in phases
     assert "datadome_tags_request_success" in phases

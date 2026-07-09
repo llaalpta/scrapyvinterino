@@ -135,7 +135,9 @@ class DataDomeCookieCollector:
         attempts: list[DataDomeCollectorAttempt] = []
         cid = self._current_datadome_cookie() or ".keep"
         jspl_length: int | None = None
+        collected_cookie: str | None = None
         for js_type in ("ch", "le"):
+            cid = self._current_datadome_cookie() or cid or ".keep"
             payload = build_datadome_collector_payload(
                 source_url=self.source_url,
                 profile=self.profile,
@@ -207,15 +209,8 @@ class DataDomeCookieCollector:
                             response_keys=_safe_response_keys(response_payload),
                         )
                     )
-                    return DataDomeCollectorResult(
-                        success=True,
-                        datadome_cookie=cookie_value,
-                        attempts=attempts,
-                        ddv=ddv,
-                        ddk_found=True,
-                        ddk_length=len(ddk),
-                        jspl_length=jspl_length,
-                    )
+                    collected_cookie = cookie_value
+                    continue
                 cid = _optional_str(response_payload.get("cid")) or cid
                 self._emit_attempt_event(
                     "datadome_collector_attempt_failed",
@@ -269,6 +264,17 @@ class DataDomeCookieCollector:
                         error=safe_error,
                     )
                 )
+
+        if collected_cookie:
+            return DataDomeCollectorResult(
+                success=True,
+                datadome_cookie=collected_cookie,
+                attempts=attempts,
+                ddv=ddv,
+                ddk_found=True,
+                ddk_length=len(ddk),
+                jspl_length=jspl_length,
+            )
 
         return DataDomeCollectorResult(
             success=False,
@@ -563,15 +569,15 @@ def _event_counters(js_type: str) -> str:
     if js_type == "le":
         return json.dumps(
             {
-                "mousemove": 0,
-                "pointermove": 0,
+                "mousemove": 26,
+                "pointermove": 26,
                 "click": 0,
                 "scroll": 0,
                 "touchstart": 0,
                 "touchend": 0,
                 "touchmove": 0,
-                "keydown": 1,
-                "keyup": 1,
+                "keydown": 0,
+                "keyup": 0,
             },
             separators=(",", ":"),
         )

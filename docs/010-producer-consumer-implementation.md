@@ -18,7 +18,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Residential proxy sticky identities are tied to prepared Vinted sessions for a monitor, not to a one-off task attempt.
 - Do not call the Asocks refresh API from runtime scraping code; rotation is achieved by using a new session UUID per attempt.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
-- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome149`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
+- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
 - Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
 - Redis task payloads carry `proxy_profile_id` only; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
 - Treat `403` and `429` from Vinted as DataDome-style challenge responses for retry purposes.
@@ -77,11 +77,18 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 ## Chrome 146 Catalog-Document Runtime 2026-07-07
 
-- Runtime defaults moved from `chrome146` to `chrome149` to align the provider profile with the latest HAR-derived catalog navigation. Vinted bootstrap/API/collector requests now use explicit ordered lowercase headers with `default_headers=False`; curl_cffi still owns TLS/HTTP2 impersonation and the session cookie jar.
+- Runtime defaults use `chrome146`, the highest Chrome target supported by the installed `curl_cffi` build and the profile aligned with the valid Chrome 146 catalog HAR. A later Chrome 149 browser HAR remains research input only until the dependency supports that impersonation target. Vinted bootstrap/API/collector requests use explicit ordered lowercase headers with `default_headers=False`; curl_cffi still owns TLS/HTTP2 impersonation and the session cookie jar.
 - The provider no longer bootstraps against the base Vinted domain. Each run uses the monitor's saved `/catalog?...` URL as the document bootstrap, then calls `/api/v2/catalog/items` with the same session, cookies, proxy identity, referer, CSRF token and anon id when those markers are present.
-- Proxy profiles now accept only connection data and country as user input. Locale, `Accept-Language`, and screen are resolved from internal country presets, stored for diagnostics, and rejected if sent through legacy create/update payloads.
+- Proxy profiles now accept only connection data and country as user input. Locale, `Accept-Language`, and screen are resolved from internal country presets, stored for diagnostics, and rejected if sent through legacy create/update payloads. The ES preset uses `locale=es-ES` with the observed Chrome 146 HAR `Accept-Language` value `en-GB,en;q=0.9`.
 - Empty `search_by_image_uuid` and `search_by_image_id` URL parameters are accepted and ignored; non-empty values remain unsupported because image-search filters are not translated to the fast API.
 - Run events record `bootstrap_origin=catalog_document`, CSRF/anon presence booleans, and safe markers only. Raw cookies, CSRF values, anon ids and Vinted session tokens remain memory-only.
+
+## Chrome 146 Runtime Correction 2026-07-09
+
+- The attempted `chrome149` runtime profile was removed because the installed `curl_cffi` build rejects live requests with `Impersonating chrome149 is not supported`.
+- `profile_for_impersonate()` now validates configured runtime targets against the installed `curl_cffi` impersonation literals before a proxy test, session prepare, or run reaches network I/O.
+- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`.
+- The DataDome collector keeps the HAR-shaped `ch` then `le` sequence and does not stop after a `ch` cookie; the final returned cookie is kept in the same `curl_cffi.Session` cookie jar.
 
 ## Continuous Direct Scheduler Validation 2026-07-06
 

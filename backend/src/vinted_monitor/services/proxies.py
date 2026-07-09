@@ -245,6 +245,10 @@ def mark_proxy_test_result(db: Session, profile_id: int, *, status: str, ip: str
     profile.last_test_status = status
     profile.last_test_ip = ip
     profile.last_test_error = redact_sensitive_text(error) if error else None
+    if status == "success":
+        profile.failure_count = 0
+        profile.cooldown_until = None
+    profile.updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(profile)
     return profile
@@ -371,12 +375,12 @@ def _validate_locale(value: str, country_code: str) -> str:
     return cleaned
 
 
-def _validate_accept_language(value: str, locale: str) -> str:
+def _validate_accept_language(value: str, _locale: str) -> str:
     cleaned = value.strip()
     if not cleaned:
         raise ValueError("Proxy accept_language cannot be empty")
-    if not cleaned.lower().startswith(locale.lower()):
-        raise ValueError("Proxy accept_language must start with locale")
+    if not any(chunk.split(";", 1)[0].strip() for chunk in cleaned.split(",")):
+        raise ValueError("Proxy accept_language must include at least one language tag")
     return cleaned
 
 
@@ -395,7 +399,7 @@ def _validate_vinted_screen(value: str) -> str:
 
 
 PROXY_CONTEXT_PRESETS: dict[str, ProxyContextPreset] = {
-    "ES": _context_preset("ES", "es-ES", "es-ES,es;q=0.9,en;q=0.8", "1920x1080"),
+    "ES": _context_preset("ES", "es-ES", "en-GB,en;q=0.9", "1920x1080"),
     "FR": _context_preset("FR", "fr-FR", "fr-FR,fr;q=0.9,en;q=0.8", "1920x1080"),
     "IT": _context_preset("IT", "it-IT", "it-IT,it;q=0.9,en;q=0.8", "1920x1080"),
     "DE": _context_preset("DE", "de-DE", "de-DE,de;q=0.9,en;q=0.8", "1920x1080"),
