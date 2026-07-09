@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Code2, FileText, RefreshCw } from 'lucide-react';
+import { FileText, RefreshCw } from 'lucide-react';
 import type { Run, RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
 import { type RunActivityController, useRunActivity } from './runActivity';
@@ -123,42 +122,32 @@ export function RunActivityList({
 }
 
 export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; showRunId?: boolean }) {
-  const hasDetails = Object.keys(event.details).length > 0;
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const narrative = eventNarrative(event);
+  const status = eventChecklistStatus(event, narrative);
   const tokens = eventLineTokens(event, showRunId);
   const message = eventMessageToken(event);
+  const detailLines = eventChecklistDetailLines(event);
   return (
     <article className={`run-event-entry ${event.level}`}>
-      <div className="event-console-row">
-        <div className="event-console-line">
+      <div className="event-console-line">
+        <div className="event-check-meta">
           <span className="event-time">{formatLogTimestamp(event.created_at)}</span>
-          <span className={`event-level ${event.level}`}>{event.level.toUpperCase()}</span>
-          <span className="event-area">{narrative.area}</span>
-          <span className="event-action">{narrative.action}</span>
-          {narrative.result ? <span className={`event-result ${narrative.tone}`}>{narrative.result}</span> : null}
-          {tokens.map((token) => (
-            <span className="event-token" key={token}>{token}</span>
-          ))}
-          {message ? <span className="event-message">{message}</span> : null}
-          {hasDetails ? (
-            <button
-              aria-expanded={detailsOpen}
-              className="event-details-toggle"
-              title="Mostrar detalles tecnicos saneados"
-              type="button"
-              onClick={() => setDetailsOpen((current) => !current)}
-            >
-              <Code2 size={13} />
-              Detalles
-            </button>
-          ) : null}
+          <span className={`event-check-status ${status.tone}`}>{status.label}</span>
         </div>
-        {detailsOpen ? (
-          <pre className="event-details-panel">
-            <code>{JSON.stringify(event.details, null, 2)}</code>
-          </pre>
-        ) : null}
+        <div className="event-check-body">
+          <div className="event-check-heading">
+            <span className="event-check-title">{eventLabel(event.phase)}</span>
+            <span className="event-check-phase">{narrative.area}.{narrative.action}</span>
+            {narrative.result ? <span className={`event-result ${narrative.tone}`}>{narrative.result}</span> : null}
+          </div>
+          {tokens.length > 0 ? (
+            <div className="event-token-line">{tokens.join(' ')}</div>
+          ) : null}
+          {detailLines.map((line) => (
+            <div className="event-check-detail" key={line}>{line}</div>
+          ))}
+          {message ? <div className="event-message">{message}</div> : null}
+        </div>
       </div>
     </article>
   );
@@ -176,7 +165,7 @@ export function eventSearchText(event: RunEvent): string {
     narrative.result,
     event.run_id ? `run#${event.run_id}` : null,
     eventLineTokens(event, true).join(' '),
-    JSON.stringify(event.details)
+    eventChecklistDetailLines(event).join(' ')
   ].filter(Boolean).join(' ').toLowerCase();
 }
 
@@ -186,6 +175,11 @@ type EventNarrative = {
   area: string;
   action: string;
   result: string | null;
+  tone: EventTone;
+};
+
+type ChecklistStatus = {
+  label: 'INFO' | 'OK' | 'SKIP' | 'WARN' | 'FAIL';
   tone: EventTone;
 };
 
@@ -301,6 +295,22 @@ function eventNarrative(event: RunEvent): EventNarrative {
   };
 }
 
+function eventChecklistStatus(event: RunEvent, narrative: EventNarrative): ChecklistStatus {
+  if (event.level === 'error') {
+    return { label: 'FAIL', tone: 'error' };
+  }
+  if (narrative.result === 'skipped' || event.phase.endsWith('_skipped')) {
+    return { label: 'SKIP', tone: 'warning' };
+  }
+  if (event.level === 'warning') {
+    return { label: 'WARN', tone: 'warning' };
+  }
+  if (narrative.result === 'ok' || narrative.result === 'passed' || narrative.tone === 'success') {
+    return { label: 'OK', tone: 'success' };
+  }
+  return { label: 'INFO', tone: 'neutral' };
+}
+
 function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   const parts: string[] = [];
   if (showRunId && event.run_id) {
@@ -366,6 +376,8 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   appendBooleanToken(parts, 'access', event.details, 'access_token_found');
   appendBooleanToken(parts, 'datadome', event.details, 'datadome_cookie');
   appendBooleanToken(parts, 'v_udt', event.details, 'v_udt_found');
+  appendBooleanToken(parts, 'cf_bm', event.details, 'cf_bm_cookie');
+  appendBooleanToken(parts, 'v_sid', event.details, 'v_sid_cookie');
   appendBooleanToken(parts, 'geo', event.details, 'egress_country_match');
   appendBooleanToken(parts, 'locale_ok', event.details, 'locale_configured');
   appendBooleanToken(parts, 'viewport_ok', event.details, 'viewport_configured');
@@ -375,6 +387,13 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   appendBooleanToken(parts, 'dd_cookie', event.details, 'cookie_found');
   if (typeof event.details.post_sent === 'boolean') {
     parts.push(`post_sent=${event.details.post_sent ? 'true' : 'false'}`);
+  }
+  if (typeof event.details.non_blocking === 'boolean') {
+    parts.push(`non_blocking=${event.details.non_blocking ? 'true' : 'false'}`);
+  }
+  const collectorEndpoint = detailString(event.details, 'collector_endpoint');
+  if (collectorEndpoint && !event.url) {
+    parts.push(`endpoint=${formatLogUrl(collectorEndpoint)}`);
   }
   appendDynamicHeaderTokens(parts, event.details);
   const locale = detailString(event.details, 'locale');
@@ -465,6 +484,41 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   return parts;
 }
 
+function eventChecklistDetailLines(event: RunEvent): string[] {
+  const lines: string[] = [];
+  const recovered = detailStringArray(event.details, 'recovered_context');
+  if (recovered.length > 0) {
+    lines.push(`Recuperado: ${recovered.join(', ')}`);
+  }
+  const missing = detailStringArray(event.details, 'missing_context');
+  const missingRequired = detailStringArray(event.details, 'missing_required');
+  const pending = missing.length > 0 ? missing : missingRequired;
+  if (pending.length > 0) {
+    lines.push(`Pendiente: ${pending.join(', ')}`);
+  }
+  const cookieFlags = detailStringArray(event.details, 'cookie_flags');
+  if (cookieFlags.length > 0) {
+    lines.push(`Cookies: ${cookieFlags.join(', ')}`);
+  }
+  const requestProfile = detailString(event.details, 'request_profile') || headerSetToken(event);
+  const defaultHeaders = event.details.default_headers === false ? 'default_headers=off' : null;
+  const dynamicHeaders = dynamicHeaderTokens(event.details);
+  if (requestProfile || defaultHeaders || dynamicHeaders.length > 0) {
+    lines.push(['Configurado:', requestProfile ? `headers=${requestProfile}` : null, defaultHeaders, ...dynamicHeaders].filter(Boolean).join(' '));
+  }
+  const params = detailRecord(event.details, 'api_param_summary') || detailRecord(event.details, 'api_params');
+  const paramsLine = formatApiParams(params);
+  if (paramsLine) {
+    lines.push(`Parametros API: ${paramsLine}`);
+  }
+  const responseSummary = detailRecord(event.details, 'response_summary');
+  const responseLine = formatResponseSummary(responseSummary);
+  if (responseLine) {
+    lines.push(`Respuesta: ${responseLine}`);
+  }
+  return lines;
+}
+
 function eventMessageToken(event: RunEvent): string | null {
   if (!event.message || event.level === 'info') {
     return null;
@@ -477,6 +531,10 @@ function eventMessageToken(event: RunEvent): string | null {
 }
 
 function headerSetToken(event: RunEvent): string | null {
+  const requestProfile = detailString(event.details, 'request_profile');
+  if (requestProfile) {
+    return requestProfile;
+  }
   if (!detailRecord(event.details, 'request_headers')) {
     return null;
   }
@@ -516,9 +574,14 @@ function appendCookieCount(parts: string[], details: Record<string, unknown>): v
 }
 
 function appendDynamicHeaderTokens(parts: string[], details: Record<string, unknown>): void {
+  parts.push(...dynamicHeaderTokens(details));
+}
+
+function dynamicHeaderTokens(details: Record<string, unknown>): string[] {
+  const parts: string[] = [];
   const headers = detailRecord(details, 'request_headers');
   if (!headers) {
-    return;
+    return parts;
   }
   if (Object.prototype.hasOwnProperty.call(headers, 'x-anon-id')) {
     parts.push('x-anon-id=ok');
@@ -531,6 +594,7 @@ function appendDynamicHeaderTokens(parts: string[], details: Record<string, unkn
   } else if (Object.prototype.hasOwnProperty.call(headers, 'x-anon-id') || Object.prototype.hasOwnProperty.call(headers, 'x-csrf-token')) {
     parts.push('x-v-udt=not_sent');
   }
+  return parts;
 }
 
 function appendBooleanToken(parts: string[], label: string, details: Record<string, unknown>, key: string): void {
@@ -563,6 +627,20 @@ function detailArray(details: Record<string, unknown>, key: string): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function detailStringArray(details: Record<string, unknown>, key: string): string[] {
+  return detailArray(details, key)
+    .map((value) => {
+      if (typeof value === 'string' && value) {
+        return formatTokenValue(value);
+      }
+      if (typeof value === 'number' || typeof value === 'boolean') {
+        return String(value);
+      }
+      return null;
+    })
+    .filter((value): value is string => Boolean(value));
+}
+
 function detailRecord(details: Record<string, unknown>, key: string): Record<string, unknown> | null {
   const value = details[key];
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -592,6 +670,43 @@ function formatLogUrl(value: string): string {
 
 function formatContentType(value: string): string {
   return value.split(';')[0].trim() || value;
+}
+
+function formatApiParams(params: Record<string, unknown> | null): string | null {
+  if (!params) {
+    return null;
+  }
+  const preferred = ['catalog_ids', 'brand_ids', 'status_ids', 'size_ids', 'price_to', 'currency', 'page', 'per_page', 'order'];
+  const tokens = preferred
+    .filter((key) => Object.prototype.hasOwnProperty.call(params, key))
+    .map((key) => {
+      const value = params[key];
+      if (Array.isArray(value)) {
+        return `${key}=${value.map(String).join('|')}`;
+      }
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        return `${key}=${formatTokenValue(String(value))}`;
+      }
+      return null;
+    })
+    .filter((value): value is string => Boolean(value));
+  return tokens.length > 0 ? tokens.join(' ') : null;
+}
+
+function formatResponseSummary(summary: Record<string, unknown> | null): string | null {
+  if (!summary) {
+    return null;
+  }
+  const tokens = ['cf_ray', 'cf_cache_status', 'request_id', 'upstream_ms']
+    .map((key) => {
+      const value = summary[key];
+      if (typeof value === 'string' || typeof value === 'number') {
+        return `${key}=${formatTokenValue(String(value))}`;
+      }
+      return null;
+    })
+    .filter((value): value is string => Boolean(value));
+  return tokens.length > 0 ? tokens.join(' ') : null;
 }
 
 function formatTokenValue(value: string): string {
@@ -656,12 +771,12 @@ function eventLabel(phase: string): string {
     datadome_tags_request_start: 'Cargando tags DataDome',
     datadome_tags_request_success: 'Tags DataDome cargados',
     datadome_tags_request_error: 'Error cargando tags DataDome',
-    datadome_collector_start: 'Recolector DataDome iniciado',
+    datadome_collector_start: 'DataDome evaluado',
     datadome_collector_attempt_start: 'Intento DataDome iniciado',
     datadome_collector_attempt_success: 'Intento DataDome completado',
     datadome_collector_attempt_failed: 'Intento DataDome fallido',
     datadome_collector_success: 'Recolector DataDome completado',
-    datadome_collector_failed: 'Recolector DataDome fallido',
+    datadome_collector_failed: 'DataDome omitido',
     datadome_collector_skipped: 'Recolector DataDome omitido',
     navigation_home_request_start: 'Visitando home',
     navigation_home_request_success: 'Home respondio',

@@ -554,9 +554,11 @@ class CurlCffiVintedCatalogProvider:
                 "per_page": params["per_page"],
                 "order": params["order"],
                 "api_params": params,
+                "api_param_summary": _api_param_summary(params),
                 "session_marker_count": len(cookie_names),
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
+                "request_profile": "api_har146",
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
                 "http_session": self._session_marker(),
@@ -734,10 +736,13 @@ class CurlCffiVintedCatalogProvider:
                 "item_count": len(payload.get("items", [])),
                 "content_type": content_type,
                 "attempt": attempt,
+                "request_profile": "api_har146",
                 "browser_profile": self.profile.name,
                 "http_session": self._session_marker(),
+                "response_summary": _response_summary(response.headers),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
+                "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
             },
         )
         return payload
@@ -776,8 +781,11 @@ class CurlCffiVintedCatalogProvider:
             details={
                 "source_url": source_url,
                 "api_params": params,
+                "api_param_summary": _api_param_summary(params),
+                "request_profile": "api_har146",
                 "missing_required": missing_context,
                 "context": context_report,
+                **_context_summary(context_report, self._cookie_values()),
                 "request_headers": safe_headers(headers),
                 "cookies_before": self._cookie_markers(),
                 "default_headers": False,
@@ -874,6 +882,9 @@ class CurlCffiVintedCatalogProvider:
                 "source_url": source_url,
                 "missing_required": missing_context,
                 "context": context_report,
+                **_context_summary(context_report, self._cookie_values()),
+                "request_profile": "api_har146",
+                "response_summary": _response_summary(response.headers),
                 "content_type": response_details.get("content_type"),
                 "items_count": response_details.get("items_count"),
                 "json_keys": response_details.get("json_keys"),
@@ -911,6 +922,7 @@ class CurlCffiVintedCatalogProvider:
             details={
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
+                "request_profile": "bootstrap_har146",
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
                 "expected_country_code": self.expected_country_code,
@@ -997,6 +1009,8 @@ class CurlCffiVintedCatalogProvider:
         self._catalog_session_context = self._build_catalog_session_context(response)
         self._bootstrapped = True
         bootstrap_duration_ms = _elapsed_ms(started_at)
+        context_report = self._session_context_report()
+        response_summary = _response_summary(response.headers)
 
         self._emit_event(
             phase="anonymous_session_bootstrap_success",
@@ -1010,27 +1024,12 @@ class CurlCffiVintedCatalogProvider:
                 "bootstrap_duration_ms": bootstrap_duration_ms,
                 "timeout_ms": self.timeout_ms,
                 "attempt": attempt,
-                "browser_profile": self.profile.name,
-                "bootstrap_origin": "catalog_document",
+                "request_profile": "bootstrap_har146",
                 "http_session": self._session_marker(),
-                "csrf_token_found": self._catalog_session_context.csrf_token is not None,
-                "anon_id_found": self._catalog_session_context.anon_id is not None,
-                "access_token_found": self._catalog_session_context.access_token_web is not None,
-                "datadome_cookie": self._catalog_session_context.datadome is not None,
-                "v_udt_found": self._catalog_session_context.v_udt is not None,
-                "expected_country_code": self.expected_country_code,
-                "locale": self.locale,
-                "accept_language": self.accept_language,
-                "user_iso_locale": self._catalog_session_context.user_iso_locale,
-                "viewport_size": self.viewport_size,
-                "vinted_screen": self.vinted_screen,
-                "response_screen": self._catalog_session_context.screen,
+                **context_report,
                 "datadome_cookie_seen_by_detector": dd_present,
-                "csrf_token": _secret_marker_or_none("csrf_token", self._catalog_session_context.csrf_token),
-                "anon_id": _secret_marker_or_none("anon_id", self._catalog_session_context.anon_id),
-                "access_token_web": _secret_marker_or_none("access_token_web", self._catalog_session_context.access_token_web),
-                "datadome": _secret_marker_or_none("datadome", self._catalog_session_context.datadome),
-                "v_udt": _secret_marker_or_none("v_udt", self._catalog_session_context.v_udt),
+                "response_summary": response_summary,
+                **response_summary,
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
             },
@@ -1054,30 +1053,27 @@ class CurlCffiVintedCatalogProvider:
         if not self.settings.vinted_datadome_collector_enabled:
             self._emit_event(
                 phase="datadome_collector_skipped",
-                method="POST",
-                url=collector_url,
-                details={"reason": "disabled"},
+                details={"reason": "disabled", "post_sent": False, "collector_endpoint": collector_url},
             )
             return
         if self._catalog_session_context.datadome:
             self._emit_event(
                 phase="datadome_collector_skipped",
-                method="POST",
-                url=collector_url,
                 details={
                     "reason": "datadome_already_present",
                     "datadome_cookie": True,
+                    "post_sent": False,
+                    "collector_endpoint": collector_url,
                     "cookies_after": self._cookie_markers(),
+                    "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
                 },
             )
             return
         if not self._last_bootstrap_html:
             self._emit_event(
                 phase="datadome_collector_skipped",
-                method="POST",
-                url=collector_url,
                 level="warning",
-                details={"reason": "bootstrap_html_missing"},
+                details={"reason": "bootstrap_html_missing", "post_sent": False, "collector_endpoint": collector_url},
             )
             return
 
@@ -1086,11 +1082,11 @@ class CurlCffiVintedCatalogProvider:
         if missing_without_datadome:
             self._emit_event(
                 phase="datadome_collector_skipped",
-                method="POST",
-                url=collector_url,
                 level="warning",
                 details={
                     "reason": "base_context_incomplete",
+                    "post_sent": False,
+                    "collector_endpoint": collector_url,
                     "missing_required": missing_without_datadome,
                     **report,
                 },
@@ -1099,10 +1095,11 @@ class CurlCffiVintedCatalogProvider:
 
         self._emit_event(
             phase="datadome_collector_start",
-            method="POST",
-            url=collector_url,
             details={
                 "timeout_ms": self.timeout_ms,
+                "request_profile": "datadome_collector",
+                "collector_endpoint": collector_url,
+                "post_sent": False,
                 "browser_profile": self.profile.name,
                 "impersonate": self.profile.impersonate,
                 "http_session": self._session_marker(),
@@ -1111,6 +1108,7 @@ class CurlCffiVintedCatalogProvider:
                 "accept_language": self.accept_language,
                 "viewport_size": self.viewport_size,
                 "vinted_screen": self.vinted_screen,
+                **_context_summary(report, self._cookie_values()),
             },
         )
         datadome_client_key = self.settings.vinted_datadome_client_key or extract_datadome_client_key(self._last_bootstrap_html)
@@ -1137,28 +1135,30 @@ class CurlCffiVintedCatalogProvider:
             self._catalog_session_context.datadome = result.datadome_cookie or self._cookie_value("datadome")
             self._emit_event(
                 phase="datadome_collector_success",
-                method="POST",
-                url=collector_url,
                 duration_ms=_elapsed_ms(started_at),
                 details={
                     **result.safe_details(),
                     "context": self._session_context_report(),
+                    "collector_endpoint": collector_url,
+                    "non_blocking": not self.require_datadome_cookie,
                     "cookies_after": self._cookie_markers(),
+                    "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
                 },
             )
             return
 
         self._emit_event(
             phase="datadome_collector_failed",
-            method="POST",
-            url=collector_url,
             duration_ms=_elapsed_ms(started_at),
             level="warning",
             message="DataDome collector did not return a cookie",
             details={
                 **result.safe_details(),
                 "context": self._session_context_report(),
+                "collector_endpoint": collector_url,
+                "non_blocking": not self.require_datadome_cookie,
                 "cookies_after": self._cookie_markers(),
+                "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
             },
         )
 
@@ -1288,6 +1288,18 @@ class CurlCffiVintedCatalogProvider:
             "datadome": _secret_marker_or_none("datadome", context.datadome),
             "v_udt": _secret_marker_or_none("v_udt", context.v_udt),
             "cookies_after_bootstrap": self._cookie_markers(),
+            **_context_summary(
+                {
+                    "csrf_token_found": context.csrf_token is not None,
+                    "anon_id_found": context.anon_id is not None,
+                    "access_token_found": context.access_token_web is not None,
+                    "datadome_cookie": context.datadome is not None,
+                    "v_udt_found": context.v_udt is not None,
+                    "response_locale_matches": response_locale_matches,
+                    "response_screen_matches": response_screen_matches,
+                },
+                self._cookie_values(),
+            ),
         }
 
     def _missing_session_context(self, report: Mapping[str, Any]) -> list[str]:
@@ -1447,6 +1459,91 @@ class CurlCffiVintedCatalogProvider:
             if cookie_name == name and cookie_value:
                 return str(cookie_value)
         return None
+
+
+def _context_summary(report: Mapping[str, Any], cookie_values: Mapping[str, str]) -> dict[str, Any]:
+    recovered: list[str] = []
+    missing: list[str] = []
+    checks = [
+        ("csrf_token_found", "csrf"),
+        ("anon_id_found", "anon_id"),
+        ("access_token_found", "access_token_web"),
+        ("v_udt_found", "v_udt"),
+        ("datadome_cookie", "datadome"),
+    ]
+    for key, label in checks:
+        if report.get(key):
+            recovered.append(label)
+        else:
+            missing.append(label)
+
+    for cookie_name in ("__cf_bm", "v_sid", "_vinted_fr_session"):
+        if cookie_values.get(cookie_name):
+            recovered.append(cookie_name)
+        else:
+            missing.append(cookie_name)
+
+    locale_ok = bool(report.get("response_locale_matches") or report.get("locale_configured"))
+    screen_ok = bool(report.get("response_screen_matches") or report.get("vinted_screen_configured"))
+    if locale_ok:
+        recovered.append("locale")
+    else:
+        missing.append("locale")
+    if screen_ok:
+        recovered.append("x_screen")
+    else:
+        missing.append("x_screen")
+
+    return {
+        "recovered_context": recovered,
+        "missing_context": missing,
+        "cookie_flags": _cookie_flags_from_values(cookie_values),
+        "cf_bm_cookie": bool(cookie_values.get("__cf_bm")),
+        "v_sid_cookie": bool(cookie_values.get("v_sid")),
+        "vinted_fr_session_cookie": bool(cookie_values.get("_vinted_fr_session")),
+    }
+
+
+def _cookie_flags_from_values(cookie_values: Mapping[str, str]) -> list[str]:
+    safe_names = (
+        "__cf_bm",
+        "datadome",
+        "v_sid",
+        "_vinted_fr_session",
+        "access_token_web",
+        "refresh_token_web",
+        "anon_id",
+        "v_udt",
+        "anonymous-iso-locale",
+    )
+    return [name for name in safe_names if cookie_values.get(name)]
+
+
+def _response_summary(headers: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "cf_ray": _header_value(headers, "cf-ray"),
+            "cf_cache_status": _header_value(headers, "cf-cache-status"),
+            "request_id": _header_value(headers, "x-request-id"),
+            "upstream_ms": _header_value(headers, "x-envoy-upstream-service-time"),
+        }.items()
+        if value
+    }
+
+
+def _api_param_summary(params: Mapping[str, Any]) -> dict[str, str]:
+    summary_keys = ("catalog_ids", "brand_ids", "status_ids", "size_ids", "price_to", "currency", "page", "per_page", "order")
+    summary: dict[str, str] = {}
+    for key in summary_keys:
+        value = params.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, (list, tuple)):
+            summary[key] = "|".join(str(part) for part in value)
+        else:
+            summary[key] = str(value)
+    return summary
 
 
 # ---------------------------------------------------------------------------

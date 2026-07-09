@@ -11,7 +11,7 @@
 - Cada proxy de Vinted debe declarar pais; locale, `Accept-Language`, viewport y Vinted `x-screen` se resuelven desde presets internos y no son editables desde la PWA/API. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
 - No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML ni payloads raw completos en logs o respuestas API.
 - Los eventos de run pueden guardar metodo, fase, nivel, URL saneada, headers saneados, status, duracion en ms, timeout, intento/retry, proxy, IP de salida, pais, user-agent, fingerprints y errores de Vinted redacted/truncados.
-- La UI principal de logs debe mostrar una linea profesional por evento con datos resumidos y seguros; los detalles JSON redacted son auditoria tecnica bajo demanda, no la vista por defecto.
+- La UI principal de logs debe mostrar una checklist operativa no interactiva con datos resumidos y seguros por evento. Los detalles JSON redacted quedan como evidencia tecnica disponible por API/base de datos, no como vista del timeline principal.
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
 - Los marcadores seguros de cookies, tokens, headers sensibles, sesion HTTP y sesion sticky de proxy pueden incluir nombre, longitud, mascara `first4****last4` y fingerprint corto. Si el valor es corto, la mascara no muestra ningun caracter.
 - La redaccion de logs debe aplicarse de forma recursiva a `details`, incluyendo listas y objetos anidados.

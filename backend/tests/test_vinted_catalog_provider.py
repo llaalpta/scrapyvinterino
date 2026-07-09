@@ -658,6 +658,7 @@ def test_curl_provider_blocks_catalog_api_when_session_context_is_incomplete() -
 
 def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_context() -> None:
     calls: list[dict] = []
+    events: list[dict] = []
 
     def handler(call: dict) -> FakeResponse:
         if path(call) == "/ip":
@@ -690,6 +691,7 @@ def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_cont
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
         session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
     )
 
     probe = provider.probe_catalog_api(source().url)
@@ -704,6 +706,20 @@ def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_cont
     assert "csrf-secret-value" not in serialized_probe
     assert "anon-secret-value" not in serialized_probe
     assert "udt-secret-value" not in serialized_probe
+    probe_start = next(event for event in events if event["phase"] == "catalog_api_probe_start")
+    assert probe_start["details"]["request_profile"] == "api_har146"
+    assert probe_start["details"]["recovered_context"] == [
+        "csrf",
+        "anon_id",
+        "access_token_web",
+        "v_udt",
+        "locale",
+        "x_screen",
+    ]
+    assert "datadome" in probe_start["details"]["missing_context"]
+    probe_success = next(event for event in events if event["phase"] == "catalog_api_probe_success")
+    assert probe_success["details"]["items_count"] == 2
+    assert probe_success["details"]["request_profile"] == "api_har146"
 
 
 def test_curl_provider_catalog_api_probe_reports_challenge_without_raising() -> None:
@@ -954,6 +970,57 @@ def test_curl_provider_preflight_collector_keeps_incomplete_when_no_cookie_retur
     assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
     assert [event["phase"] for event in events][-1] == "datadome_collector_failed"
     assert [event["phase"] for event in events].count("datadome_collector_attempt_failed") == 2
+
+
+def test_curl_provider_preflight_collector_without_ddk_logs_skip_without_post() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def handler(call: dict) -> FakeResponse:
+        if path(call) == "/ip":
+            return FakeResponse(
+                200,
+                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
+                headers={"content-type": "application/json"},
+            )
+        if path(call) == "/catalog":
+            return FakeResponse(
+                200,
+                text='{"CSRF_TOKEN":"csrf-secret-value"}',
+                headers={
+                    "set-cookie": ["access_token_web=access-secret-value; Path=/;", "__cf_bm=cf-secret-value; Path=/;"],
+                    "x-anon-id": "anon-secret-value",
+                    "x-v-udt": "udt-secret-value",
+                    "x-user-iso-locale": "ES",
+                    "x-screen": "catalog",
+                },
+            )
+        if path(call) == "/js":
+            raise AssertionError("collector POST must not run without a DataDome client key")
+        return FakeResponse(404)
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: events.append(event),
+        require_datadome_cookie=False,
+    )
+
+    report = provider.bootstrap_for_session(source().url, collect_datadome=True)
+
+    assert report["datadome_cookie"] is False
+    assert [path(call) for call in calls] == ["/ip", "/catalog"]
+    start_event = next(event for event in events if event["phase"] == "datadome_collector_start")
+    assert start_event["method"] is None
+    assert start_event["url"] is None
+    assert start_event["details"]["post_sent"] is False
+    failed_event = next(event for event in events if event["phase"] == "datadome_collector_failed")
+    assert failed_event["method"] is None
+    assert failed_event["url"] is None
+    assert failed_event["details"]["post_sent"] is False
+    assert failed_event["details"]["error"] == "datadome_client_key_missing"
+    assert failed_event["details"]["non_blocking"] is True
+    assert "cf-secret-value" not in json.dumps(events)
 
 
 def test_curl_provider_preflight_collector_skips_when_base_context_is_incomplete() -> None:

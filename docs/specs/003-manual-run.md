@@ -46,7 +46,7 @@ Allow the user to manually execute a configured monitor and record the execution
 - A failed run does not crash the worker.
 - API/PWA can show recent run state from the monitor view.
 - Manual run events include safe configuration, egress, HTTP/session, request-duration, Redis/cache, candidate, filter, persistence, and opportunity/no-op decisions without raw secrets.
-- The PWA log console presents those events as one professional text line per event (`area action result key=value...`); large JSON diagnostics are not expanded by default.
+- The PWA log console presents those events as non-interactive operational checklist entries; large JSON diagnostics are not rendered in the main timeline.
 - A manual run without a current initial snapshot is rejected with a clear message to recalibrate the listing first.
 - The PWA does not expose a separate Activity navigation item for run history.
 - `items_found` counts provider candidates.

@@ -1196,24 +1196,62 @@
 }
 
 .event-console-line {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: nowrap;
-  gap: 5px 8px;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  overflow-x: auto;
   padding: 7px 10px;
   font-size: 12px;
   line-height: 1.45;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .event-console-row {
   width: 100%;
   min-width: 0;
   max-width: 100%;
+}
+
+.event-check-meta {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.event-check-body {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.event-check-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.event-check-title {
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.event-check-phase {
+  color: #93c5fd;
+}
+
+.event-token-line {
+  min-width: 0;
+  color: #94a3b8;
+}
+
+.event-check-detail {
+  color: #cbd5e1;
 }
 
 .event-time {
@@ -1287,45 +1325,52 @@
   background: rgb(239 68 68 / 0.18);
 }
 
-.event-message {
-  color: #fca5a5;
-  white-space: nowrap;
-}
-
-.event-details-toggle {
+.event-check-status {
   display: inline-flex;
   align-items: center;
-  flex: 0 0 auto;
-  gap: 4px;
-  min-height: 22px;
-  border: 1px solid rgb(148 163 184 / 0.34);
   border-radius: 4px;
-  padding: 1px 6px;
-  color: #cbd5e1;
-  background: rgb(15 23 42 / 0.5);
-  font-family: inherit;
-  font-size: 11px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
-.event-details-toggle:hover {
-  border-color: rgb(203 213 225 / 0.56);
-  color: #f8fafc;
+.event-check-status.neutral {
+  color: #bfdbfe;
+  background: rgb(59 130 246 / 0.18);
 }
 
-.event-details-panel {
-  min-width: 0;
-  max-width: 100%;
-  margin: 0;
-  border-top: 1px solid rgb(148 163 184 / 0.22);
-  padding: 8px;
-  overflow-x: auto;
-  color: #d1fae5;
-  background: rgb(2 6 23 / 0.64);
-  white-space: pre;
+.event-check-status.success {
+  color: #bbf7d0;
+  background: rgb(34 197 94 / 0.16);
 }
 
-.event-details-panel code {
-  font-family: inherit;
+.event-check-status.warning {
+  color: #fde68a;
+  background: rgb(245 158 11 / 0.18);
+}
+
+.event-check-status.error {
+  color: #fecaca;
+  background: rgb(239 68 68 / 0.18);
+}
+
+.event-message {
+  color: #fca5a5;
+  white-space: normal;
+}
+
+@media (max-width: 640px) {
+  .event-console-line {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .event-check-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
 }
 
 .empty-inline {
