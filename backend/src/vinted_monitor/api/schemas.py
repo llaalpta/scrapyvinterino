@@ -205,6 +205,7 @@ class VintedSessionContextRead(BaseModel):
     anon_id: bool
     access_token_web: bool
     datadome: bool
+    cf_bm: bool
     v_udt: bool
     user_iso_locale: bool
     vinted_screen: bool

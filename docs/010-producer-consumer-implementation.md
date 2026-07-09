@@ -87,7 +87,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 - The attempted `chrome149` runtime profile was removed because the installed `curl_cffi` build rejects live requests with `Impersonating chrome149 is not supported`.
 - `profile_for_impersonate()` now validates configured runtime targets against the installed `curl_cffi` impersonation literals before a proxy test, session prepare, or run reaches network I/O.
-- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`.
+- Migration `0010_chrome146_runtime_profile` updates existing ES proxy context rows to `en-GB,en;q=0.9` and invalidates ready pre-production sessions that used `chrome149`; `0011_normalize_vinted_session_invalid_status` normalizes any already-migrated `invalidated` rows back to the canonical `invalid` status.
 - The DataDome collector keeps the HAR-shaped `ch` then `le` sequence and does not stop after a `ch` cookie; the final returned cookie is kept in the same `curl_cffi.Session` cookie jar.
 
 ## Detail Probe Session Hardening 2026-07-09
@@ -102,6 +102,31 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
 - Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That endpoint remains a diagnostic probe only.
 - Business runs now require the public `/items/...` HTML/Next detail document before creating opportunities. Non-DataDome detail failures are terminal pending outcomes without opportunities; DataDome detail challenges still fail the run and invalidate the prepared Vinted session.
+
+## Prepared Session Hardening 2026-07-09
+
+- A monitor-owned Vinted session is reusable only after strict context is present: CSRF token, anon id, `access_token_web`, `v_udt`, `__cf_bm`, `datadome`, target country match, locale, `Accept-Language`, viewport and `x-screen=catalog`.
+- Session preparation may still call the catalog API probe after a failed DataDome collector to collect diagnostics, but a successful JSON probe no longer overrides missing `datadome` or `__cf_bm`; the saved row remains `incomplete` and the run fails clearly.
+- Runtime provider selection, explicit `Preparar sesion`, silent context refreshes and item detail probes now all use the same strict prepared-session requirement.
+- The provider receives the configured human pacing bounds from settings instead of hardcoded defaults.
+- Recalibrating the initial catalog snapshot reuses the accepted JSON payload from the preparation probe when the run had to prepare a new session, avoiding an immediate duplicate catalog API request. The explicit `Preparar sesion` action remains non-business: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
+
+## Vinted API Kit Detail Research 2026-07-09
+
+- Reviewed `https://github.com/vlymar1/vinted-api-kit` at commit `90a5655` (`2026-06-06`, release `v1.0.1`) as a reference for direct Vinted item detail extraction.
+- The package does not use a hidden or alternate item detail endpoint. `ItemsAPI.get_details()` extracts the numeric item id from `/items/{id}-...` and calls `GET {base_url}/api/v2/items/{id}/details`, then reads `response.json()["item"]`.
+- Its HTTP layer uses `curl_cffi.AsyncSession`, optional proxy configuration, cookie persistence, `Accept-Language` derived from the Vinted domain, and a cookie refresh path using `HEAD {base_url}` with `impersonate="chrome"`.
+- Its default application headers are minimal: `Cache-Control: max-age=0`, `DNT: 1`, and `X-Money-Object: true`. It does not implement HAR-shaped header ordering, explicit CSRF/anon headers, DataDome collection, Chrome 146 coupling, item-document warmup, or a detail endpoint matrix.
+- Its tests mock the detail response and therefore prove wrapper behavior only; they do not demonstrate that `/api/v2/items/{id}/details` currently works against live Vinted through Cloudflare/DataDome.
+- Actionable takeaway: the reference confirms the common direct detail endpoint but does not explain the current live `403 cf-mitigated: challenge` observed by this project. Useful ideas to retain are cookie persistence, same-session refresh before retrying `401/403`, and explicit `429` handling. The next direct-detail work should focus on discovering missing endpoint parameters or a different browser-observed API path rather than repeatedly probing `/details` with the same matrix.
+
+## Live Detail Probe Findings 2026-07-09
+
+- Controlled live probes prepared one monitor-owned Chrome 146 sticky residential session and then tested two item detail references. Session preparation produced a reusable catalog session with CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, and a collected `datadome` cookie.
+- The item document warmup returned `200` and the item-context DataDome collector could also obtain or reuse a `datadome` cookie in the same session.
+- Control/support endpoints behaved differently from the detail endpoint: `/api/v2/info_banners/item` returned JSON, `/api/v2/items/{id}/services` returned JSON, and `/api/v2/items/{id}/more` returned `400`.
+- The direct detail endpoint `/api/v2/items/{id}/details` remained blocked with `403` and `cf-mitigated: challenge` even after item-document warmup, DataDome presence, item referer, catalog referer, and Chrome 146 Client Hints variants.
+- Current conclusion: DataDome collection is necessary for a high-fidelity prepared session, but it is not sufficient to unlock the direct item detail API. Future detail work should avoid broad request batteries and instead add narrowly targeted probes based on browser bundle/HAR evidence.
 
 ## Continuous Direct Scheduler Validation 2026-07-06
 

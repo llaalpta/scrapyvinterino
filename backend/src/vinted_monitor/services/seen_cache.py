@@ -7,6 +7,7 @@ import redis
 from redis.exceptions import RedisError
 
 from vinted_monitor.core.config import Settings, get_settings
+from vinted_monitor.core.redis_client import redis_client_from_url
 
 
 class SeenCacheUnavailableError(RuntimeError):
@@ -125,7 +126,7 @@ class RedisSeenCache:
 def get_seen_cache(settings: Settings | None = None) -> RedisSeenCache:
     resolved = settings or get_settings()
     return RedisSeenCache(
-        client=redis.Redis.from_url(resolved.redis_url, decode_responses=True),
+        client=redis_client_from_url(resolved.redis_url, decode_responses=True),
         seen_ttl_seconds=resolved.seen_cache_ttl_seconds,
         processing_ttl_seconds=resolved.seen_processing_ttl_seconds,
         max_per_monitor=resolved.seen_cache_max_per_monitor,

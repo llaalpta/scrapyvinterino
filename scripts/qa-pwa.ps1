@@ -13,6 +13,7 @@ $StampFile = Join-Path $StateDir "vite-$Port.started"
 $OutLog = Join-Path $StateDir "vite-$Port.out.log"
 $ErrLog = Join-Path $StateDir "vite-$Port.err.log"
 $FrontendUrl = "http://127.0.0.1:$Port"
+$DockerFrontendUrl = "http://localhost:5173"
 
 function Get-RecordedVitePid {
     if (-not (Test-Path -LiteralPath $PidFile)) {
@@ -74,6 +75,17 @@ function Wait-HttpOk([string]$Url, [int]$Seconds) {
     throw "Timed out waiting for $Url"
 }
 
+function Write-DockerFrontendStatus {
+    $connections = @(Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue)
+    if ($connections.Count -eq 0) {
+        Write-Host "Docker frontend 5173: not listening"
+        return
+    }
+
+    $owners = ($connections | Select-Object -ExpandProperty OwningProcess -Unique) -join ", "
+    Write-Warning "Docker frontend 5173 is listening (pid(s): $owners). Use $FrontendUrl for isolated QA, not $DockerFrontendUrl."
+}
+
 if ($Action -eq "stop") {
     Stop-RecordedVite
     Write-Host "Stopped tracked Vite process for $FrontendUrl"
@@ -83,7 +95,8 @@ if ($Action -eq "stop") {
 if ($Action -eq "status") {
     $pidValue = Get-RecordedVitePid
     $viteState = if ($null -ne $pidValue -and $null -ne (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)) { "running pid $pidValue" } else { "not running" }
-    Write-Host "Frontend: $viteState at $FrontendUrl"
+    Write-Host "QA frontend: $viteState at $FrontendUrl"
+    Write-DockerFrontendStatus
     Push-Location $RepoRoot
     try {
         docker compose ps
@@ -98,19 +111,24 @@ Assert-PortAvailableOrOwned
 
 Push-Location $RepoRoot
 try {
-    docker compose up -d postgres redis api worker
+    cmd.exe /c "docker compose stop frontend >NUL 2>NUL"
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker compose stop frontend failed with exit code $LASTEXITCODE"
+    }
+    cmd.exe /c "docker compose up -d postgres redis api worker >NUL 2>NUL"
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker compose up failed with exit code $LASTEXITCODE"
+    }
     Wait-HttpOk "http://localhost:8000/health" 60
 } finally {
     Pop-Location
 }
 
-$command = "set VITE_DEV_API_PROXY_TARGET=http://localhost:8000&& pnpm.cmd dev --host 127.0.0.1 --port $Port"
+$command = "set VITE_DEV_API_PROXY_TARGET=http://localhost:8000&& pnpm.cmd dev --host 127.0.0.1 --port $Port > `"$OutLog`" 2> `"$ErrLog`""
 $process = Start-Process `
     -FilePath "cmd.exe" `
     -ArgumentList "/c `"$command`"" `
     -WorkingDirectory (Join-Path $RepoRoot "frontend") `
-    -RedirectStandardOutput $OutLog `
-    -RedirectStandardError $ErrLog `
     -WindowStyle Hidden `
     -PassThru
 
@@ -125,4 +143,7 @@ try {
 
 Write-Host "QA frontend ready: $FrontendUrl"
 Write-Host "API health: http://localhost:8000/health"
+Write-Host "Docker services ready: postgres redis api worker"
+Write-Host "Docker frontend disabled for isolated QA: $DockerFrontendUrl"
+Write-DockerFrontendStatus
 Write-Host "Logs: $OutLog / $ErrLog"
