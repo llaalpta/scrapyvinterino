@@ -296,6 +296,7 @@
   }
 
   .opportunity-detail-shell {
+    height: calc(100dvh - 18px);
     max-height: calc(100dvh - 18px);
   }
 
@@ -313,12 +314,15 @@
   }
 
   .opportunity-gallery {
+    grid-template-rows: auto auto;
     border-right: 0;
     border-bottom: 1px solid #e5eaf0;
     padding: 10px;
+    overflow: visible;
   }
 
   .opportunity-gallery-stage {
+    height: auto;
     aspect-ratio: 3 / 4;
     max-height: 62dvh;
   }
@@ -330,5 +334,24 @@
 
   .opportunity-description p {
     max-height: none;
+  }
+}
+
+@media (max-width: 420px) {
+  nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
+  }
+
+  nav button,
+  .shell.nav-collapsed nav button {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  nav button:first-child {
+    grid-column: 1 / -1;
   }
 }

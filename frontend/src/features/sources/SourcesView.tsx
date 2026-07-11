@@ -2,7 +2,8 @@ import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, use
 import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Search, Square, Trash2 } from 'lucide-react';
 import { monitorEventsStreamUrl, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
-import { eventSearchText, RunEventEntry } from '../runs/RunsView';
+import { eventSearchText } from '../runs/runEventSearch';
+import { RunEventEntry } from '../runs/RunsView';
 import { buildSourceDraft, filterTermLabelFromDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));

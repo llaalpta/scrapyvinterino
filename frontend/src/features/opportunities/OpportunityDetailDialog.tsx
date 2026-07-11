@@ -1,8 +1,10 @@
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { OpportunityResult } from '../../api';
 import { ItemPhoto } from '../../components/ItemPhoto';
 import { RowActions } from '../../components/RowActions';
+import { formatDate } from '../../utils/format';
+import { availabilityReasons } from './opportunityAvailability';
 import { PriceBreakdown } from './PriceBreakdown';
 import { AvailabilityBadge } from './opportunityPresentation';
 
@@ -23,6 +25,8 @@ export function OpportunityDetailDialog({
     return [...new Set(detailPhotos.length > 0 ? detailPhotos : item.image_url ? [item.image_url] : [])];
   }, [item.image_url, item.photos]);
   const photoCount = photos.length;
+  const publicAvailabilityReasons = availabilityReasons(item);
+  const detailTimestamp = item.detail_last_fetched_at ?? opportunity.last_scraped_at;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -54,6 +58,29 @@ export function OpportunityDetailDialog({
     window.requestAnimationFrame(() => returnFocus?.focus());
   }
 
+  function trapFocus(event: ReactKeyboardEvent<HTMLDialogElement>) {
+    const dialog = dialogRef.current;
+    if (event.key !== 'Tab' || !dialog) {
+      return;
+    }
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')
+    ).filter((element) => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) {
+      event.preventDefault();
+      return;
+    }
+    if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <dialog
       aria-labelledby="opportunity-detail-title"
@@ -66,6 +93,7 @@ export function OpportunityDetailDialog({
       }}
       onClose={handleDialogClosed}
       onKeyDown={(event) => {
+        trapFocus(event);
         if (event.key === 'ArrowLeft') {
           event.preventDefault();
           showPreviousPhoto();
@@ -157,7 +185,14 @@ export function OpportunityDetailDialog({
               <Metadata label="Marca" value={item.brand} />
               <Metadata label="Talla" value={item.size} />
               <Metadata label="Condicion" value={item.status} />
+              {item.seller_login ? <Metadata label="Vendedor" value={item.seller_login} /> : null}
+              {item.seller_country ? <Metadata label="Pais" value={item.seller_country} /> : null}
               <Metadata label="Monitor" value={opportunity.source_name} />
+              <Metadata label="Detalle publico" value={formatDate(detailTimestamp)} />
+              <Metadata
+                label="Bloqueo publico"
+                value={publicAvailabilityReasons.length > 0 ? publicAvailabilityReasons.join(', ') : 'Ninguno observado'}
+              />
             </dl>
             <div className="opportunity-description">
               <h4>Descripcion</h4>

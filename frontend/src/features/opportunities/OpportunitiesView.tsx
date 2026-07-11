@@ -172,6 +172,8 @@ export function OpportunitiesView({
               <th>Marca</th>
               <th>Talla</th>
               <th>Condicion</th>
+              <th>Vendedor</th>
+              <th>Pais</th>
               <th>Precio</th>
               <th>Favs</th>
               <th>Acciones</th>
@@ -180,7 +182,7 @@ export function OpportunitiesView({
           <tbody>
             {opportunityPage.items.length === 0 ? (
               <tr>
-                <td colSpan={11} className="empty">
+                <td colSpan={13} className="empty">
                   No hay oportunidades para los filtros actuales.
                 </td>
               </tr>
@@ -241,6 +243,8 @@ function OpportunityTableRow({ opportunity, onOpenDetails }: { opportunity: Oppo
       <td>{opportunity.item.brand ?? '-'}</td>
       <td>{opportunity.item.size ?? '-'}</td>
       <td>{opportunity.item.status ?? '-'}</td>
+      <td>{opportunity.item.seller_login ?? '-'}</td>
+      <td>{opportunity.item.seller_country ?? '-'}</td>
       <td>
         <PriceBreakdown item={opportunity.item} />
       </td>
@@ -278,6 +282,18 @@ function OpportunityCard({ opportunity, onOpenDetails }: { opportunity: Opportun
           <dt>Talla</dt>
           <dd>{opportunity.item.size ?? '-'}</dd>
         </div>
+        {opportunity.item.seller_login ? (
+          <div>
+            <dt>Vendedor</dt>
+            <dd>{opportunity.item.seller_login}</dd>
+          </div>
+        ) : null}
+        {opportunity.item.seller_country ? (
+          <div>
+            <dt>Pais</dt>
+            <dd>{opportunity.item.seller_country}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Scrape</dt>
           <dd>{formatDate(opportunity.last_scraped_at)}</dd>

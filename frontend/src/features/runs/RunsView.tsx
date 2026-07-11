@@ -153,21 +153,6 @@ export function RunEventEntry({ event, showRunId = false }: { event: RunEvent; s
   );
 }
 
-export function eventSearchText(event: RunEvent): string {
-  const narrative = eventNarrative(event);
-  return [
-    event.phase,
-    event.level,
-    event.message,
-    event.url,
-    narrative.area,
-    narrative.action,
-    narrative.result,
-    event.run_id ? `run#${event.run_id}` : null,
-    eventRenderedLogLines(event, true).map((line) => line.text).join(' ')
-  ].filter(Boolean).join(' ').toLowerCase();
-}
-
 type EventTone = 'neutral' | 'success' | 'warning' | 'error';
 
 type EventNarrative = {
@@ -218,14 +203,6 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   catalog_session_context_incomplete: { area: 'session_context', action: 'checking', result: 'incomplete', tone: 'error' },
   vinted_session_prepare_start: { area: 'prepare_session', action: 'preparing', result: null, tone: 'neutral' },
   vinted_session_prepare_result: { area: 'session', action: 'saving', result: 'ok', tone: 'success' },
-  detail_api_probe_start: { area: 'detail_api', action: 'probing', result: null, tone: 'neutral' },
-  detail_api_probe_attempt_start: { area: 'detail_api', action: 'probing_variant', result: null, tone: 'neutral' },
-  detail_api_probe_attempt_finished: { area: 'detail_api', action: 'probing_variant', result: null, tone: 'neutral' },
-  detail_api_probe_finished: { area: 'detail_api', action: 'finishing_matrix', result: null, tone: 'neutral' },
-  detail_item_document_request_start: { area: 'detail_document', action: 'requesting', result: null, tone: 'neutral' },
-  detail_api_probe_success: { area: 'detail_api', action: 'probing', result: 'ok', tone: 'success' },
-  detail_api_probe_failed: { area: 'detail_api', action: 'probing', result: 'rejected', tone: 'warning' },
-  detail_api_probe_error: { area: 'detail_api', action: 'probing', result: 'failed', tone: 'error' },
   detail_probe_finished: { area: 'detail_probe', action: 'finishing', result: 'ok', tone: 'success' },
   catalog_api_probe_start: { area: 'api', action: 'probing', result: null, tone: 'neutral' },
   catalog_api_probe_success: { area: 'api', action: 'probing', result: 'ok', tone: 'success' },
@@ -635,7 +612,7 @@ function headerSetToken(event: RunEvent): string | null {
   if (event.phase.startsWith('anonymous_session_bootstrap')) {
     return 'bootstrap_har146';
   }
-  if (event.phase.startsWith('catalog_api') || event.phase.startsWith('detail_api')) {
+  if (event.phase.startsWith('catalog_api')) {
     return 'api_har146';
   }
   if (event.phase.startsWith('datadome_tags')) {
@@ -880,14 +857,6 @@ function eventLabel(phase: string): string {
     catalog_session_context_incomplete: 'Contexto de catalogo incompleto',
     vinted_session_prepare_start: 'Preparando sesion Vinted',
     vinted_session_prepare_result: 'Sesion Vinted preparada',
-    detail_api_probe_start: 'Probando API de detalle',
-    detail_api_probe_attempt_start: 'Probando variante de detalle',
-    detail_api_probe_attempt_finished: 'Variante de detalle completada',
-    detail_api_probe_finished: 'Matriz de detalle completada',
-    detail_item_document_request_start: 'Navegando documento del item',
-    detail_api_probe_success: 'Detalle API aceptado',
-    detail_api_probe_failed: 'Detalle API no aceptado',
-    detail_api_probe_error: 'Error en API de detalle',
     detail_probe_finished: 'Probe de detalle completado',
     catalog_api_probe_start: 'Probando API de catalogo',
     catalog_api_probe_success: 'Probe API aceptado',
