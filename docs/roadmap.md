@@ -26,7 +26,7 @@ Status values:
 | 11 | done | Opportunity monitors model correction | `docs/specs/001-search-sources.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md`, `docs/specs/008-scheduler.md` | Treat configured Vinted searches as reusable monitors with per-monitor dedupe, optional filters, and accumulated monitor metrics. |
 | 12 | done | Professional monitor logs | `docs/specs/008-scheduler.md`, `docs/security.md` | Structured run events with levels, safe session diagnostics, durations, Redis/cache events, and PWA log timeline. |
 
-| 13 | in-progress | Producer-Consumer + DataDome bypass | `docs/specs/010-producer-consumer-bypass.md` | Persistent prepared Vinted sessions added; live residential session warm-up/validation remains pending before `done`. |
+| 13 | done | Producer-Consumer + DataDome bypass | `docs/specs/010-producer-consumer-bypass.md` | Prepared residential session, catalog baseline, reliable queue recovery and five-item public-detail run verified live on 2026-07-11. |
 | 13.1 | done | Prepared session hardening | `docs/specs/010-producer-consumer-bypass.md` | Require strict prepared context (`datadome`, `__cf_bm`, CSRF, anon, access, `v_udt`, geo/locale/screen) before a monitor-owned session becomes reusable. |
 | 13.2 | done | Public item document enrichment | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/010-producer-consumer-bypass.md` | Structural JSON-LD/Next Flight parsing, resilient Redis retries, public availability/pricing, complete direct-CDN photos, production-path detail probe, and accessible opportunity gallery verified against the supplied HAR plus backend/PWA tests. |
 
@@ -41,13 +41,13 @@ Status values:
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 15 | not-started | Production deployment hardening | `docs/deployment.md` | Traefik and Cloudflare deployment details. |
+| 16 | not-started | Production deployment hardening | `docs/deployment.md` | Traefik and Cloudflare deployment details. |
 
 ## Future Authenticated Actions
 
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
-| 16 | not-started | Authenticated actions | `docs/specs/009-authenticated-actions.md` | Favorites, checkout discovery, pre-purchase, and explicit purchase. |
+| 17 | not-started | Authenticated actions | `docs/specs/009-authenticated-actions.md` | Favorites, checkout discovery, pre-purchase, and explicit purchase. |
 
 ## Roadmap Rules
 

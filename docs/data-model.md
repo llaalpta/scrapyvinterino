@@ -6,7 +6,7 @@ Tablas principales:
 - `search_sources`: monitores de oportunidad reutilizables; guardan URL, modo, cadencia, `filter_definition` con terminos excluyentes propios del monitor y estado runtime. `archived_at` oculta un monitor sin borrar historico.
 - `app_settings`: configuracion global mutable desde la PWA, como el estado UI del scheduler.
 - `monitor_sessions`: periodos historicos de lanzamiento de un monitor; los puntuales se cierran al terminar y los recurrentes quedan abiertos hasta parada, expiracion o fallo.
-- `runs`: ejecuciones de monitor, con `trigger`, `monitor_session_id`, contadores de filtrado y metadatos runtime.
+- `runs`: ejecuciones de monitor, con `trigger`, `monitor_session_id`, `task_id` indexado para redelivery idempotente, contadores de filtrado y metadatos runtime.
 - `items`: articulos normalizados de Vinted que llegaron a oportunidad; `vinted_item_id` define identidad de catalogo/cache.
 - `opportunities`: articulos vistos por un monitor que no fueron descartados; es la tabla principal de resultados utiles del producto y su unicidad notificable es por monitor e item.
 - `proxy_profiles`: pool global de proxys configurables desde UI con secretos cifrados, tipo, capacidad y estado operativo.
@@ -19,6 +19,6 @@ Tablas principales:
 
 Estado runtime no relacional:
 
-- Redis mantiene el cache obligatorio de vistos/procesamiento y la cola diferida de reintentos de detalle por monitor y politica de evaluacion. Si Redis no esta disponible, el monitor no procesa candidatos y el run falla.
+- Redis mantiene la cola fiable ready/processing-por-consumidor/dead-letter, marcadores directo e inverso de la tarea pendiente por monitor, el cache obligatorio de vistos/procesamiento con ownership y la cola diferida de reintentos de detalle por monitor y politica de evaluacion. Si Redis no esta disponible, el monitor no procesa candidatos y el run no se confirma.
 - `items.photos` conserva todas las URL publicas firmadas observadas; `availability_flags` conserva senales independientes, `state`, `reason_codes` y `source=public_snapshot`; los precios de proteccion, total sin envio y envio minimo usan las columnas de detalle existentes.
 - Los candidatos descartados por filtros no se persisten como items; quedan reflejados solo en contadores agregados del run.

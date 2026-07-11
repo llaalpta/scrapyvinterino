@@ -26,6 +26,10 @@ La configuracion no debe tener dos fuentes de verdad activas:
 
 Algunos valores `.env` tambien sirven como defaults cuando aun no existe override operativo en `app_settings.scheduler`; por ejemplo `VINTED_REQUEST_TIMEOUT_MS`. Una vez guardado desde la PWA, el valor persistido en DB es la fuente de verdad operativa.
 
+Redis conserva AOF en un volumen Docker tanto en desarrollo como en el ejemplo de produccion. El worker se despliega como una unica instancia con varios consumidores internos: recupera las listas `vinted:task_queue:processing*` antes de iniciar scheduler y consumidores, y no se deben arrancar replicas independientes hasta incorporar ownership/visibility timeout distribuido.
+
+Fuera de `development` y `test`, el backend rechaza al arrancar una `APP_SECRET_KEY` de menos de 32 caracteres o igual a cualquiera de los placeholders versionados. Cada despliegue debe generar y custodiar un valor aleatorio propio; cambiarlo exige recifrar previamente las credenciales de proxy y los contextos de sesion existentes.
+
 ## Outbound Vinted Proxy
 
 El monitor debe funcionar sin proxy de salida por defecto cuando el ajuste global de acceso directo lo permite. El uso de proxy residencial o de otro proveedor es optativo y se configura en el pool global de proxys gestionado por la PWA; las credenciales se almacenan cifradas en base de datos.

@@ -18,12 +18,8 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - Show image, title, brand, size, status, price, favorites, seller, country, source, and detection time when available.
 - Show the public availability state plus base price, buyer protection, total excluding shipping, and minimum displayed shipping price when available.
 - Open an accessible desktop/mobile photo viewer from the item thumbnail, using all persisted signed CDN URLs with direct lazy loading and a visible broken-image fallback.
-- Provide action affordances:
-  - view item;
-  - favorite;
-  - prepare purchase;
-  - purchase.
-- Keep future authenticated actions disabled or clearly unavailable until implemented.
+- Provide a working view-item action and clearly unavailable indicators for future favorite and authenticated purchase behavior.
+- Do not expose a separate pre-purchase or purchase control until the authenticated-actions spec is implemented.
 
 ## Out of Scope
 
@@ -61,7 +57,10 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - The Opportunities tab is the primary result surface and is truthful when empty.
 - The Vinted item can be opened from the `view` action.
 - Future actions are visible but disabled or feature-flagged.
+- Disabled authenticated actions expose an accessible name and unavailable reason to keyboard, screen-reader, pointer, and touch users, and never issue a request.
 - The photo viewer supports thumbnails, previous/next navigation, arrow keys, `Escape`, and mobile-safe scrolling without enabling authenticated actions.
+- Availability is labelled as a public scrape snapshot and the detail view exposes its scrape time and blocking reason when available; it never implies authenticated checkout validation.
+- CDN images are requested with no referrer and without application/Vinted session credentials, are not proxied by the backend, and are not precached by the service worker.
 - Empty state is clear.
 - Table remains usable on desktop widths and is replaced by cards on mobile widths.
 - The page itself does not scroll horizontally; horizontal overflow is limited to the desktop table container.
@@ -77,3 +76,4 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - Backend tests for paginated opportunities empty and seeded data.
 - Frontend build.
 - Playwright check against the running app for tabs, collapsible desktop navigation, sticky mobile navigation, collapsed opportunity-result filters, mobile filter drawer, pagination page size, desktop table, mobile cards, no page-level horizontal scroll, and disabled future actions.
+- Playwright checks the gallery with zero, one, five, duplicate and broken photos; keyboard focus/return, swipe, direct CDN requests, accessible disabled actions, and all availability states at desktop and mobile widths.

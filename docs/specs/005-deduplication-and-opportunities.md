@@ -20,10 +20,13 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Count `items_new` as candidates newly claimed by Redis for that monitor/policy in that run.
 - Fetch item detail for every Redis-new candidate before filter evaluation and opportunity creation, bounded by the configured per-run limit.
 - Parse the public item document's JSON-LD and structurally discovered Next/React Flight records; do not depend on dynamic Flight record ids or the Cloudflare-challenged direct detail API.
+- Anchor every Flight section to the requested item id. Recommendations or unrelated products in the same record must never contribute plugins, photos, availability, shipping, or pricing.
 - Extract detail fields needed for second-stage filtering and opportunity display: title, description, brand, size, physical status, base price/currency, semantic color, category, minimum displayed shipping price, buyer protection fee, total excluding shipping, the complete public photo set, seller rating/badges, and public availability signals when visible.
 - Validate a configurable required-field allowlist before filter evaluation. The default clothing policy requires title, observed description (which may be empty), brand, size, physical status, base price/currency, and at least one photo.
 - Persist signed Vinted CDN photo URLs only; image bytes are loaded directly by the PWA and never through the residential Vinted proxy.
 - Keep recoverable detail failures in a bounded Redis retry queue so an item is not lost after leaving the top-five catalog window.
+- Preserve the normalized public catalog identity across detail retries, including seller login and country; retry payloads still exclude source `raw`, cookies, tokens and HTML.
+- Make candidate state transitions recoverable across PostgreSQL commits, Redis failures, process crashes, and processing-lock expiry. A later run must converge without losing a candidate or duplicating an opportunity.
 - Leave opportunity creation behavior to local filter evaluation in spec 006.
 
 ## Out of Scope
@@ -71,9 +74,14 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Detail transport, challenge, response, or parser failures do not create opportunities and remain retryable for three total attempts; candidates skipped by the per-run detail budget are queued without consuming an attempt.
 - Valid detail that lacks a configured required field is a terminal `detail_incomplete` outcome, names the missing fields, creates no opportunity, and is marked seen.
 - Optional fields absent from a valid document remain null and do not block an opportunity. An observed empty description is valid and contributes no blacklist text.
+- Money amount and currency are selected from the same source and must be finite, non-negative, and internally consistent. Invalid optional prices remain null with a validation warning.
+- Public availability is conservative: any observed blocking signal wins, and `buyable` is emitted only when every required positive signal is explicit and no reservation, stock, visibility, processing, permission, or shipping blocker is present.
 - Redis seen state is marked only after a terminal outcome; pending retries retain their sanitized candidate even if the item leaves the catalog window.
-- A processing lock expiring allows retry instead of permanently losing a candidate.
+- A candidate rehydrated from the detail retry queue retains its public seller login and country for later item/opportunity persistence.
+- Processing locks have an owner token. Expiry allows retry, while a stale worker cannot release a lock reacquired by another worker.
 - Detail requests are sequential inside one Vinted session so response cookie rotation cannot race.
+- A run is reported successful only after its PostgreSQL effects and Redis candidate transitions are durable. Recovery paths must not leave contradictory terminal events.
+- Concurrent monitors may share one global `Item` row without either run failing; each monitor still owns its opportunity independently.
 
 ## Verification
 
@@ -88,6 +96,9 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Confirm `items_found`, `items_new`, and `opportunities_created` reflect catalog results, monitor-new items, and created opportunities.
 - Confirm Redis unavailable fails the run and does not create opportunities.
 - Confirm discarded candidates are not inserted into `items`.
+- Inject failure before/after the PostgreSQL commit and during Redis finalize; confirm the next run converges to one item/opportunity and a terminal or retry Redis state.
+- Expire and reacquire a processing lock, then confirm a stale release cannot remove the new owner's lock.
+- Process the same item concurrently under two monitors and confirm one global item plus one opportunity per monitor.
 
 ## Audit
 

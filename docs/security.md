@@ -14,15 +14,20 @@
 - Los reintentos Redis guardan solo el candidato publico normalizado, contador, tipo de fallo y siguiente fecha; no guardan HTML/Flight, cookies, sesiones ni `raw` de origen.
 - Las fotos se persisten como URL HTTPS firmada y solo se aceptan hosts `images*.vinted.net`; se conserva la query de firma. El worker no descarga bytes ni envia cookies/proxy Vinted al CDN.
 - La navegacion de detalle acepta solo rutas HTTPS `/items/...` en `www.vinted.es`/`vinted.es`; un candidato o retry no puede redirigir la sesion preparada a otro host.
+- Tras cualquier redirect se vuelve a validar la URL final antes de leer o parsear la respuesta; se rechazan otros hosts, HTTP, credenciales, puertos alternativos y rutas ajenas a `/items/...`.
 - Los eventos de run pueden guardar metodo, fase, nivel, URL saneada, headers saneados, status, duracion en ms, timeout, intento/retry, proxy, IP de salida, pais, user-agent, fingerprints y errores de Vinted redacted/truncados.
 - La UI principal de logs debe mostrar una checklist operativa no interactiva con datos resumidos y seguros por evento. Los detalles JSON redacted quedan como evidencia tecnica disponible por API/base de datos, no como vista del timeline principal.
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
 - Los marcadores seguros de cookies, tokens, headers sensibles, sesion HTTP y sesion sticky de proxy pueden incluir nombre, longitud, mascara `first4****last4` y fingerprint corto. Si el valor es corto, la mascara no muestra ningun caracter.
 - La redaccion de logs debe aplicarse de forma recursiva a `details`, incluyendo listas y objetos anidados.
+- La misma redaccion se aplica antes de enviar excepciones a `structlog`/stdout; ningun logger puede recibir `str(exc)` sin sanear.
+- Los campos contenedores de cookies, cabeceras y sesiones solo conservan marcadores creados por el redactor en runtime; cadenas crudas o diccionarios que imitan su forma se sustituyen completos por `<redacted>`.
 - Implementar donde sea necesario bypass agresivo anti-bot.
 - `curl_cffi` con `impersonate` falsifica la huella TLS/JA3 y HTTP/2. Los perfiles de navegador (User-Agent, Sec-Ch-Ua) son datos publicos, no secretos.
 - Los identificadores sticky de proxy se guardan como parte de una sesion Vinted preparada y solo se registran como marcador seguro.
 - Las cookies DataDome, tokens publicos y CSRF de sesiones preparadas se cifran en `vinted_sessions.context_encrypted`; la API y los logs nunca devuelven valores raw.
+- Invalidar una sesion sustituye su payload cifrado por un objeto vacio y conserva solo estado, fingerprint y diagnosticos saneados. Archivar un monitor invalida y purga todas sus sesiones preparadas.
+- En `production`, el arranque exige una `APP_SECRET_KEY` propia de al menos 32 caracteres y rechaza los placeholders versionados.
 - La preparacion de sesion Vinted pertenece al monitor y se ejecuta automaticamente si el run no encuentra una sesion `ready` compatible con el proxy sticky seleccionado.
 - Antes de pedir `/api/v2/catalog/items` para scraping, el provider debe tener contexto anonimo completo en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, DataDome, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`.
 - Los eventos de run pueden incluir el nombre del perfil de navegador usado, el marcador seguro del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.

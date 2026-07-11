@@ -4,8 +4,8 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 
 ## Current State
 
-- Scheduler is a producer and enqueues `MonitorTask` payloads to Redis with `LPUSH`.
-- Consumers block with `BRPOP`, create a browser profile, select proxy capacity, then execute monitor business logic through `execute_monitor_run()`.
+- Scheduler atomically enqueues `MonitorTask` payloads with `LPUSH`, one pending marker per monitor and a payload reverse marker, coalescing later ticks while work is queued or reserved and counting backlog against global/proxy capacity.
+- Consumers use a binary queue client and reserve FIFO work with `BLMOVE` into per-consumer processing lists; its socket timeout exceeds the blocking window. Terminal outcomes ACK the exact payload, unexpected failures requeue it, malformed/non-UTF-8 payloads go to dead-letter, and startup/thread recovery restores unacknowledged reservations. Maintenance transitions retry with backoff and are idempotent after ambiguous responses.
 - `CurlCffiVintedCatalogProvider` is the only Vinted catalog HTTP provider.
 - Runtime catalog traffic is monitor-owned: the run reuses a ready `vinted_sessions` row for that monitor/proxy sticky identity or prepares one automatically from the saved catalog document URL before scraping.
 - Manual runs remain synchronous from the API, but use the same provider stack.
@@ -24,6 +24,8 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
 - Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
 - Redis task payloads carry `proxy_profile_id` only; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
+- Run rows persist indexed `task_id`. Redelivery acknowledges an existing terminal run without Vinted traffic, reconciles `finalizing`, and closes an orphan `running` row before retrying.
+- Development Redis uses a persisted AOF volume. The recovery contract assumes one worker service instance with multiple in-process consumers; horizontally scaled workers require distributed reservation ownership before deployment.
 - Classify DataDome and `cf-mitigated: challenge` explicitly; plain `429` remains rate limiting and detail `404/410` is terminal.
 - Keep retry escalation in `TaskConsumer`; `execute_monitor_run()` records the failed run and re-raises `DataDomeChallengeError`.
 
@@ -48,7 +50,7 @@ Before connecting the new ephemeral HTTP client to Redis workers or sending live
 - `docker compose exec -T worker python -c "import curl_cffi; print(curl_cffi.__version__)"`
 - `python scripts/verify_impersonation.py`
 
-The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are run with the chosen provider and current Vinted response behavior.
+The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queue, public-detail and PWA audit recorded below.
 
 ## Audit 2026-07-05
 
@@ -103,7 +105,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 ## DataDome Key and Detail HTML Runtime 2026-07-09
 
 - The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
-- Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That endpoint remains a diagnostic probe only.
+- Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That direct endpoint was an earlier research diagnostic and has been removed from runtime and PWA probes.
 - Business runs require the public `/items/...` HTML/Next detail document before creating opportunities. Recoverable failures stay pending in Redis; configured incompleteness, genuine `404/410`, blacklist decisions and exhausted retries are terminal. Anti-bot challenges fail the run, invalidate the prepared session and preserve the rolled-back batch.
 
 ## Prepared Session Hardening 2026-07-09
@@ -152,3 +154,12 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - The timeline uses `/api/monitors/{monitor_id}/events` for persisted history and the existing SSE stream to append live events for active monitors. Each event is rendered as one console-style line with timestamp, level, run id, flow area/action/result, method/status/duration, compact URL, and safe context tokens. Redacted JSON `details` remains available only behind an explicit technical-details control.
 - `Limpiar vista` hides only the currently visible event IDs in the browser session, so persisted history and later event IDs remain visible.
 - The per-run log expansion remains available in the global runs view through `/api/runs/{run_id}/events`.
+
+## Independent Merge Audit 2026-07-11
+
+- Adversarial parser gates cover item identity (including rejection of unscoped JSON-LD without matching Flight identity), recommendation isolation, atomic money/currency selection, finite non-negative prices, signed image hosts, reservation/out-of-stock precedence and final redirect validation. The supplied catalog-to-item HAR parses with all required fields, five signed photos, `2.00 EUR` base, `0.80 EUR` protection, `2.80 EUR` total, `1.75 EUR` shipping, `buyable`, and parser p95 below `150 ms` across 30 runs.
+- PostgreSQL/Redis gates cover concurrent item upsert, owner-checked atomic retry/terminal transitions, claim-vs-finalize races, two-phase `finalizing` convergence after SQL commit failure, retry-attempt recovery, challenge preservation, stale run recovery, archive-vs-session/source/scheduler fencing and idempotent binary task reservation/ACK/requeue/dead-letter. Redis AOF `appendfsync=always` retained a per-consumer reservation plus reverse marker across a real container restart and recovered it exactly once.
+- A live residential run prepared a monitor-owned session (`catalog_api_probe=accepted_json`), seeded a five-item baseline, then processed one catalog JSON plus five sequential public item documents in `18.6 s`: five complete opportunities, zero private detail requests, zero backend image requests, no pending/retry/processing residue and `run_succeeded` only after the Redis transition.
+- Playwright verified the five live opportunities at desktop and 390/320 px: direct signed CDN images, complete price/shipping breakdown, public availability/timestamp/reasons, focus trap/return, keyboard gallery, accessible unavailable actions and real Monitors/Ajustes navigation. Invalid input produced `422` with no row; valid create/archive stayed consistent across UI, API and PostgreSQL.
+- Archiving the audit monitor preserved its five opportunities and run history, invalidated its prepared Vinted session and replaced the encrypted cookie/token payload with an empty context.
+- The final gate passed the complete backend suite (`340 passed`), Ruff, PWA lint/build, production Compose rendering, Alembic head `0012`, API/frontend smoke and Playwright desktop/390/320 checks. Redaction rejects forged marker containers, production rejects placeholder encryption keys, and the local ignored key was rotated with existing encrypted rows re-encrypted before runtime recreation.

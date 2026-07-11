@@ -62,6 +62,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - The selected monitor detail shows name, URL, session state when available, stopped-only editable configuration, performance chart, and active logs in that order.
 - Archived monitors are hidden from the default monitor list and cannot be scheduled or launched.
 - Archiving a monitor stops it and preserves historical rows for audit and result traceability.
+- Archiving invalidates every prepared Vinted session owned by the monitor and purges its encrypted cookie/token payload while preserving safe session metadata.
 - Archiving from the PWA uses an in-app confirmation dialog, not a browser alert.
 - Punctual launch executes once for testing and leaves the monitor inactive.
 - Changing a monitor URL keeps the same monitor identity and historical results.
