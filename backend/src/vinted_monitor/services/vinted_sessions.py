@@ -100,6 +100,7 @@ def get_ready_vinted_session(
     settings = settings or get_settings()
     current_time = now or datetime.now(UTC)
     profile = profile_for_impersonate(settings.curl_impersonate_browser)
+    _lock_live_source_for_session_write(db, source.id)
     statement = (
         select(VintedSession)
         .where(
@@ -149,6 +150,7 @@ def save_prepared_vinted_session(
     last_error: str | None = None,
     require_datadome: bool = True,
 ) -> VintedSession:
+    locked_source = _lock_live_source_for_session_write(db, source.id)
     settings = settings or get_settings()
     now = datetime.now(UTC)
     context_payload = context_to_encrypted_payload(context)
@@ -159,7 +161,7 @@ def save_prepared_vinted_session(
         resolved_status = INCOMPLETE
         resolved_error = f"Prepared Vinted session missing context: {', '.join(missing)}"
     session = VintedSession(
-        source_id=source.id,
+        source_id=locked_source.id,
         proxy_profile_id=proxy_profile.id,
         proxy_session_id=proxy_session_id.strip(),
         status=resolved_status,
@@ -192,17 +194,39 @@ def mark_vinted_session_used(db: Session, session: VintedSession, *, now: dateti
     db.flush()
 
 
-def mark_vinted_session_invalid(db: Session, session_id: int | None, *, reason: str) -> None:
+def mark_vinted_session_invalid(
+    db: Session,
+    session_id: int | None,
+    *,
+    reason: str,
+    settings: Settings | None = None,
+) -> None:
     if session_id is None:
         return
     session = db.get(VintedSession, session_id)
     if session is None:
         return
+    if session.status != INVALID:
+        session.failure_count = (session.failure_count or 0) + 1
     session.status = INVALID
-    session.failure_count = (session.failure_count or 0) + 1
     session.invalidated_at = datetime.now(UTC)
     session.last_error = redact_sensitive_text(reason)
+    session.context_encrypted = encrypt_text("{}", (settings or get_settings()).app_secret_key)
     db.flush()
+
+
+def invalidate_vinted_sessions_for_source(
+    db: Session,
+    source_id: int,
+    *,
+    reason: str,
+    settings: Settings | None = None,
+) -> int:
+    sessions = list(db.scalars(select(VintedSession).where(VintedSession.source_id == source_id)))
+    resolved_settings = settings or get_settings()
+    for session in sessions:
+        mark_vinted_session_invalid(db, session.id, reason=reason, settings=resolved_settings)
+    return len(sessions)
 
 
 def update_vinted_session_context(
@@ -219,6 +243,7 @@ def update_vinted_session_context(
     session = db.get(VintedSession, session_id)
     if session is None:
         return None
+    _lock_live_source_for_session_write(db, session.source_id)
     settings = settings or get_settings()
     now = datetime.now(UTC)
     context_payload = context_to_encrypted_payload(context)
@@ -240,6 +265,18 @@ def update_vinted_session_context(
         session.last_error = None
     db.flush()
     return session
+
+
+def _lock_live_source_for_session_write(db: Session, source_id: int) -> SearchSource:
+    source = db.scalar(
+        select(SearchSource)
+        .where(SearchSource.id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if source is None or source.archived_at is not None:
+        raise VintedSessionRequiredError(f"Search source {source_id} is archived")
+    return source
 
 
 def summarize_vinted_session(session: VintedSession, settings: Settings | None = None) -> VintedSessionSummary:

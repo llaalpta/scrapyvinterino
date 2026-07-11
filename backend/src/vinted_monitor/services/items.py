@@ -74,6 +74,37 @@ def get_or_persist_catalog_item(db: Session, candidate: CatalogItemCandidate) ->
         db.flush()
         return existing
 
+    if db.get_bind().dialect.name == "postgresql":
+        values = _item_insert_values(candidate, now)
+        insert_statement = pg_insert(Item).values(**values)
+        update_values = {
+            column: getattr(insert_statement.excluded, column)
+            for column in (
+                "title",
+                "brand",
+                "price_amount",
+                "currency",
+                "size",
+                "status",
+                "seller_login",
+                "seller_country",
+                "favorite_count",
+                "url",
+                "image_url",
+                "raw",
+                "last_seen_at",
+            )
+        }
+        statement = (
+            insert_statement.on_conflict_do_update(
+                index_elements=[Item.vinted_item_id],
+                set_=update_values,
+            ).returning(Item)
+        )
+        item = db.scalars(statement).one()
+        db.flush()
+        return item
+
     item = Item(**_item_insert_values(candidate, now))
     db.add(item)
     db.flush()

@@ -23,13 +23,14 @@ def test_short_secret_mask_does_not_reveal_characters() -> None:
 
 
 def test_run_event_details_are_redacted_recursively() -> None:
+    session_marker = safe_secret_marker("access_token_web", "very-secret-token-value", kind="cookie")
     details = _redacted_details(
         {
             "headers": {"Authorization": "Bearer raw-token"},
             "response_headers": {"x-v-udt": "raw-vinted-udt-value", "x-request-id": "public-request-id"},
             "nested": [{"set-cookie": "access_token_web=raw-cookie; Path=/"}],
             "message": "token=raw-token",
-            "session_markers": [{"name": "access_token_web", "masked": "abc****xyz", "fingerprint": "sha256:123"}],
+            "session_markers": [session_marker],
         }
     )
 
@@ -41,8 +42,8 @@ def test_run_event_details_are_redacted_recursively() -> None:
     assert details["response_headers"]["x-request-id"] == "public-request-id"
     assert details["nested"][0]["set-cookie"] == "<redacted>"
     assert details["message"] == "token=<redacted>"
-    assert details["session_markers"][0]["masked"] == "abc****xyz"
-    assert details["session_markers"][0]["fingerprint"] == "sha256:123"
+    assert details["session_markers"][0]["masked"] == session_marker["masked"]
+    assert details["session_markers"][0]["fingerprint"] == session_marker["fingerprint"]
 
 
 def test_safe_headers_expose_only_safe_markers_for_cookies_and_tokens() -> None:

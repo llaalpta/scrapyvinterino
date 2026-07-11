@@ -17,9 +17,11 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --save "" --appendonly no
+    command: redis-server --save "" --appendonly yes --appendfsync always
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -80,4 +82,5 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
   frontend-node-modules:

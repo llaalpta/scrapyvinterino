@@ -6,6 +6,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 VINTED_DETAIL_FIELD_ALLOWLIST = frozenset(
     {"title", "description", "brand", "size", "status", "price_amount", "currency", "photos"}
 )
+INSECURE_APP_SECRET_KEYS = frozenset(
+    {
+        "change-me",
+        "replace-with-a-unique-random-secret-of-at-least-32-characters",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -31,10 +37,10 @@ class Settings(BaseSettings):
     vinted_detail_retry_backoffs_seconds: tuple[int, ...] = (30, 120)
 
     # Worker consumer (Producer-Consumer pattern)
-    worker_consumer_count: int = 2
+    worker_consumer_count: int = Field(default=2, ge=1, le=32)
     worker_task_queue_key: str = "vinted:task_queue"
-    worker_blpop_timeout_seconds: int = 5
-    worker_max_retry_attempts: int = 3
+    worker_reserve_timeout_seconds: int = Field(default=5, ge=1, le=300)
+    worker_max_retry_attempts: int = Field(default=3, ge=1, le=20)
 
     # curl_cffi / anti-bot evasion
     curl_impersonate_browser: str = "chrome146"
@@ -86,6 +92,15 @@ class Settings(BaseSettings):
             raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS must contain one delay per retry")
         if any(delay < 0 for delay in self.vinted_detail_retry_backoffs_seconds):
             raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS cannot contain negative delays")
+        return self
+
+    @model_validator(mode="after")
+    def validate_production_secret_key(self) -> "Settings":
+        if self.app_env.strip().lower() in {"development", "test"}:
+            return self
+        secret_key = self.app_secret_key.strip()
+        if len(secret_key) < 32 or secret_key.lower() in INSECURE_APP_SECRET_KEYS:
+            raise ValueError("APP_SECRET_KEY must be a unique random value of at least 32 characters outside development")
         return self
 
     @property

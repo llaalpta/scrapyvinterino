@@ -4,11 +4,15 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from vinted_monitor.core.config import get_settings
 from vinted_monitor.db.models import SearchSource
 from vinted_monitor.providers.catalog_url import analyze_catalog_url, ensure_catalog_url_filters_supported
 from vinted_monitor.services.filters import normalize_filter_definition
 from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
 from vinted_monitor.services.scheduler import normalize_scheduler_config
+from vinted_monitor.services.seen_cache import get_seen_cache
+from vinted_monitor.services.task_queue import TaskQueueError, cancel_ready_task_for_source
+from vinted_monitor.services.vinted_sessions import invalidate_vinted_sessions_for_source
 
 ALLOWED_VINTED_CATALOG_HOSTS = {"www.vinted.es", "vinted.es"}
 ALLOWED_VINTED_CATALOG_PATHS = {"/catalog", "/catalog/"}
@@ -40,8 +44,15 @@ def validate_vinted_catalog_url(url: str) -> str:
         raise ValueError("Search source URL cannot be empty")
 
     parsed = urlparse(normalized_url)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("Search source URL must use http or https")
+    if parsed.scheme != "https":
+        raise ValueError("Search source URL must use https")
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Search source URL has an invalid port") from exc
+    if parsed.username or parsed.password or port is not None:
+        raise ValueError("Search source URL cannot include credentials or an explicit port")
 
     hostname = parsed.hostname.lower() if parsed.hostname else ""
     if hostname not in ALLOWED_VINTED_CATALOG_HOSTS:
@@ -97,11 +108,7 @@ def update_source(
     clear_duration_minutes: bool = False,
     filter_definition: dict | None = None,
 ) -> SearchSource:
-    source = db.get(SearchSource, source_id)
-    if source is None:
-        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
-    if source.archived_at is not None:
-        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    source = _get_live_source(db, source_id)
     if source.is_active:
         raise SearchSourceActiveError(f"Monitor {source_id} is active; stop it before editing configuration")
 
@@ -160,13 +167,19 @@ def stop_source_monitor(db: Session, source_id: int) -> SearchSource:
     source.next_run_at = None
     source.monitor_until = None
     stop_active_monitor_session(db, source.id, reason="stopped")
+    _cancel_ready_source_task(source.id)
     db.commit()
     db.refresh(source)
     return source
 
 
 def archive_source(db: Session, source_id: int) -> None:
-    source = db.get(SearchSource, source_id)
+    source = db.scalar(
+        select(SearchSource)
+        .where(SearchSource.id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if source is None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if source.archived_at is not None:
@@ -178,6 +191,8 @@ def archive_source(db: Session, source_id: int) -> None:
     source.monitor_until = None
     source.archived_at = now
     stop_active_monitor_session(db, source.id, stopped_at=now, reason="archived")
+    invalidate_vinted_sessions_for_source(db, source.id, reason="Monitor archived")
+    _cancel_ready_source_task(source.id)
     db.commit()
 
 
@@ -188,10 +203,27 @@ def validate_monitor_mode(value: str) -> str:
 
 
 def _get_live_source(db: Session, source_id: int) -> SearchSource:
-    source = db.get(SearchSource, source_id)
+    source = db.scalar(
+        select(SearchSource)
+        .where(SearchSource.id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     return source
+
+
+def _cancel_ready_source_task(source_id: int) -> None:
+    settings = get_settings()
+    try:
+        cancel_ready_task_for_source(
+            get_seen_cache(settings).client,
+            source_id,
+            queue_key=settings.worker_task_queue_key,
+        )
+    except TaskQueueError:
+        pass
 
 
 def _validate_monitor_runtime_config(source: SearchSource) -> None:

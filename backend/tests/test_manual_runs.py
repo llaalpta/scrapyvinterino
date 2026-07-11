@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +19,11 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
-from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession, VintedItemDetailHTTPError
+from vinted_monitor.providers.vinted_catalog import (
+    PreparedCatalogSession,
+    VintedItemDetailHTTPError,
+    extract_vinted_item_id,
+)
 from vinted_monitor.services.monitor_sessions import start_monitor_session
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
@@ -33,12 +40,21 @@ from vinted_monitor.services.runs import (
     execute_monitor_run,
 )
 from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
+from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
     DetailRetryRecord,
     SeenCacheUnavailableError,
 )
-from vinted_monitor.services.vinted_sessions import prepared_context_from_session, save_prepared_vinted_session
+from vinted_monitor.services.task_queue import TaskQueueError
+from vinted_monitor.services.vinted_sessions import (
+    VintedSessionRequiredError,
+    get_ready_vinted_session,
+    prepared_context_flags,
+    prepared_context_from_session,
+    save_prepared_vinted_session,
+    update_vinted_session_context,
+)
 
 
 class FakeSeenCache:
@@ -63,6 +79,29 @@ class FakeSeenCache:
             if item_id not in self.seen and item_id not in self.processing and item_id not in self.detail_retries
         }
         self.processing.update(claimed)
+        return claimed
+
+    def claim_unseen_with_recovery(
+        self,
+        monitor_id: int,
+        policy_hash: str,
+        candidates: list[CatalogItemCandidate],
+    ) -> set[str]:
+        claimed = self.claim_unseen(
+            monitor_id,
+            policy_hash,
+            [candidate.vinted_item_id for candidate in candidates],
+        )
+        now = datetime.now(UTC)
+        self.stage_candidate_retries(
+            monitor_id,
+            policy_hash,
+            tuple(
+                DetailRetryRecord(candidate, 0, now, "detail_claim_recovery")
+                for candidate in candidates
+                if candidate.vinted_item_id in claimed
+            ),
+        )
         return claimed
 
     def mark_seen(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
@@ -95,6 +134,16 @@ class FakeSeenCache:
         )[:limit]
         self.processing.update(retry.candidate.vinted_item_id for retry in due)
         return due
+
+    def stage_candidate_retries(
+        self,
+        monitor_id: int,
+        policy_hash: str,
+        retries: tuple[DetailRetryRecord, ...],
+    ) -> None:
+        self.require_available()
+        for retry in retries:
+            self.detail_retries[retry.candidate.vinted_item_id] = retry
 
     def finalize_candidate_states(
         self,
@@ -361,55 +410,29 @@ class FakeSessionPreparingProvider:
             egress_country_code=self.kwargs["expected_country_code"],
         )
 
-    def probe_item_detail_api(self, item_ref: str, *, referer_url: str | None = None) -> dict:
-        self.detail_probe_calls.append((item_ref, referer_url))
-        if self.event_sink is not None:
-            self.event_sink(
-                phase="detail_api_probe_success",
-                method="GET",
-                url=f"https://www.vinted.es/api/v2/items/{item_ref}/details",
-                status_code=200,
-                duration_ms=13,
-                details={
-                    "outcome": "accepted_json",
-                    "item_id": item_ref,
-                    "request_profile": "api_har146",
-                    "detail_summary": {"description_present": True, "photo_count": 2},
-                },
-            )
-        return {
-            "outcome": "accepted_json",
-            "item_id": item_ref,
-            "detail_api_url": f"https://www.vinted.es/api/v2/items/{item_ref}/details",
-            "status_code": 200,
-            "duration_ms": 13,
-            "detail_summary": {"description_present": True, "photo_count": 2},
-            "missing_required": [],
-            "error": None,
-        }
-
     def probe_item_detail_document(self, item_ref: str, *, referer_url: str | None = None) -> dict:
         self.detail_probe_calls.append((item_ref, referer_url))
+        item_id = extract_vinted_item_id(item_ref) or item_ref
         if self.event_sink is not None:
             self.event_sink(
                 phase="detail_document_probe_success",
                 method="GET",
-                url=f"https://www.vinted.es/items/{item_ref}?referrer=catalog",
+                url=f"https://www.vinted.es/items/{item_id}?referrer=catalog",
                 status_code=200,
                 duration_ms=13,
                 details={
                     "outcome": "accepted_html",
-                    "item_id": item_ref,
-                    "detail_summary": {"parser_version": "flight-v1", "photo_count": 2},
+                    "item_id": item_id,
+                    "detail_summary": {"parser_version": "next_flight_v2", "photo_count": 2},
                 },
             )
         return {
             "outcome": "accepted_html",
-            "item_id": item_ref,
-            "detail_document_url": f"https://www.vinted.es/items/{item_ref}?referrer=catalog",
+            "item_id": item_id,
+            "detail_document_url": f"https://www.vinted.es/items/{item_id}?referrer=catalog",
             "status_code": 200,
             "duration_ms": 13,
-            "detail_summary": {"parser_version": "flight-v1", "photo_count": 2},
+            "detail_summary": {"parser_version": "next_flight_v2", "photo_count": 2},
             "missing_required": [],
             "error": None,
         }
@@ -466,9 +489,9 @@ def _create_ready_vinted_session(
     proxy: ProxyProfile,
     *,
     proxy_session_id: str = "pytestsession",
-) -> None:
+) -> VintedSession:
     profile = profile_for_impersonate("chrome146")
-    save_prepared_vinted_session(
+    session = save_prepared_vinted_session(
         db,
         source,
         proxy,
@@ -497,6 +520,7 @@ def _create_ready_vinted_session(
         settings=Settings(),
     )
     db.flush()
+    return session
 
 
 def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
@@ -884,7 +908,9 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
         assert len(FakeSessionPreparingProvider.created) == 2
         assert FakeSessionPreparingProvider.created[0].closed is True
         assert FakeSessionPreparingProvider.created[1].closed is True
-        assert FakeSessionPreparingProvider.created[1].detail_probe_calls == [("9356705635", source_url)]
+        assert FakeSessionPreparingProvider.created[1].detail_probe_calls == [
+            ("https://www.vinted.es/items/9356705635", source_url)
+        ]
 
         with SessionLocal() as db:
             session = db.scalar(
@@ -969,11 +995,239 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
             assert session.status == "invalid"
             assert session.failure_count == 1
             assert "DataDome challenge" in (session.last_error or "")
+            assert not any(prepared_context_flags(prepared_context_from_session(session, Settings())).values())
             events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == body["run"]["id"]).order_by(RunEvent.id.asc())))
             phases = [event.phase for event in events]
             assert "run_failed" in phases
             assert "detail_probe_finished" not in phases
     finally:
+        cleanup_source(source_id)
+
+
+def test_archiving_monitor_invalidates_and_purges_prepared_sessions_when_queue_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+
+    def fail_ready_task_cancellation(*args, **kwargs) -> None:
+        raise TaskQueueError("pytest queue unavailable")
+
+    monkeypatch.setattr(
+        "vinted_monitor.services.search_sources.cancel_ready_task_for_source",
+        fail_ready_task_cancellation,
+    )
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest archive session proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8013,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest archive session monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        session = _create_ready_vinted_session(db, source, proxy, proxy_session_id="archivesession01")
+        db.commit()
+        source_id = source.id
+        session_id = session.id
+
+    try:
+        response = client.delete(f"/api/monitors/{source_id}")
+
+        assert response.status_code == 204
+        with SessionLocal() as db:
+            persisted = db.get(VintedSession, session_id)
+            assert persisted is not None
+            assert persisted.status == "invalid"
+            assert persisted.invalidated_at is not None
+            assert persisted.failure_count == 1
+            assert persisted.last_error == "Monitor archived"
+            assert not any(prepared_context_flags(prepared_context_from_session(persisted, Settings())).values())
+    finally:
+        cleanup_source(source_id)
+
+
+def test_archived_monitor_rejects_stale_session_context_refresh() -> None:
+    cleanup_source(None)
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest stale archive session proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8014,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest stale archive session monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        session = _create_ready_vinted_session(db, source, proxy, proxy_session_id="stalearchive01")
+        db.commit()
+        source_id = source.id
+        proxy_id = proxy.id
+        session_id = session.id
+
+    stale_db = SessionLocal()
+    try:
+        assert stale_db.get(VintedSession, session_id) is not None
+        with SessionLocal() as archive_db:
+            archive_source(archive_db, source_id)
+
+        with pytest.raises(VintedSessionRequiredError, match="archived"):
+            update_vinted_session_context(
+                stale_db,
+                session_id,
+                context=PreparedCatalogSession(
+                    proxy_session_id="stalearchive01",
+                    cookies={"datadome": "fresh-secret"},
+                    datadome="fresh-secret",
+                ),
+                settings=Settings(),
+            )
+        stale_db.rollback()
+
+        with SessionLocal() as create_db:
+            archived_source = create_db.get(SearchSource, source_id)
+            persisted_proxy = create_db.get(ProxyProfile, proxy_id)
+            assert archived_source is not None
+            assert persisted_proxy is not None
+            with pytest.raises(VintedSessionRequiredError, match="archived"):
+                save_prepared_vinted_session(
+                    create_db,
+                    archived_source,
+                    persisted_proxy,
+                    proxy_session_id="stalearchive02",
+                    profile=profile_for_impersonate("chrome146"),
+                    context=PreparedCatalogSession(
+                        proxy_session_id="stalearchive02",
+                        cookies={"datadome": "new-secret"},
+                        datadome="new-secret",
+                    ),
+                    settings=Settings(),
+                )
+            create_db.rollback()
+
+        with SessionLocal() as db:
+            persisted = db.get(VintedSession, session_id)
+            assert persisted is not None
+            assert persisted.status == "invalid"
+            assert db.scalar(select(func.count()).select_from(VintedSession).where(VintedSession.source_id == source_id)) == 1
+            assert not any(prepared_context_flags(prepared_context_from_session(persisted, Settings())).values())
+    finally:
+        stale_db.close()
+        cleanup_source(source_id)
+
+
+def test_archive_waits_for_inflight_session_refresh_then_purges_it() -> None:
+    cleanup_source(None)
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest concurrent archive session proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8015,
+            username="customer",
+            password=None,
+        )
+        source = SearchSource(
+            name="pytest concurrent archive session monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        session = _create_ready_vinted_session(db, source, proxy, proxy_session_id="concurrentarchive01")
+        db.commit()
+        source_id = source.id
+        proxy_id = proxy.id
+        session_id = session.id
+
+    refresh_locked = Event()
+    allow_refresh_commit = Event()
+    archive_started = Event()
+
+    def refresh_context() -> None:
+        with SessionLocal() as db:
+            live_source = db.get(SearchSource, source_id)
+            live_proxy = db.get(ProxyProfile, proxy_id)
+            assert live_source is not None
+            assert live_proxy is not None
+            selected, _prepared = get_ready_vinted_session(
+                db,
+                live_source,
+                live_proxy,
+                settings=Settings(),
+            )
+            assert selected.id == session_id
+            refresh_locked.set()
+            assert allow_refresh_commit.wait(timeout=5)
+            updated = update_vinted_session_context(
+                db,
+                session_id,
+                context=PreparedCatalogSession(
+                    proxy_session_id="concurrentarchive01",
+                    cookies={"datadome": "fresh-secret"},
+                    datadome="fresh-secret",
+                ),
+                settings=Settings(),
+            )
+            assert updated is not None
+            db.commit()
+
+    def archive_monitor() -> None:
+        assert refresh_locked.wait(timeout=5)
+        archive_started.set()
+        with SessionLocal() as db:
+            archive_source(db, source_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            refresh_future = executor.submit(refresh_context)
+            assert refresh_locked.wait(timeout=5)
+            archive_future = executor.submit(archive_monitor)
+            assert archive_started.wait(timeout=5)
+            with pytest.raises(FutureTimeoutError):
+                archive_future.result(timeout=1)
+            allow_refresh_commit.set()
+            refresh_future.result(timeout=5)
+            archive_future.result(timeout=5)
+
+        with SessionLocal() as db:
+            persisted_source = db.get(SearchSource, source_id)
+            persisted_session = db.get(VintedSession, session_id)
+            assert persisted_source is not None
+            assert persisted_source.archived_at is not None
+            assert persisted_session is not None
+            assert persisted_session.status == "invalid"
+            assert not any(prepared_context_flags(prepared_context_from_session(persisted_session, Settings())).values())
+    finally:
+        allow_refresh_commit.set()
         cleanup_source(source_id)
 
 

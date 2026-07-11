@@ -206,7 +206,10 @@ def test_due_detail_retry_is_claimed_once_and_rehydrates_normalized_candidate() 
     assert len(claimed) == 1
     assert claimed_again == []
     assert claimed[0].candidate.price_amount == Decimal("3.50")
+    assert claimed[0].candidate.seller_login == "seller"
+    assert claimed[0].candidate.seller_country == "ES"
     assert claimed[0].candidate.raw["id"] == retry.candidate.vinted_item_id
+    assert claimed[0].candidate.raw["user"]["login"] == "seller"
     assert "cookie" not in claimed[0].candidate.raw
 
 

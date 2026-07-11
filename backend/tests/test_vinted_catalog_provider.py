@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.utils import format_datetime
@@ -25,7 +26,6 @@ from vinted_monitor.providers.datadome import (
 from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
-    PreparedCatalogSession,
     VintedCatalogChallengeError,
     VintedCatalogProviderError,
     VintedCatalogRateLimitError,
@@ -48,11 +48,20 @@ DETAIL_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "vinted_item_detail_f
 
 
 class FakeResponse:
-    def __init__(self, status_code: int = 200, *, text: str = "", json_data: dict | None = None, headers: dict | None = None) -> None:
+    def __init__(
+        self,
+        status_code: int = 200,
+        *,
+        text: str = "",
+        json_data: dict | None = None,
+        headers: dict | None = None,
+        url: str | None = None,
+    ) -> None:
         self.status_code = status_code
         self.text = text
         self._json_data = json_data
         self.headers = headers or {}
+        self.url = url
 
     def json(self) -> dict:
         return self._json_data or {}
@@ -67,7 +76,7 @@ class FakeCurlSession:
         self.cookies: dict[str, str] = {}
         self.closed = False
 
-    def get(self, url, *, params=None, headers=None, timeout=None, default_headers=None):
+    def get(self, url, *, params=None, headers=None, timeout=None, default_headers=None, allow_redirects=None):
         call = {
             "method": "GET",
             "url": url,
@@ -75,12 +84,14 @@ class FakeCurlSession:
             "headers": headers or {},
             "timeout": timeout,
             "default_headers": default_headers,
+            "allow_redirects": allow_redirects,
             "impersonate": self.impersonate,
             "proxies": self.proxies,
             "cookies": dict(self.cookies),
         }
         self.calls.append(call)
         response = self.handler(call)
+        response.url = response.url or url
         self._store_response_cookies(response)
         return response
 
@@ -876,529 +887,6 @@ def test_extract_vinted_item_id_accepts_id_or_item_url() -> None:
     assert extract_vinted_item_id("https://www.vinted.es/catalog?search_text=foo") is None
 
 
-def test_curl_provider_item_detail_api_probe_uses_prepared_session_and_summarizes_json() -> None:
-    calls: list[dict] = []
-    events: list[dict] = []
-
-    def handler(call: dict) -> FakeResponse:
-        if path(call) == "/items/9356705635":
-            assert call["method"] == "GET"
-            assert call["default_headers"] is False
-            assert call["headers"]["sec-fetch-dest"] == "document"
-            assert call["headers"]["sec-fetch-site"] == "same-origin"
-            assert call["headers"]["referer"] == source().url
-            return FakeResponse(
-                200,
-                text="<html>item document</html>",
-                headers={
-                    "content-type": "text/html; charset=utf-8",
-                    "set-cookie": ["v_sid=vsid-secret-value; Path=/;", "_vinted_fr_session=session-secret-value; Path=/;"],
-                    "x-anon-id": "item-anon-secret-value",
-                    "x-v-udt": "item-udt-secret-value",
-                    "x-user-iso-locale": "ES",
-                    "x-screen": "item",
-                },
-            )
-        if path(call) == "/api/v2/info_banners/item":
-            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json; charset=utf-8"})
-        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
-            return FakeResponse(200, json_data={"code": 0, "items": []}, headers={"content-type": "application/json"})
-        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        assert call["default_headers"] is False
-        assert call["headers"]["x-csrf-token"] == "csrf-secret-value"
-        assert call["headers"]["x-anon-id"] == "item-anon-secret-value"
-        assert "x-v-udt" not in call["headers"]
-        assert "cookie" not in call["headers"]
-        assert "host" not in call["headers"]
-        assert not any(str(header).startswith(":") for header in call["headers"])
-        assert call["cookies"]["access_token_web"] == "access-secret-value"
-        assert call["cookies"]["v_udt"] == "udt-secret-value"
-        assert call["cookies"]["v_sid"] == "vsid-secret-value"
-        assert call["cookies"]["_vinted_fr_session"] == "session-secret-value"
-        return FakeResponse(
-            200,
-            json_data={
-                "code": 0,
-                "item": {
-                    "id": 9356705635,
-                    "title": "Dead cowboy",
-                    "description": "Detalle publico",
-                    "price": {"amount": "6.00", "currency_code": "EUR"},
-                    "brand_dto": {"title": "Vintage"},
-                    "size_title": "L",
-                    "status": "Muy bueno",
-                    "photos": [{"full_size_url": "https://images.example/1.jpg"}, {"url": "https://images.example/2.jpg"}],
-                    "user": {"login": "seller"},
-                    "favourite_count": 3,
-                    "url": "https://www.vinted.es/items/9356705635-dead-cowboy",
-                },
-            },
-            headers={"content-type": "application/json; charset=utf-8"},
-        )
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            datadome=None,
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, calls),
-        event_sink=lambda **event: events.append(event),
-    )
-
-    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
-
-    assert probe["outcome"] == "accepted_json"
-    assert probe["status_code"] == 200
-    assert probe["detail_summary"]["description_present"] is True
-    assert probe["detail_summary"]["photo_count"] == 2
-    assert probe["detail_summary"]["brand"] == "Vintage"
-    serialized = json.dumps(probe)
-    assert "access-secret-value" not in serialized
-    assert "csrf-secret-value" not in serialized
-    assert "anon-secret-value" not in serialized
-    assert "item-anon-secret-value" not in serialized
-    assert "udt-secret-value" not in serialized
-    assert "item-udt-secret-value" not in serialized
-    start = next(event for event in events if event["phase"] == "detail_api_probe_start")
-    assert start["details"]["request_profile"] == "api_har146"
-    assert start["details"]["x_v_udt_sent"] is False
-    assert probe["attempt_count"] == 11
-    assert probe["control_outcome"] == "accepted_json"
-    attempts = probe["attempts"]
-    document = next(attempt for attempt in attempts if attempt["endpoint_role"] == "document")
-    assert document["outcome"] == "document_ok"
-    assert document["pre_navigation"] is True
-    assert {attempt["referer_mode"] for attempt in attempts if attempt["endpoint_role"] == "detail"} == {"catalog", "item"}
-    assert {attempt["endpoint"] for attempt in attempts if attempt["endpoint_role"] == "support"} == {"item_more", "item_services"}
-    success = next(
-        event
-        for event in events
-        if event["phase"] == "detail_api_probe_attempt_finished"
-        and event["details"]["endpoint"] == "item_details"
-        and event["details"]["outcome"] == "accepted_json"
-    )
-    assert success["details"]["detail_summary"]["photo_count"] == 2
-
-
-def test_curl_provider_item_detail_api_probe_preserves_item_url_as_item_referer() -> None:
-    calls: list[dict] = []
-    item_url = "https://www.vinted.es/items/9356705635-dead-cowboy?referrer=catalog"
-
-    def handler(call: dict) -> FakeResponse:
-        if path(call) == "/items/9356705635-dead-cowboy":
-            return FakeResponse(
-                200,
-                text="<html>item</html>",
-                headers={
-                    "content-type": "text/html",
-                    "x-anon-id": "anon-secret-value",
-                    "x-v-udt": "udt-secret-value",
-                    "x-user-iso-locale": "ES",
-                    "x-screen": "item",
-                },
-            )
-        if path(call) == "/api/v2/info_banners/item":
-            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
-        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
-            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
-        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        return FakeResponse(
-            200,
-            json_data={"item": {"id": 9356705635, "title": "Dead cowboy"}},
-            headers={"content-type": "application/json"},
-        )
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, calls),
-    )
-
-    provider.probe_item_detail_api(item_url, referer_url=source().url)
-
-    item_referer_calls = [
-        call
-        for call in calls
-        if path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        and call["headers"]["referer"] == item_url
-    ]
-    assert len(item_referer_calls) == 2
-
-
-def test_curl_provider_item_detail_api_probe_collects_datadome_after_item_warmup() -> None:
-    calls: list[dict] = []
-    events: list[dict] = []
-
-    def handler(call: dict) -> FakeResponse:
-        if path(call) == "/items/9356705635":
-            return FakeResponse(
-                200,
-                text=(
-                    '<script src="https://static-assets.vinted.com/datadome/5.7.0/tags.js"></script>'
-                    '{"DATADOME_CLIENT_SIDE_KEY":"E6EAF460AA2A8322D66B42C85B62F9"}'
-                ),
-                headers={
-                    "content-type": "text/html",
-                    "x-anon-id": "anon-secret-value",
-                    "x-v-udt": "udt-secret-value",
-                    "x-user-iso-locale": "ES",
-                    "x-screen": "item",
-                },
-            )
-        if path(call) == "/js":
-            assert call["method"] == "POST"
-            assert call["default_headers"] is False
-            assert "content-length" not in call["headers"]
-            assert call["headers"]["sec-fetch-site"] == "cross-site"
-            assert call["data"]["ddk"] == "E6EAF460AA2A8322D66B42C85B62F9"
-            assert call["data"]["request"] == "/items/9356705635?referrer=catalog"
-            assert call["data"]["Referer"] == "https://www.vinted.es/items/9356705635?referrer=catalog"
-            return FakeResponse(
-                200,
-                json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure; SameSite=Lax"},
-                headers={"content-type": "application/json"},
-            )
-        if path(call) == "/api/v2/info_banners/item":
-            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
-        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
-            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
-        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        assert call["cookies"]["datadome"] == "dd-cookie-secret"
-        assert "x-v-udt" not in call["headers"]
-        return FakeResponse(
-            200,
-            json_data={"item": {"id": 9356705635, "title": "Dead cowboy"}},
-            headers={"content-type": "application/json"},
-        )
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(
-            egress_diagnostic_url=None,
-            vinted_datadome_collector_url="https://dd.vinted.lt/js",
-        ),
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, calls),
-        event_sink=lambda **event: events.append(event),
-    )
-
-    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
-
-    assert probe["outcome"] == "accepted_json"
-    assert [call["data"]["jsType"] for call in calls if path(call) == "/js"] == ["ch", "le"]
-    assert any(event["phase"] == "datadome_collector_success" for event in events)
-    assert "dd-cookie-secret" not in json.dumps(events)
-    assert "E6EAF460AA2A8322D66B42C85B62F9" not in json.dumps(events)
-
-
-def test_curl_provider_egress_diagnostic_is_cookie_free_with_prepared_session() -> None:
-    calls: list[dict] = []
-
-    def handler(call: dict) -> FakeResponse:
-        parsed = urlparse(call["url"])
-        if parsed.hostname == "ipwho.is":
-            assert call["default_headers"] is False
-            assert call["cookies"] == {}
-            return FakeResponse(
-                200,
-                json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES"},
-                headers={"content-type": "application/json"},
-            )
-        if path(call) == "/items/9356705635":
-            return FakeResponse(
-                200,
-                text="<html>item</html>",
-                headers={
-                    "content-type": "text/html",
-                    "x-anon-id": "anon-secret-value",
-                    "x-v-udt": "udt-secret-value",
-                    "x-user-iso-locale": "ES",
-                    "x-screen": "item",
-                },
-            )
-        if path(call) == "/api/v2/info_banners/item":
-            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
-        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
-            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
-        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        assert call["cookies"]["access_token_web"] == "access-secret-value"
-        assert call["cookies"]["v_udt"] == "udt-secret-value"
-        return FakeResponse(
-            200,
-            json_data={"item": {"id": 9356705635, "title": "Dead cowboy"}},
-            headers={"content-type": "application/json"},
-        )
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url="https://ipwho.is/"),
-        proxy_url="http://user:pass@proxy.example:8000",
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "refresh_token_web": "refresh-secret-value",
-                "datadome": "datadome-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            datadome="datadome-secret-value",
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, calls),
-    )
-
-    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
-
-    assert probe["outcome"] == "accepted_json"
-    diagnostic_calls = [call for call in calls if urlparse(call["url"]).hostname == "ipwho.is"]
-    detail_calls = [call for call in calls if path(call) == "/api/v2/items/9356705635/details"]
-    assert len(diagnostic_calls) == 1
-    assert len(detail_calls) == 2
-    assert diagnostic_calls[0]["cookies"] == {}
-
-
-@pytest.mark.parametrize(
-    ("response", "expected_outcome", "expected_status"),
-    [
-        (
-            FakeResponse(404, text="not found", headers={"content-type": "text/plain"}),
-            "not_found",
-            404,
-        ),
-        (
-            FakeResponse(429, text="slow down", headers={"content-type": "text/plain", "retry-after": "7"}),
-            "rate_limited",
-            429,
-        ),
-        (
-            FakeResponse(403, text="DataDome challenge", headers={"content-type": "text/html", "x-datadome": "blocked"}),
-            "datadome_challenge",
-            403,
-        ),
-        (
-            FakeResponse(403, text="<html>challenge</html>", headers={"content-type": "text/html", "cf-mitigated": "challenge"}),
-            "cloudflare_challenge",
-            403,
-        ),
-        (
-            FakeResponse(500, text="server error", headers={"content-type": "text/plain"}),
-            "http_error",
-            500,
-        ),
-        (
-            FakeResponse(200, text="<html>not json</html>", headers={"content-type": "text/html"}),
-            "invalid_json",
-            200,
-        ),
-    ],
-)
-def test_curl_provider_item_detail_api_probe_classifies_terminal_outcomes(
-    response: FakeResponse,
-    expected_outcome: str,
-    expected_status: int,
-) -> None:
-    calls: list[dict] = []
-
-    def handler(call: dict) -> FakeResponse:
-        if path(call) == "/api/v2/info_banners/item":
-            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
-        if path(call) == "/items/9356705635":
-            return FakeResponse(200, text="<html>item</html>", headers={"content-type": "text/html"})
-        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
-            return FakeResponse(200, json_data={"code": 0}, headers={"content-type": "application/json"})
-        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        return response
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            datadome=None,
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, calls),
-    )
-
-    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
-
-    assert probe["outcome"] == expected_outcome
-    assert probe["status_code"] == expected_status
-    if expected_outcome == "rate_limited":
-        assert probe["response"]["retry_after_seconds"] == 7
-
-
-def test_curl_provider_item_detail_api_probe_retries_with_client_hints_when_requested() -> None:
-    calls: list[dict] = []
-
-    def handler(call: dict) -> FakeResponse:
-        if path(call) == "/items/9356705635":
-            return FakeResponse(
-                200,
-                text="<html>item</html>",
-                headers={
-                    "content-type": "text/html",
-                    "x-anon-id": "anon-secret-value",
-                    "x-v-udt": "udt-secret-value",
-                    "x-user-iso-locale": "ES",
-                    "x-screen": "item",
-                },
-            )
-        if path(call) == "/api/v2/info_banners/item":
-            return FakeResponse(200, json_data={"banners": []}, headers={"content-type": "application/json"})
-        if path(call) in {"/api/v2/items/9356705635/more", "/api/v2/items/9356705635/services"}:
-            return FakeResponse(
-                403,
-                text="<html>challenge</html>",
-                headers={
-                    "content-type": "text/html",
-                    "cf-mitigated": "challenge",
-                    "accept-ch": "Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform-Version",
-                },
-            )
-        assert path(call) in {"/api/v2/items/9356705635/details", "/api/v2/items/9356705635"}
-        assert "x-v-udt" not in call["headers"]
-        if "sec-ch-ua-full-version-list" in call["headers"]:
-            return FakeResponse(
-                200,
-                json_data={"item": {"id": 9356705635, "title": "Dead cowboy", "description": "Detalle publico"}},
-                headers={"content-type": "application/json"},
-            )
-        return FakeResponse(
-            403,
-            text="<html>challenge</html>",
-            headers={
-                "content-type": "text/html",
-                "cf-mitigated": "challenge",
-                "accept-ch": "Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform-Version",
-            },
-        )
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            datadome=None,
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, calls),
-    )
-
-    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
-
-    assert probe["outcome"] == "accepted_json"
-    assert any(attempt["client_hints"] is True for attempt in probe["attempts"] if attempt["endpoint_role"] == "detail")
-    hinted_calls = [call for call in calls if "sec-ch-ua-full-version-list" in call["headers"]]
-    assert hinted_calls
-    assert all("cookie" not in call["headers"] for call in hinted_calls)
-
-
-def test_curl_provider_item_detail_api_probe_reports_transport_error() -> None:
-    def handler(_call: dict) -> FakeResponse:
-        raise RuntimeError("proxy timeout access_token_web=raw-secret")
-
-    provider = CurlCffiVintedCatalogProvider(
-        settings=Settings(egress_diagnostic_url=None),
-        prepared_session=PreparedCatalogSession(
-            cookies={
-                "access_token_web": "access-secret-value",
-                "v_udt": "udt-secret-value",
-                "anon_id": "anon-secret-value",
-            },
-            csrf_token="csrf-secret-value",
-            anon_id="anon-secret-value",
-            access_token_web="access-secret-value",
-            datadome=None,
-            v_udt="udt-secret-value",
-            user_iso_locale="es-ES",
-            vinted_screen="catalog",
-            egress_ip="203.0.113.10",
-            egress_country_code="ES",
-        ),
-        require_datadome_cookie=False,
-        session_factory=fake_session_factory(handler, []),
-    )
-
-    probe = provider.probe_item_detail_api("9356705635", referer_url=source().url)
-
-    assert probe["outcome"] == "transport_error"
-    assert probe["status_code"] is None
-    assert "raw-secret" not in json.dumps(probe)
-
-
 def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_returned() -> None:
     calls: list[dict] = []
     events: list[dict] = []
@@ -1760,7 +1248,7 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
         "color": "Azul",
         "category": "Polos",
         "image": ["https://images1.vinted.net/t/detail/f800/detail.webp?s=signed-detail"],
-        "offers": {"availability": "https://schema.org/InStock"},
+        "offers": {"url": candidate.url, "availability": "https://schema.org/InStock"},
     }
     html = f'<script type="application/ld+json">{json.dumps(product_json)}</script>'
 
@@ -1791,6 +1279,76 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
     ]
     assert provider._catalog_session_context.datadome == "dd"
     assert provider.prepared_session_refreshed is True
+
+
+def test_curl_provider_fetch_detail_follows_only_same_item_vinted_redirects() -> None:
+    calls: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    html = build_item_detail_flight_html()
+
+    def handler(call: dict) -> FakeResponse:
+        assert call["allow_redirects"] is False
+        if len(calls) == 1:
+            return FakeResponse(302, headers={"location": f"/items/{candidate.vinted_item_id}-canonical"})
+        return FakeResponse(200, text=html, headers={"content-type": "text/html"})
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(handler, calls),
+    )
+
+    detail = provider.fetch_detail(candidate)
+
+    assert detail.vinted_item_id == candidate.vinted_item_id
+    assert len(calls) == 2
+    assert calls[1]["url"].endswith(f"/items/{candidate.vinted_item_id}-canonical?referrer=catalog")
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://attacker.example/items/1000000001",
+        "http://www.vinted.es/items/1000000001",
+        "https://www.vinted.es:444/items/1000000001",
+        "https://www.vinted.es/items/9999999999-other",
+        "https://www.vinted.es/catalog",
+    ],
+)
+def test_curl_provider_fetch_detail_rejects_unsafe_redirect_before_following(location: str) -> None:
+    calls: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(302, headers={"location": location}),
+            calls,
+        ),
+    )
+
+    with pytest.raises(VintedCatalogProviderError, match="detail request failed"):
+        provider.fetch_detail(candidate)
+
+    assert len(calls) == 1
+
+
+def test_curl_provider_fetch_detail_rejects_unsafe_effective_response_url() -> None:
+    calls: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(
+                200,
+                text=build_item_detail_flight_html(),
+                headers={"content-type": "text/html"},
+                url="https://attacker.example/items/1000000001",
+            ),
+            calls,
+        ),
+    )
+
+    with pytest.raises(VintedCatalogProviderError, match="detail request failed"):
+        provider.fetch_detail(candidate)
 
 
 def test_curl_provider_fetch_detail_types_cloudflare_challenge() -> None:
@@ -2194,7 +1752,7 @@ def test_parse_item_detail_html_extracts_item_anchored_flight_detail() -> None:
     assert detail.field_sources["description"] == "flight.description"
     assert detail.field_sources["photos"] == "flight.rich_item"
     assert {"description", "photos", "shipping_price_amount"}.issubset(detail.observed_fields)
-    assert detail.raw["parser_version"] == "next_flight_v1"
+    assert detail.raw["parser_version"] == "next_flight_v2"
     assert detail.raw["flight_sections"] == ["plugins", "pricing", "rich_item", "shipping_details"]
     assert detail.raw["missing_fields"] == []
     assert detail.raw["validation_warnings"] == []
@@ -2215,6 +1773,54 @@ def test_parse_item_detail_html_preserves_observed_empty_description() -> None:
     assert "description" not in detail.raw["missing_fields"]
 
 
+def test_parse_item_detail_html_prefers_explicitly_item_scoped_plugin_over_unscoped_duplicate() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    records["a7"][3]["plugins"].insert(
+        0,
+        {
+            "type": "description",
+            "data": {"description": "Descripcion de una recomendacion sin identidad"},
+        },
+    )
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.description == "Tiene una marca pequena en la manga"
+
+
+def test_parse_item_detail_html_extracts_item_scoped_summary_characteristics() -> None:
+    candidate = replace(map_catalog_item(load_fixture()["items"][0]), brand=None, size=None, status=None)
+    records = load_detail_fixture()["records"]
+    plugins = records["a7"][3]["plugins"]
+    records["a7"][3]["plugins"] = [plugin for plugin in plugins if plugin["type"] != "attributes"]
+    summary = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "summary")
+    summary["data"]["lines"].append(
+        {
+            "elements": [
+                {"type": "text", "value": "M", "style": "body"},
+                {"type": "text", "value": "Muy bueno", "style": "body"},
+                {
+                    "type": "navigational",
+                    "value": "Ralph Lauren",
+                    "code": "summary_brand",
+                    "style": "body",
+                },
+                {"type": "text", "value": "Subido hace una hora", "style": "body"},
+            ]
+        }
+    )
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.brand == "Ralph Lauren"
+    assert detail.size == "M"
+    assert detail.status == "Muy bueno"
+    assert detail.field_sources["brand"] == "flight.summary"
+    assert detail.field_sources["size"] == "flight.summary"
+    assert detail.field_sources["status"] == "flight.summary"
+
+
 def test_parse_item_detail_html_gives_blocking_availability_precedence() -> None:
     candidate = map_catalog_item(load_fixture()["items"][0])
     records = load_detail_fixture()["records"]
@@ -2228,6 +1834,19 @@ def test_parse_item_detail_html_gives_blocking_availability_precedence() -> None
     assert detail.availability_flags["can_buy"] is True
 
 
+def test_parse_item_detail_html_keeps_blocker_observed_in_lower_priority_plugin() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    ask_seller = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "ask_seller")
+    ask_seller["data"]["is_hidden"] = True
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.availability_flags["is_hidden"] is True
+    assert detail.availability_flags["state"] == "hidden"
+    assert detail.availability_flags["reason_codes"] == ["hidden"]
+
+
 def test_parse_item_detail_html_drops_optional_price_with_mismatched_currency() -> None:
     candidate = map_catalog_item(load_fixture()["items"][0])
     records = load_detail_fixture()["records"]
@@ -2239,6 +1858,78 @@ def test_parse_item_detail_html_drops_optional_price_with_mismatched_currency() 
     assert detail.buyer_protection_fee_amount is None
     assert detail.total_price_amount == Decimal("3.30")
     assert detail.raw["validation_warnings"] == ["buyer_protection_price_invalid"]
+
+
+@pytest.mark.parametrize(
+    ("unsafe_rich_price", "expected_amount", "expected_currency"),
+    [
+        ({"amount": "99.00"}, Decimal("2.50"), "EUR"),
+        ({"amount": "not-money", "currency_code": "USD"}, Decimal("2.50"), "EUR"),
+    ],
+)
+def test_parse_item_detail_html_selects_money_amount_and_currency_as_one_pair(
+    unsafe_rich_price: dict[str, str],
+    expected_amount: Decimal,
+    expected_currency: str,
+) -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    records["2f"][3]["value"]["price"] = unsafe_rich_price
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.price_amount == expected_amount
+    assert detail.currency == expected_currency
+    assert detail.field_sources["price_amount"] == "flight.make_offer"
+    assert detail.field_sources["currency"] == "flight.make_offer"
+
+
+@pytest.mark.parametrize("unsafe_amount", ["-0.01", "NaN", "Infinity", "-Infinity"])
+def test_parse_item_detail_html_skips_non_finite_or_negative_base_prices(unsafe_amount: str) -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    records["2f"][3]["value"]["price"]["amount"] = unsafe_amount
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.price_amount == Decimal("2.50")
+    assert detail.currency == "EUR"
+    assert detail.field_sources["price_amount"] == "flight.make_offer"
+    assert detail.field_sources["currency"] == "flight.make_offer"
+
+
+@pytest.mark.parametrize("unsafe_amount", ["-0.01", "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize(
+    ("price_name", "warning"),
+    [
+        ("shipping", "shipping_price_invalid"),
+        ("buyer_protection", "buyer_protection_price_invalid"),
+        ("total", "total_price_invalid"),
+    ],
+)
+def test_parse_item_detail_html_rejects_non_finite_or_negative_optional_prices(
+    price_name: str,
+    warning: str,
+    unsafe_amount: str,
+) -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    pricing_record = records["k3"][3]
+    if price_name == "shipping":
+        pricing_record["shippingDetails"]["price"]["amount"] = unsafe_amount
+        value_name = "shipping_price_amount"
+    elif price_name == "buyer_protection":
+        protection = pricing_record["children"]["pricingServices"]["services"]["buyerProtection"]
+        protection["finalPrice"]["amount"] = unsafe_amount
+        value_name = "buyer_protection_fee_amount"
+    else:
+        pricing_record["children"]["pricingServices"]["totalAmount"]["amount"] = unsafe_amount
+        value_name = "total_price_amount"
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert getattr(detail, value_name) is None
+    assert warning in detail.raw["validation_warnings"]
 
 
 def test_parse_item_detail_html_maps_explicit_free_shipping_to_zero() -> None:
@@ -2255,6 +1946,150 @@ def test_parse_item_detail_html_maps_explicit_free_shipping_to_zero() -> None:
     assert detail.raw["validation_warnings"] == []
 
 
+def test_parse_item_detail_html_does_not_mix_target_pricing_with_recommendation() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    records["z9"] = [
+        "$",
+        "$Lrecommendation",
+        None,
+        {
+            "recommendation": {
+                "shippingDetails": {
+                    "isFreeShipping": False,
+                    "price": {"amount": "99.00", "currencyCode": "EUR"},
+                },
+                "children": {
+                    "pricingServices": {
+                        "services": {
+                            "buyerProtection": {
+                                "finalPrice": {"amount": "19.00", "currencyCode": "EUR"}
+                            }
+                        },
+                        "originalAskingAmount": {"amount": "80.00", "currencyCode": "EUR"},
+                        "totalAmount": {"amount": "99.00", "currencyCode": "EUR"},
+                    },
+                    "item": {"item_id": 9999999999},
+                },
+            },
+            "selectedItem": {"item_id": int(candidate.vinted_item_id)},
+        },
+    ]
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.shipping_price_amount == Decimal("1.75")
+    assert detail.buyer_protection_fee_amount == Decimal("0.80")
+    assert detail.total_price_amount == Decimal("3.30")
+
+
+def test_parse_item_detail_html_keeps_signed_photos_but_rejects_explicit_ports() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    signed_url = "https://images2.vinted.net/t/a/f800/photo.webp?s=signed%2Btoken&foo=1"
+    records["p9"][3]["value"]["photos"] = [
+        {"image_no": 1, "is_hidden": False, "url": signed_url},
+        {
+            "image_no": 2,
+            "is_hidden": False,
+            "url": "https://images2.vinted.net:443/t/a/f800/ported.webp?s=signed-port",
+        },
+    ]
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.photos == [signed_url]
+
+
+def test_parse_item_detail_html_treats_non_null_reservation_as_blocking() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    ask_seller = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "ask_seller")
+    ask_seller["data"]["reservation"] = {"reserved_for_user_id": 999}
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.availability_flags["has_reservation"] is True
+    assert detail.availability_flags["state"] == "reserved"
+    assert detail.availability_flags["reason_codes"] == ["reserved"]
+
+
+def test_parse_item_detail_html_treats_reservation_in_any_item_plugin_as_blocking() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    item_status = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "item_status")
+    item_status["data"]["reservation"] = {"reserved_for_user_id": 999}
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.availability_flags["has_reservation"] is True
+    assert detail.availability_flags["state"] == "reserved"
+    assert detail.availability_flags["reason_codes"] == ["reserved"]
+
+
+def test_parse_item_detail_html_does_not_treat_false_reservation_as_blocking() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    item_status = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "item_status")
+    item_status["data"]["reservation"] = False
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.availability_flags["has_reservation"] is False
+    assert detail.availability_flags["state"] == "buyable"
+    assert detail.availability_flags["reason_codes"] == []
+
+
+def test_parse_item_detail_html_does_not_treat_empty_shipping_details_as_available() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    records["k3"][3]["shippingDetails"] = {}
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.shipping_price_amount is None
+    assert detail.availability_flags["shipping_available"] is False
+    assert detail.availability_flags["state"] == "shipping_unavailable"
+    assert detail.availability_flags["reason_codes"] == ["shipping_unavailable"]
+
+
+def test_parse_item_detail_html_treats_json_ld_out_of_stock_as_blocking() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    product = {
+        "@type": "Product",
+        "offers": {
+            "url": candidate.url,
+            "price": "2.50",
+            "priceCurrency": "EUR",
+            "availability": "https://schema.org/OutOfStock",
+        },
+    }
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(product_json=product), candidate)
+
+    assert detail.availability_flags["availability"] == "https://schema.org/OutOfStock"
+    assert detail.availability_flags["state"] == "not_buyable"
+    assert detail.availability_flags["reason_codes"] == ["out_of_stock"]
+
+
+def test_parse_item_detail_html_treats_json_ld_reserved_as_blocking() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    product = {
+        "@type": "Product",
+        "offers": {
+            "url": candidate.url,
+            "price": "2.50",
+            "priceCurrency": "EUR",
+            "availability": "https://schema.org/Reserved",
+        },
+    }
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(product_json=product), candidate)
+
+    assert detail.availability_flags["state"] == "reserved"
+    assert detail.availability_flags["reason_codes"] == ["reserved"]
+
+
 def test_parse_item_detail_html_ignores_json_ld_for_another_item() -> None:
     candidate = map_catalog_item(load_fixture()["items"][0])
     other_product = {
@@ -2265,6 +2100,77 @@ def test_parse_item_detail_html_ignores_json_ld_for_another_item() -> None:
 
     with pytest.raises(ValueError, match="No public item detail data"):
         parse_item_detail_html(build_item_detail_flight_html(product_json=other_product, records={}), candidate)
+
+
+def test_parse_item_detail_html_rejects_unscoped_json_ld_without_matching_flight_identity() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    unscoped_product = {
+        "@type": "Product",
+        "name": "Producto sin identidad",
+        "offers": {"price": "2.50", "priceCurrency": "EUR"},
+    }
+
+    with pytest.raises(ValueError, match="No public item detail data"):
+        parse_item_detail_html(build_item_detail_flight_html(product_json=unscoped_product, records={}), candidate)
+
+
+@pytest.mark.parametrize(
+    "product",
+    [
+        {
+            "@type": "Product",
+            "url": "https://attacker.example/items/1000000001-fake",
+            "name": "Producto externo",
+            "offers": {"price": "9.00", "priceCurrency": "EUR"},
+        },
+        {
+            "@type": "Product",
+            "url": "https://www.vinted.es/items/1000000001-target",
+            "name": "Producto con oferta contradictoria",
+            "offers": {
+                "url": "https://www.vinted.es/items/9999999999-other",
+                "price": "999.00",
+                "priceCurrency": "USD",
+            },
+        },
+    ],
+)
+def test_parse_item_detail_html_rejects_json_ld_with_invalid_or_conflicting_identity(product: dict) -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+
+    with pytest.raises(ValueError, match="No public item detail data"):
+        parse_item_detail_html(build_item_detail_flight_html(product_json=product, records={}), candidate)
+
+
+def test_parse_item_detail_html_uses_later_matching_json_ld_product() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    unrelated = {
+        "@type": "Product",
+        "name": "Recomendacion",
+        "offers": {"url": "https://www.vinted.es/items/9999999999-recomendacion"},
+    }
+    target = {
+        "@type": "Product",
+        "name": "Articulo objetivo",
+        "description": "Descripcion objetivo",
+        "offers": {
+            "url": candidate.url,
+            "price": "2.50",
+            "priceCurrency": "EUR",
+            "availability": "https://schema.org/InStock",
+        },
+    }
+    html = (
+        f'<script type="application/ld+json">{json.dumps(unrelated)}</script>'
+        f'<script type="application/ld+json">{json.dumps(target)}</script>'
+    )
+
+    detail = parse_item_detail_html(html, candidate)
+
+    assert detail.title == "Articulo objetivo"
+    assert detail.description == "Descripcion objetivo"
+    assert detail.price_amount == Decimal("2.50")
+    assert detail.currency == "EUR"
 
 
 def test_parse_item_detail_html_rejects_document_without_detail_data() -> None:

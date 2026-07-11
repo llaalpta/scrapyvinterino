@@ -5,9 +5,10 @@ import time
 from datetime import UTC, datetime
 
 import structlog
+from sqlalchemy import select
 
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import SearchSource
+from vinted_monitor.db.models import Run, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
@@ -21,7 +22,7 @@ from vinted_monitor.services.scheduler import (
     source_config,
 )
 from vinted_monitor.services.seen_cache import get_seen_cache
-from vinted_monitor.services.task_queue import MonitorTask, enqueue_task
+from vinted_monitor.services.task_queue import MonitorTask, enqueue_task, pending_tasks, processing_queue_key
 
 
 class SchedulerRunner:
@@ -29,7 +30,7 @@ class SchedulerRunner:
 
     The scheduler no longer executes HTTP requests or monitor runs directly.
     It builds ``MonitorTask`` payloads and pushes them into the Redis task
-    queue.  The ``TaskConsumer`` workers pick them up via BRPOP.
+    queue. The ``TaskConsumer`` workers reserve them into a processing list.
     """
 
     def __init__(
@@ -75,8 +76,70 @@ class SchedulerRunner:
 
             cache = get_seen_cache()
             active_proxy_counts, active_direct_count = active_run_egress_counts(db)
-            for _, source_id, source, config in sorted(due_sources, key=lambda e: (e[0], e[1])):
+            active_task_ids = set(
+                db.scalars(
+                    select(Run.task_id).where(
+                        Run.status == "running",
+                        Run.finished_at.is_(None),
+                        Run.task_id.is_not(None),
+                    )
+                )
+            )
+            queue_key = self.settings.worker_task_queue_key
+            consumer_processing_keys = (
+                processing_queue_key(queue_key),
+                *(
+                    processing_queue_key(queue_key, consumer_id)
+                    for consumer_id in range(max(self.settings.worker_consumer_count, 1))
+                ),
+            )
+            queued_tasks = pending_tasks(
+                cache.client,
+                queue_key=queue_key,
+                processing_keys=consumer_processing_keys,
+            )
+            pending_by_source_id = {task.source_id: task for task in queued_tasks}
+            for queued_task in queued_tasks:
+                if queued_task.task_id in active_task_ids:
+                    continue
+                if queued_task.proxy_profile_id is not None:
+                    active_proxy_counts[queued_task.proxy_profile_id] = (
+                        active_proxy_counts.get(queued_task.proxy_profile_id, 0) + 1
+                    )
+                else:
+                    active_direct_count += 1
+            for _, source_id, _source, _config in sorted(due_sources, key=lambda e: (e[0], e[1])):
+                source = db.scalar(
+                    select(SearchSource)
+                    .where(
+                        SearchSource.id == source_id,
+                        SearchSource.is_active.is_(True),
+                        SearchSource.archived_at.is_(None),
+                        SearchSource.monitor_mode != "manual",
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if source is None:
+                    db.commit()
+                    self.next_due_by_source_id.pop(source_id, None)
+                    continue
+                config = source_config(source)
+                pending_task = pending_by_source_id.get(source_id)
+                if pending_task is not None:
+                    next_due = next_run_after(current_time, config, self.rng, self.timezone)
+                    self.next_due_by_source_id[source_id] = next_due
+                    source.next_run_at = next_due
+                    self.logger.info(
+                        "scheduler_task_coalesced",
+                        source_id=source_id,
+                        task_id=pending_task.task_id,
+                        reason="monitor_task_already_pending",
+                    )
+                    db.commit()
+                    continue
                 if sum(active_proxy_counts.values()) + active_direct_count >= state.max_concurrent_runs:
+                    db.commit()
                     break
                 try:
                     egress = choose_run_egress(
@@ -86,6 +149,7 @@ class SchedulerRunner:
                         active_direct_count=active_direct_count,
                     )
                 except SchedulerCapacityError:
+                    db.rollback()
                     break
 
                 task = MonitorTask(
@@ -101,8 +165,9 @@ class SchedulerRunner:
                 )
                 try:
                     redis_client = cache.client
-                    enqueue_task(redis_client, task, queue_key=self.settings.worker_task_queue_key)
+                    enqueued = enqueue_task(redis_client, task, queue_key=self.settings.worker_task_queue_key)
                 except Exception as exc:
+                    db.rollback()
                     self.logger.error(
                         "scheduler_enqueue_error",
                         source_id=source_id,
@@ -113,14 +178,23 @@ class SchedulerRunner:
 
                 next_due = next_run_after(current_time, config, self.rng, self.timezone)
                 self.next_due_by_source_id[source_id] = next_due
-                source_obj = db.get(SearchSource, source_id)
-                if source_obj is not None:
-                    source_obj.next_run_at = next_due
+                source.next_run_at = next_due
+                if not enqueued:
+                    self.logger.info(
+                        "scheduler_task_coalesced",
+                        source_id=source_id,
+                        task_id=task.task_id,
+                        reason="monitor_task_already_pending",
+                    )
+                    db.commit()
+                    continue
                 if egress.proxy_profile_id is not None:
                     active_proxy_counts[egress.proxy_profile_id] = active_proxy_counts.get(egress.proxy_profile_id, 0) + 1
                 elif egress.mode == "direct":
                     active_direct_count += 1
                 submitted.append(source_id)
+                pending_by_source_id[source_id] = task
+                db.commit()
 
             db.commit()
             return submitted

@@ -36,7 +36,8 @@ NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
 NEXT_FLIGHT_RECORD_ID_PATTERN = re.compile(r"^[0-9A-Za-z]+$")
 VINTED_IMAGE_HOST_PATTERN = re.compile(r"^images\d*\.vinted\.net$", re.IGNORECASE)
-DETAIL_PARSER_VERSION = "next_flight_v1"
+VINTED_ITEM_PATH_PATTERN = re.compile(r"^/items/(\d+)(?:-[^/]+)?/?$")
+DETAIL_PARSER_VERSION = "next_flight_v2"
 CSRF_TOKEN_PATTERNS = (
     re.compile(r'"CSRF_TOKEN"\s*:\s*"([^"]+)"'),
     re.compile(r'\\"CSRF_TOKEN\\"\s*:\s*\\"([^"\\]+)\\"'),
@@ -60,11 +61,6 @@ SESSION_REFRESH_COOKIE_NAMES = {
     "v_sid",
     "v_udt",
 }
-DETAIL_API_CONTROL_ENDPOINT = "info_banners"
-DETAIL_API_DETAILS_ENDPOINT = "item_details"
-DETAIL_API_LEGACY_ENDPOINT = "item_legacy"
-DETAIL_API_MORE_ENDPOINT = "item_more"
-DETAIL_API_SERVICES_ENDPOINT = "item_services"
 
 
 @dataclass
@@ -297,19 +293,6 @@ class CurlCffiVintedCatalogProvider:
             self._bootstrap_anonymous_session(source_url, attempt=1)
         return self._probe_catalog_api_request(source_url, include_payload=include_payload)
 
-    def probe_item_detail_api(self, item_ref: str, *, referer_url: str | None = None) -> dict[str, Any]:
-        """Probe the internal item detail API once and return safe diagnostics."""
-        item_id = extract_vinted_item_id(item_ref)
-        if item_id is None:
-            raise ValueError("item_ref must be a Vinted item id or item URL")
-        self._ensure_session()
-        self._diagnose_egress(attempt=1)
-        return self._probe_item_detail_api_request(
-            item_id,
-            item_ref=item_ref,
-            referer_url=referer_url or str(self.settings.vinted_base_url),
-        )
-
     def probe_item_detail_document(self, item_ref: str, *, referer_url: str | None = None) -> dict[str, Any]:
         """Run the production public-document parser and return only safe diagnostics."""
         item_id = extract_vinted_item_id(item_ref)
@@ -420,11 +403,10 @@ class CurlCffiVintedCatalogProvider:
         )
         started_at = time.perf_counter()
         try:
-            response = self._session.get(
+            response, final_url, redirect_count = self._request_item_detail_response(
                 detail_url,
-                headers=dict(headers),
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
+                candidate.vinted_item_id,
+                headers,
             )
             refreshed_markers = self._refresh_session_context_from_cookies(
                 cookies_before=cookies_before_request,
@@ -442,6 +424,8 @@ class CurlCffiVintedCatalogProvider:
                 "cookies_after": self._cookie_markers(),
                 "session_context_refreshed": bool(refreshed_markers),
                 "refreshed_markers": refreshed_markers,
+                "final_url": final_url,
+                "redirect_count": redirect_count,
             }
             if is_cloudflare_challenge(response.status_code, dict(response.headers)):
                 self._emit_event(
@@ -560,6 +544,81 @@ class CurlCffiVintedCatalogProvider:
                 ) from exc
             raise
 
+    def _request_item_detail_response(
+        self,
+        detail_url: str,
+        item_id: str,
+        headers: Mapping[str, str],
+    ) -> tuple[Any, str, int]:
+        assert self._session is not None
+        current_url = detail_url
+        for redirect_count in range(4):
+            _validate_item_detail_url(current_url, expected_item_id=item_id)
+            response = self._session.get(
+                current_url,
+                headers=dict(headers),
+                timeout=self.timeout_ms / 1000,
+                default_headers=False,
+                allow_redirects=False,
+            )
+            effective_url = str(getattr(response, "url", None) or current_url)
+            _validate_item_detail_url(effective_url, expected_item_id=item_id)
+            if response.status_code not in {301, 302, 303, 307, 308}:
+                return response, effective_url, redirect_count
+            if is_cloudflare_challenge(response.status_code, dict(response.headers)) or is_datadome_challenge(
+                response.status_code,
+                dict(response.headers),
+                response.text[:3000],
+            ):
+                return response, effective_url, redirect_count
+            location = _header_value(response.headers, "location")
+            if not location:
+                raise VintedCatalogProviderError("Vinted item detail redirect omitted Location")
+            next_url = urljoin(effective_url, location)
+            _validate_item_detail_url(next_url, expected_item_id=item_id)
+            current_url = build_item_detail_navigation_url(next_url)
+        raise VintedCatalogProviderError("Vinted item detail redirect limit exceeded")
+
+    def _request_vinted_response(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        *,
+        expected_path: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> tuple[Any, str, int]:
+        assert self._session is not None
+        current_url = url
+        current_params = params
+        for redirect_count in range(4):
+            _validate_vinted_response_url(current_url, expected_path=expected_path)
+            response = self._session.get(
+                current_url,
+                params=current_params,
+                headers=dict(headers),
+                timeout=self.timeout_ms / 1000,
+                default_headers=False,
+                allow_redirects=False,
+            )
+            effective_url = str(getattr(response, "url", None) or current_url)
+            _validate_vinted_response_url(effective_url, expected_path=expected_path)
+            if response.status_code not in {301, 302, 303, 307, 308}:
+                return response, effective_url, redirect_count
+            if is_cloudflare_challenge(response.status_code, dict(response.headers)) or is_datadome_challenge(
+                response.status_code,
+                dict(response.headers),
+                response.text[:3000],
+            ):
+                return response, effective_url, redirect_count
+            location = _header_value(response.headers, "location")
+            if not location:
+                raise VintedCatalogProviderError("Vinted redirect omitted Location")
+            next_url = urljoin(effective_url, location)
+            _validate_vinted_response_url(next_url, expected_path=expected_path)
+            current_url = next_url
+            current_params = None
+        raise VintedCatalogProviderError("Vinted redirect limit exceeded")
+
     def close(self) -> None:
         """Discard the session, cookies, and proxy connection."""
         if self._session is not None:
@@ -612,8 +671,14 @@ class CurlCffiVintedCatalogProvider:
             set_value = getattr(cookies, "set", None)
             if callable(set_value):
                 try:
-                    set_value(name, value)
+                    set_value(name, value, domain=".vinted.es", path="/", secure=True)
                     continue
+                except TypeError:
+                    try:
+                        set_value(name, value)
+                        continue
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             try:
@@ -759,12 +824,11 @@ class CurlCffiVintedCatalogProvider:
         )
         started_at = time.perf_counter()
         try:
-            response = self._session.get(
+            response, final_url, redirect_count = self._request_vinted_response(
                 url,
+                headers,
+                expected_path="/api/v2/catalog/items",
                 params=params,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
             )
         except Exception as exc:
             self._emit_event(
@@ -783,6 +847,27 @@ class CurlCffiVintedCatalogProvider:
                 },
             )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
+
+        if is_cloudflare_challenge(response.status_code, dict(response.headers)):
+            self._emit_event(
+                phase="cloudflare_challenge_detected",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message="Cloudflare served a challenge instead of catalog data",
+                details={
+                    "attempt": attempt,
+                    "browser_profile": self.profile.name,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                    "final_url": final_url,
+                    "redirect_count": redirect_count,
+                },
+            )
+            raise VintedCatalogChallengeError("Cloudflare challenge detected on catalog API request")
 
         # DataDome challenge detection
         if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
@@ -930,6 +1015,8 @@ class CurlCffiVintedCatalogProvider:
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
                 "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
+                "final_url": final_url,
+                "redirect_count": redirect_count,
             },
         )
         return payload
@@ -980,12 +1067,11 @@ class CurlCffiVintedCatalogProvider:
         )
         started_at = time.perf_counter()
         try:
-            response = self._session.get(
+            response, final_url, redirect_count = self._request_vinted_response(
                 url,
+                headers,
+                expected_path="/api/v2/catalog/items",
                 params=params,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
             )
         except Exception as exc:
             duration_ms = _elapsed_ms(started_at)
@@ -1025,14 +1111,21 @@ class CurlCffiVintedCatalogProvider:
         response_details: dict[str, Any] = {
             "headers": safe_headers(dict(response.headers)),
             "content_type": content_type,
+            "final_url": final_url,
+            "redirect_count": redirect_count,
         }
         outcome = "rejected"
         error: str | None = None
         accepted_payload: Mapping[str, Any] | None = None
         body_snippet = getattr(response, "text", "")[:1200]
 
-        if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
+        if is_cloudflare_challenge(response.status_code, dict(response.headers)):
             outcome = "challenge"
+            response_details["challenge_kind"] = "cloudflare"
+            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+        elif is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
+            outcome = "challenge"
+            response_details["challenge_kind"] = "datadome"
             response_details["body_snippet"] = redact_sensitive_text(body_snippet)
         elif response.status_code >= 400:
             outcome = "rejected"
@@ -1101,526 +1194,6 @@ class CurlCffiVintedCatalogProvider:
             result["payload"] = accepted_payload
         return result
 
-    def _probe_item_detail_api_request(self, item_id: str, *, item_ref: str, referer_url: str) -> dict[str, Any]:
-        assert self._session is not None
-        item_url = _item_public_url(item_id, item_ref=item_ref, base_url=str(self.settings.vinted_base_url))
-        context_report = self._session_context_report()
-        missing_context = self._missing_session_context(context_report)
-        attempts: list[dict[str, Any]] = []
-        fast_variants = self._detail_probe_variants(item_id, catalog_referer=referer_url, item_referer=item_url)
-        self._emit_event(
-            phase="detail_api_probe_start",
-            method="GET",
-            url=urljoin(str(self.settings.vinted_base_url), f"/api/v2/items/{item_id}/details"),
-            details={
-                "item_id": item_id,
-                "item_url": item_url,
-                "request_profile": "api_har146",
-                "variant_count": len(fast_variants),
-                "missing_required": missing_context,
-                "context": context_report,
-                **_context_summary(context_report, self._cookie_values()),
-                "cookies_before": self._cookie_markers(),
-                "default_headers": False,
-                "x_v_udt_sent": False,
-            },
-        )
-        matrix_started_at = time.perf_counter()
-
-        navigation = self._probe_item_document_navigation(item_url, referer_url=referer_url, warmup=True)
-        attempts.append(navigation)
-        if navigation.get("outcome") == "document_ok":
-            self._try_datadome_collector(
-                item_url,
-                page_html=self._last_item_document_html,
-                expected_screen="item",
-                bootstrap_origin="item_document",
-            )
-            context_report = self._session_context_report(expected_screen="item", bootstrap_origin="item_document")
-            missing_context = self._missing_session_context(context_report)
-
-        for variant in fast_variants:
-            attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
-
-        if self._should_retry_detail_with_client_hints(attempts):
-            for variant in self._detail_probe_variants(
-                item_id,
-                catalog_referer=referer_url,
-                item_referer=item_url,
-                include_control=False,
-                referer_modes=("item",),
-                client_hints=True,
-            ):
-                attempts.append(self._probe_detail_api_variant(item_id, variant, missing_context=missing_context))
-
-        selected = _select_detail_probe_attempt(attempts)
-        final_context_report = self._session_context_report(expected_screen="item", bootstrap_origin="item_document")
-        matrix_duration_ms = _elapsed_ms(matrix_started_at)
-        detail_summary = selected.get("detail_summary") if isinstance(selected.get("detail_summary"), dict) else {}
-        response_details = selected.get("response") if isinstance(selected.get("response"), dict) else {}
-        request_details = selected.get("request") if isinstance(selected.get("request"), dict) else {}
-        result = {
-            "outcome": selected.get("outcome", "transport_error"),
-            "item_id": item_id,
-            "detail_api_url": selected.get("url"),
-            "status_code": selected.get("status_code"),
-            "duration_ms": selected.get("duration_ms"),
-            "matrix_duration_ms": matrix_duration_ms,
-            "attempt_count": len(attempts),
-            "egress_ip": self._egress_context.ip,
-            "egress_country_code": self._egress_context.country_code,
-            "context": final_context_report,
-            "missing_required": missing_context,
-            "request": request_details,
-            "response": response_details,
-            "detail_summary": detail_summary,
-            "attempts": [_safe_detail_probe_attempt(attempt) for attempt in attempts],
-            "control_outcome": _first_endpoint_outcome(attempts, DETAIL_API_CONTROL_ENDPOINT),
-            "error": selected.get("error"),
-        }
-        self._emit_event(
-            phase="detail_api_probe_finished",
-            method="GET",
-            url=result.get("detail_api_url") if isinstance(result.get("detail_api_url"), str) else None,
-            status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
-            duration_ms=matrix_duration_ms,
-            level=None if result["outcome"] == "accepted_json" else "warning",
-            details={
-                "item_id": item_id,
-                "outcome": result["outcome"],
-                "attempt_count": len(attempts),
-                "control_outcome": result["control_outcome"],
-                "selected_variant": selected.get("variant_id"),
-                "selected_endpoint": selected.get("endpoint"),
-                "selected_referer_mode": selected.get("referer_mode"),
-                "matrix": result["attempts"],
-                "context": final_context_report,
-                **_context_summary(final_context_report, self._cookie_values()),
-                "cookies_after": self._cookie_markers(),
-                "detail_summary": detail_summary,
-                "x_v_udt_sent": False,
-            },
-        )
-        return result
-
-    def _detail_probe_variants(
-        self,
-        item_id: str,
-        *,
-        catalog_referer: str,
-        item_referer: str,
-        include_control: bool = True,
-        referer_modes: tuple[str, ...] = ("catalog", "item"),
-        client_hints: bool = False,
-        pre_navigation: bool = False,
-    ) -> list[dict[str, Any]]:
-        base_url = str(self.settings.vinted_base_url)
-        referers = {
-            "catalog": catalog_referer,
-            "item": item_referer,
-        }
-        endpoints: list[dict[str, Any]] = []
-        if include_control:
-            endpoints.append(
-                {
-                    "endpoint": DETAIL_API_CONTROL_ENDPOINT,
-                    "endpoint_role": "control",
-                    "url": urljoin(base_url, "/api/v2/info_banners/item"),
-                    "params": None,
-                }
-            )
-        endpoints.extend(
-            [
-                {
-                    "endpoint": DETAIL_API_DETAILS_ENDPOINT,
-                    "endpoint_role": "detail",
-                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/details"),
-                    "params": None,
-                },
-                {
-                    "endpoint": DETAIL_API_LEGACY_ENDPOINT,
-                    "endpoint_role": "detail",
-                    "url": urljoin(base_url, f"/api/v2/items/{item_id}"),
-                    "params": {"localize": "true"},
-                },
-                {
-                    "endpoint": DETAIL_API_MORE_ENDPOINT,
-                    "endpoint_role": "support",
-                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/more"),
-                    "params": {"content_source": "catalog", "screen": "item"},
-                },
-                {
-                    "endpoint": DETAIL_API_SERVICES_ENDPOINT,
-                    "endpoint_role": "support",
-                    "url": urljoin(base_url, f"/api/v2/items/{item_id}/services"),
-                    "params": None,
-                },
-            ]
-        )
-        variants: list[dict[str, Any]] = []
-        for referer_mode in referer_modes:
-            for endpoint in endpoints:
-                variants.append(
-                    {
-                        **endpoint,
-                        "referer_mode": referer_mode,
-                        "referer_url": referers[referer_mode],
-                        "client_hints": client_hints,
-                        "pre_navigation": pre_navigation,
-                        "variant_id": (
-                            f"{endpoint['endpoint']}:{referer_mode}:"
-                            f"{'ch' if client_hints else 'base'}:{'prenav' if pre_navigation else 'fast'}"
-                        ),
-                    }
-                )
-        return variants
-
-    def _probe_detail_api_variant(
-        self,
-        item_id: str,
-        variant: dict[str, Any],
-        *,
-        missing_context: list[str],
-    ) -> dict[str, Any]:
-        assert self._session is not None
-        url = str(variant["url"])
-        params = variant.get("params")
-        headers = self._build_detail_api_headers(str(variant["referer_url"]), client_hints=bool(variant["client_hints"]))
-        request_details = {
-            "method": "GET",
-            "url": _url_with_params(url, params),
-            "headers": safe_headers(headers),
-            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
-            "cookies": self._cookie_markers(),
-            "default_headers": False,
-        }
-        event_details = {
-            "item_id": item_id,
-            "variant_id": variant["variant_id"],
-            "endpoint": variant["endpoint"],
-            "endpoint_role": variant["endpoint_role"],
-            "referer_mode": variant["referer_mode"],
-            "referer_url": variant["referer_url"],
-            "pre_navigation": variant["pre_navigation"],
-            "client_hints": variant["client_hints"],
-            "request_profile": "api_har146",
-            "missing_required": missing_context,
-            "request_headers": safe_headers(headers),
-            "cookies_before": self._cookie_markers(),
-            "default_headers": False,
-            "x_v_udt_sent": False,
-        }
-        self._emit_event(
-            phase="detail_api_probe_attempt_start",
-            method="GET",
-            url=url,
-            details=event_details,
-        )
-        started_at = time.perf_counter()
-        try:
-            response = self._session.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
-            )
-        except Exception as exc:
-            duration_ms = _elapsed_ms(started_at)
-            error = redact_sensitive_text(str(exc))
-            attempt = {
-                **_variant_public_fields(variant),
-                "item_id": item_id,
-                "url": _url_with_params(url, params),
-                "outcome": "transport_error",
-                "status_code": None,
-                "duration_ms": duration_ms,
-                "content_type": None,
-                "request": request_details,
-                "response": {},
-                "detail_summary": {},
-                "error": error,
-            }
-            self._emit_detail_attempt_finished(attempt, level="warning")
-            return attempt
-
-        duration_ms = _elapsed_ms(started_at)
-        self._catalog_session_context.access_token_web = (
-            self._cookie_value("access_token_web") or self._catalog_session_context.access_token_web
-        )
-        self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
-        self._catalog_session_context.v_udt = self._cookie_value("v_udt") or self._catalog_session_context.v_udt
-        attempt = self._classify_detail_api_response(
-            item_id=item_id,
-            variant=variant,
-            url=_url_with_params(url, params),
-            response=response,
-            duration_ms=duration_ms,
-            request_details=request_details,
-        )
-        self._emit_detail_attempt_finished(attempt, level=None if attempt["outcome"] == "accepted_json" else "warning")
-        return attempt
-
-    def _build_detail_api_headers(self, referer_url: str, *, client_hints: bool = False) -> dict[str, str]:
-        headers = dict(
-            self.profile.build_api_headers(
-                referer=referer_url,
-                accept_language=self.accept_language,
-                locale=self.locale,
-                screen=self._catalog_session_context.screen or self.vinted_screen,
-            )
-        )
-        if client_hints:
-            headers = _headers_with_chrome146_client_hints(headers)
-        if self._catalog_session_context.anon_id:
-            headers["x-anon-id"] = self._catalog_session_context.anon_id
-        if self._catalog_session_context.csrf_token:
-            headers["x-csrf-token"] = self._catalog_session_context.csrf_token
-        return headers
-
-    def _classify_detail_api_response(
-        self,
-        *,
-        item_id: str,
-        variant: dict[str, Any],
-        url: str,
-        response: Any,
-        duration_ms: int,
-        request_details: dict[str, Any],
-    ) -> dict[str, Any]:
-        content_type = str(response.headers.get("content-type", ""))
-        body_snippet = getattr(response, "text", "")[:1200]
-        response_details: dict[str, Any] = {
-            "headers": safe_headers(dict(response.headers)),
-            "content_type": content_type,
-            "summary": _response_summary(response.headers),
-        }
-        outcome = "http_error"
-        error: str | None = None
-        detail_summary: dict[str, Any] = {}
-
-        if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
-            outcome = "datadome_challenge"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-        elif is_cloudflare_challenge(response.status_code, dict(response.headers)):
-            outcome = "cloudflare_challenge"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-        elif response.status_code == 404:
-            outcome = "not_found"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-        elif response.status_code == 429:
-            outcome = "rate_limited"
-            retry_after_seconds, retry_after_source = _retry_after_seconds(response.headers.get("retry-after"))
-            response_details["retry_after_seconds"] = retry_after_seconds
-            response_details["retry_after_source"] = retry_after_source
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-        elif response.status_code >= 400:
-            outcome = "http_error"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-        elif "json" not in content_type.lower():
-            outcome = "invalid_json"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-        else:
-            try:
-                payload = response.json()
-            except Exception as exc:
-                outcome = "invalid_json"
-                error = redact_sensitive_text(str(exc))
-                response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-            else:
-                if variant["endpoint_role"] == "control":
-                    outcome = "accepted_json" if isinstance(payload, (Mapping, list)) else "invalid_json"
-                    if isinstance(payload, Mapping):
-                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
-                elif variant["endpoint_role"] == "support":
-                    outcome = "accepted_json" if isinstance(payload, (Mapping, list)) else "invalid_json"
-                    if isinstance(payload, Mapping):
-                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
-                    elif isinstance(payload, list):
-                        response_details["items_count"] = len(payload)
-                elif isinstance(payload, Mapping):
-                    item_payload = payload.get("item") if isinstance(payload.get("item"), Mapping) else payload
-                    if isinstance(item_payload, Mapping) and _looks_like_item_detail_payload(item_payload, item_id):
-                        outcome = "accepted_json"
-                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
-                        response_details["item_keys"] = sorted(str(key) for key in item_payload.keys())[:40]
-                        detail_summary = summarize_item_detail_api_payload(item_payload)
-                    else:
-                        outcome = "invalid_json"
-                        response_details["json_keys"] = sorted(str(key) for key in payload.keys())[:25]
-                        response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-                else:
-                    outcome = "invalid_json"
-                    response_details["body_snippet"] = redact_sensitive_text(body_snippet)
-
-        return {
-            **_variant_public_fields(variant),
-            "item_id": item_id,
-            "url": url,
-            "outcome": outcome,
-            "status_code": response.status_code,
-            "duration_ms": duration_ms,
-            "content_type": content_type,
-            "cf_mitigated": _header_value(response.headers, "cf-mitigated"),
-            "cf_ray": _header_value(response.headers, "cf-ray"),
-            "request": request_details,
-            "response": response_details,
-            "detail_summary": detail_summary,
-            "error": error,
-        }
-
-    def _emit_detail_attempt_finished(self, attempt: dict[str, Any], *, level: str | None) -> None:
-        self._emit_event(
-            phase="detail_api_probe_attempt_finished",
-            method="GET",
-            url=attempt.get("url") if isinstance(attempt.get("url"), str) else None,
-            status_code=attempt.get("status_code") if isinstance(attempt.get("status_code"), int) else None,
-            duration_ms=attempt.get("duration_ms") if isinstance(attempt.get("duration_ms"), int) else None,
-            level=level,
-            details={
-                "item_id": attempt.get("item_id"),
-                "variant_id": attempt.get("variant_id"),
-                "endpoint": attempt.get("endpoint"),
-                "endpoint_role": attempt.get("endpoint_role"),
-                "referer_mode": attempt.get("referer_mode"),
-                "pre_navigation": attempt.get("pre_navigation"),
-                "client_hints": attempt.get("client_hints"),
-                "outcome": attempt.get("outcome"),
-                "status_code": attempt.get("status_code"),
-                "duration_ms": attempt.get("duration_ms"),
-                "content_type": attempt.get("content_type"),
-                "cf_mitigated": attempt.get("cf_mitigated"),
-                "cf_ray": attempt.get("cf_ray"),
-                "response_summary": (attempt.get("response") or {}).get("summary")
-                if isinstance(attempt.get("response"), dict)
-                else {},
-                "detail_summary": attempt.get("detail_summary") or {},
-                "error": attempt.get("error"),
-                "cookies_after": self._cookie_markers(),
-                "x_v_udt_sent": False,
-            },
-        )
-
-    def _should_retry_detail_with_client_hints(self, attempts: list[dict[str, Any]]) -> bool:
-        detail_attempts = [attempt for attempt in attempts if attempt.get("endpoint_role") == "detail"]
-        if any(attempt.get("outcome") == "accepted_json" for attempt in detail_attempts):
-            return False
-        return any(
-            attempt.get("outcome") == "cloudflare_challenge"
-            and _response_requests_client_hints(attempt.get("response") if isinstance(attempt.get("response"), dict) else {})
-            for attempt in detail_attempts
-        )
-
-    def _probe_item_document_navigation(self, item_url: str, *, referer_url: str, warmup: bool = False) -> dict[str, Any]:
-        assert self._session is not None
-        headers = dict(self.profile.build_bootstrap_headers(referer=referer_url, accept_language=self.accept_language))
-        headers["sec-fetch-site"] = "same-origin"
-        request_details = {
-            "method": "GET",
-            "url": item_url,
-            "headers": safe_headers(headers),
-            "cookie_count": len(list(self._session.cookies.keys())) if self._session.cookies else 0,
-            "cookies": self._cookie_markers(),
-            "default_headers": False,
-        }
-        self._emit_event(
-            phase="detail_item_document_request_start",
-            method="GET",
-            url=item_url,
-            details={
-                "variant_id": "item_document:navigate",
-                "endpoint": "item_document",
-                "endpoint_role": "document",
-                "referer_url": referer_url,
-                "warmup": warmup,
-                "request_headers": safe_headers(headers),
-                "cookies_before": self._cookie_markers(),
-                "default_headers": False,
-            },
-        )
-        started_at = time.perf_counter()
-        try:
-            response = self._session.get(
-                item_url,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
-            )
-        except Exception as exc:
-            duration_ms = _elapsed_ms(started_at)
-            error = redact_sensitive_text(str(exc))
-            attempt = {
-                "variant_id": "item_document:navigate",
-                "endpoint": "item_document",
-                "endpoint_role": "document",
-                "referer_mode": "catalog",
-                "pre_navigation": warmup,
-                "client_hints": False,
-                "url": item_url,
-                "outcome": "transport_error",
-                "status_code": None,
-                "duration_ms": duration_ms,
-                "content_type": None,
-                "request": request_details,
-                "response": {},
-                "detail_summary": {},
-                "error": error,
-            }
-            self._emit_detail_attempt_finished(attempt, level="warning")
-            return attempt
-
-        duration_ms = _elapsed_ms(started_at)
-        self._last_item_document_html = getattr(response, "text", "") or ""
-        self._catalog_session_context.csrf_token = (
-            extract_csrf_token(self._last_item_document_html) or self._catalog_session_context.csrf_token
-        )
-        self._catalog_session_context.anon_id = _header_value(response.headers, "x-anon-id") or self._catalog_session_context.anon_id
-        self._catalog_session_context.access_token_web = (
-            self._cookie_value("access_token_web") or self._catalog_session_context.access_token_web
-        )
-        self._catalog_session_context.datadome = self._cookie_value("datadome") or self._catalog_session_context.datadome
-        self._catalog_session_context.v_udt = (
-            _header_value(response.headers, "x-v-udt") or self._cookie_value("v_udt") or self._catalog_session_context.v_udt
-        )
-        self._catalog_session_context.user_iso_locale = (
-            _header_value(response.headers, "x-user-iso-locale") or self._catalog_session_context.user_iso_locale
-        )
-        self._catalog_session_context.screen = _header_value(response.headers, "x-screen") or self._catalog_session_context.screen
-        body_snippet = getattr(response, "text", "")[:1200]
-        if is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
-            outcome = "datadome_challenge"
-        elif is_cloudflare_challenge(response.status_code, dict(response.headers)):
-            outcome = "cloudflare_challenge"
-        elif response.status_code >= 400:
-            outcome = "http_error"
-        else:
-            outcome = "document_ok"
-        attempt = {
-            "variant_id": "item_document:navigate",
-            "endpoint": "item_document",
-            "endpoint_role": "document",
-            "referer_mode": "catalog",
-            "pre_navigation": warmup,
-            "client_hints": False,
-            "url": item_url,
-            "outcome": outcome,
-            "status_code": response.status_code,
-            "duration_ms": duration_ms,
-            "content_type": str(response.headers.get("content-type", "")),
-            "cf_mitigated": _header_value(response.headers, "cf-mitigated"),
-            "cf_ray": _header_value(response.headers, "cf-ray"),
-            "request": request_details,
-            "response": {
-                "headers": safe_headers(dict(response.headers)),
-                "content_type": str(response.headers.get("content-type", "")),
-                "summary": _response_summary(response.headers),
-            },
-            "detail_summary": {},
-            "error": None,
-        }
-        self._emit_detail_attempt_finished(attempt, level=None if outcome == "document_ok" else "warning")
-        return attempt
-
     def _bootstrap_anonymous_session(self, source_url: str, *, attempt: int) -> None:
         assert self._session is not None
         bootstrap_url = source_url
@@ -1650,11 +1223,10 @@ class CurlCffiVintedCatalogProvider:
         )
         started_at = time.perf_counter()
         try:
-            response = self._session.get(
+            response, final_url, redirect_count = self._request_vinted_response(
                 bootstrap_url,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
+                headers,
+                expected_path=urlparse(bootstrap_url).path,
             )
         except Exception as exc:
             self._emit_event(
@@ -1674,6 +1246,28 @@ class CurlCffiVintedCatalogProvider:
                 },
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
+
+        if is_cloudflare_challenge(response.status_code, dict(response.headers)):
+            self._emit_event(
+                phase="cloudflare_challenge_detected",
+                method="GET",
+                url=bootstrap_url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message="Cloudflare challenge detected during bootstrap",
+                details={
+                    "attempt": attempt,
+                    "browser_profile": self.profile.name,
+                    "bootstrap_origin": "catalog_document",
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                    "final_url": final_url,
+                    "redirect_count": redirect_count,
+                },
+            )
+            raise VintedCatalogChallengeError("Cloudflare challenge detected during bootstrap")
 
         if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
             self._emit_event(
@@ -2198,22 +1792,25 @@ class CurlCffiVintedCatalogProvider:
     def _cookie_values(self) -> dict[str, str]:
         if self._session is None or not self._session.cookies:
             return {}
-        values: dict[str, str] = {}
         cookies = self._session.cookies
+        jar = getattr(cookies, "jar", None)
+        if jar is not None:
+            values: dict[str, str] = {}
+            for cookie in jar:
+                cookie_name = getattr(cookie, "name", None)
+                cookie_value = getattr(cookie, "value", None)
+                cookie_domain = getattr(cookie, "domain", None)
+                if cookie_name and cookie_value and _is_vinted_cookie_domain(cookie_domain):
+                    values[str(cookie_name)] = str(cookie_value)
+            return values
+
         items = getattr(cookies, "items", None)
         if callable(items):
             try:
                 return {str(name): str(value) for name, value in items() if value}
             except Exception:
                 pass
-
-        jar = getattr(cookies, "jar", cookies)
-        for cookie in jar:
-            cookie_name = getattr(cookie, "name", None)
-            cookie_value = getattr(cookie, "value", None)
-            if cookie_name and cookie_value:
-                values[str(cookie_name)] = str(cookie_value)
-        return values
+        return {}
 
     def _session_context_values(self) -> dict[str, str | None]:
         return {
@@ -2282,6 +1879,16 @@ class CurlCffiVintedCatalogProvider:
             return None
 
         cookies = self._session.cookies
+        jar = getattr(cookies, "jar", None)
+        if jar is not None:
+            for cookie in jar:
+                cookie_name = getattr(cookie, "name", None)
+                cookie_value = getattr(cookie, "value", None)
+                cookie_domain = getattr(cookie, "domain", None)
+                if cookie_name == name and cookie_value and _is_vinted_cookie_domain(cookie_domain):
+                    return str(cookie_value)
+            return None
+
         get_value = getattr(cookies, "get", None)
         if callable(get_value):
             try:
@@ -2291,12 +1898,6 @@ class CurlCffiVintedCatalogProvider:
             if value:
                 return str(value)
 
-        jar = getattr(cookies, "jar", cookies)
-        for cookie in jar:
-            cookie_name = getattr(cookie, "name", None)
-            cookie_value = getattr(cookie, "value", None)
-            if cookie_name == name and cookie_value:
-                return str(cookie_value)
         return None
 
 
@@ -2393,125 +1994,6 @@ def is_cloudflare_challenge(status_code: int, headers: Mapping[str, Any]) -> boo
         return False
     mitigated = _header_value(headers, "cf-mitigated")
     return bool(mitigated and mitigated.strip().lower() == "challenge")
-
-
-def _response_requests_client_hints(response_details: Mapping[str, Any]) -> bool:
-    headers = response_details.get("headers") if isinstance(response_details.get("headers"), Mapping) else {}
-    summary = response_details.get("summary") if isinstance(response_details.get("summary"), Mapping) else {}
-    return bool(
-        _header_value(headers, "accept-ch")
-        or _header_value(headers, "critical-ch")
-        or summary.get("accept_ch")
-        or summary.get("critical_ch")
-    )
-
-
-def _looks_like_item_detail_payload(payload: Mapping[str, Any], item_id: str) -> bool:
-    raw_id = payload.get("id")
-    if raw_id is not None and str(raw_id) == str(item_id):
-        return True
-    item_url = payload.get("url")
-    if isinstance(item_url, str) and f"/items/{item_id}" in item_url:
-        return True
-    public_item_fields = {"title", "description", "price", "brand", "brand_dto", "photos", "user"}
-    return bool(public_item_fields.intersection(payload.keys()) and (raw_id is not None or item_url))
-
-
-def _headers_with_chrome146_client_hints(headers: Mapping[str, str]) -> dict[str, str]:
-    updated = dict(headers)
-    additions = {
-        "sec-ch-ua-arch": '"x86"',
-        "sec-ch-ua-bitness": '"64"',
-        "sec-ch-ua-full-version": '"146.0.0.0"',
-        "sec-ch-ua-full-version-list": '"Not-A.Brand";v="24.0.0.0", "Chromium";v="146.0.0.0"',
-        "sec-ch-ua-model": '""',
-        "sec-ch-ua-platform-version": '"10.0.0"',
-        "sec-ch-ua-wow64": "?0",
-    }
-    rebuilt: dict[str, str] = {}
-    for key, value in updated.items():
-        rebuilt[key] = value
-        if key == "sec-ch-ua":
-            rebuilt.update(additions)
-    if not any(key in rebuilt for key in additions):
-        rebuilt.update(additions)
-    return rebuilt
-
-
-def _variant_public_fields(variant: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "variant_id": variant.get("variant_id"),
-        "endpoint": variant.get("endpoint"),
-        "endpoint_role": variant.get("endpoint_role"),
-        "referer_mode": variant.get("referer_mode"),
-        "referer_url": variant.get("referer_url"),
-        "pre_navigation": bool(variant.get("pre_navigation")),
-        "client_hints": bool(variant.get("client_hints")),
-    }
-
-
-def _safe_detail_probe_attempt(attempt: Mapping[str, Any]) -> dict[str, Any]:
-    response = attempt.get("response") if isinstance(attempt.get("response"), Mapping) else {}
-    summary = response.get("summary") if isinstance(response.get("summary"), Mapping) else {}
-    detail_summary = attempt.get("detail_summary") if isinstance(attempt.get("detail_summary"), Mapping) else {}
-    return {
-        "variant_id": attempt.get("variant_id"),
-        "endpoint": attempt.get("endpoint"),
-        "endpoint_role": attempt.get("endpoint_role"),
-        "referer_mode": attempt.get("referer_mode"),
-        "pre_navigation": attempt.get("pre_navigation"),
-        "client_hints": attempt.get("client_hints"),
-        "outcome": attempt.get("outcome"),
-        "status_code": attempt.get("status_code"),
-        "duration_ms": attempt.get("duration_ms"),
-        "content_type": attempt.get("content_type"),
-        "cf_mitigated": attempt.get("cf_mitigated"),
-        "cf_ray": attempt.get("cf_ray"),
-        "response_summary": dict(summary),
-        "detail_summary": dict(detail_summary),
-        "error": attempt.get("error"),
-    }
-
-
-def _select_detail_probe_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
-    detail_attempts = [attempt for attempt in attempts if attempt.get("endpoint_role") == "detail"]
-    ordered_outcomes = (
-        "accepted_json",
-        "cloudflare_challenge",
-        "datadome_challenge",
-        "rate_limited",
-        "not_found",
-        "invalid_json",
-        "http_error",
-        "transport_error",
-    )
-    for outcome in ordered_outcomes:
-        for attempt in detail_attempts:
-            if attempt.get("outcome") == outcome:
-                return attempt
-    return detail_attempts[0] if detail_attempts else (attempts[0] if attempts else {"outcome": "transport_error"})
-
-
-def _first_endpoint_outcome(attempts: list[dict[str, Any]], endpoint: str) -> str | None:
-    for attempt in attempts:
-        if attempt.get("endpoint") == endpoint:
-            outcome = attempt.get("outcome")
-            return str(outcome) if outcome else None
-    return None
-
-
-def _item_public_url(item_id: str, *, item_ref: str | None = None, base_url: str) -> str:
-    if item_ref:
-        parsed = urlparse(str(item_ref).strip())
-        if parsed.scheme in {"http", "https"} and parsed.netloc and parsed.path.startswith(f"/items/{item_id}"):
-            return str(item_ref).strip()
-    return urljoin(base_url, f"/items/{item_id}?referrer=catalog")
-
-
-def _url_with_params(url: str, params: Mapping[str, Any] | None) -> str:
-    if not params:
-        return url
-    return f"{url}?{urlencode(params, doseq=True)}"
 
 
 # ---------------------------------------------------------------------------
@@ -2655,56 +2137,59 @@ def extract_vinted_item_id(item_ref: str) -> str | None:
 
 
 def build_item_detail_navigation_url(item_url: str) -> str:
-    parsed = urlparse(item_url)
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname not in {"www.vinted.es", "vinted.es"}
-        or parsed.username
-        or parsed.password
-        or parsed.port not in {None, 443}
-        or not parsed.path.startswith("/items/")
-    ):
-        raise ValueError("Item detail URL must be an HTTPS Vinted ES item URL")
+    parsed = _validate_item_detail_url(item_url)
     query = parse_qsl(parsed.query, keep_blank_values=True)
     if not any(name == "referrer" for name, _ in query):
         query.append(("referrer", "catalog"))
     return parsed._replace(query=urlencode(query, doseq=True)).geturl()
 
 
-def summarize_item_detail_api_payload(item: Mapping[str, Any]) -> dict[str, Any]:
-    photos = item.get("photos")
-    photo_count = len(photos) if isinstance(photos, list) else 0
-    description = _optional_str(item.get("description"))
-    price = item.get("price") if isinstance(item.get("price"), Mapping) else {}
-    brand = item.get("brand_dto") if isinstance(item.get("brand_dto"), Mapping) else {}
-    user = item.get("user") if isinstance(item.get("user"), Mapping) else {}
-    return {
-        "id": _optional_str(item.get("id")),
-        "title_present": bool(_optional_str(item.get("title"))),
-        "description_present": bool(description),
-        "description_length": len(description or ""),
-        "photo_count": photo_count,
-        "brand": _optional_str(brand.get("title")) or _optional_str(item.get("brand")),
-        "size": _optional_str(item.get("size_title")) or _optional_str(item.get("size")),
-        "status": _optional_str(item.get("status")),
-        "color": _optional_str(item.get("color")),
-        "category": _optional_str(item.get("category")),
-        "price_amount": _optional_str(price.get("amount")) or _optional_str(item.get("price")),
-        "currency": _optional_str(price.get("currency_code")) or _optional_str(item.get("currency")),
-        "favorite_count": _optional_int(item.get("favourite_count") or item.get("favorite_count")),
-        "seller_present": bool(user),
-        "seller_rating": _optional_str(user.get("feedback_reputation")),
-        "created_at": _optional_str(item.get("created_at_ts")) or _optional_str(item.get("created_at")),
-        "url_present": bool(_optional_str(item.get("url"))),
-    }
+def _validate_vinted_response_url(url: str, *, expected_path: str):
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Vinted response URL has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"www.vinted.es", "vinted.es"}
+        or parsed.username
+        or parsed.password
+        or port is not None
+        or parsed.path.rstrip("/") != expected_path.rstrip("/")
+    ):
+        raise ValueError("Vinted response URL left the expected HTTPS endpoint")
+    return parsed
+
+
+def _is_vinted_cookie_domain(domain: Any) -> bool:
+    normalized = str(domain or "").lstrip(".").lower()
+    return normalized in {"vinted.es", "www.vinted.es"}
+
+
+def _validate_item_detail_url(item_url: str, *, expected_item_id: str | None = None):
+    parsed = urlparse(item_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"www.vinted.es", "vinted.es"}
+        or parsed.username
+        or parsed.password
+        or parsed.port is not None
+        or not VINTED_ITEM_PATH_PATTERN.fullmatch(parsed.path)
+    ):
+        raise ValueError("Item detail URL must be an HTTPS Vinted ES item URL")
+    observed_item_id = VINTED_ITEM_PATH_PATTERN.fullmatch(parsed.path).group(1)
+    if observed_item_id is None or (expected_item_id is not None and observed_item_id != expected_item_id):
+        raise ValueError("Item detail URL must reference the requested Vinted item")
+    return parsed
 
 
 def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> CatalogItemDetail:
-    product_data = extract_product_json_ld(html)
-    if product_data and not _json_ld_matches_item(product_data, candidate.vinted_item_id):
-        product_data = {}
+    product_data = extract_product_json_ld(html, item_id=candidate.vinted_item_id)
     flight_records = parse_next_flight_records(decode_next_flight_payload(html))
     flight = _extract_item_flight_parts(flight_records, candidate.vinted_item_id)
+    if product_data and not _json_ld_identity_urls(product_data) and not flight["matched"]:
+        product_data = {}
     if not product_data and not flight["matched"]:
         raise ValueError("No public item detail data found in item document")
 
@@ -2713,6 +2198,7 @@ def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> Catalo
     item_status = _plugin_data(plugins, "item_status")
     summary = _plugin_data(plugins, "summary")
     attributes = _attribute_values(_plugin_data(plugins, "attributes"))
+    summary_attributes = _summary_attributes(summary)
     description = _plugin_data(plugins, "description")
     make_offer = _plugin_data(plugins, "make_offer")
     ask_seller = _plugin_data(plugins, "ask_seller")
@@ -2746,17 +2232,20 @@ def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> Catalo
     choose(
         "brand",
         ("flight.attributes", "brand" in attributes, attributes.get("brand")),
+        ("flight.summary", "brand" in summary_attributes, summary_attributes.get("brand")),
         ("json_ld", "name" in product_brand, _optional_str(product_brand.get("name"))),
         ("catalog", candidate.brand is not None, candidate.brand),
     )
     choose(
         "size",
         ("flight.attributes", "size" in attributes, attributes.get("size")),
+        ("flight.summary", "size" in summary_attributes, summary_attributes.get("size")),
         ("catalog", candidate.size is not None, candidate.size),
     )
     choose(
         "status",
         ("flight.attributes", "status" in attributes, attributes.get("status")),
+        ("flight.summary", "status" in summary_attributes, summary_attributes.get("status")),
         ("catalog", candidate.status is not None, candidate.status),
     )
     choose(
@@ -2791,8 +2280,16 @@ def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> Catalo
         ("json_ld", *json_ld_price),
         ("catalog", *catalog_price),
     )
-    choose("price_amount", *((source, present, amount) for source, present, amount, _ in price_options))
-    choose("currency", *((source, present and currency is not None, currency) for source, present, _, currency in price_options))
+    for source, present, amount, currency in price_options:
+        if present:
+            observed_fields.update({"price_amount", "currency"})
+        if not present or amount is None or not currency:
+            continue
+        values["price_amount"] = amount
+        values["currency"] = currency
+        field_sources["price_amount"] = source
+        field_sources["currency"] = source
+        break
 
     photo_candidates = (
         ("flight.rich_item", "photos" in rich_item, _resolve_flight_value(rich_item.get("photos"), flight_records)),
@@ -2860,6 +2357,7 @@ def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> Catalo
         ask_seller=ask_seller,
         shipping_details=flight["shipping_details"],
         shipping_details_observed=flight["shipping_details_observed"],
+        shipping_amount=shipping_amount,
         offers=offers,
     )
     if availability_flags:
@@ -2952,35 +2450,44 @@ def _extract_item_flight_parts(records: Mapping[str, Any], item_id: str) -> dict
 
         plugin_value = _resolve_flight_value(props.get("plugins"), records)
         if _same_item_id(props.get("itemId"), item_id) and isinstance(plugin_value, list):
-            plugins = plugin_value
+            plugins = [
+                plugin
+                for plugin in plugin_value
+                if not isinstance(plugin, Mapping)
+                or _value_is_unscoped_or_matches_item(
+                    _resolve_flight_value(plugin.get("data"), records),
+                    item_id,
+                )
+            ]
             sections.add("plugins")
             matched = True
 
-        if not _contains_item_id(record, item_id):
-            continue
-        for node in _walk_mappings(props):
-            if "shippingDetails" not in node:
-                continue
+        scoped_shipping = _find_item_scoped_field(props, "shippingDetails", item_id, records)
+        if scoped_shipping is not _MISSING:
             shipping_details_observed = True
-            shipping_details = _resolve_flight_value(node.get("shippingDetails"), records)
-            pricing_node = _find_mapping_with_key(node, "pricingServices")
-            if pricing_node is not None:
-                resolved_pricing = _resolve_flight_value(pricing_node.get("pricingServices"), records)
-                if isinstance(resolved_pricing, Mapping):
-                    pricing_services = resolved_pricing
-                    sections.add("pricing")
+            shipping_details = scoped_shipping
             sections.add("shipping_details")
             matched = True
-            break
+
+        scoped_pricing = _find_item_scoped_field(props, "pricingServices", item_id, records)
+        if isinstance(scoped_pricing, Mapping):
+            pricing_services = scoped_pricing
+            sections.add("pricing")
+            matched = True
 
     plugin_map: dict[str, Mapping[str, Any]] = {}
+    plugin_scope_rank: dict[str, int] = {}
     for plugin in plugins:
         if not isinstance(plugin, Mapping):
             continue
         plugin_type = _optional_str(plugin.get("type"))
         data = _resolve_flight_value(plugin.get("data"), records)
         if plugin_type and isinstance(data, Mapping):
-            plugin_map.setdefault(plugin_type, data)
+            identities = _item_identity_values(data)
+            scope_rank = 1 if identities == {item_id} else 0
+            if scope_rank > plugin_scope_rank.get(plugin_type, -1):
+                plugin_map[plugin_type] = data
+                plugin_scope_rank[plugin_type] = scope_rank
 
     return {
         "matched": matched,
@@ -2991,6 +2498,56 @@ def _extract_item_flight_parts(records: Mapping[str, Any], item_id: str) -> dict
         "pricing_services": pricing_services,
         "sections": sorted(sections),
     }
+
+
+_MISSING = object()
+
+
+def _find_item_scoped_field(
+    value: Any,
+    field_name: str,
+    item_id: str,
+    records: Mapping[str, Any],
+) -> Any:
+    candidates: list[tuple[int, int, Any]] = []
+    for depth, node in _walk_mappings_with_depth(value):
+        if field_name not in node:
+            continue
+        item_ids = _item_identity_values(node)
+        if item_ids != {item_id}:
+            continue
+        resolved = _resolve_flight_value(node.get(field_name), records)
+        candidates.append((_mapping_size(node), -depth, resolved))
+    if not candidates:
+        return _MISSING
+    candidates.sort(key=lambda entry: (entry[0], entry[1]))
+    return candidates[0][2]
+
+
+def _value_is_unscoped_or_matches_item(value: Any, item_id: str) -> bool:
+    item_ids = _item_identity_values(value)
+    return not item_ids or item_ids == {item_id}
+
+
+def _item_identity_values(value: Any) -> set[str]:
+    identities: set[str] = set()
+    for mapping in _walk_mappings(value):
+        for key in ("item_id", "itemId"):
+            if mapping.get(key) is not None:
+                identities.add(str(mapping[key]))
+        if mapping.get("id") is not None and any(
+            marker in mapping for marker in ("title", "photos", "price", "can_buy", "instant_buy")
+        ):
+            identities.add(str(mapping["id"]))
+    return identities
+
+
+def _mapping_size(value: Any) -> int:
+    if isinstance(value, Mapping):
+        return 1 + sum(_mapping_size(child) for child in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_mapping_size(child) for child in value)
+    return 1
 
 
 def _react_props(record: Any) -> Mapping[str, Any]:
@@ -3031,6 +2588,16 @@ def _walk_mappings(value: Any):
             yield from _walk_mappings(child)
 
 
+def _walk_mappings_with_depth(value: Any, depth: int = 0):
+    if isinstance(value, Mapping):
+        yield depth, value
+        for child in value.values():
+            yield from _walk_mappings_with_depth(child, depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_mappings_with_depth(child, depth + 1)
+
+
 def _find_mapping_with_key(value: Any, key: str) -> Mapping[str, Any] | None:
     return next((mapping for mapping in _walk_mappings(value) if key in mapping), None)
 
@@ -3049,10 +2616,25 @@ def _same_item_id(value: Any, item_id: str) -> bool:
 
 
 def _json_ld_matches_item(product_data: Mapping[str, Any], item_id: str) -> bool:
+    identity_urls = _json_ld_identity_urls(product_data)
+    if not identity_urls:
+        return False
+    observed_ids = [_strict_vinted_item_id(url) for url in identity_urls]
+    return all(observed_id == item_id for observed_id in observed_ids)
+
+
+def _json_ld_identity_urls(product_data: Mapping[str, Any]) -> list[str]:
     offers = product_data.get("offers") if isinstance(product_data.get("offers"), Mapping) else {}
-    identity_urls = [product_data.get("url"), offers.get("url")]
-    observed_ids = [extract_vinted_item_id(str(url)) for url in identity_urls if url]
-    return not observed_ids or item_id in observed_ids
+    return [str(url) for url in (product_data.get("url"), offers.get("url")) if url]
+
+
+def _strict_vinted_item_id(url: str) -> str | None:
+    try:
+        parsed = _validate_item_detail_url(url)
+    except (TypeError, ValueError):
+        return None
+    match = VINTED_ITEM_PATH_PATTERN.fullmatch(parsed.path)
+    return match.group(1) if match else None
 
 
 def _plugin_data(plugins: Mapping[str, Mapping[str, Any]], plugin_type: str) -> Mapping[str, Any]:
@@ -3079,6 +2661,42 @@ def _summary_title(summary: Mapping[str, Any]) -> str | None:
         if mapping.get("style") == "title" and mapping.get("value") is not None:
             return _optional_str(mapping.get("value"))
     return None
+
+
+def _summary_attributes(summary: Mapping[str, Any]) -> dict[str, str]:
+    for line in summary.get("lines") if isinstance(summary.get("lines"), list) else []:
+        if not isinstance(line, Mapping) or not isinstance(line.get("elements"), list):
+            continue
+        elements = line["elements"]
+        brand_index = next(
+            (
+                index
+                for index, element in enumerate(elements)
+                if isinstance(element, Mapping) and element.get("code") == "summary_brand"
+            ),
+            None,
+        )
+        if brand_index is None:
+            continue
+        brand_element = elements[brand_index]
+        preceding_values = [
+            value
+            for element in elements[:brand_index]
+            if isinstance(element, Mapping)
+            and element.get("type") == "text"
+            and element.get("style") == "body"
+            for value in [_optional_str(element.get("value"))]
+            if value
+        ]
+        values: dict[str, str] = {}
+        brand = _optional_str(brand_element.get("value"))
+        if brand:
+            values["brand"] = brand
+        if len(preceding_values) >= 2:
+            values["size"] = preceding_values[0]
+            values["status"] = preceding_values[1]
+        return values
+    return {}
 
 
 def _money_parts(value: Any) -> tuple[bool, Decimal | None, str | None]:
@@ -3121,12 +2739,19 @@ def _extract_vinted_photo_urls(value: Any) -> list[str]:
 
 def _is_allowed_vinted_photo_url(url: str) -> bool:
     parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    signature = dict(parse_qsl(parsed.query, keep_blank_values=True)).get("s")
     return bool(
         parsed.scheme == "https"
         and not parsed.username
         and not parsed.password
+        and port is None
         and parsed.hostname
         and VINTED_IMAGE_HOST_PATTERN.fullmatch(parsed.hostname)
+        and signature
     )
 
 
@@ -3162,7 +2787,7 @@ def _validated_total_amount(
 
 
 def _currency_matches(value: str | None, expected: str | None) -> bool:
-    return value is None or expected is None or value.upper() == expected.upper()
+    return bool(value and expected and value.upper() == expected.upper())
 
 
 def _derive_public_availability(
@@ -3172,48 +2797,59 @@ def _derive_public_availability(
     ask_seller: Mapping[str, Any],
     shipping_details: Any,
     shipping_details_observed: bool,
+    shipping_amount: Decimal | None,
     offers: Mapping[str, Any],
 ) -> dict[str, Any]:
     flags: dict[str, Any] = {"source": "public_snapshot"}
-    for name in (
-        "can_buy",
-        "instant_buy",
-        "transaction_permitted",
-        "is_closed",
-        "is_hidden",
-        "is_reserved",
-        "is_draft",
-        "is_processing",
-    ):
-        for source in (item_status, ask_seller, rich_item):
-            if name in source:
-                flags[name] = source.get(name)
-                break
-    for source in (ask_seller, rich_item):
-        if "reservation" in source:
-            flags["has_reservation"] = source.get("reservation") is not None
-            break
+    sources = (item_status, ask_seller, rich_item)
+    positive_flags = ("can_buy", "instant_buy", "transaction_permitted")
+    blocking_flags = ("is_closed", "is_hidden", "is_reserved", "is_draft", "is_processing")
+    for name in positive_flags:
+        observed = [source.get(name) for source in sources if name in source]
+        if observed:
+            if any(value is False for value in observed):
+                flags[name] = False
+            elif all(value is True for value in observed):
+                flags[name] = True
+            else:
+                flags[name] = None
+    for name in blocking_flags:
+        observed = [source.get(name) for source in sources if name in source]
+        if observed:
+            if any(value is True for value in observed):
+                flags[name] = True
+            elif all(value is False for value in observed):
+                flags[name] = False
+            else:
+                flags[name] = None
+    reservations = [source.get("reservation") for source in sources if "reservation" in source]
+    if reservations:
+        flags["has_reservation"] = any(_has_active_reservation(reservation) for reservation in reservations)
     if "availability" in offers:
         flags["availability"] = offers.get("availability")
     if shipping_details_observed:
-        flags["shipping_available"] = isinstance(shipping_details, Mapping)
+        flags["shipping_available"] = isinstance(shipping_details, Mapping) and shipping_amount is not None
 
-    if flags.get("is_processing") is True:
-        state = "processing"
-    elif flags.get("is_draft") is True:
-        state = "draft"
-    elif flags.get("is_closed") is True:
-        state = "closed"
-    elif flags.get("is_hidden") is True:
-        state = "hidden"
-    elif flags.get("is_reserved") is True:
-        state = "reserved"
-    elif shipping_details_observed and not flags.get("shipping_available"):
-        state = "shipping_unavailable"
-    elif flags.get("transaction_permitted") is False:
-        state = "not_permitted"
-    elif flags.get("can_buy") is False or flags.get("instant_buy") is False:
-        state = "not_buyable"
+    availability = str(flags.get("availability") or "").lower()
+    out_of_stock = availability.endswith("outofstock") or availability.endswith("soldout")
+    schema_reserved = availability.endswith("reserved")
+    blockers = [
+        ("processing", flags.get("is_processing") is True),
+        ("draft", flags.get("is_draft") is True),
+        ("closed", flags.get("is_closed") is True),
+        ("hidden", flags.get("is_hidden") is True),
+        (
+            "reserved",
+            flags.get("is_reserved") is True or flags.get("has_reservation") is True or schema_reserved,
+        ),
+        ("out_of_stock", out_of_stock),
+        ("shipping_unavailable", shipping_details_observed and not flags.get("shipping_available")),
+        ("not_permitted", flags.get("transaction_permitted") is False),
+        ("not_buyable", flags.get("can_buy") is False or flags.get("instant_buy") is False),
+    ]
+    reason_codes = [reason for reason, blocked in blockers if blocked]
+    if reason_codes:
+        state = "not_buyable" if reason_codes[0] == "out_of_stock" else reason_codes[0]
     elif (
         flags.get("can_buy") is True
         and flags.get("instant_buy") is True
@@ -3221,19 +2857,32 @@ def _derive_public_availability(
         and flags.get("is_closed") is False
         and flags.get("is_hidden") is False
         and flags.get("is_reserved") is False
+        and flags.get("has_reservation") is False
         and flags.get("is_draft") is False
         and flags.get("is_processing") is False
         and flags.get("shipping_available") is True
+        and not out_of_stock
     ):
         state = "buyable"
     else:
         state = "unknown"
     flags["state"] = state
-    flags["reason_codes"] = [] if state == "buyable" else [state]
+    flags["reason_codes"] = reason_codes if reason_codes else ([] if state == "buyable" else [state])
     return flags
 
 
-def extract_product_json_ld(html: str) -> dict[str, Any]:
+def _has_active_reservation(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, Mapping):
+        return bool(value)
+    return bool(value)
+
+
+def extract_product_json_ld(html: str, *, item_id: str | None = None) -> dict[str, Any]:
+    products: list[dict[str, Any]] = []
     for match in JSON_LD_PATTERN.findall(html):
         try:
             parsed = json.loads(match.strip())
@@ -3241,8 +2890,21 @@ def extract_product_json_ld(html: str) -> dict[str, Any]:
             continue
         candidates = parsed if isinstance(parsed, list) else [parsed]
         for candidate in candidates:
-            if isinstance(candidate, dict) and candidate.get("@type") == "Product":
-                return candidate
+            if not isinstance(candidate, dict):
+                continue
+            graph = candidate.get("@graph")
+            graph_candidates = graph if isinstance(graph, list) else []
+            for product in [candidate, *graph_candidates]:
+                if isinstance(product, dict) and product.get("@type") == "Product":
+                    products.append(product)
+    if item_id is None:
+        return products[0] if products else {}
+    for product in products:
+        if _json_ld_matches_item(product, item_id):
+            return product
+    unscoped_products = [product for product in products if not _json_ld_identity_urls(product)]
+    if len(unscoped_products) == 1:
+        return unscoped_products[0]
     return {}
 
 
@@ -3408,9 +3070,10 @@ def _optional_decimal(value: Any) -> Decimal | None:
     if value is None:
         return None
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+    return parsed if parsed.is_finite() and parsed >= 0 else None
 
 
 def _optional_int(value: Any) -> int | None:

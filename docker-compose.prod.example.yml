@@ -7,12 +7,33 @@ services:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vinted} -d ${POSTGRES_DB:-vinted_monitor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly yes --appendfsync always
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   api:
     build:
       context: ./backend
     env_file:
       - .env
+    environment:
+      APP_ENV: production
+    command: sh -c "alembic upgrade head && uvicorn vinted_monitor.api.main:app --host 0.0.0.0 --port 8000"
     networks:
       - internal
       - traefik
@@ -23,7 +44,15 @@ services:
       - "traefik.http.routers.scrapyvinterino-api.tls=true"
       - "traefik.http.services.scrapyvinterino-api.loadbalancer.server.port=8000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   worker:
     build:
@@ -31,10 +60,17 @@ services:
     command: python -m vinted_monitor.worker.main
     env_file:
       - .env
+    environment:
+      APP_ENV: production
     networks:
       - internal
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
   frontend:
     build:
@@ -48,10 +84,12 @@ services:
       - "traefik.http.routers.scrapyvinterino.tls=true"
       - "traefik.http.services.scrapyvinterino.loadbalancer.server.port=80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   postgres-data:
+  redis-data:
 
 networks:
   internal:

@@ -1,5 +1,7 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,15 +25,44 @@ from vinted_monitor.services.scheduler import (
     update_scheduler_enabled,
     validate_proxy_settings,
 )
+from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.worker.scheduler import SchedulerRunner
 
 
 class FakeRedis:
     def __init__(self) -> None:
         self.values: list[str] = []
+        self.pending: dict[str, str] = {}
 
-    def lpush(self, _key: str, payload: str) -> None:
-        self.values.insert(0, payload)
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        keys = keys_and_args[:numkeys]
+        args = keys_and_args[numkeys:]
+        if "EXISTS" in script and "LPUSH" in script:
+            if keys[0] in self.pending:
+                return 0
+            self.pending[keys[0]] = args[0]
+            self.pending[keys[2]] = args[2]
+            self.values.insert(0, args[1])
+            return 1
+        if "LREM" in script:
+            try:
+                self.values.remove(args[0])
+            except ValueError:
+                return 0
+            if self.pending.get(keys[1]) == args[1]:
+                self.pending.pop(keys[1], None)
+            self.pending.pop(keys[2], None)
+            return 1
+        raise AssertionError("unsupported Redis script")
+
+    def lrange(self, key: str, start: int, end: int) -> list[str]:
+        if key.endswith(":processing"):
+            return []
+        stop = len(self.values) if end == -1 else end + 1
+        return self.values[start:stop]
+
+    def get(self, key: str) -> str | None:
+        return self.pending.get(key)
 
 
 @pytest.fixture(autouse=True)
@@ -314,10 +345,15 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
         assert payload["trigger"] == "scheduler"
         assert payload["proxy_profile_id"] is None
         assert "proxy_url_template" not in payload
+
+        coalesced_ids = runner.run_once(now=now + timedelta(minutes=5))
+
+        assert coalesced_ids == []
+        assert len(fake_redis.values) == 1
         with SessionLocal() as db:
             updated = db.get(SearchSource, source_id)
             assert updated is not None
-            assert updated.next_run_at == datetime(2026, 7, 3, 8, 5, tzinfo=UTC)
+            assert updated.next_run_at == datetime(2026, 7, 3, 8, 10, tzinfo=UTC)
     finally:
         with SessionLocal() as db:
             for active_source_id in previously_active_source_ids:
@@ -383,6 +419,11 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
 
         assert submitted_ids == [source_ids[0]]
         assert len(fake_redis.values) == 1
+
+        submitted_while_first_is_pending = runner.run_once(now=now + timedelta(minutes=1))
+
+        assert submitted_while_first_is_pending == []
+        assert len(fake_redis.values) == 1
     finally:
         with SessionLocal() as db:
             for active_source_id in previously_active_source_ids:
@@ -398,6 +439,171 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
                 source = db.get(SearchSource, source_id)
                 if source is not None:
                     db.delete(source)
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+            db.commit()
+
+
+def test_archive_cancels_scheduler_task_that_is_still_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_redis = FakeRedis()
+    cache = type("Cache", (), {"client": fake_redis})()
+    settings = Settings(
+        scheduler_enabled=True,
+        vinted_direct_catalog_enabled=True,
+        worker_task_queue_key="pytest:archive-scheduler-queue",
+    )
+    monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: cache)
+    monkeypatch.setattr("vinted_monitor.services.search_sources.get_seen_cache", lambda value: cache)
+    monkeypatch.setattr("vinted_monitor.services.search_sources.get_settings", lambda: settings)
+    now = datetime(2026, 7, 3, 9, 0, tzinfo=UTC)
+
+    with SessionLocal() as db:
+        previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
+        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        if previously_active_source_ids:
+            db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
+                {SearchSource.is_active: False},
+                synchronize_session=False,
+            )
+        if active_proxy_ids:
+            db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                {ProxyProfile.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_enabled(db, True, settings)
+        source = SearchSource(
+            name="pytest archive queued source",
+            url="https://www.vinted.es/catalog?search_text=archive-queued",
+            normalized_query={"search_text": ["archive-queued"]},
+            is_active=True,
+            monitor_mode="window",
+            scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
+            next_run_at=now,
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+        source_id = source.id
+
+    try:
+        assert SchedulerRunner(settings).run_once(now=now) == [source_id]
+        assert len(fake_redis.values) == 1
+
+        with SessionLocal() as db:
+            archive_source(db, source_id)
+
+        assert fake_redis.values == []
+        with SessionLocal() as db:
+            archived = db.get(SearchSource, source_id)
+            assert archived is not None
+            assert archived.archived_at is not None
+            assert archived.is_active is False
+            assert archived.next_run_at is None
+    finally:
+        with SessionLocal() as db:
+            for active_source_id in previously_active_source_ids:
+                active_source = db.get(SearchSource, active_source_id)
+                if active_source is not None:
+                    active_source.is_active = True
+            if active_proxy_ids:
+                db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                    {ProxyProfile.is_active: True},
+                    synchronize_session=False,
+                )
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+            db.commit()
+
+
+def test_scheduler_revalidates_source_after_archive_commits_during_initial_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedis()
+    cache = type("Cache", (), {"client": fake_redis})()
+    settings = Settings(
+        scheduler_enabled=True,
+        vinted_direct_catalog_enabled=True,
+        worker_task_queue_key="pytest:archive-snapshot-queue",
+    )
+    snapshot_taken = Event()
+    resume_scheduler = Event()
+
+    def pause_after_initial_snapshot(*args, **kwargs) -> list:
+        snapshot_taken.set()
+        assert resume_scheduler.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: cache)
+    monkeypatch.setattr("vinted_monitor.worker.scheduler.pending_tasks", pause_after_initial_snapshot)
+    monkeypatch.setattr("vinted_monitor.services.search_sources.get_seen_cache", lambda value: cache)
+    monkeypatch.setattr("vinted_monitor.services.search_sources.get_settings", lambda: settings)
+    now = datetime(2026, 7, 3, 9, 30, tzinfo=UTC)
+
+    with SessionLocal() as db:
+        previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
+        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        if previously_active_source_ids:
+            db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
+                {SearchSource.is_active: False},
+                synchronize_session=False,
+            )
+        if active_proxy_ids:
+            db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                {ProxyProfile.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_enabled(db, True, settings)
+        source = SearchSource(
+            name="pytest archive snapshot source",
+            url="https://www.vinted.es/catalog?search_text=archive-snapshot",
+            normalized_query={"search_text": ["archive-snapshot"]},
+            is_active=True,
+            monitor_mode="window",
+            scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
+            next_run_at=now,
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+        source_id = source.id
+
+    try:
+        runner = SchedulerRunner(settings)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            scheduler_future = executor.submit(runner.run_once, now)
+            assert snapshot_taken.wait(timeout=5)
+            with SessionLocal() as db:
+                archive_source(db, source_id)
+            resume_scheduler.set()
+            assert scheduler_future.result(timeout=5) == []
+
+        assert fake_redis.values == []
+        with SessionLocal() as db:
+            archived = db.get(SearchSource, source_id)
+            assert archived is not None
+            assert archived.archived_at is not None
+            assert archived.is_active is False
+            assert archived.next_run_at is None
+    finally:
+        resume_scheduler.set()
+        with SessionLocal() as db:
+            for active_source_id in previously_active_source_ids:
+                active_source = db.get(SearchSource, active_source_id)
+                if active_source is not None:
+                    active_source.is_active = True
+            if active_proxy_ids:
+                db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                    {ProxyProfile.is_active: True},
+                    synchronize_session=False,
+                )
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
             setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
             if setting is not None:
                 db.delete(setting)

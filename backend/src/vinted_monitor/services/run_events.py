@@ -8,7 +8,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.core.redaction import SENSITIVE_HEADER_TOKENS, redact_sensitive_text
+from vinted_monitor.core.redaction import (
+    SENSITIVE_HEADER_TOKENS,
+    redact_sensitive_text,
+    sensitive_value_requires_redaction,
+)
 from vinted_monitor.db.models import RunEvent
 
 MAX_MESSAGE_LENGTH = 1200
@@ -103,7 +107,7 @@ def _redacted_details(details: dict) -> dict:
 def _redact_value(value: Any, *, key: str | None = None) -> Any:
     if value is None or isinstance(value, bool | int | float):
         return value
-    if key is not None and _is_sensitive_key(key) and not _is_safe_marker(value):
+    if key is not None and sensitive_value_requires_redaction(key, value):
         return "<redacted>"
     if isinstance(value, str):
         return redact_sensitive_text(value)[:MAX_MESSAGE_LENGTH]
@@ -114,26 +118,9 @@ def _redact_value(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
-def _is_safe_marker(value: Any) -> bool:
-    return isinstance(value, dict) and {"kind", "name", "masked", "length", "fingerprint"}.issubset(value)
-
-
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
-    safe_keys = {
-        "masked",
-        "fingerprint",
-        "session_markers",
-        "cookies_before",
-        "cookies_after",
-        "cookies_before_close",
-        "request_headers",
-        "response_headers",
-        "http_session",
-        "proxy_session",
-        "proxy_sticky_session",
-    }
-    if lowered in safe_keys:
+    if lowered in {"masked", "fingerprint"}:
         return False
     return any(token in lowered for token in SENSITIVE_HEADER_TOKENS)
 

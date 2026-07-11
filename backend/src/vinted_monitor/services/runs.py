@@ -23,6 +23,7 @@ from vinted_monitor.providers.vinted_catalog import (
     VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
+    build_item_detail_navigation_url,
     extract_vinted_item_id,
     parse_catalog_api_payload,
 )
@@ -48,7 +49,9 @@ from vinted_monitor.services.seen_cache import (
     DetailRetryRecord,
     SeenCache,
     SeenCacheUnavailableError,
+    deserialize_candidate_state_update,
     get_seen_cache,
+    serialize_candidate_state_update,
 )
 from vinted_monitor.services.vinted_sessions import (
     INCOMPLETE,
@@ -65,6 +68,7 @@ from vinted_monitor.services.vinted_sessions import (
 )
 
 RUNNING = "running"
+FINALIZING = "finalizing"
 SUCCESS = "success"
 FAILED = "failed"
 MANUAL_TRIGGER = "manual"
@@ -80,6 +84,7 @@ SESSION_ITEM_DETAIL_ERROR = "detail_error"
 DEFAULT_DETAIL_REQUIRED_FIELDS = frozenset(
     {"title", "description", "brand", "size", "status", "price_amount", "currency", "photos"}
 )
+STALE_RUN_AFTER = timedelta(minutes=30)
 
 
 @dataclass(frozen=True)
@@ -199,7 +204,7 @@ def execute_monitor_baseline(
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if source.is_active:
         raise RunAlreadyActiveError("Deten la sesion antes de recalibrar el listado inicial")
-    if _active_source_run_exists(db, source_id=source.id):
+    if _active_source_run_exists(db, source_id=source.id, include_finalizing=True):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
     catalog_filters = _validated_catalog_filter_compatibility(source)
 
@@ -459,7 +464,7 @@ def execute_monitor_session_prepare(
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if source.is_active:
         raise RunAlreadyActiveError("Deten la sesion antes de preparar la sesion Vinted")
-    if _active_source_run_exists(db, source_id=source.id):
+    if _active_source_run_exists(db, source_id=source.id, include_finalizing=True):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
     catalog_filters = _validated_catalog_filter_compatibility(source)
 
@@ -649,11 +654,17 @@ def execute_monitor_item_detail_probe(
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if source.is_active:
         raise RunAlreadyActiveError("Deten la sesion antes de probar el detalle de un item")
-    if _active_source_run_exists(db, source_id=source.id):
+    if _active_source_run_exists(db, source_id=source.id, include_finalizing=True):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
-    item_id = extract_vinted_item_id(item_ref)
+    normalized_item_ref = str(item_ref or "").strip()
+    item_id = extract_vinted_item_id(normalized_item_ref)
     if item_id is None:
         raise SearchSourceConfigError("Introduce un ID numerico de Vinted o una URL de item valida")
+    if not normalized_item_ref.isdigit():
+        try:
+            build_item_detail_navigation_url(normalized_item_ref)
+        except ValueError as exc:
+            raise SearchSourceConfigError("Introduce un ID numerico de Vinted o una URL de item valida") from exc
     catalog_filters = _validated_catalog_filter_compatibility(source)
 
     settings = get_settings()
@@ -680,7 +691,6 @@ def execute_monitor_item_detail_probe(
         runtime_metadata={
             **_run_runtime_metadata(source, selected_egress, runtime_config),
             "detail_probe_run": True,
-            "item_ref": item_ref,
             "item_id": item_id,
             "target_country_code": settings.vinted_target_country_code.strip().upper(),
             "proxy_country_code": proxy_profile.country_code,
@@ -782,7 +792,10 @@ def execute_monitor_item_detail_probe(
             run=run,
         )
         _merge_run_metadata(run, {**provider_metadata, "detail_probe_run": True, "item_id": item_id})
-        result = provider.probe_item_detail_document(item_ref, referer_url=source.url)
+        result = provider.probe_item_detail_document(
+            f"{str(settings.vinted_base_url).rstrip('/')}/items/{item_id}",
+            referer_url=source.url,
+        )
         vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
         if isinstance(vinted_session_id, int):
             provider_prepared_session = getattr(provider, "prepared_session", None)
@@ -901,6 +914,7 @@ def execute_monitor_run(
     run = Run(
         source_id=source.id,
         monitor_session_id=active_session.id if active_session is not None else None,
+        task_id=_runtime_task_id(runtime_metadata_extra),
         status=RUNNING,
         trigger=trigger,
         items_found=0,
@@ -1046,6 +1060,7 @@ def execute_monitor_run(
         details={"policy_hash": policy_hash},
     )
     try:
+        _reconcile_finalizing_runs(db, source, cache, exclude_run_id=run.id)
         if not cache.has_baseline(source.id, policy_hash):
             record_run_event(
                 db,
@@ -1199,10 +1214,10 @@ def execute_monitor_run(
                     "attempt_counts": [retry.attempt_count for retry in due_retries[:10]],
                 },
             )
-        catalog_claimed_ids = cache.claim_unseen(
+        catalog_claimed_ids = cache.claim_unseen_with_recovery(
             source.id,
             policy_hash,
-            [candidate.vinted_item_id for candidate in unique_candidates],
+            unique_candidates,
         )
         monitor_new_candidates = [
             candidate for candidate in unique_candidates if candidate.vinted_item_id in catalog_claimed_ids
@@ -1212,6 +1227,21 @@ def execute_monitor_run(
             for retry in due_retries
         ] + [DetailWorkItem(candidate=candidate) for candidate in monitor_new_candidates]
         claimed_ids = {work_item.candidate.vinted_item_id for work_item in claimed_work_items}
+        if claimed_work_items:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="detail_candidate_recovery_staged",
+                proxy_profile_id=proxy_profile_id,
+                details={
+                    "candidate_count": len(claimed_work_items),
+                    "sample_vinted_item_ids": [
+                        work_item.candidate.vinted_item_id for work_item in claimed_work_items[:10]
+                    ],
+                    "policy_hash": policy_hash,
+                },
+            )
         existing_opportunity_ids = _existing_opportunity_item_ids(
             db,
             source,
@@ -1237,7 +1267,11 @@ def execute_monitor_run(
                     "policy_hash": policy_hash,
                 },
             )
-            cache.mark_seen(source.id, policy_hash, already_claimed_existing_ids)
+            cache.finalize_candidate_states(
+                source.id,
+                policy_hash,
+                DetailCandidateStateUpdate(terminal_ids=tuple(already_claimed_existing_ids)),
+            )
             claimed_ids.difference_update(already_claimed_existing_ids)
             catalog_claimed_ids.difference_update(already_claimed_existing_ids)
             monitor_new_candidates = [
@@ -1294,8 +1328,12 @@ def execute_monitor_run(
             max_detail_candidates=max_detail_candidates,
         )
         _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
-        run.status = SUCCESS
-        run.finished_at = datetime.now(UTC)
+        candidate_state_update = DetailCandidateStateUpdate(
+            terminal_ids=monitor_result.terminal_ids,
+            retries=monitor_result.retries,
+        )
+        run.status = FINALIZING
+        run.finished_at = None
         run.items_found = len(result.items)
         run.items_new = len(monitor_new_candidates)
         run.items_filter_passed = monitor_result.passed
@@ -1303,47 +1341,32 @@ def execute_monitor_run(
         run.items_filter_pending = monitor_result.pending
         run.opportunities_created = monitor_result.opportunities_created
         run.error_message = None
-        source.last_run_at = run.finished_at
-        mark_proxy_run_success(db, proxy_profile_id)
-        if close_session_on_finish and run.monitor_session_id is not None:
-            stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="completed")
-            record_run_event(
-                db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="monitor_session_closed",
-                proxy_profile_id=proxy_profile_id,
-                message="Monitor session closed after run completion",
-                details={"monitor_session_id": run.monitor_session_id, "reason": "completed"},
-            )
-        elif not close_session_on_finish:
-            _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
-        _clear_manual_monitor_runtime(source)
+        _merge_run_metadata(
+            run,
+            {
+                "candidate_state_transition_status": "pending",
+                "candidate_state_transition_policy_hash": policy_hash,
+                "candidate_state_transition": serialize_candidate_state_update(candidate_state_update),
+                "candidate_state_close_session_on_finish": close_session_on_finish,
+            },
+        )
         record_run_event(
             db,
             run_id=run.id,
             source_id=source.id,
-            phase="run_succeeded",
+            phase="redis_candidate_state_pending",
             proxy_profile_id=proxy_profile_id,
-            user_agent=None,
-            auth_mode="public_anonymous",
             details={
-                "items_found": run.items_found,
-                "items_new": run.items_new,
-                "items_filter_passed": run.items_filter_passed,
-                "items_discarded_by_filters": run.items_discarded_by_filters,
-                "items_filter_pending": run.items_filter_pending,
-                "opportunities_created": run.opportunities_created,
+                "marked_seen_count": len(monitor_result.terminal_ids),
+                "retry_scheduled_count": len(monitor_result.retries),
+                "policy_hash": policy_hash,
             },
         )
         db.commit()
         cache.finalize_candidate_states(
             source.id,
             policy_hash,
-            DetailCandidateStateUpdate(
-                terminal_ids=monitor_result.terminal_ids,
-                retries=monitor_result.retries,
-            ),
+            candidate_state_update,
         )
         record_run_event(
             db,
@@ -1361,6 +1384,13 @@ def execute_monitor_run(
                 "policy_hash": policy_hash,
             },
         )
+        _complete_finalizing_run(
+            db,
+            run,
+            source,
+            close_session_on_finish=close_session_on_finish,
+            reconciled=False,
+        )
         db.commit()
         db.refresh(run)
         _close_owned_provider(run_provider, owned_provider=owned_provider)
@@ -1369,6 +1399,34 @@ def execute_monitor_run(
         db.rollback()
         run = db.get(Run, run.id)
         source = db.get(SearchSource, source.id) or source
+        if run is not None and run.status == FINALIZING:
+            try:
+                _apply_pending_candidate_state_transition(db, run, source, cache, reconciled=True)
+                db.commit()
+                db.refresh(run)
+                _close_owned_provider(run_provider, owned_provider=owned_provider)
+                return run
+            except SeenCacheUnavailableError as retry_exc:
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="redis_candidate_state_pending_error",
+                    level="error",
+                    proxy_profile_id=proxy_profile_id,
+                    message=str(retry_exc),
+                    details={"recovery_pending": True, "policy_hash": policy_hash},
+                )
+                source.is_active = False
+                source.monitor_mode = "manual"
+                source.monitor_started_at = None
+                source.monitor_until = None
+                source.next_run_at = None
+                stop_active_monitor_session(db, source.id, reason="redis_unavailable")
+                db.commit()
+                db.refresh(run)
+                _close_owned_provider(run_provider, owned_provider=owned_provider)
+                return run
         source.is_active = False
         source.monitor_mode = "manual"
         source.monitor_started_at = None
@@ -1401,23 +1459,31 @@ def execute_monitor_run(
                 claimed_work_items,
                 failing_item_id=getattr(exc, "detail_candidate_id", None),
             )
-            cache.finalize_candidate_states(
-                source.id,
-                policy_hash,
-                aborted_states,
-            )
+            preservation_error: SeenCacheUnavailableError | None = None
+            for _ in range(2):
+                try:
+                    cache.finalize_candidate_states(source.id, policy_hash, aborted_states)
+                    preservation_error = None
+                    break
+                except SeenCacheUnavailableError as retry_exc:
+                    preservation_error = retry_exc
             record_run_event(
                 db,
                 run_id=run.id,
                 source_id=source.id,
-                phase="detail_retry_batch_preserved",
-                level="warning",
+                phase="detail_retry_batch_preserved" if preservation_error is None else "detail_retry_preservation_pending",
+                level="warning" if preservation_error is None else "error",
                 proxy_profile_id=proxy_profile_id,
-                message="Claimed candidates preserved after anti-bot challenge rolled back the run",
+                message=(
+                    "Claimed candidates preserved after anti-bot challenge rolled back the run"
+                    if preservation_error is None
+                    else "Staged candidate recovery remains pending after anti-bot challenge"
+                ),
                 details={
                     "challenge_kind": challenge_kind,
                     "retry_scheduled_count": len(aborted_states.retries),
                     "retry_exhausted_count": len(aborted_states.terminal_ids),
+                    "recovery_pending": preservation_error is not None,
                 },
             )
             db.commit()
@@ -1427,8 +1493,25 @@ def execute_monitor_run(
     except Exception as exc:
         db.rollback()
         run = db.get(Run, run.id)
+        if run is not None and run.status == FINALIZING:
+            try:
+                _apply_pending_candidate_state_transition(db, run, source, cache, reconciled=True)
+                db.commit()
+                db.refresh(run)
+            except Exception:
+                db.rollback()
+                run = db.get(Run, run.id)
+            _close_owned_provider(run_provider, owned_provider=owned_provider)
+            if run is None:
+                raise
+            return run
         if claimed_ids:
-            cache.release_processing(source.id, policy_hash, list(claimed_ids))
+            for _ in range(2):
+                try:
+                    cache.release_processing(source.id, policy_hash, list(claimed_ids))
+                    break
+                except SeenCacheUnavailableError:
+                    continue
         if run is None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
@@ -1697,7 +1780,11 @@ def _close_owned_provider(provider: ManualRunProvider, *, owned_provider: bool) 
         return
     close = getattr(provider, "close", None)
     if callable(close):
-        close()
+        try:
+            close()
+        except Exception:
+            # Cleanup must never replace the run/challenge exception that triggered it.
+            pass
 
 
 def _persist_provider_session_refresh(
@@ -1762,13 +1849,55 @@ def _persist_provider_session_refresh(
     )
 
 
-def _active_source_run_exists(db: Session, *, source_id: int) -> bool:
+def _active_source_run_exists(
+    db: Session,
+    *,
+    source_id: int,
+    include_finalizing: bool = False,
+) -> bool:
+    stale_cutoff = datetime.now(UTC) - STALE_RUN_AFTER
+    stale_runs = list(
+        db.scalars(
+            select(Run).where(
+                Run.source_id == source_id,
+                Run.status == RUNNING,
+                Run.finished_at.is_(None),
+                Run.started_at < stale_cutoff,
+            )
+        )
+    )
+    for stale_run in stale_runs:
+        message = "Stale running run interrupted during worker crash recovery"
+        stale_run.status = FAILED
+        stale_run.finished_at = datetime.now(UTC)
+        stale_run.error_message = message
+        record_run_event(
+            db,
+            run_id=stale_run.id,
+            source_id=source_id,
+            phase="stale_run_recovered",
+            level="error",
+            message=message,
+            details={"stale_after_seconds": int(STALE_RUN_AFTER.total_seconds())},
+        )
+        db.add(
+            ErrorLog(
+                run_id=stale_run.id,
+                source_id=source_id,
+                kind="stale_run_recovered",
+                message=message,
+                details={},
+            )
+        )
+    if stale_runs:
+        db.flush()
+    active_statuses = [RUNNING, FINALIZING] if include_finalizing else [RUNNING]
     return (
         db.scalar(
             select(Run.id)
             .where(
                 Run.source_id == source_id,
-                Run.status == RUNNING,
+                Run.status.in_(active_statuses),
                 Run.finished_at.is_(None),
             )
             .limit(1)
@@ -1791,6 +1920,16 @@ def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_confi
         "proxy_cooldown_minutes": runtime_config.proxy_cooldown_minutes,
         "stop_monitor_after_consecutive_failures": runtime_config.stop_monitor_after_consecutive_failures,
     }
+
+
+def _runtime_task_id(runtime_metadata_extra: dict[str, Any] | None) -> str | None:
+    raw_task_id = (runtime_metadata_extra or {}).get("task_id")
+    if raw_task_id is None:
+        return None
+    task_id = str(raw_task_id)
+    if not task_id or len(task_id) > 64:
+        raise ValueError("task_id must contain between 1 and 64 characters")
+    return task_id
 
 
 def _merge_run_metadata(run: Run, metadata: dict[str, Any]) -> None:
@@ -1849,6 +1988,175 @@ def _attach_provider_event_sink(
     provider.event_sink = _build_provider_event_sink(db, run, source, proxy_profile_id)
 
 
+def _reconcile_finalizing_runs(
+    db: Session,
+    source: SearchSource,
+    cache: SeenCache,
+    *,
+    exclude_run_id: int,
+) -> None:
+    pending_runs = db.scalars(
+        select(Run)
+        .where(
+            Run.source_id == source.id,
+            Run.status == FINALIZING,
+            Run.id != exclude_run_id,
+        )
+        .order_by(Run.id.asc())
+    )
+    for pending_run in pending_runs:
+        _apply_pending_candidate_state_transition(db, pending_run, source, cache, reconciled=True)
+        db.commit()
+
+
+def recover_task_run_before_delivery(
+    db: Session,
+    *,
+    source_id: int,
+    task_id: str,
+    seen_cache: SeenCache | None = None,
+) -> Run | None:
+    """Converge a prior delivery of the same task before any new Vinted traffic."""
+    previous_run = db.scalar(
+        select(Run)
+        .where(Run.source_id == source_id, Run.task_id == task_id)
+        .order_by(Run.id.desc())
+        .limit(1)
+    )
+    if previous_run is None:
+        return None
+    if previous_run.status in {SUCCESS, FAILED}:
+        return previous_run
+
+    source = db.get(SearchSource, source_id)
+    if source is None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if previous_run.status == FINALIZING:
+        cache = seen_cache or get_seen_cache()
+        cache.require_available()
+        _apply_pending_candidate_state_transition(db, previous_run, source, cache, reconciled=True)
+        db.commit()
+        db.refresh(previous_run)
+        return previous_run
+    if previous_run.status == RUNNING:
+        message = "Running task delivery interrupted before queue acknowledgement"
+        previous_run.status = FAILED
+        previous_run.finished_at = datetime.now(UTC)
+        previous_run.error_message = message
+        metadata = dict(previous_run.runtime_metadata or {})
+        metadata["failure_kind"] = "worker_task_delivery_interrupted"
+        previous_run.runtime_metadata = metadata
+        record_run_event(
+            db,
+            run_id=previous_run.id,
+            source_id=source_id,
+            phase="worker_task_delivery_recovered",
+            level="error",
+            message=message,
+            details={"task_id": task_id, "recovery_action": "close_orphan_and_redeliver"},
+        )
+        db.add(
+            ErrorLog(
+                run_id=previous_run.id,
+                source_id=source_id,
+                kind="worker_task_delivery_recovered",
+                message=message,
+                details={"task_id": task_id},
+            )
+        )
+        db.commit()
+        db.refresh(previous_run)
+        return previous_run
+    raise ValueError(f"Run {previous_run.id} has unsupported task recovery status {previous_run.status!r}")
+
+
+def _apply_pending_candidate_state_transition(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    cache: SeenCache,
+    *,
+    reconciled: bool,
+) -> None:
+    metadata = dict(run.runtime_metadata or {})
+    policy_hash = metadata.get("candidate_state_transition_policy_hash")
+    payload = metadata.get("candidate_state_transition")
+    if not isinstance(policy_hash, str) or not policy_hash or payload is None:
+        raise ValueError(f"Run {run.id} has no recoverable candidate state transition")
+    update = deserialize_candidate_state_update(payload)
+    cache.finalize_candidate_states(source.id, policy_hash, update)
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="redis_candidate_state_reconciled" if reconciled else "redis_candidate_state_updated",
+        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        details={
+            "marked_seen_count": len(update.terminal_ids),
+            "retry_scheduled_count": len(update.retries),
+            "policy_hash": policy_hash,
+            "reconciled": reconciled,
+        },
+    )
+    _complete_finalizing_run(
+        db,
+        run,
+        source,
+        close_session_on_finish=bool(metadata.get("candidate_state_close_session_on_finish")),
+        reconciled=reconciled,
+    )
+
+
+def _complete_finalizing_run(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    *,
+    close_session_on_finish: bool,
+    reconciled: bool,
+) -> None:
+    run.status = SUCCESS
+    run.finished_at = datetime.now(UTC)
+    run.error_message = None
+    source.last_run_at = run.finished_at
+    mark_proxy_run_success(db, (run.runtime_metadata or {}).get("proxy_profile_id"))
+    if close_session_on_finish and run.monitor_session_id is not None:
+        stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="completed")
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="monitor_session_closed",
+            proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+            message="Monitor session closed after run completion",
+            details={"monitor_session_id": run.monitor_session_id, "reason": "completed"},
+        )
+    elif not close_session_on_finish:
+        _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
+    _clear_manual_monitor_runtime(source)
+    metadata = dict(run.runtime_metadata or {})
+    metadata.pop("candidate_state_transition", None)
+    metadata["candidate_state_transition_status"] = "applied"
+    run.runtime_metadata = metadata
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="run_succeeded",
+        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        auth_mode="public_anonymous",
+        details={
+            "items_found": run.items_found,
+            "items_new": run.items_new,
+            "items_filter_passed": run.items_filter_passed,
+            "items_discarded_by_filters": run.items_discarded_by_filters,
+            "items_filter_pending": run.items_filter_pending,
+            "opportunities_created": run.opportunities_created,
+            "candidate_state_reconciled": reconciled,
+        },
+    )
+
+
 def _record_failed_run(
     db: Session,
     run: Run,
@@ -1860,6 +2168,8 @@ def _record_failed_run(
     force_stop_monitor: bool = False,
 ) -> Run:
     message = redact_sensitive_text(str(exc))
+    failure_kind = kind or exc.__class__.__name__
+    _merge_run_metadata(run, {"failure_kind": failure_kind})
     session_failure = _classify_session_failure(exc, kind=kind)
     record_run_event(
         db,
@@ -1872,7 +2182,7 @@ def _record_failed_run(
         user_agent=None,
         auth_mode="public_anonymous",
         details={
-            "kind": kind or exc.__class__.__name__,
+            "kind": failure_kind,
             "session_end_reason": session_failure["session_end_reason"],
             "recovery_action": session_failure["recovery_action"],
             "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
@@ -1913,7 +2223,7 @@ def _record_failed_run(
         ErrorLog(
             run_id=run.id,
             source_id=source.id,
-            kind=kind or exc.__class__.__name__,
+            kind=failure_kind,
             message=message,
             details={},
         )

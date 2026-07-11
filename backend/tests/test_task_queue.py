@@ -1,8 +1,15 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
-from vinted_monitor.services.task_queue import MonitorTask, TaskQueueError, dequeue_task, enqueue_task
+from vinted_monitor.core.config import Settings
+from vinted_monitor.services.task_queue import (
+    InvalidTaskPayloadError,
+    MonitorTask,
+    enqueue_task,
+    reserve_task,
+)
 
 
 class FakeRedis:
@@ -10,12 +17,26 @@ class FakeRedis:
         self.payload = payload
         self.pushed: list[tuple[str, str]] = []
 
-    def brpop(self, _queue_key: str, timeout: int = 0):
-        assert self.payload is not None
-        return (_queue_key, json.dumps(self.payload))
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        keys = keys_and_args[:numkeys]
+        args = keys_and_args[numkeys:]
+        assert "LPUSH" in script
+        self.pushed.append((keys[1], args[1]))
+        return 1
 
-    def lpush(self, queue_key: str, payload: str) -> None:
-        self.pushed.append((queue_key, payload))
+    def blmove(
+        self,
+        _queue_key: str,
+        _processing_key: str,
+        _timeout: int,
+        *,
+        src: str,
+        dest: str,
+    ) -> str:
+        assert src == "RIGHT"
+        assert dest == "LEFT"
+        assert self.payload is not None
+        return json.dumps(self.payload)
 
 
 def test_enqueue_task_serializes_current_payload_without_proxy_secrets() -> None:
@@ -31,7 +52,7 @@ def test_enqueue_task_serializes_current_payload_without_proxy_secrets() -> None
         enqueued_at="2026-07-05T12:00:00+00:00",
     )
 
-    enqueue_task(fake_redis, task, queue_key="pytest:queue")
+    assert enqueue_task(fake_redis, task, queue_key="pytest:queue") is True
 
     assert len(fake_redis.pushed) == 1
     queue_key, raw_payload = fake_redis.pushed[0]
@@ -42,9 +63,9 @@ def test_enqueue_task_serializes_current_payload_without_proxy_secrets() -> None
     assert "proxy_url_template" not in payload
 
 
-def test_dequeue_task_rejects_unknown_fields() -> None:
-    with pytest.raises(TaskQueueError, match="unknown fields"):
-        dequeue_task(
+def test_reserve_task_rejects_unknown_fields_without_logging_values() -> None:
+    with pytest.raises(InvalidTaskPayloadError, match="unknown fields") as exc_info:
+        reserve_task(
             FakeRedis(
                 {
                     "source_id": 123,
@@ -60,9 +81,11 @@ def test_dequeue_task_rejects_unknown_fields() -> None:
             )
         )
 
+    assert "user:password" not in str(exc_info.value)
 
-def test_dequeue_task_reads_current_payload() -> None:
-    task = dequeue_task(
+
+def test_reserve_task_reads_current_payload() -> None:
+    reservation = reserve_task(
         FakeRedis(
             {
                 "source_id": 123,
@@ -77,6 +100,13 @@ def test_dequeue_task_reads_current_payload() -> None:
         )
     )
 
-    assert task is not None
-    assert task.source_id == 123
-    assert task.proxy_profile_id == 7
+    assert reservation is not None
+    assert reservation.task.source_id == 123
+    assert reservation.task.proxy_profile_id == 7
+
+
+def test_worker_reservation_settings_reject_invalid_bounds() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_reserve_timeout_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_consumer_count=0)

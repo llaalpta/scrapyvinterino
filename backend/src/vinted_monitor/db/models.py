@@ -94,6 +94,7 @@ class Run(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
     monitor_session_id: Mapped[int | None] = mapped_column(ForeignKey("monitor_sessions.id"))
+    task_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(40))
     trigger: Mapped[str] = mapped_column(String(40), default="manual")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

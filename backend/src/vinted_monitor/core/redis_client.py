@@ -10,7 +10,12 @@ except ImportError:  # pragma: no cover - kept for older redis-py builds.
     MaintNotificationsConfig = None  # type: ignore[assignment]
 
 
-def redis_client_from_url(url: str, *, decode_responses: bool = True) -> redis.Redis:
+def redis_client_from_url(
+    url: str,
+    *,
+    decode_responses: bool = True,
+    socket_timeout: float | None = 5,
+) -> redis.Redis:
     """Create Redis clients consistently for the local Redis OSS runtime.
 
     redis-py 8 defaults to RESP3 and enables maintenance notifications in
@@ -21,6 +26,7 @@ def redis_client_from_url(url: str, *, decode_responses: bool = True) -> redis.R
     kwargs: dict[str, Any] = {
         "decode_responses": decode_responses,
         "protocol": 2,
+        "socket_timeout": socket_timeout,
     }
     if MaintNotificationsConfig is not None:
         kwargs["maint_notifications_config"] = MaintNotificationsConfig(enabled=False)

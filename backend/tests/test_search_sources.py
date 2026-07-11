@@ -1,15 +1,25 @@
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from threading import Event
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from vinted_monitor.api.main import app
 from vinted_monitor.api.schemas import SearchSourceCreate
-from vinted_monitor.db.models import AppSetting, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.services import search_sources as search_sources_service
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
 from vinted_monitor.services.search_sources import (
+    SearchSourceNotFoundError,
+    archive_source,
     catalog_filter_compatibility,
     normalize_vinted_catalog_url,
+    start_source_monitor,
+    stop_source_monitor,
+    update_source,
     validate_search_source_name,
     validate_vinted_catalog_url,
 )
@@ -34,7 +44,11 @@ def test_validate_vinted_catalog_url_preserves_original_after_trim() -> None:
     "url",
     [
         "ftp://www.vinted.es/catalog",
+        "http://www.vinted.es/catalog",
         "https://example.com/catalog",
+        "https://user:secret@www.vinted.es/catalog",
+        "https://www.vinted.es:443/catalog",
+        "https://www.vinted.es:invalid/catalog",
         "https://www.vinted.es/member/123",
         "not a url",
     ],
@@ -472,6 +486,124 @@ def test_delete_source_api_stops_active_monitor() -> None:
             if source is not None:
                 db.delete(source)
             db.commit()
+
+
+def test_archive_remains_authoritative_when_queue_cleanup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest archive redis outage",
+            url="https://www.vinted.es/catalog?search_text=archive-outage",
+            normalized_query={"search_text": ["archive-outage"]},
+            is_active=True,
+            monitor_mode="continuous",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+        source_id = source.id
+
+    monkeypatch.setattr(
+        search_sources_service,
+        "cancel_ready_task_for_source",
+        lambda *args, **kwargs: (_ for _ in ()).throw(search_sources_service.TaskQueueError("redis down")),
+    )
+    try:
+        with SessionLocal() as db:
+            archive_source(db, source_id)
+
+        with SessionLocal() as db:
+            archived = db.get(SearchSource, source_id)
+            assert archived is not None
+            assert archived.archived_at is not None
+            assert archived.is_active is False
+            assert archived.next_run_at is None
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            db.commit()
+
+
+@pytest.mark.parametrize("operation", ["start", "update", "stop"])
+def test_source_mutation_waits_for_archive_and_rejects_stale_state(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    with SessionLocal() as db:
+        source = SearchSource(
+            name=f"pytest archive race {operation}",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=operation == "stop",
+            monitor_mode="continuous",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    archive_holds_lock = Event()
+    allow_archive_commit = Event()
+    original_invalidate = search_sources_service.invalidate_vinted_sessions_for_source
+
+    def pause_archive_before_commit(db, locked_source_id: int, *, reason: str) -> int:
+        archive_holds_lock.set()
+        assert allow_archive_commit.wait(timeout=5)
+        return original_invalidate(db, locked_source_id, reason=reason)
+
+    monkeypatch.setattr(
+        search_sources_service,
+        "invalidate_vinted_sessions_for_source",
+        pause_archive_before_commit,
+    )
+
+    def archive() -> None:
+        with SessionLocal() as db:
+            archive_source(db, source_id)
+
+    def mutate() -> None:
+        assert archive_holds_lock.wait(timeout=5)
+        with SessionLocal() as db:
+            if operation == "start":
+                start_source_monitor(db, source_id)
+            elif operation == "update":
+                update_source(db, source_id, name="pytest stale rename")
+            else:
+                stop_source_monitor(db, source_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            archive_future = executor.submit(archive)
+            assert archive_holds_lock.wait(timeout=5)
+            mutation_future = executor.submit(mutate)
+            with pytest.raises(FutureTimeoutError):
+                mutation_future.result(timeout=1)
+            allow_archive_commit.set()
+            archive_future.result(timeout=5)
+            with pytest.raises(SearchSourceNotFoundError):
+                mutation_future.result(timeout=5)
+
+        with SessionLocal() as db:
+            persisted = db.get(SearchSource, source_id)
+            assert persisted is not None
+            assert persisted.archived_at is not None
+            assert persisted.is_active is False
+            assert persisted.name == f"pytest archive race {operation}"
+            assert (
+                db.query(MonitorSession)
+                .filter(MonitorSession.source_id == source_id, MonitorSession.stopped_at.is_(None))
+                .one_or_none()
+                is None
+            )
+    finally:
+        allow_archive_commit.set()
+        with SessionLocal() as db:
+            persisted = db.get(SearchSource, source_id)
+            if persisted is not None:
+                db.delete(persisted)
+                db.commit()
 
 
 def test_scheduler_api_updates_persisted_ui_gate() -> None:
