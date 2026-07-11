@@ -6,7 +6,7 @@
 - `api`: FastAPI para REST, login local y eventos.
 - `worker`: productor (scheduler), consumidores (task workers), scraping, deduplicacion, filtros y acciones pendientes.
 - `postgres`: persistencia.
-- `redis`: cola de tareas (patron productor-consumidor con LPUSH/BRPOP), cache de vistos/procesamiento por monitor.
+- `redis`: cola de tareas (patron productor-consumidor con LPUSH/BRPOP), cache de vistos/procesamiento y reintentos de detalle por monitor/politica.
 
 ## Modulos backend
 
@@ -26,10 +26,12 @@
 5. Cada tarea usa el perfil de navegador configurado para runtime.
 6. La API/worker busca una sesion Vinted `ready` del monitor para el proxy residencial sticky seleccionado. Si no existe o caduco, intenta prepararla automaticamente antes de tocar el catalogo del run.
 7. Se crea una sesion `curl_cffi` con `impersonate` para falsificar TLS/JA3. La preparacion navega el documento de catalogo, extrae contexto anonimo seguro, prueba la API de catalogo con la misma sesion y guarda cookies/tokens cifrados en `vinted_sessions`.
-8. Se diagnostica egress con la misma IP/proxy y se valida pais, locale, viewport, Vinted `x-screen=catalog`, CSRF, anon id, `access_token_web` y `v_udt`. DataDome se registra como senal de contexto; durante la medicion actual no bloquea si el probe de catalogo devuelve JSON aceptado.
+8. Se diagnostica egress con la misma IP/proxy y se valida pais, locale, viewport, Vinted `x-screen=catalog`, CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm` y DataDome. Un contexto preparado incompleto no se reutiliza aunque el probe de catalogo aporte diagnosticos.
 9. Si falta contexto base o el probe no acepta JSON, el run falla antes de pedir `/api/v2/catalog/items` para el scraping.
 10. Con el mismo proxy sticky y el contexto anonimo guardado, se pide el catalogo JSON.
-11. Se deduplican candidatos contra la cache Redis del monitor.
-12. Se aplican filtros de exclusion y se crean oportunidades.
-13. La sesion Vinted del monitor se conserva cifrada para usos posteriores hasta caducar, agotar contador, alcanzar el limite opcional de usos del monitor o invalidarse por rechazo/challenge.
-14. La PWA muestra oportunidades, estado de ejecucion y diagnosticos saneados de sesion en los logs del monitor.
+11. Se reclaman primero los reintentos de detalle vencidos y despues los candidatos nuevos deduplicados contra Redis.
+12. Cada candidato reclamado navega su documento publico `/items/...?...referrer=catalog` secuencialmente en la misma sesion; JSON-LD y Next/React Flight se fusionan por estructura e identidad del item.
+13. Solo un detalle que cumple la politica de campos requeridos pasa por filtros y puede persistir item/oportunidad. Fallos recuperables quedan en Redis con backoff sin marcar `seen`; resultados terminales actualizan `seen` despues del commit PostgreSQL.
+14. Se guardan todas las URL firmadas de fotos publicas, no sus bytes. La PWA descarga las imagenes directamente desde el CDN de Vinted y muestra precios y disponibilidad publica.
+15. La sesion Vinted del monitor se conserva cifrada para usos posteriores hasta caducar, agotar contador, alcanzar el limite opcional de usos del monitor o invalidarse por rechazo/challenge.
+16. La PWA muestra oportunidades, estado de ejecucion y diagnosticos saneados de sesion en los logs del monitor.

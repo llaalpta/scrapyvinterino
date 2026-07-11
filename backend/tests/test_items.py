@@ -4,8 +4,8 @@ from sqlalchemy import select
 
 from vinted_monitor.db.models import Item
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.providers.catalog import CatalogItemCandidate
-from vinted_monitor.services.items import persist_catalog_items
+from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail
+from vinted_monitor.services.items import apply_item_detail_data, persist_catalog_items
 
 
 def build_candidate(
@@ -166,3 +166,39 @@ def test_persist_catalog_items_deduplicates_candidates_in_one_batch() -> None:
             assert items[0].title == "Last title"
     finally:
         cleanup_items()
+
+
+def test_partial_detail_does_not_erase_richer_existing_values() -> None:
+    item = Item(
+        vinted_item_id="pytest-item-persistence-partial",
+        title="Original title",
+        brand="Original brand",
+        price_amount=Decimal("5.00"),
+        currency="EUR",
+        size="M",
+        status="Muy bueno",
+        url="https://www.vinted.es/items/pytest-item-persistence-partial",
+        photos=["https://images1.vinted.net/example/f800/photo.webp?s=signed"],
+        seller_badges=["ACTIVE_LISTER"],
+        availability_flags={"state": "buyable"},
+        detail_raw={"parser_version": "flight-v1"},
+        raw={},
+    )
+
+    apply_item_detail_data(
+        item,
+        CatalogItemDetail(
+            vinted_item_id=item.vinted_item_id,
+            description="",
+            observed_fields=frozenset({"description"}),
+        ),
+    )
+
+    assert item.description == ""
+    assert item.title == "Original title"
+    assert item.brand == "Original brand"
+    assert item.price_amount == Decimal("5.00")
+    assert item.photos == ["https://images1.vinted.net/example/f800/photo.webp?s=signed"]
+    assert item.seller_badges == ["ACTIVE_LISTER"]
+    assert item.availability_flags == {"state": "buyable"}
+    assert item.detail_raw == {"parser_version": "flight-v1"}

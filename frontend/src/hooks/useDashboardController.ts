@@ -698,49 +698,26 @@ function detailProbeMessage(result: Record<string, unknown>): string {
   const outcome = typeof result.outcome === 'string' ? result.outcome : 'unknown';
   const status = typeof result.status_code === 'number' ? `status=${result.status_code}` : null;
   const duration = typeof result.duration_ms === 'number' ? `ms=${result.duration_ms}` : null;
-  const matrixDuration = typeof result.matrix_duration_ms === 'number' ? `total_ms=${result.matrix_duration_ms}` : null;
-  const attemptCount = typeof result.attempt_count === 'number' ? `intentos=${result.attempt_count}` : null;
-  const controlOutcome = typeof result.control_outcome === 'string' ? `control=${result.control_outcome}` : null;
   const summary = recordValue(result.detail_summary);
   const photos = numberOrString(summary?.photo_count);
   const description = numberOrString(summary?.description_length);
-  const seller = summary?.seller_present === true ? 'seller=ok' : summary?.seller_present === false ? 'seller=missing' : null;
-  const title = summary?.title_present === true ? 'title=ok' : summary?.title_present === false ? 'title=missing' : null;
+  const parser = typeof summary?.parser_version === 'string' ? `parser=${summary.parser_version}` : null;
+  const availability = typeof summary?.availability_state === 'string' ? `availability=${summary.availability_state}` : null;
+  const missing = Array.isArray(summary?.missing_required)
+    ? summary.missing_required.filter((field): field is string => typeof field === 'string').join(',')
+    : '';
   const tokens = [
     status,
     duration,
-    matrixDuration,
-    attemptCount,
-    controlOutcome,
-    title,
+    parser,
     photos ? `photos=${photos}` : null,
     description ? `description_chars=${description}` : null,
-    seller
+    availability,
+    missing ? `missing=${missing}` : null
   ]
     .filter(Boolean)
     .join(' ');
-  const attempts = Array.isArray(result.attempts)
-    ? result.attempts.map((entry) => recordValue(entry)).filter((entry): entry is Record<string, unknown> => entry !== null)
-    : [];
-  const matrix = attempts
-    .map((attempt) => {
-      const endpoint = typeof attempt?.endpoint === 'string' ? attempt.endpoint : 'endpoint';
-      const referer = typeof attempt?.referer_mode === 'string' ? attempt.referer_mode : 'referer';
-      const attemptOutcome = typeof attempt?.outcome === 'string' ? attempt.outcome : 'unknown';
-      const attemptStatus = typeof attempt?.status_code === 'number' ? `status=${attempt.status_code}` : 'status=-';
-      const attemptMs = typeof attempt?.duration_ms === 'number' ? `ms=${attempt.duration_ms}` : null;
-      const extras = [
-        attempt?.pre_navigation === true ? 'pre-nav' : null,
-        attempt?.client_hints === true ? 'client-hints' : null,
-        typeof attempt?.cf_mitigated === 'string' ? `cf=${attempt.cf_mitigated}` : null
-      ]
-        .filter(Boolean)
-        .join(' ');
-      return `- ${endpoint}/${referer}: ${attemptOutcome} ${[attemptStatus, attemptMs, extras].filter(Boolean).join(' ')}`;
-    })
-    .join('\n');
-  const firstLine = tokens ? `Detalle ${outcome}: ${tokens}` : `Detalle ${outcome}`;
-  return matrix ? `${firstLine}\n${matrix}` : firstLine;
+  return tokens ? `Detalle ${outcome}: ${tokens}` : `Detalle ${outcome}`;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {

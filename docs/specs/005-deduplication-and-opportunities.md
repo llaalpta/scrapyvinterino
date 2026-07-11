@@ -19,7 +19,11 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Use `items.vinted_item_id` as normalized catalog identity only for items that become opportunities.
 - Count `items_new` as candidates newly claimed by Redis for that monitor/policy in that run.
 - Fetch item detail for every Redis-new candidate before filter evaluation and opportunity creation, bounded by the configured per-run limit.
-- Extract detail fields needed for second-stage filtering and opportunity display: description, semantic color, category, shipping price, buyer protection fee, total price, full photo set, seller rating, seller badges, and item availability flags when visible.
+- Parse the public item document's JSON-LD and structurally discovered Next/React Flight records; do not depend on dynamic Flight record ids or the Cloudflare-challenged direct detail API.
+- Extract detail fields needed for second-stage filtering and opportunity display: title, description, brand, size, physical status, base price/currency, semantic color, category, minimum displayed shipping price, buyer protection fee, total excluding shipping, the complete public photo set, seller rating/badges, and public availability signals when visible.
+- Validate a configurable required-field allowlist before filter evaluation. The default clothing policy requires title, observed description (which may be empty), brand, size, physical status, base price/currency, and at least one photo.
+- Persist signed Vinted CDN photo URLs only; image bytes are loaded directly by the PWA and never through the residential Vinted proxy.
+- Keep recoverable detail failures in a bounded Redis retry queue so an item is not lost after leaving the top-five catalog window.
 - Leave opportunity creation behavior to local filter evaluation in spec 006.
 
 ## Out of Scope
@@ -41,6 +45,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Redis runtime:
   - required seen cache by monitor, policy hash, and `vinted_item_id`;
   - required processing lock by monitor, policy hash, and `vinted_item_id`;
+  - due-time detail retry entries containing only a sanitized catalog candidate, attempt count, failure kind, and next attempt time;
   - configurable TTL and per-monitor cap.
 - Database:
   - `items` for opportunity items only;
@@ -63,9 +68,12 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Changing the monitor URL or monitor-owned filter definition also requires a new explicit initial snapshot for the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
 - Details are fetched for monitor-new candidates before opportunity creation and are bounded by the configured per-run limit.
-- Detail failures are recorded without crashing the service; non-DataDome detail failures do not create opportunities during the current pre-production phase.
-- Redis seen state is marked after each candidate reaches a terminal outcome.
+- Detail transport, challenge, response, or parser failures do not create opportunities and remain retryable for three total attempts; candidates skipped by the per-run detail budget are queued without consuming an attempt.
+- Valid detail that lacks a configured required field is a terminal `detail_incomplete` outcome, names the missing fields, creates no opportunity, and is marked seen.
+- Optional fields absent from a valid document remain null and do not block an opportunity. An observed empty description is valid and contributes no blacklist text.
+- Redis seen state is marked only after a terminal outcome; pending retries retain their sanitized candidate even if the item leaves the catalog window.
 - A processing lock expiring allows retry instead of permanently losing a candidate.
+- Detail requests are sequential inside one Vinted session so response cookie rotation cannot race.
 
 ## Verification
 

@@ -10,6 +10,10 @@
 - El acceso directo al catalogo publico de Vinted esta bloqueado por defecto mediante `VINTED_DIRECT_CATALOG_ENABLED=false`; para trafico real se debe configurar un proxy compatible con el pais objetivo.
 - Cada proxy de Vinted debe declarar pais; locale, `Accept-Language`, viewport y Vinted `x-screen` se resuelven desde presets internos y no son editables desde la PWA/API. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
 - No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML ni payloads raw completos en logs o respuestas API.
+- Los HAR de investigacion nunca se commitean. Los fixtures de detalle deben ser subconjuntos compactos, inventados y saneados sin cookies, tokens ni identificadores personales.
+- Los reintentos Redis guardan solo el candidato publico normalizado, contador, tipo de fallo y siguiente fecha; no guardan HTML/Flight, cookies, sesiones ni `raw` de origen.
+- Las fotos se persisten como URL HTTPS firmada y solo se aceptan hosts `images*.vinted.net`; se conserva la query de firma. El worker no descarga bytes ni envia cookies/proxy Vinted al CDN.
+- La navegacion de detalle acepta solo rutas HTTPS `/items/...` en `www.vinted.es`/`vinted.es`; un candidato o retry no puede redirigir la sesion preparada a otro host.
 - Los eventos de run pueden guardar metodo, fase, nivel, URL saneada, headers saneados, status, duracion en ms, timeout, intento/retry, proxy, IP de salida, pais, user-agent, fingerprints y errores de Vinted redacted/truncados.
 - La UI principal de logs debe mostrar una checklist operativa no interactiva con datos resumidos y seguros por evento. Los detalles JSON redacted quedan como evidencia tecnica disponible por API/base de datos, no como vista del timeline principal.
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
@@ -20,10 +24,10 @@
 - Los identificadores sticky de proxy se guardan como parte de una sesion Vinted preparada y solo se registran como marcador seguro.
 - Las cookies DataDome, tokens publicos y CSRF de sesiones preparadas se cifran en `vinted_sessions.context_encrypted`; la API y los logs nunca devuelven valores raw.
 - La preparacion de sesion Vinted pertenece al monitor y se ejecuta automaticamente si el run no encuentra una sesion `ready` compatible con el proxy sticky seleccionado.
-- Antes de pedir `/api/v2/catalog/items` para scraping, el provider debe tener contexto anonimo base en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, `v_udt`, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`. DataDome se registra como presente/ausente, pero en el modo de medicion actual no bloquea si el probe previo de catalogo devuelve JSON aceptado.
+- Antes de pedir `/api/v2/catalog/items` para scraping, el provider debe tener contexto anonimo completo en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, DataDome, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`.
 - Los eventos de run pueden incluir el nombre del perfil de navegador usado, el marcador seguro del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.
 - Los `429` del catalogo se registran como rate limit salvo que haya firmas DataDome en cabeceras/cookies/cuerpo. `Retry-After` puede registrarse y aplicarse como espera acotada, sin exponer cookies ni tokens.
 - Acciones de compra futuras:
   - requeriran click explicito;
-  - validaran precio, moneda y disponibilidad;
+  - revalidaran precio, moneda, disponibilidad, envio, pago y destinatario en la sesion autenticada inmediatamente antes de ejecutar;
   - registraran auditoria redacted.

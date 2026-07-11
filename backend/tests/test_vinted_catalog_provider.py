@@ -26,9 +26,12 @@ from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, C
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
     PreparedCatalogSession,
+    VintedCatalogChallengeError,
     VintedCatalogProviderError,
     VintedCatalogRateLimitError,
+    VintedItemDetailHTTPError,
     build_catalog_api_params,
+    build_item_detail_navigation_url,
     decode_next_flight_payload,
     extract_csrf_token,
     extract_vinted_item_id,
@@ -36,10 +39,14 @@ from vinted_monitor.providers.vinted_catalog import (
     parse_catalog_api_payload,
     parse_catalog_html,
     parse_item_detail_html,
+    parse_next_flight_records,
     sanitize_catalog_item,
 )
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "vinted_catalog_payload.json"
+DETAIL_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "vinted_item_detail_flight.json"
+
+
 class FakeResponse:
     def __init__(self, status_code: int = 200, *, text: str = "", json_data: dict | None = None, headers: dict | None = None) -> None:
         self.status_code = status_code
@@ -239,6 +246,10 @@ def load_fixture() -> dict:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
+def load_detail_fixture() -> dict:
+    return json.loads(DETAIL_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
 def build_next_flight_html(payload: dict) -> str:
     flight_payload = json.dumps(
         {
@@ -257,6 +268,32 @@ def build_next_flight_html(payload: dict) -> str:
 def build_next_flight_chunk(payload: str) -> str:
     escaped_payload = json.dumps(payload, ensure_ascii=False)[1:-1]
     return f'<script>self.__next_f.push([1,"{escaped_payload}"])</script>'
+
+
+def build_item_detail_flight_html(*, product_json: dict | None = None, records: dict | None = None) -> str:
+    resolved_records = records if records is not None else load_detail_fixture()["records"]
+    flight_payload = "".join(
+        f"{record_id}:{json.dumps(record, ensure_ascii=False, separators=(',', ':'))}\n"
+        for record_id, record in resolved_records.items()
+    )
+    split_at = len(flight_payload) // 2
+    chunks = build_next_flight_chunk(flight_payload[:split_at]) + build_next_flight_chunk(flight_payload[split_at:])
+    json_ld = product_json or {
+        "@type": "Product",
+        "name": "Titulo JSON-LD de respaldo",
+        "description": "Descripcion JSON-LD de respaldo",
+        "image": "https://images1.vinted.net/t/json-ld/f800/main.webp?s=signed-json-ld",
+        "brand": {"@type": "Brand", "name": "Marca JSON-LD"},
+        "offers": {
+            "url": "https://www.vinted.es/items/1000000001-polo-ralph-lauren-de-prueba",
+            "price": "9.99",
+            "priceCurrency": "EUR",
+            "availability": "InStock",
+        },
+        "category": "Hombre Polos",
+        "color": "Gris",
+    }
+    return f'<script type="application/ld+json">{json.dumps(json_ld)}</script>{chunks}'
 
 
 def source(url: str = "https://www.vinted.es/catalog?catalog[]=76&order=newest_first"):
@@ -424,6 +461,15 @@ def test_decode_next_flight_payload_concatenates_multiple_chunks() -> None:
     html = f"<html><body>{build_next_flight_chunk('first')}{build_next_flight_chunk('second')}</body></html>"
 
     assert decode_next_flight_payload(html) == "firstsecond"
+
+
+def test_parse_next_flight_records_uses_dynamic_ids_and_skips_protocol_lines() -> None:
+    payload = 'D{"protocol":"metadata"}\n2f:{"value":1}\nk3:["$",null,null,{"itemId":1000000001}]\nbad:not-json\n'
+
+    assert parse_next_flight_records(payload) == {
+        "2f": {"value": 1},
+        "k3": ["$", None, None, {"itemId": 1000000001}],
+    }
 
 
 def test_map_catalog_item_maps_observed_fields() -> None:
@@ -1678,6 +1724,32 @@ def test_curl_provider_preflight_collector_skips_when_base_context_is_incomplete
     assert set(skipped["details"]["missing_required"]) >= {"access_token_web", "v_udt"}
 
 
+def test_build_item_detail_navigation_url_adds_referrer_once_and_preserves_query() -> None:
+    assert (
+        build_item_detail_navigation_url("https://www.vinted.es/items/100-test?foo=bar")
+        == "https://www.vinted.es/items/100-test?foo=bar&referrer=catalog"
+    )
+    assert (
+        build_item_detail_navigation_url("https://www.vinted.es/items/100-test?referrer=feed")
+        == "https://www.vinted.es/items/100-test?referrer=feed"
+    )
+
+
+@pytest.mark.parametrize(
+    "item_url",
+    [
+        "http://www.vinted.es/items/100-test",
+        "https://example.test/items/100-test",
+        "https://www.vinted.es.evil.test/items/100-test",
+        "https://user:secret@www.vinted.es/items/100-test",
+        "https://www.vinted.es/catalog",
+    ],
+)
+def test_build_item_detail_navigation_url_rejects_non_vinted_targets(item_url: str) -> None:
+    with pytest.raises(ValueError, match="HTTPS Vinted ES item URL"):
+        build_item_detail_navigation_url(item_url)
+
+
 def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
     calls: list[dict] = []
     events: list[dict] = []
@@ -1687,14 +1759,14 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
         "description": "Detalle publico",
         "color": "Azul",
         "category": "Polos",
-        "image": ["https://images.example.test/detail.webp"],
+        "image": ["https://images1.vinted.net/t/detail/f800/detail.webp?s=signed-detail"],
         "offers": {"availability": "https://schema.org/InStock"},
     }
     html = f'<script type="application/ld+json">{json.dumps(product_json)}</script>'
 
     def handler(call: dict) -> FakeResponse:
         assert call["method"] == "GET"
-        assert call["url"] == candidate.url
+        assert call["url"] == f"{candidate.url}?referrer=catalog"
         assert call["default_headers"] is False
         assert call["headers"]["referer"] == source().url
         assert call["headers"]["sec-fetch-site"] == "same-origin"
@@ -1710,7 +1782,7 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
     detail = provider.fetch_detail(candidate, referer_url=source().url)
 
     assert detail.description == "Detalle publico"
-    assert detail.photos == ["https://images.example.test/detail.webp", "https://images.example.test/item-1000000001.webp"]
+    assert detail.photos == ["https://images1.vinted.net/t/detail/f800/detail.webp?s=signed-detail"]
     assert [event["phase"] for event in events] == [
         "http_session_created",
         "detail_http_request_start",
@@ -1719,6 +1791,52 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
     ]
     assert provider._catalog_session_context.datadome == "dd"
     assert provider.prepared_session_refreshed is True
+
+
+def test_curl_provider_fetch_detail_types_cloudflare_challenge() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(
+                403,
+                text="<html>Cloudflare challenge</html>",
+                headers={"content-type": "text/html", "cf-mitigated": "challenge"},
+            ),
+            calls,
+        ),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    with pytest.raises(VintedCatalogChallengeError, match="Cloudflare challenge"):
+        provider.fetch_detail(candidate)
+
+    assert calls[0]["url"].endswith("?referrer=catalog")
+    assert [event["phase"] for event in events] == ["http_session_created", "detail_http_request_start", "detail_http_request_error"]
+
+
+@pytest.mark.parametrize(("status_code", "retryable"), [(404, False), (410, False), (429, True), (503, True)])
+def test_curl_provider_fetch_detail_exposes_http_status_for_retry_policy(
+    status_code: int,
+    retryable: bool,
+) -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(status_code, text="error", headers={"content-type": "text/html"}),
+            [],
+        ),
+    )
+
+    with pytest.raises(VintedItemDetailHTTPError) as captured:
+        provider.fetch_detail(candidate)
+
+    assert captured.value.status_code == status_code
+    assert captured.value.retryable is retryable
 
 
 def test_curl_provider_emits_detail_http_error_with_duration_on_network_failure() -> None:
@@ -1969,7 +2087,11 @@ def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> Non
 
     def handler(call: dict) -> FakeResponse:
         if path(call) == "/catalog":
-            return FakeResponse(200, text="<html>bootstrap</html>", headers={"set-cookie": ["datadome=ok; Path=/;", "__cf_bm=cf-secret-value; Path=/;"]})
+            return FakeResponse(
+                200,
+                text="<html>bootstrap</html>",
+                headers={"set-cookie": ["datadome=ok; Path=/;", "__cf_bm=cf-secret-value; Path=/;"]},
+            )
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(200, text="<html>geo.captcha-delivery.com</html>", headers={"content-type": "text/html"})
         return FakeResponse(404)
@@ -2029,51 +2151,120 @@ def test_get_profile_by_name_scans_all_profiles() -> None:
     assert get_profile_by_name("missing") is None
 
 
-def test_parse_item_detail_html_extracts_sanitized_public_detail() -> None:
+def test_parse_item_detail_html_extracts_item_anchored_flight_detail() -> None:
     candidate = map_catalog_item(load_fixture()["items"][0])
-    product_json = {
-        "@type": "Product",
-        "description": "Tiene una mancha pequena en la manga",
-        "color": "Azul",
-        "category": "Polos",
-        "image": ["https://images.example.test/full-1.webp", "https://images.example.test/full-2.webp"],
-        "offers": {"availability": "https://schema.org/InStock"},
-    }
-    embedded = {
-        "item": {
-            "shipping_price": {"amount": "2.99"},
-            "buyer_protection_fee": {"amount": "0.70"},
-            "total_price": {"amount": "6.19"},
-            "seller_rating": "4.8",
-            "seller_badges": [{"title": "Very responsive"}],
-            "is_visible": True,
-            "photos": [{"url": "https://images.example.test/full-3.webp"}],
-        }
-    }
-    html = (
-        '<script type="application/ld+json">'
-        f"{json.dumps(product_json)}"
-        "</script>"
-        f"<script>window.__detail={json.dumps(embedded)}</script>"
-    )
+    html = build_item_detail_flight_html()
 
     detail = parse_item_detail_html(html, candidate)
 
-    assert detail.description == "Tiene una mancha pequena en la manga"
+    assert detail.title == "Polo Ralph Lauren de detalle"
+    assert detail.description == "Tiene una marca pequena en la manga"
+    assert detail.brand == "Ralph Lauren"
+    assert detail.size == "M"
+    assert detail.status == "Muy bueno"
     assert detail.color == "Azul"
-    assert detail.category == "Polos"
-    assert detail.shipping_price_amount == Decimal("2.99")
-    assert detail.buyer_protection_fee_amount == Decimal("0.70")
-    assert detail.total_price_amount == Decimal("6.19")
-    assert detail.seller_rating == Decimal("4.8")
-    assert detail.seller_badges == ["Very responsive"]
-    assert detail.availability_flags["is_visible"] is True
+    assert detail.category == "Hombre Polos"
+    assert detail.price_amount == Decimal("2.50")
+    assert detail.currency == "EUR"
+    assert detail.shipping_price_amount == Decimal("1.75")
+    assert detail.buyer_protection_fee_amount == Decimal("0.80")
+    assert detail.total_price_amount == Decimal("3.30")
+    assert detail.seller_rating == Decimal("0.98")
+    assert detail.seller_badges == ["ACTIVE_LISTER"]
+    assert detail.availability_flags == {
+        "source": "public_snapshot",
+        "can_buy": True,
+        "instant_buy": True,
+        "transaction_permitted": True,
+        "is_closed": False,
+        "is_hidden": False,
+        "is_reserved": False,
+        "is_draft": False,
+        "is_processing": False,
+        "has_reservation": False,
+        "availability": "InStock",
+        "shipping_available": True,
+        "state": "buyable",
+        "reason_codes": [],
+    }
     assert detail.photos == [
-        "https://images.example.test/full-1.webp",
-        "https://images.example.test/full-2.webp",
-        "https://images.example.test/full-3.webp",
-        "https://images.example.test/item-1000000001.webp",
+        "https://images1.vinted.net/t/01_fixture/f800/1.webp?s=signed-one",
+        "https://images1.vinted.net/t/02_fixture/f800/2.webp?s=signed-two",
     ]
+    assert detail.field_sources["description"] == "flight.description"
+    assert detail.field_sources["photos"] == "flight.rich_item"
+    assert {"description", "photos", "shipping_price_amount"}.issubset(detail.observed_fields)
+    assert detail.raw["parser_version"] == "next_flight_v1"
+    assert detail.raw["flight_sections"] == ["plugins", "pricing", "rich_item", "shipping_details"]
+    assert detail.raw["missing_fields"] == []
+    assert detail.raw["validation_warnings"] == []
+    assert "seller_id" not in json.dumps(detail.raw)
+
+
+def test_parse_item_detail_html_preserves_observed_empty_description() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    description = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "description")
+    description["data"]["description"] = ""
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.description == ""
+    assert "description" in detail.observed_fields
+    assert detail.field_sources["description"] == "flight.description"
+    assert "description" not in detail.raw["missing_fields"]
+
+
+def test_parse_item_detail_html_gives_blocking_availability_precedence() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    item_status = next(plugin for plugin in records["a7"][3]["plugins"] if plugin["type"] == "item_status")
+    item_status["data"]["is_reserved"] = True
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.availability_flags["state"] == "reserved"
+    assert detail.availability_flags["reason_codes"] == ["reserved"]
+    assert detail.availability_flags["can_buy"] is True
+
+
+def test_parse_item_detail_html_drops_optional_price_with_mismatched_currency() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    buyer_protection = records["k3"][3]["children"]["pricingServices"]["services"]["buyerProtection"]
+    buyer_protection["finalPrice"]["currencyCode"] = "USD"
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.buyer_protection_fee_amount is None
+    assert detail.total_price_amount == Decimal("3.30")
+    assert detail.raw["validation_warnings"] == ["buyer_protection_price_invalid"]
+
+
+def test_parse_item_detail_html_maps_explicit_free_shipping_to_zero() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    shipping_details = records["k3"][3]["shippingDetails"]
+    shipping_details["isFreeShipping"] = True
+    shipping_details.pop("price")
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.shipping_price_amount == Decimal("0")
+    assert detail.availability_flags["shipping_available"] is True
+    assert detail.raw["validation_warnings"] == []
+
+
+def test_parse_item_detail_html_ignores_json_ld_for_another_item() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    other_product = {
+        "@type": "Product",
+        "name": "Otro item",
+        "offers": {"url": "https://www.vinted.es/items/9999999999-otro-item"},
+    }
+
+    with pytest.raises(ValueError, match="No public item detail data"):
+        parse_item_detail_html(build_item_detail_flight_html(product_json=other_product, records={}), candidate)
 
 
 def test_parse_item_detail_html_rejects_document_without_detail_data() -> None:

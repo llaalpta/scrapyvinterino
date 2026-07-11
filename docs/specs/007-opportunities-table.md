@@ -16,6 +16,8 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - Keep page-size selection in the pagination controls, not in the product filters.
 - Show the monitor that generated the opportunity and the scrape date/time.
 - Show image, title, brand, size, status, price, favorites, seller, country, source, and detection time when available.
+- Show the public availability state plus base price, buyer protection, total excluding shipping, and minimum displayed shipping price when available.
+- Open an accessible desktop/mobile photo viewer from the item thumbnail, using all persisted signed CDN URLs with direct lazy loading and a visible broken-image fallback.
 - Provide action affordances:
   - view item;
   - favorite;
@@ -59,6 +61,7 @@ Show opportunity results in the private PWA with paginated backend queries, moni
 - The Opportunities tab is the primary result surface and is truthful when empty.
 - The Vinted item can be opened from the `view` action.
 - Future actions are visible but disabled or feature-flagged.
+- The photo viewer supports thumbnails, previous/next navigation, arrow keys, `Escape`, and mobile-safe scrolling without enabling authenticated actions.
 - Empty state is clear.
 - Table remains usable on desktop widths and is replaced by cards on mobile widths.
 - The page itself does not scroll horizontally; horizontal overflow is limited to the desktop table container.

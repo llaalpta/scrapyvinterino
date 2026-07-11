@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 from curl_cffi.requests import Session
 
@@ -34,6 +34,9 @@ from vinted_monitor.providers.datadome import (
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
+NEXT_FLIGHT_RECORD_ID_PATTERN = re.compile(r"^[0-9A-Za-z]+$")
+VINTED_IMAGE_HOST_PATTERN = re.compile(r"^images\d*\.vinted\.net$", re.IGNORECASE)
+DETAIL_PARSER_VERSION = "next_flight_v1"
 CSRF_TOKEN_PATTERNS = (
     re.compile(r'"CSRF_TOKEN"\s*:\s*"([^"]+)"'),
     re.compile(r'\\"CSRF_TOKEN\\"\s*:\s*\\"([^"\\]+)\\"'),
@@ -108,6 +111,18 @@ class VintedCatalogProviderError(RuntimeError):
 
 class VintedCatalogSessionError(VintedCatalogProviderError):
     pass
+
+
+class VintedCatalogChallengeError(VintedCatalogSessionError):
+    pass
+
+
+class VintedItemDetailHTTPError(VintedCatalogProviderError):
+    def __init__(self, item_id: str, status_code: int) -> None:
+        super().__init__(f"Vinted detail request failed for {item_id}: HTTP {status_code}")
+        self.status_code = status_code
+        self.failure_kind = f"detail_http_{status_code}"
+        self.retryable = status_code not in {404, 410}
 
 
 class VintedCatalogRateLimitError(VintedCatalogProviderError):
@@ -295,6 +310,70 @@ class CurlCffiVintedCatalogProvider:
             referer_url=referer_url or str(self.settings.vinted_base_url),
         )
 
+    def probe_item_detail_document(self, item_ref: str, *, referer_url: str | None = None) -> dict[str, Any]:
+        """Run the production public-document parser and return only safe diagnostics."""
+        item_id = extract_vinted_item_id(item_ref)
+        if item_id is None:
+            raise ValueError("item_ref must be a Vinted item id or item URL")
+        parsed_ref = urlparse(item_ref)
+        item_url = (
+            item_ref
+            if parsed_ref.scheme in {"http", "https"} and parsed_ref.netloc.lower().endswith("vinted.es")
+            else urljoin(str(self.settings.vinted_base_url), f"/items/{item_id}")
+        )
+        candidate = CatalogItemCandidate(
+            vinted_item_id=item_id,
+            title="",
+            brand=None,
+            price_amount=None,
+            currency=None,
+            size=None,
+            status=None,
+            seller_login=None,
+            seller_country=None,
+            favorite_count=None,
+            url=item_url,
+            image_url=None,
+            raw={},
+        )
+        started_at = time.perf_counter()
+        detail = self.fetch_detail(candidate, referer_url=referer_url)
+        summary = {
+            "parser_version": detail.raw.get("parser_version"),
+            "field_sources": detail.field_sources,
+            "missing_required": detail.raw.get("missing_fields", []),
+            "title": detail.title,
+            "brand": detail.brand,
+            "size": detail.size,
+            "status": detail.status,
+            "description_observed": "description" in detail.observed_fields,
+            "description_length": len(detail.description or ""),
+            "photo_count": len(detail.photos),
+            "price_amount": str(detail.price_amount) if detail.price_amount is not None else None,
+            "currency": detail.currency,
+            "buyer_protection_fee_amount": (
+                str(detail.buyer_protection_fee_amount)
+                if detail.buyer_protection_fee_amount is not None
+                else None
+            ),
+            "total_price_amount": str(detail.total_price_amount) if detail.total_price_amount is not None else None,
+            "shipping_price_amount": (
+                str(detail.shipping_price_amount) if detail.shipping_price_amount is not None else None
+            ),
+            "availability_state": detail.availability_flags.get("state"),
+            "availability_reason_codes": detail.availability_flags.get("reason_codes", []),
+        }
+        return {
+            "outcome": "accepted_html",
+            "item_id": item_id,
+            "detail_document_url": build_item_detail_navigation_url(item_url),
+            "status_code": 200,
+            "duration_ms": _elapsed_ms(started_at),
+            "detail_summary": summary,
+            "missing_required": summary["missing_required"],
+            "error": None,
+        }
+
     def export_prepared_session(self, *, proxy_session_id: str | None = None) -> PreparedCatalogSession:
         if self._session is None or not self._bootstrapped:
             raise VintedCatalogSessionContextError("Catalog session has not been bootstrapped")
@@ -320,6 +399,7 @@ class CurlCffiVintedCatalogProvider:
         self._ensure_session()
         self._diagnose_egress(attempt=1)
         assert self._session is not None
+        detail_url = build_item_detail_navigation_url(candidate.url)
         cookies_before_request = self._cookie_values()
         context_before_request = self._session_context_values()
         headers = self.profile.build_bootstrap_headers(referer=referer_url, accept_language=self.accept_language)
@@ -328,7 +408,7 @@ class CurlCffiVintedCatalogProvider:
         self._emit_event(
             phase="detail_http_request_start",
             method="GET",
-            url=candidate.url,
+            url=detail_url,
             details={
                 "vinted_item_id": candidate.vinted_item_id,
                 "referer_url": referer_url,
@@ -341,7 +421,7 @@ class CurlCffiVintedCatalogProvider:
         started_at = time.perf_counter()
         try:
             response = self._session.get(
-                candidate.url,
+                detail_url,
                 headers=dict(headers),
                 timeout=self.timeout_ms / 1000,
                 default_headers=False,
@@ -349,6 +429,9 @@ class CurlCffiVintedCatalogProvider:
             refreshed_markers = self._refresh_session_context_from_cookies(
                 cookies_before=cookies_before_request,
                 context_before=context_before_request,
+            )
+            refreshed_markers = sorted(
+                set(refreshed_markers).union(self._refresh_session_context_from_detail_response(response))
             )
             response_details = {
                 "vinted_item_id": candidate.vinted_item_id,
@@ -360,11 +443,23 @@ class CurlCffiVintedCatalogProvider:
                 "session_context_refreshed": bool(refreshed_markers),
                 "refreshed_markers": refreshed_markers,
             }
+            if is_cloudflare_challenge(response.status_code, dict(response.headers)):
+                self._emit_event(
+                    phase="detail_http_request_error",
+                    method="GET",
+                    url=detail_url,
+                    status_code=response.status_code,
+                    duration_ms=_elapsed_ms(started_at),
+                    level="warning",
+                    message="Cloudflare challenge detected on item detail request",
+                    details=response_details,
+                )
+                raise VintedCatalogChallengeError("Cloudflare challenge detected on item detail request")
             if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
                 self._emit_event(
                     phase="detail_http_request_error",
                     method="GET",
-                    url=candidate.url,
+                    url=detail_url,
                     status_code=response.status_code,
                     duration_ms=_elapsed_ms(started_at),
                     level="warning",
@@ -376,20 +471,23 @@ class CurlCffiVintedCatalogProvider:
                 self._emit_event(
                     phase="detail_http_request_error",
                     method="GET",
-                    url=candidate.url,
+                    url=detail_url,
                     status_code=response.status_code,
                     duration_ms=_elapsed_ms(started_at),
                     level="error",
                     message=f"HTTP {response.status_code}",
                     details=response_details,
                 )
+                raise VintedItemDetailHTTPError(candidate.vinted_item_id, response.status_code)
+            content_type = _header_value(response.headers, "content-type")
+            if content_type and "text/html" not in content_type.lower():
                 raise VintedCatalogProviderError(
-                    f"Vinted detail request failed for {candidate.vinted_item_id}: HTTP {response.status_code}"
+                    f"Vinted detail request returned non-HTML content for {candidate.vinted_item_id}"
                 )
             self._emit_event(
                 phase="detail_http_request_success",
                 method="GET",
-                url=candidate.url,
+                url=detail_url,
                 status_code=response.status_code,
                 duration_ms=_elapsed_ms(started_at),
                 details=response_details,
@@ -401,7 +499,7 @@ class CurlCffiVintedCatalogProvider:
                 self._emit_event(
                     phase="detail_parse_error",
                     method="GET",
-                    url=candidate.url,
+                    url=detail_url,
                     status_code=response.status_code,
                     duration_ms=_elapsed_ms(started_at),
                     level="error",
@@ -419,7 +517,7 @@ class CurlCffiVintedCatalogProvider:
             self._emit_event(
                 phase="detail_parse_success",
                 method="GET",
-                url=candidate.url,
+                url=detail_url,
                 status_code=response.status_code,
                 duration_ms=_elapsed_ms(started_at),
                 details={
@@ -427,13 +525,16 @@ class CurlCffiVintedCatalogProvider:
                     "referer_url": referer_url,
                     "html_length": len(response.text or ""),
                     "has_description": bool(detail.description),
+                    "description_observed": "description" in detail.observed_fields,
                     "photo_count": len(detail.photos),
                     "has_total_price": detail.total_price_amount is not None,
-                    "availability_flags": sorted(detail.availability_flags.keys()),
+                    "availability_state": detail.availability_flags.get("state"),
+                    "field_sources": detail.field_sources,
+                    "missing_fields": detail.raw.get("missing_fields", []),
                 },
             )
             return detail
-        except DataDomeChallengeError:
+        except (DataDomeChallengeError, VintedCatalogChallengeError):
             raise
         except Exception as exc:
             if not isinstance(exc, VintedCatalogProviderError):
@@ -441,7 +542,7 @@ class CurlCffiVintedCatalogProvider:
                 self._emit_event(
                     phase="detail_http_request_error",
                     method="GET",
-                    url=candidate.url,
+                    url=detail_url,
                     duration_ms=_elapsed_ms(started_at),
                     level="error",
                     message=safe_error,
@@ -2116,10 +2217,38 @@ class CurlCffiVintedCatalogProvider:
 
     def _session_context_values(self) -> dict[str, str | None]:
         return {
+            "csrf_token": self._catalog_session_context.csrf_token,
+            "anon_id": self._catalog_session_context.anon_id,
             "access_token_web": self._catalog_session_context.access_token_web,
             "datadome": self._catalog_session_context.datadome,
+            "cf_bm": self._catalog_session_context.cf_bm,
             "v_udt": self._catalog_session_context.v_udt,
+            "user_iso_locale": self._catalog_session_context.user_iso_locale,
         }
+
+    def _refresh_session_context_from_detail_response(self, response: Any) -> list[str]:
+        before = self._session_context_values()
+        headers = dict(response.headers)
+        values = {
+            "csrf_token": extract_csrf_token(response.text)
+            or self._cookie_value("csrf_token")
+            or self._cookie_value("_csrf_token"),
+            "anon_id": _header_value(headers, "x-anon-id") or self._cookie_value("anon_id"),
+            "access_token_web": self._cookie_value("access_token_web"),
+            "datadome": self._cookie_value("datadome"),
+            "cf_bm": self._cookie_value("__cf_bm"),
+            "v_udt": _header_value(headers, "x-v-udt") or self._cookie_value("v_udt"),
+            "user_iso_locale": _header_value(headers, "x-user-iso-locale"),
+        }
+        for name, value in values.items():
+            if value:
+                setattr(self._catalog_session_context, name, value)
+
+        after = self._session_context_values()
+        refreshed = sorted(name for name, value in after.items() if value and value != before.get(name))
+        if refreshed:
+            self.prepared_session_refreshed = True
+        return refreshed
 
     def _refresh_session_context_from_cookies(
         self,
@@ -2525,6 +2654,23 @@ def extract_vinted_item_id(item_ref: str) -> str | None:
     return None
 
 
+def build_item_detail_navigation_url(item_url: str) -> str:
+    parsed = urlparse(item_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"www.vinted.es", "vinted.es"}
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or not parsed.path.startswith("/items/")
+    ):
+        raise ValueError("Item detail URL must be an HTTPS Vinted ES item URL")
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if not any(name == "referrer" for name, _ in query):
+        query.append(("referrer", "catalog"))
+    return parsed._replace(query=urlencode(query, doseq=True)).geturl()
+
+
 def summarize_item_detail_api_payload(item: Mapping[str, Any]) -> dict[str, Any]:
     photos = item.get("photos")
     photo_count = len(photos) if isinstance(photos, list) else 0
@@ -2555,27 +2701,536 @@ def summarize_item_detail_api_payload(item: Mapping[str, Any]) -> dict[str, Any]
 
 def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> CatalogItemDetail:
     product_data = extract_product_json_ld(html)
-    embedded_data = extract_embedded_detail_data(html)
-    if not product_data and not embedded_data:
+    if product_data and not _json_ld_matches_item(product_data, candidate.vinted_item_id):
+        product_data = {}
+    flight_records = parse_next_flight_records(decode_next_flight_payload(html))
+    flight = _extract_item_flight_parts(flight_records, candidate.vinted_item_id)
+    if not product_data and not flight["matched"]:
         raise ValueError("No public item detail data found in item document")
-    raw_detail = sanitize_item_detail(product_data)
+
+    rich_item = flight["rich_item"]
+    plugins = flight["plugins"]
+    item_status = _plugin_data(plugins, "item_status")
+    summary = _plugin_data(plugins, "summary")
+    attributes = _attribute_values(_plugin_data(plugins, "attributes"))
+    description = _plugin_data(plugins, "description")
+    make_offer = _plugin_data(plugins, "make_offer")
+    ask_seller = _plugin_data(plugins, "ask_seller")
+    seller_badges_info = _plugin_data(plugins, "seller_badges_info")
+    user_info = _plugin_data(plugins, "user_info_header")
+    offers = product_data.get("offers") if isinstance(product_data.get("offers"), Mapping) else {}
+    product_brand = product_data.get("brand") if isinstance(product_data.get("brand"), Mapping) else {}
+
+    values: dict[str, Any] = {}
+    observed_fields: set[str] = set()
+    field_sources: dict[str, str] = {}
+
+    def choose(name: str, *options: tuple[str, bool, Any], allow_empty: bool = False) -> None:
+        for source, present, value in options:
+            if present:
+                observed_fields.add(name)
+            if not present or value is None or (not allow_empty and value == ""):
+                continue
+            values[name] = value
+            field_sources[name] = source
+            return
+
+    choose(
+        "title",
+        ("flight.rich_item", "title" in rich_item, _optional_str(rich_item.get("title"))),
+        ("flight.make_offer", "title" in make_offer, _optional_str(make_offer.get("title"))),
+        ("flight.summary", bool(summary), _summary_title(summary)),
+        ("json_ld", "name" in product_data, _optional_str(product_data.get("name"))),
+        ("catalog", bool(candidate.title), candidate.title),
+    )
+    choose(
+        "brand",
+        ("flight.attributes", "brand" in attributes, attributes.get("brand")),
+        ("json_ld", "name" in product_brand, _optional_str(product_brand.get("name"))),
+        ("catalog", candidate.brand is not None, candidate.brand),
+    )
+    choose(
+        "size",
+        ("flight.attributes", "size" in attributes, attributes.get("size")),
+        ("catalog", candidate.size is not None, candidate.size),
+    )
+    choose(
+        "status",
+        ("flight.attributes", "status" in attributes, attributes.get("status")),
+        ("catalog", candidate.status is not None, candidate.status),
+    )
+    choose(
+        "description",
+        ("flight.description", "description" in description, _optional_str(description.get("description"))),
+        ("json_ld", "description" in product_data, _optional_str(product_data.get("description"))),
+        allow_empty=True,
+    )
+    choose(
+        "color",
+        ("flight.attributes", "color" in attributes, attributes.get("color")),
+        ("json_ld", "color" in product_data, _optional_str(product_data.get("color"))),
+    )
+    choose(
+        "category",
+        ("json_ld", "category" in product_data, _optional_str(product_data.get("category"))),
+    )
+
+    rich_price = _money_parts(rich_item.get("price"))
+    offer_price = _money_parts(make_offer.get("price"))
+    pricing_price = _money_parts(flight["pricing_services"].get("originalAskingAmount"))
+    json_ld_price = (
+        "price" in offers,
+        _optional_decimal(offers.get("price")),
+        _optional_str(offers.get("priceCurrency")),
+    )
+    catalog_price = (candidate.price_amount is not None, candidate.price_amount, candidate.currency)
+    price_options = (
+        ("flight.rich_item", *rich_price),
+        ("flight.make_offer", *offer_price),
+        ("flight.pricing", *pricing_price),
+        ("json_ld", *json_ld_price),
+        ("catalog", *catalog_price),
+    )
+    choose("price_amount", *((source, present, amount) for source, present, amount, _ in price_options))
+    choose("currency", *((source, present and currency is not None, currency) for source, present, _, currency in price_options))
+
+    photo_candidates = (
+        ("flight.rich_item", "photos" in rich_item, _resolve_flight_value(rich_item.get("photos"), flight_records)),
+        ("flight.make_offer", "photos" in make_offer, _resolve_flight_value(make_offer.get("photos"), flight_records)),
+        ("json_ld", "image" in product_data, product_data.get("image")),
+        ("catalog", candidate.image_url is not None, candidate.image_url),
+    )
+    photos: list[str] = []
+    for source, present, raw_photos in photo_candidates:
+        if present:
+            observed_fields.add("photos")
+        if not present:
+            continue
+        photos = _extract_vinted_photo_urls(raw_photos)
+        if photos:
+            field_sources["photos"] = source
+            break
+    values["photos"] = photos
+
+    choose(
+        "seller_rating",
+        (
+            "flight.user_info_header",
+            "feedback_reputation" in user_info,
+            _optional_decimal(user_info.get("feedback_reputation")),
+        ),
+    )
+    badge_value = seller_badges_info.get("badges")
+    seller_badges = _extract_string_list(badge_value)
+    if "badges" in seller_badges_info:
+        observed_fields.add("seller_badges")
+        field_sources["seller_badges"] = "flight.seller_badges_info"
+
+    resolved_currency = values.get("currency")
+    shipping_amount, shipping_observed = _shipping_amount(flight["shipping_details"], resolved_currency)
+    protection_amount, protection_observed = _pricing_service_amount(
+        flight["pricing_services"], "buyerProtection", resolved_currency
+    )
+    total_amount, total_observed = _validated_total_amount(
+        flight["pricing_services"], values.get("price_amount"), resolved_currency
+    )
+    validation_warnings: list[str] = []
+    if shipping_observed and shipping_amount is None:
+        validation_warnings.append("shipping_price_invalid")
+    if protection_observed and protection_amount is None:
+        validation_warnings.append("buyer_protection_price_invalid")
+    if total_observed and total_amount is None:
+        validation_warnings.append("total_price_invalid")
+    choose(
+        "shipping_price_amount",
+        ("flight.shipping_details", shipping_observed, shipping_amount),
+    )
+    choose(
+        "buyer_protection_fee_amount",
+        ("flight.pricing", protection_observed, protection_amount),
+    )
+    choose(
+        "total_price_amount",
+        ("flight.pricing", total_observed, total_amount),
+    )
+
+    availability_flags = _derive_public_availability(
+        rich_item=rich_item,
+        item_status=item_status,
+        ask_seller=ask_seller,
+        shipping_details=flight["shipping_details"],
+        shipping_details_observed=flight["shipping_details_observed"],
+        offers=offers,
+    )
+    if availability_flags:
+        observed_fields.add("availability_flags")
+        field_sources["availability_flags"] = "flight" if flight["matched"] else "json_ld"
+
+    diagnostic_fields = (
+        "title",
+        "description",
+        "brand",
+        "size",
+        "status",
+        "price_amount",
+        "currency",
+        "photos",
+    )
+    missing_fields = [
+        name
+        for name in diagnostic_fields
+        if name not in observed_fields
+        or (name == "photos" and not values.get(name))
+        or (name not in {"description", "photos"} and values.get(name) in {None, ""})
+    ]
+    raw = {
+        "parser_version": DETAIL_PARSER_VERSION,
+        "field_sources": dict(sorted(field_sources.items())),
+        "observed_fields": sorted(observed_fields),
+        "missing_fields": missing_fields,
+        "flight_record_count": len(flight_records),
+        "flight_sections": flight["sections"],
+        "json_ld_present": bool(product_data),
+        "validation_warnings": validation_warnings,
+    }
 
     return CatalogItemDetail(
         vinted_item_id=candidate.vinted_item_id,
-        description=_optional_str(product_data.get("description")),
-        color=_optional_str(product_data.get("color")),
-        category=_optional_str(product_data.get("category")),
-        shipping_price_amount=_optional_decimal(_find_first_key_value(embedded_data, {"shipping_price", "shipping_price_amount"})),
-        buyer_protection_fee_amount=_optional_decimal(
-            _find_first_key_value(embedded_data, {"buyer_protection_fee", "buyer_protection_fee_amount"})
-        ),
-        total_price_amount=_optional_decimal(_find_first_key_value(embedded_data, {"total_price", "total_price_amount"})),
-        photos=_extract_photo_urls(product_data, embedded_data, candidate),
-        seller_rating=_optional_decimal(_find_first_key_value(embedded_data, {"seller_rating", "rating"})),
-        seller_badges=_extract_string_list(_find_first_key_value(embedded_data, {"seller_badges", "badges"})),
-        availability_flags=_extract_availability_flags(product_data, embedded_data),
-        raw={**raw_detail, "embedded": sanitize_embedded_detail(embedded_data)},
+        title=values.get("title"),
+        brand=values.get("brand"),
+        size=values.get("size"),
+        status=values.get("status"),
+        price_amount=values.get("price_amount"),
+        currency=values.get("currency"),
+        description=values.get("description"),
+        color=values.get("color"),
+        category=values.get("category"),
+        shipping_price_amount=values.get("shipping_price_amount"),
+        buyer_protection_fee_amount=values.get("buyer_protection_fee_amount"),
+        total_price_amount=values.get("total_price_amount"),
+        photos=photos,
+        seller_rating=values.get("seller_rating"),
+        seller_badges=seller_badges,
+        availability_flags=availability_flags,
+        observed_fields=frozenset(observed_fields),
+        field_sources=field_sources,
+        raw=raw,
     )
+
+
+def parse_next_flight_records(payload: str) -> dict[str, Any]:
+    records: dict[str, Any] = {}
+    for line in payload.splitlines():
+        record_id, separator, raw_value = line.partition(":")
+        if not separator or not NEXT_FLIGHT_RECORD_ID_PATTERN.fullmatch(record_id):
+            continue
+        try:
+            records[record_id] = json.loads(raw_value)
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def _extract_item_flight_parts(records: Mapping[str, Any], item_id: str) -> dict[str, Any]:
+    rich_item: Mapping[str, Any] = {}
+    plugins: list[Any] = []
+    shipping_details: Any = None
+    shipping_details_observed = False
+    pricing_services: Mapping[str, Any] = {}
+    sections: set[str] = set()
+    matched = False
+
+    for record in records.values():
+        props = _react_props(record)
+        if not props:
+            continue
+        value = _resolve_flight_value(props.get("value"), records)
+        if isinstance(value, Mapping) and _same_item_id(value.get("id"), item_id):
+            rich_item = value
+            sections.add("rich_item")
+            matched = True
+
+        plugin_value = _resolve_flight_value(props.get("plugins"), records)
+        if _same_item_id(props.get("itemId"), item_id) and isinstance(plugin_value, list):
+            plugins = plugin_value
+            sections.add("plugins")
+            matched = True
+
+        if not _contains_item_id(record, item_id):
+            continue
+        for node in _walk_mappings(props):
+            if "shippingDetails" not in node:
+                continue
+            shipping_details_observed = True
+            shipping_details = _resolve_flight_value(node.get("shippingDetails"), records)
+            pricing_node = _find_mapping_with_key(node, "pricingServices")
+            if pricing_node is not None:
+                resolved_pricing = _resolve_flight_value(pricing_node.get("pricingServices"), records)
+                if isinstance(resolved_pricing, Mapping):
+                    pricing_services = resolved_pricing
+                    sections.add("pricing")
+            sections.add("shipping_details")
+            matched = True
+            break
+
+    plugin_map: dict[str, Mapping[str, Any]] = {}
+    for plugin in plugins:
+        if not isinstance(plugin, Mapping):
+            continue
+        plugin_type = _optional_str(plugin.get("type"))
+        data = _resolve_flight_value(plugin.get("data"), records)
+        if plugin_type and isinstance(data, Mapping):
+            plugin_map.setdefault(plugin_type, data)
+
+    return {
+        "matched": matched,
+        "rich_item": rich_item,
+        "plugins": plugin_map,
+        "shipping_details": shipping_details,
+        "shipping_details_observed": shipping_details_observed,
+        "pricing_services": pricing_services,
+        "sections": sorted(sections),
+    }
+
+
+def _react_props(record: Any) -> Mapping[str, Any]:
+    if isinstance(record, list) and len(record) >= 4 and isinstance(record[3], Mapping):
+        return record[3]
+    return {}
+
+
+def _resolve_flight_value(value: Any, records: Mapping[str, Any]) -> Any:
+    current = value
+    for _ in range(3):
+        if not isinstance(current, str) or not current.startswith("$") or current == "$undefined":
+            return current
+        parts = current[1:].split(":")
+        if len(parts) < 2 or parts[1] != "props":
+            return current
+        resolved: Any = _react_props(records.get(parts[0]))
+        if not resolved:
+            return current
+        for part in parts[2:]:
+            if isinstance(resolved, Mapping) and part in resolved:
+                resolved = resolved[part]
+            elif isinstance(resolved, list) and part.isdigit() and int(part) < len(resolved):
+                resolved = resolved[int(part)]
+            else:
+                return current
+        current = resolved
+    return current
+
+
+def _walk_mappings(value: Any):
+    if isinstance(value, Mapping):
+        yield value
+        for child in value.values():
+            yield from _walk_mappings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_mappings(child)
+
+
+def _find_mapping_with_key(value: Any, key: str) -> Mapping[str, Any] | None:
+    return next((mapping for mapping in _walk_mappings(value) if key in mapping), None)
+
+
+def _contains_item_id(value: Any, item_id: str) -> bool:
+    return any(
+        _same_item_id(mapping.get(key), item_id)
+        for mapping in _walk_mappings(value)
+        for key in ("id", "item_id", "itemId")
+        if key in mapping
+    )
+
+
+def _same_item_id(value: Any, item_id: str) -> bool:
+    return value is not None and str(value) == item_id
+
+
+def _json_ld_matches_item(product_data: Mapping[str, Any], item_id: str) -> bool:
+    offers = product_data.get("offers") if isinstance(product_data.get("offers"), Mapping) else {}
+    identity_urls = [product_data.get("url"), offers.get("url")]
+    observed_ids = [extract_vinted_item_id(str(url)) for url in identity_urls if url]
+    return not observed_ids or item_id in observed_ids
+
+
+def _plugin_data(plugins: Mapping[str, Mapping[str, Any]], plugin_type: str) -> Mapping[str, Any]:
+    return plugins.get(plugin_type, {})
+
+
+def _attribute_values(data: Mapping[str, Any]) -> dict[str, str | None]:
+    values: dict[str, str | None] = {}
+    attributes = data.get("attributes")
+    if not isinstance(attributes, list):
+        return values
+    for attribute in attributes:
+        if not isinstance(attribute, Mapping):
+            continue
+        code = _optional_str(attribute.get("code"))
+        attribute_data = attribute.get("data") if isinstance(attribute.get("data"), Mapping) else {}
+        if code:
+            values[code] = _optional_str(attribute_data.get("value"))
+    return values
+
+
+def _summary_title(summary: Mapping[str, Any]) -> str | None:
+    for mapping in _walk_mappings(summary.get("lines")):
+        if mapping.get("style") == "title" and mapping.get("value") is not None:
+            return _optional_str(mapping.get("value"))
+    return None
+
+
+def _money_parts(value: Any) -> tuple[bool, Decimal | None, str | None]:
+    if not isinstance(value, Mapping):
+        return False, None, None
+    amount = _optional_decimal(value.get("amount"))
+    currency = _optional_str(value.get("currency_code") or value.get("currencyCode"))
+    return "amount" in value, amount, currency
+
+
+def _extract_vinted_photo_urls(value: Any) -> list[str]:
+    if isinstance(value, str):
+        candidates: list[Any] = [value]
+    elif isinstance(value, Mapping):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = sorted(
+            enumerate(value),
+            key=lambda entry: (
+                _optional_int(entry[1].get("image_no")) if isinstance(entry[1], Mapping) else None
+            )
+            or (1_000_000 + entry[0]),
+        )
+        candidates = [entry for _, entry in candidates]
+    else:
+        return []
+
+    photos: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            if candidate.get("is_hidden") is True:
+                continue
+            url = candidate.get("url")
+        else:
+            url = candidate
+        if isinstance(url, str) and _is_allowed_vinted_photo_url(url):
+            photos.append(url)
+    return list(dict.fromkeys(photos))
+
+
+def _is_allowed_vinted_photo_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return bool(
+        parsed.scheme == "https"
+        and not parsed.username
+        and not parsed.password
+        and parsed.hostname
+        and VINTED_IMAGE_HOST_PATTERN.fullmatch(parsed.hostname)
+    )
+
+
+def _shipping_amount(shipping_details: Any, currency: str | None) -> tuple[Decimal | None, bool]:
+    if not isinstance(shipping_details, Mapping):
+        return None, shipping_details is not None
+    price = shipping_details.get("price")
+    present, amount, price_currency = _money_parts(price)
+    if present and _currency_matches(price_currency, currency):
+        return amount, True
+    if shipping_details.get("isFreeShipping") is True:
+        return Decimal("0"), True
+    return None, "price" in shipping_details
+
+
+def _pricing_service_amount(
+    pricing_services: Mapping[str, Any], service_name: str, currency: str | None
+) -> tuple[Decimal | None, bool]:
+    services = pricing_services.get("services") if isinstance(pricing_services.get("services"), Mapping) else {}
+    service = services.get(service_name) if isinstance(services.get(service_name), Mapping) else {}
+    present, amount, service_currency = _money_parts(service.get("finalPrice"))
+    return (amount if present and _currency_matches(service_currency, currency) else None, present)
+
+
+def _validated_total_amount(
+    pricing_services: Mapping[str, Any], base_amount: Decimal | None, currency: str | None
+) -> tuple[Decimal | None, bool]:
+    present, amount, total_currency = _money_parts(pricing_services.get("totalAmount"))
+    valid = present and _currency_matches(total_currency, currency)
+    if valid and base_amount is not None and amount is not None and amount < base_amount:
+        valid = False
+    return (amount if valid else None, present)
+
+
+def _currency_matches(value: str | None, expected: str | None) -> bool:
+    return value is None or expected is None or value.upper() == expected.upper()
+
+
+def _derive_public_availability(
+    *,
+    rich_item: Mapping[str, Any],
+    item_status: Mapping[str, Any],
+    ask_seller: Mapping[str, Any],
+    shipping_details: Any,
+    shipping_details_observed: bool,
+    offers: Mapping[str, Any],
+) -> dict[str, Any]:
+    flags: dict[str, Any] = {"source": "public_snapshot"}
+    for name in (
+        "can_buy",
+        "instant_buy",
+        "transaction_permitted",
+        "is_closed",
+        "is_hidden",
+        "is_reserved",
+        "is_draft",
+        "is_processing",
+    ):
+        for source in (item_status, ask_seller, rich_item):
+            if name in source:
+                flags[name] = source.get(name)
+                break
+    for source in (ask_seller, rich_item):
+        if "reservation" in source:
+            flags["has_reservation"] = source.get("reservation") is not None
+            break
+    if "availability" in offers:
+        flags["availability"] = offers.get("availability")
+    if shipping_details_observed:
+        flags["shipping_available"] = isinstance(shipping_details, Mapping)
+
+    if flags.get("is_processing") is True:
+        state = "processing"
+    elif flags.get("is_draft") is True:
+        state = "draft"
+    elif flags.get("is_closed") is True:
+        state = "closed"
+    elif flags.get("is_hidden") is True:
+        state = "hidden"
+    elif flags.get("is_reserved") is True:
+        state = "reserved"
+    elif shipping_details_observed and not flags.get("shipping_available"):
+        state = "shipping_unavailable"
+    elif flags.get("transaction_permitted") is False:
+        state = "not_permitted"
+    elif flags.get("can_buy") is False or flags.get("instant_buy") is False:
+        state = "not_buyable"
+    elif (
+        flags.get("can_buy") is True
+        and flags.get("instant_buy") is True
+        and flags.get("transaction_permitted") is True
+        and flags.get("is_closed") is False
+        and flags.get("is_hidden") is False
+        and flags.get("is_reserved") is False
+        and flags.get("is_draft") is False
+        and flags.get("is_processing") is False
+        and flags.get("shipping_available") is True
+    ):
+        state = "buyable"
+    else:
+        state = "unknown"
+    flags["state"] = state
+    flags["reason_codes"] = [] if state == "buyable" else [state]
+    return flags
 
 
 def extract_product_json_ld(html: str) -> dict[str, Any]:
@@ -2591,104 +3246,6 @@ def extract_product_json_ld(html: str) -> dict[str, Any]:
     return {}
 
 
-def sanitize_item_detail(raw_detail: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "description": raw_detail.get("description"),
-        "color": raw_detail.get("color"),
-        "category": raw_detail.get("category"),
-        "image": raw_detail.get("image"),
-        "offers": raw_detail.get("offers") if isinstance(raw_detail.get("offers"), Mapping) else None,
-        "aggregateRating": raw_detail.get("aggregateRating") if isinstance(raw_detail.get("aggregateRating"), Mapping) else None,
-    }
-
-
-def extract_embedded_detail_data(html: str) -> dict[str, Any]:
-    marker = '"item":'
-    marker_index = html.find(marker)
-    if marker_index == -1:
-        return {}
-
-    object_start = html.find("{", marker_index)
-    object_end = _find_matching_object_end(html, object_start)
-    if object_start == -1 or object_end is None:
-        return {}
-
-    try:
-        parsed = json.loads(html[object_start:object_end])
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def sanitize_embedded_detail(raw_detail: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "shipping_price": _find_first_key_value(raw_detail, {"shipping_price", "shipping_price_amount"}),
-        "buyer_protection_fee": _find_first_key_value(raw_detail, {"buyer_protection_fee", "buyer_protection_fee_amount"}),
-        "total_price": _find_first_key_value(raw_detail, {"total_price", "total_price_amount"}),
-        "photos": _extract_photo_urls({}, raw_detail, None),
-        "seller_rating": _find_first_key_value(raw_detail, {"seller_rating", "rating"}),
-        "seller_badges": _extract_string_list(_find_first_key_value(raw_detail, {"seller_badges", "badges"})),
-    }
-
-
-def _extract_photo_urls(
-    product_data: Mapping[str, Any],
-    embedded_data: Mapping[str, Any],
-    candidate: CatalogItemCandidate | None,
-) -> list[str]:
-    photos: list[str] = []
-    product_images = product_data.get("image")
-    if isinstance(product_images, str):
-        photos.append(product_images)
-    elif isinstance(product_images, list):
-        photos.extend(str(image) for image in product_images if image)
-
-    embedded_photos = _find_first_key_value(embedded_data, {"photos", "images"})
-    if isinstance(embedded_photos, list):
-        for photo in embedded_photos:
-            if isinstance(photo, str):
-                photos.append(photo)
-            elif isinstance(photo, Mapping):
-                url = photo.get("url") or photo.get("full_size_url") or photo.get("src")
-                if url:
-                    photos.append(str(url))
-
-    if candidate and candidate.image_url:
-        photos.append(candidate.image_url)
-
-    return list(dict.fromkeys(photos))
-
-
-def _extract_availability_flags(product_data: Mapping[str, Any], embedded_data: Mapping[str, Any]) -> dict[str, Any]:
-    offers = product_data.get("offers") if isinstance(product_data.get("offers"), Mapping) else {}
-    flags = {
-        "availability": offers.get("availability"),
-        "is_visible": _find_first_key_value(embedded_data, {"is_visible"}),
-        "is_sold": _find_first_key_value(embedded_data, {"is_sold", "sold"}),
-        "can_be_sold": _find_first_key_value(embedded_data, {"can_be_sold"}),
-    }
-    return {key: value for key, value in flags.items() if value is not None}
-
-
-def _find_first_key_value(value: Any, keys: set[str]) -> Any:
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            if key in keys:
-                if isinstance(child, Mapping) and "amount" in child:
-                    return child.get("amount")
-                return child
-        for child in value.values():
-            found = _find_first_key_value(child, keys)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = _find_first_key_value(child, keys)
-            if found is not None:
-                return found
-    return None
-
-
 def _extract_string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -2700,7 +3257,7 @@ def _extract_string_list(value: Any) -> list[str]:
             if isinstance(entry, str):
                 results.append(entry)
             elif isinstance(entry, Mapping):
-                label = entry.get("name") or entry.get("title") or entry.get("code")
+                label = entry.get("name") or entry.get("title") or entry.get("code") or entry.get("type")
                 if label:
                     results.append(str(label))
         return results

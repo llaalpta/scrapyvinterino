@@ -2,7 +2,16 @@
 
 Fecha de observacion inicial: 2026-07-02.
 
-Ultima actualizacion: 2026-07-07.
+Ultima actualizacion: 2026-07-11.
+
+## Evidencia del documento de detalle
+
+- Un HAR de navegacion directa a `/api/v2/items/{id}/details` muestra respuestas `403` con `cf-mitigated: challenge`; el `code:104 not_found` final pertenece a un POST generado por Cloudflare y no es un resultado fiable de consulta del articulo.
+- Un segundo HAR de catalogo a articulo muestra un documento publico `/items/{id}-{slug}?referrer=catalog` correcto y ninguna XHR de detalle. JSON-LD y los registros Next/React Flight del documento contienen los datos necesarios.
+- Los ids de registro Flight cambian por render. La extraccion debe parsear registros `id:JSON`, comprobar el item solicitado y localizar bloques de item, plugins y precios mediante firmas estructurales.
+- `plugins` aporta descripcion, atributos, estado y senales de transaccion; el bloque del item aporta fotos firmadas y comprabilidad; `shippingDetails.price` es el envio minimo mostrado; `pricingServices` aporta base, proteccion y total sin envio.
+- Las URL firmadas `images*.vinted.net/.../f800/...?...` cargan sin cookies de Vinted. El backend guarda solo las URL y el navegador las descarga directamente conservando la firma y la query.
+- Los HAR son entradas locales de investigacion y no se incorporan al repositorio porque contienen material bruto de navegacion y sesion.
 
 ## URL investigada
 

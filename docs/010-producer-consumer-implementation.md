@@ -10,6 +10,9 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Runtime catalog traffic is monitor-owned: the run reuses a ready `vinted_sessions` row for that monitor/proxy sticky identity or prepares one automatically from the saved catalog document URL before scraping.
 - Manual runs remain synchronous from the API, but use the same provider stack.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
+- Item enrichment uses the public item document, structural Next/React Flight records and JSON-LD fallback. The production flow and visible detail probe no longer call the direct `/api/v2/items/{id}/details` matrix.
+- Detail work is sequential per cookie jar. Recoverable candidates survive outside the top-five window in Redis for three total attempts (`30s`, `120s`); only terminal outcomes become seen.
+- The PWA persists no image bytes: it renders every signed `images*.vinted.net` URL directly and exposes an accessible gallery plus public availability/price breakdown while purchase remains disabled.
 
 ## Decisions
 
@@ -21,7 +24,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
 - Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
 - Redis task payloads carry `proxy_profile_id` only; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
-- Treat `403` and `429` from Vinted as DataDome-style challenge responses for retry purposes.
+- Classify DataDome and `cf-mitigated: challenge` explicitly; plain `429` remains rate limiting and detail `404/410` is terminal.
 - Keep retry escalation in `TaskConsumer`; `execute_monitor_run()` records the failed run and re-raises `DataDomeChallengeError`.
 
 ## Pre-Integration Impersonation Plan
@@ -92,7 +95,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 ## Detail Probe Session Hardening 2026-07-09
 
-- The item detail API probe now reuses or prepares the monitor-owned Vinted session through the same proxy sticky identity and Chrome 146 runtime profile as catalog runs.
+- The item detail document probe reuses or prepares the monitor-owned Vinted session through the same proxy sticky identity and Chrome 146 runtime profile as catalog runs.
 - A detail probe records a `detail_probe` audit run, emits `detail_probe_finished` and `run_succeeded` on terminal success, and remains excluded from monitor metrics, item persistence, opportunities and Redis seen state.
 - A DataDome challenge during the detail probe invalidates the prepared Vinted session and records safe diagnostics without silently rotating into an unprepared proxy identity.
 - Host verification passed with service URLs overridden for Windows host access: `ruff check backend/src backend/alembic` and the focused 010 pytest suite (`144 passed`).
@@ -101,7 +104,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 
 - The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
 - Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That endpoint remains a diagnostic probe only.
-- Business runs now require the public `/items/...` HTML/Next detail document before creating opportunities. Non-DataDome detail failures are terminal pending outcomes without opportunities; DataDome detail challenges still fail the run and invalidate the prepared Vinted session.
+- Business runs require the public `/items/...` HTML/Next detail document before creating opportunities. Recoverable failures stay pending in Redis; configured incompleteness, genuine `404/410`, blacklist decisions and exhausted retries are terminal. Anti-bot challenges fail the run, invalidate the prepared session and preserve the rolled-back batch.
 
 ## Prepared Session Hardening 2026-07-09
 
@@ -118,7 +121,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - Its HTTP layer uses `curl_cffi.AsyncSession`, optional proxy configuration, cookie persistence, `Accept-Language` derived from the Vinted domain, and a cookie refresh path using `HEAD {base_url}` with `impersonate="chrome"`.
 - Its default application headers are minimal: `Cache-Control: max-age=0`, `DNT: 1`, and `X-Money-Object: true`. It does not implement HAR-shaped header ordering, explicit CSRF/anon headers, DataDome collection, Chrome 146 coupling, item-document warmup, or a detail endpoint matrix.
 - Its tests mock the detail response and therefore prove wrapper behavior only; they do not demonstrate that `/api/v2/items/{id}/details` currently works against live Vinted through Cloudflare/DataDome.
-- Actionable takeaway: the reference confirms the common direct detail endpoint but does not explain the current live `403 cf-mitigated: challenge` observed by this project. Useful ideas to retain are cookie persistence, same-session refresh before retrying `401/403`, and explicit `429` handling. The next direct-detail work should focus on discovering missing endpoint parameters or a different browser-observed API path rather than repeatedly probing `/details` with the same matrix.
+- Historical takeaway: the reference confirmed the common direct endpoint but did not unlock it. This direction is superseded by the 2026-07-11 catalog-to-item HAR, which proves that the public item document embeds the required data.
 
 ## Live Detail Probe Findings 2026-07-09
 
@@ -126,7 +129,7 @@ The roadmap item remains `in-progress` until live Vinted/proxy diagnostics are r
 - The item document warmup returned `200` and the item-context DataDome collector could also obtain or reuse a `datadome` cookie in the same session.
 - Control/support endpoints behaved differently from the detail endpoint: `/api/v2/info_banners/item` returned JSON, `/api/v2/items/{id}/services` returned JSON, and `/api/v2/items/{id}/more` returned `400`.
 - The direct detail endpoint `/api/v2/items/{id}/details` remained blocked with `403` and `cf-mitigated: challenge` even after item-document warmup, DataDome presence, item referer, catalog referer, and Chrome 146 Client Hints variants.
-- Current conclusion: DataDome collection is necessary for a high-fidelity prepared session, but it is not sufficient to unlock the direct item detail API. Future detail work should avoid broad request batteries and instead add narrowly targeted probes based on browser bundle/HAR evidence.
+- Superseded conclusion: DataDome remains part of the prepared-session context, but direct-detail request batteries are no longer product work. The supported detail contract is the public document parser used by both business runs and the operator probe.
 
 ## Continuous Direct Scheduler Validation 2026-07-06
 

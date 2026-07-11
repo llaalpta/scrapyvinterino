@@ -97,10 +97,17 @@ def build_item(suffix: str, title: str, price: Decimal) -> Item:
         seller_country=None,
         favorite_count=1,
         url=f"https://www.vinted.es/items/{PREFIX}{suffix}",
-        image_url=None,
-        photos=[],
+        image_url=f"https://images1.vinted.net/{PREFIX}{suffix}/thumb.webp?s=signed",
+        description="Detalle publico de prueba",
+        shipping_price_amount=Decimal("1.75"),
+        buyer_protection_fee_amount=Decimal("0.80"),
+        total_price_amount=price + Decimal("0.80"),
+        photos=[
+            f"https://images1.vinted.net/{PREFIX}{suffix}/f800/1.webp?s=signed-1",
+            f"https://images1.vinted.net/{PREFIX}{suffix}/f800/2.webp?s=signed-2",
+        ],
         seller_badges=[],
-        availability_flags={},
+        availability_flags={"state": "reserved", "reason_codes": ["reserved"], "source": "public_snapshot"},
         detail_raw={},
         raw={},
     )
@@ -125,6 +132,13 @@ def test_opportunities_api_returns_paginated_opportunities() -> None:
         assert body["total"] == 1
         assert body["items"][0]["source_name"] == f"{PREFIX}source-b"
         assert body["items"][0]["item"]["vinted_item_id"] == f"{PREFIX}source-b"
+        assert body["items"][0]["item"]["photos"] == [
+            f"https://images1.vinted.net/{PREFIX}source-b/f800/1.webp?s=signed-1",
+            f"https://images1.vinted.net/{PREFIX}source-b/f800/2.webp?s=signed-2",
+        ]
+        assert body["items"][0]["item"]["shipping_price_amount"] == "1.75"
+        assert body["items"][0]["item"]["buyer_protection_fee_amount"] == "0.80"
+        assert body["items"][0]["item"]["availability_flags"]["state"] == "reserved"
         assert body["items"][0]["last_scraped_at"] == SEED_NOW.isoformat().replace("+00:00", "Z")
         assert body["items"][0]["last_run_id"] is not None
     finally:

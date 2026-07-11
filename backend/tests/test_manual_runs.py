@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -14,7 +15,8 @@ from vinted_monitor.db.models import ErrorLog, Item, MonitorSession, Opportunity
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
-from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
+from vinted_monitor.providers.datadome import DataDomeChallengeError
+from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession, VintedItemDetailHTTPError
 from vinted_monitor.services.monitor_sessions import start_monitor_session
 from vinted_monitor.services.monitor_stats import get_monitor_stats
 from vinted_monitor.services.proxies import create_proxy_profile
@@ -31,7 +33,11 @@ from vinted_monitor.services.runs import (
     execute_monitor_run,
 )
 from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
-from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
+from vinted_monitor.services.seen_cache import (
+    DetailCandidateStateUpdate,
+    DetailRetryRecord,
+    SeenCacheUnavailableError,
+)
 from vinted_monitor.services.vinted_sessions import prepared_context_from_session, save_prepared_vinted_session
 
 
@@ -41,6 +47,7 @@ class FakeSeenCache:
         self.seen = set(initially_seen or set())
         self.processing: set[str] = set()
         self.marked_seen: list[str] = []
+        self.detail_retries: dict[str, DetailRetryRecord] = {}
         self.baseline_ready = baseline_ready
         self.marked_baseline: list[tuple[int, str]] = []
 
@@ -50,7 +57,11 @@ class FakeSeenCache:
 
     def claim_unseen(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> set[str]:
         self.require_available()
-        claimed = {item_id for item_id in vinted_item_ids if item_id not in self.seen and item_id not in self.processing}
+        claimed = {
+            item_id
+            for item_id in vinted_item_ids
+            if item_id not in self.seen and item_id not in self.processing and item_id not in self.detail_retries
+        }
         self.processing.update(claimed)
         return claimed
 
@@ -59,9 +70,44 @@ class FakeSeenCache:
         self.seen.update(vinted_item_ids)
         self.marked_seen.extend(vinted_item_ids)
         self.processing.difference_update(vinted_item_ids)
+        for item_id in vinted_item_ids:
+            self.detail_retries.pop(item_id, None)
 
     def release_processing(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
         self.processing.difference_update(vinted_item_ids)
+
+    def claim_due_detail_retries(
+        self,
+        monitor_id: int,
+        policy_hash: str,
+        *,
+        due_at: datetime,
+        limit: int,
+    ) -> list[DetailRetryRecord]:
+        self.require_available()
+        due = sorted(
+            (
+                retry
+                for item_id, retry in self.detail_retries.items()
+                if retry.next_attempt_at <= due_at and item_id not in self.processing and item_id not in self.seen
+            ),
+            key=lambda retry: retry.next_attempt_at,
+        )[:limit]
+        self.processing.update(retry.candidate.vinted_item_id for retry in due)
+        return due
+
+    def finalize_candidate_states(
+        self,
+        monitor_id: int,
+        policy_hash: str,
+        update: DetailCandidateStateUpdate,
+    ) -> None:
+        self.require_available()
+        self.mark_seen(monitor_id, policy_hash, list(update.terminal_ids))
+        for retry in update.retries:
+            item_id = retry.candidate.vinted_item_id
+            self.detail_retries[item_id] = retry
+            self.processing.discard(item_id)
 
     def has_baseline(self, monitor_id: int, policy_hash: str) -> bool:
         self.require_available()
@@ -211,7 +257,7 @@ class FakeDiscardingDetailProvider(FakeSuccessProvider):
             description="contiene descarte pytest",
             color="Azul",
             category="Polos",
-            photos=[],
+            photos=[f"https://images.example.test/{candidate.vinted_item_id}-detail.webp"],
         )
 
 
@@ -342,23 +388,40 @@ class FakeSessionPreparingProvider:
             "error": None,
         }
 
+    def probe_item_detail_document(self, item_ref: str, *, referer_url: str | None = None) -> dict:
+        self.detail_probe_calls.append((item_ref, referer_url))
+        if self.event_sink is not None:
+            self.event_sink(
+                phase="detail_document_probe_success",
+                method="GET",
+                url=f"https://www.vinted.es/items/{item_ref}?referrer=catalog",
+                status_code=200,
+                duration_ms=13,
+                details={
+                    "outcome": "accepted_html",
+                    "item_id": item_ref,
+                    "detail_summary": {"parser_version": "flight-v1", "photo_count": 2},
+                },
+            )
+        return {
+            "outcome": "accepted_html",
+            "item_id": item_ref,
+            "detail_document_url": f"https://www.vinted.es/items/{item_ref}?referrer=catalog",
+            "status_code": 200,
+            "duration_ms": 13,
+            "detail_summary": {"parser_version": "flight-v1", "photo_count": 2},
+            "missing_required": [],
+            "error": None,
+        }
+
     def close(self) -> None:
         self.closed = True
 
 
 class FakeDataDomeDetailProvider(FakeSessionPreparingProvider):
-    def probe_item_detail_api(self, item_ref: str, *, referer_url: str | None = None) -> dict:
+    def probe_item_detail_document(self, item_ref: str, *, referer_url: str | None = None) -> dict:
         self.detail_probe_calls.append((item_ref, referer_url))
-        return {
-            "outcome": "datadome_challenge",
-            "item_id": item_ref,
-            "detail_api_url": f"https://www.vinted.es/api/v2/items/{item_ref}/details",
-            "status_code": 403,
-            "duration_ms": 17,
-            "detail_summary": {},
-            "missing_required": [],
-            "error": None,
-        }
+        raise DataDomeChallengeError("DataDome challenge on item detail document probe")
 
 
 class FakeSessionPreparingProviderWithoutDataDome(FakeSessionPreparingProvider):
@@ -529,9 +592,9 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         assert phases.count("item_detail_persisted") == 2
         assert phases.count("opportunity_created") == 2
         assert sorted(provider.detail_calls) == ["pytest-run-item-0", "pytest-run-item-1"]
-        assert "redis_seen_marked" in phases
+        assert "redis_candidate_state_updated" in phases
         assert next(event for event in events if event.phase == "catalog_candidates_received").details["candidate_count"] == 2
-        assert next(event for event in events if event.phase == "redis_seen_marked").details["marked_seen_count"] == 2
+        assert next(event for event in events if event.phase == "redis_candidate_state_updated").details["marked_seen_count"] == 2
 
 
 def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
@@ -815,7 +878,7 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
         assert run["status"] == SUCCESS
         assert run["items_found"] == 0
         assert run["opportunities_created"] == 0
-        assert result["outcome"] == "accepted_json"
+        assert result["outcome"] == "accepted_html"
         assert result["item_id"] == "9356705635"
         assert result["detail_summary"]["photo_count"] == 2
         assert len(FakeSessionPreparingProvider.created) == 2
@@ -832,7 +895,7 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
             events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run["id"]).order_by(RunEvent.id.asc())))
             phases = [event.phase for event in events]
             assert "vinted_session_prepare_start" in phases
-            assert "detail_api_probe_success" in phases
+            assert "detail_document_probe_success" in phases
             assert "detail_probe_finished" in phases
             assert "run_succeeded" in phases
             assert "catalog_search_start" not in phases
@@ -894,8 +957,8 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
 
         assert response.status_code == 201
         body = response.json()
-        assert body["run"]["status"] == SUCCESS
-        assert body["result"]["outcome"] == "datadome_challenge"
+        assert body["run"]["status"] == FAILED
+        assert body["result"]["outcome"] == "failed"
         assert len(FakeSessionPreparingProvider.created) == 1
 
         with SessionLocal() as db:
@@ -908,8 +971,8 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
             assert "DataDome challenge" in (session.last_error or "")
             events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == body["run"]["id"]).order_by(RunEvent.id.asc())))
             phases = [event.phase for event in events]
-            assert "detail_probe_finished" in phases
-            assert "run_succeeded" in phases
+            assert "run_failed" in phases
+            assert "detail_probe_finished" not in phases
     finally:
         cleanup_source(source_id)
 
@@ -1245,7 +1308,12 @@ def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.M
             )
             events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
             success_event = next(event for event in events if event.phase == "catalog_search_success")
-            session = db.scalar(select(VintedSession).where(VintedSession.source_id == source_id, VintedSession.proxy_profile_id == proxy_id))
+            session = db.scalar(
+                select(VintedSession).where(
+                    VintedSession.source_id == source_id,
+                    VintedSession.proxy_profile_id == proxy_id,
+                )
+            )
 
             assert run.status == SUCCESS
             assert run.items_found == 2
@@ -2033,13 +2101,14 @@ def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) ->
         source.filter_definition = {"blacklist_terms": ["nunca"]}
         db.commit()
 
+    cache = FakeSeenCache()
     with SessionLocal() as db:
         provider = FakeFailingDetailProvider(item_count=1)
         run = execute_monitor_run(
             db,
             source_id,
             provider=provider,
-            seen_cache=FakeSeenCache(),
+            seen_cache=cache,
             egress=_test_direct_egress(),
         )
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
@@ -2055,6 +2124,255 @@ def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) ->
         assert provider.detail_calls == ["pytest-run-item-0"]
         assert error_event is not None
         assert "session-secret" not in (error_event.message or "")
+        assert "pytest-run-item-0" not in cache.seen
+        assert cache.detail_retries["pytest-run-item-0"].attempt_count == 1
+        assert cache.detail_retries["pytest-run-item-0"].failure_kind == "detail_transport_or_parser_error"
+
+
+def test_due_detail_retry_creates_opportunity_after_item_leaves_catalog_window(source_id: int) -> None:
+    cache = FakeSeenCache()
+    failing_provider = FakeFailingDetailProvider(item_count=1)
+
+    with SessionLocal() as db:
+        first_run = execute_monitor_run(
+            db,
+            source_id,
+            provider=failing_provider,
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+
+    queued = cache.detail_retries["pytest-run-item-0"]
+    cache.detail_retries["pytest-run-item-0"] = replace(
+        queued,
+        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    recovery_provider = FakeSuccessProvider(item_count=0)
+
+    with SessionLocal() as db:
+        second_run = execute_monitor_run(
+            db,
+            source_id,
+            provider=recovery_provider,
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+            require_active=False,
+        )
+        opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
+
+        assert first_run.items_filter_pending == 1
+        assert second_run.items_found == 0
+        assert second_run.items_new == 0
+        assert second_run.opportunities_created == 1
+        assert opportunity is not None
+        assert recovery_provider.detail_calls == ["pytest-run-item-0"]
+        assert "pytest-run-item-0" in cache.seen
+        assert "pytest-run-item-0" not in cache.detail_retries
+
+
+def test_detail_budget_defers_candidate_without_consuming_attempt(
+    source_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vinted_monitor.services.scheduler import get_scheduler_runtime_config as real_runtime_config
+
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.get_scheduler_runtime_config",
+        lambda db, settings: replace(
+            real_runtime_config(db, settings),
+            detail_max_candidates_per_run=1,
+        ),
+    )
+    cache = FakeSeenCache()
+    provider = FakeSuccessProvider(item_count=2)
+
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=provider,
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+
+    assert run.opportunities_created == 1
+    assert run.items_filter_pending == 1
+    assert provider.detail_calls == ["pytest-run-item-0"]
+    assert "pytest-run-item-0" in cache.seen
+    assert cache.detail_retries["pytest-run-item-1"].attempt_count == 0
+    assert cache.detail_retries["pytest-run-item-1"].failure_kind == "detail_budget_deferred"
+
+
+def test_third_detail_failure_exhausts_retry_and_marks_candidate_seen(source_id: int) -> None:
+    cache = FakeSeenCache()
+    candidate = FakeSuccessProvider(item_count=1).search(SimpleNamespace(url="https://www.vinted.es/catalog")).items[0]
+    cache.detail_retries[candidate.vinted_item_id] = DetailRetryRecord(
+        candidate=candidate,
+        attempt_count=2,
+        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
+        failure_kind="detail_timeout",
+    )
+
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeFailingDetailProvider(item_count=0),
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+        exhausted_event = db.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == run.id,
+                RunEvent.phase == "detail_retry_exhausted",
+            )
+        )
+
+        assert run.items_new == 0
+        assert run.items_filter_pending == 1
+        assert run.opportunities_created == 0
+        assert exhausted_event is not None
+        assert candidate.vinted_item_id in cache.seen
+        assert candidate.vinted_item_id not in cache.detail_retries
+
+
+def test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate(source_id: int) -> None:
+    class MidBatchChallengeProvider(FakeSuccessProvider):
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            self.detail_calls.append(candidate.vinted_item_id)
+            if candidate.vinted_item_id.endswith("-1"):
+                raise DataDomeChallengeError("DataDome challenge in detail batch")
+            return CatalogItemDetail(
+                vinted_item_id=candidate.vinted_item_id,
+                description="Detalle valido",
+                photos=[f"https://images.example.test/{candidate.vinted_item_id}.webp"],
+            )
+
+    cache = FakeSeenCache()
+    provider = MidBatchChallengeProvider(item_count=3)
+    with SessionLocal() as db, pytest.raises(DataDomeChallengeError):
+        execute_monitor_run(
+            db,
+            source_id,
+            provider=provider,
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+
+    with SessionLocal() as db:
+        opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
+
+    assert opportunity_count == 0
+    assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-1"]
+    assert set(cache.detail_retries) == {"pytest-run-item-0", "pytest-run-item-1", "pytest-run-item-2"}
+    assert cache.detail_retries["pytest-run-item-0"].attempt_count == 0
+    assert cache.detail_retries["pytest-run-item-1"].attempt_count == 1
+    assert cache.detail_retries["pytest-run-item-2"].attempt_count == 0
+    assert cache.seen == set()
+
+
+def test_observed_empty_description_is_valid_detail(source_id: int) -> None:
+    class EmptyDescriptionProvider(FakeSuccessProvider):
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            self.detail_calls.append(candidate.vinted_item_id)
+            return CatalogItemDetail(
+                vinted_item_id=candidate.vinted_item_id,
+                description="",
+                photos=[f"https://images.example.test/{candidate.vinted_item_id}.webp"],
+                observed_fields=frozenset({"description", "photos"}),
+            )
+
+    cache = FakeSeenCache()
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=EmptyDescriptionProvider(item_count=1),
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+        item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
+
+        assert run.opportunities_created == 1
+        assert item is not None
+        assert item.description == ""
+        assert "pytest-run-item-0" in cache.seen
+
+
+def test_missing_required_detail_is_terminal_without_opportunity(source_id: int) -> None:
+    class MissingDescriptionProvider(FakeSuccessProvider):
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            self.detail_calls.append(candidate.vinted_item_id)
+            return CatalogItemDetail(
+                vinted_item_id=candidate.vinted_item_id,
+                description=None,
+                photos=[f"https://images.example.test/{candidate.vinted_item_id}.webp"],
+            )
+
+    cache = FakeSeenCache()
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=MissingDescriptionProvider(item_count=1),
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+        incomplete_event = db.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == run.id,
+                RunEvent.phase == "detail_incomplete",
+            )
+        )
+
+        assert run.items_filter_pending == 1
+        assert run.opportunities_created == 0
+        assert incomplete_event is not None
+        assert incomplete_event.details["missing_required"] == ["description"]
+        assert "pytest-run-item-0" in cache.seen
+        assert cache.detail_retries == {}
+
+
+def test_gone_detail_is_terminal_without_retry(source_id: int) -> None:
+    class GoneDetailProvider(FakeSuccessProvider):
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            self.detail_calls.append(candidate.vinted_item_id)
+            raise VintedItemDetailHTTPError(candidate.vinted_item_id, 410)
+
+    cache = FakeSeenCache()
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=GoneDetailProvider(item_count=1),
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+
+        assert run.items_filter_pending == 1
+        assert run.opportunities_created == 0
+        assert "pytest-run-item-0" in cache.seen
+        assert cache.detail_retries == {}
 
 
 def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:

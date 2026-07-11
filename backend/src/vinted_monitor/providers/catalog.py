@@ -39,6 +39,12 @@ class CatalogSearchResult:
 @dataclass(frozen=True)
 class CatalogItemDetail:
     vinted_item_id: str
+    title: str | None = None
+    brand: str | None = None
+    size: str | None = None
+    status: str | None = None
+    price_amount: Decimal | None = None
+    currency: str | None = None
     description: str | None = None
     color: str | None = None
     category: str | None = None
@@ -49,6 +55,8 @@ class CatalogItemDetail:
     seller_rating: Decimal | None = None
     seller_badges: list[str] = field(default_factory=list)
     availability_flags: dict[str, Any] = field(default_factory=dict)
+    observed_fields: frozenset[str] = field(default_factory=frozenset)
+    field_sources: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
 

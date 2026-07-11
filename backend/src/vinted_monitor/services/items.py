@@ -92,17 +92,40 @@ def apply_item_detail(db: Session, item: Item, detail: CatalogItemDetail) -> Non
 
 def apply_item_detail_data(item: Item, detail: CatalogItemDetail, now: datetime | None = None) -> None:
     resolved_now = now or datetime.now(UTC)
-    item.description = detail.description
-    item.color = detail.color
-    item.category = detail.category
-    item.shipping_price_amount = detail.shipping_price_amount
-    item.buyer_protection_fee_amount = detail.buyer_protection_fee_amount
-    item.total_price_amount = detail.total_price_amount
-    item.photos = detail.photos
-    item.seller_rating = detail.seller_rating
-    item.seller_badges = detail.seller_badges
-    item.availability_flags = detail.availability_flags
-    item.detail_raw = detail.raw
+    if detail.title:
+        item.title = detail.title
+    if detail.brand:
+        item.brand = detail.brand
+    if detail.size:
+        item.size = detail.size
+    if detail.status:
+        item.status = detail.status
+    if detail.price_amount is not None:
+        item.price_amount = detail.price_amount
+    if detail.currency:
+        item.currency = detail.currency
+    if detail.description is not None or "description" in detail.observed_fields:
+        item.description = detail.description
+    if detail.color is not None:
+        item.color = detail.color
+    if detail.category is not None:
+        item.category = detail.category
+    if detail.shipping_price_amount is not None:
+        item.shipping_price_amount = detail.shipping_price_amount
+    if detail.buyer_protection_fee_amount is not None:
+        item.buyer_protection_fee_amount = detail.buyer_protection_fee_amount
+    if detail.total_price_amount is not None:
+        item.total_price_amount = detail.total_price_amount
+    if detail.photos:
+        item.photos = detail.photos
+    if detail.seller_rating is not None:
+        item.seller_rating = detail.seller_rating
+    if detail.seller_badges:
+        item.seller_badges = detail.seller_badges
+    if detail.availability_flags:
+        item.availability_flags = detail.availability_flags
+    if detail.raw:
+        item.detail_raw = detail.raw
     item.detail_last_fetched_at = resolved_now
     item.detail_error = None
     item.last_seen_at = resolved_now

@@ -1,10 +1,24 @@
 import type { Item } from '../api';
+import { ItemPhoto } from './ItemPhoto';
 
-export function ItemCell({ item }: { item: Item }) {
+export function ItemCell({ item, onOpenDetails }: { item: Item; onOpenDetails?: () => void }) {
+  const photo = item.photos.find(Boolean) ?? item.image_url;
+  const content = (
+    <>
+      <ItemPhoto alt="" className="item-thumbnail" src={photo} />
+      <span>{item.title}</span>
+    </>
+  );
+
   return (
     <div className="item-cell">
-      {item.image_url ? <img src={item.image_url} alt="" /> : <div className="thumb" />}
-      <span>{item.title}</span>
+      {onOpenDetails ? (
+        <button aria-label={`Ver detalle y fotos de ${item.title}`} className="item-cell-trigger" type="button" onClick={onOpenDetails}>
+          {content}
+        </button>
+      ) : (
+        content
+      )}
     </div>
   );
 }

@@ -808,14 +808,19 @@ function formatDetailSummary(summary: Record<string, unknown> | null): string | 
     return null;
   }
   const tokens = [
+    typeof summary.parser_version === 'string' ? `parser=${formatTokenValue(summary.parser_version)}` : null,
     summary.title_present === true ? 'title=ok' : summary.title_present === false ? 'title=missing' : null,
+    typeof summary.title === 'string' && summary.title ? `title=${formatTokenValue(summary.title)}` : null,
     typeof summary.photo_count === 'number' ? `photos=${summary.photo_count}` : null,
     typeof summary.description_length === 'number' ? `description_chars=${summary.description_length}` : null,
     summary.seller_present === true ? 'seller=ok' : summary.seller_present === false ? 'seller=missing' : null,
     typeof summary.brand === 'string' && summary.brand ? `brand=${formatTokenValue(summary.brand)}` : null,
     typeof summary.size === 'string' && summary.size ? `size=${formatTokenValue(summary.size)}` : null,
     typeof summary.price_amount === 'string' && summary.price_amount ? `price=${formatTokenValue(summary.price_amount)}` : null,
-    typeof summary.currency === 'string' && summary.currency ? `currency=${formatTokenValue(summary.currency)}` : null
+    typeof summary.currency === 'string' && summary.currency ? `currency=${formatTokenValue(summary.currency)}` : null,
+    typeof summary.availability_state === 'string'
+      ? `availability=${formatTokenValue(summary.availability_state)}`
+      : null
   ].filter(Boolean);
   return tokens.length > 0 ? tokens.join(' ') : null;
 }

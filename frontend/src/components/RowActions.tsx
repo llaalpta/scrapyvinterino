@@ -10,9 +10,11 @@ export function RowActions({ item }: { item: Item }) {
       <button type="button" title="Marcar favorito" disabled>
         <Heart size={17} />
       </button>
-      <button type="button" title="Comprar" disabled>
-        <ShoppingCart size={17} />
-      </button>
+      <span className="disabled-action" title="La compra autenticada aun no esta disponible">
+        <button aria-label="Compra autenticada aun no disponible" type="button" disabled>
+          <ShoppingCart size={17} />
+        </button>
+      </span>
     </div>
   );
 }

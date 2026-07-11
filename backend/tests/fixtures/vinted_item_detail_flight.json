@@ -1,0 +1,219 @@
+{
+  "records": {
+    "p9": [
+      "$",
+      "$Lphotos",
+      null,
+      {
+        "value": {
+          "photos": [
+            {
+              "image_no": 2,
+              "is_hidden": false,
+              "url": "https://images1.vinted.net/t/02_fixture/f800/2.webp?s=signed-two"
+            },
+            {
+              "image_no": 3,
+              "is_hidden": true,
+              "url": "https://images1.vinted.net/t/03_fixture/f800/3.webp?s=signed-hidden"
+            },
+            {
+              "image_no": 1,
+              "is_hidden": false,
+              "url": "https://images1.vinted.net/t/01_fixture/f800/1.webp?s=signed-one"
+            },
+            {
+              "image_no": 4,
+              "is_hidden": false,
+              "url": "https://images1.vinted.net.evil.test/t/04_fixture/f800/4.webp?s=not-vinted"
+            }
+          ]
+        }
+      }
+    ],
+    "2f": [
+      "$",
+      "$Lrich",
+      null,
+      {
+        "value": {
+          "id": 1000000001,
+          "title": "Polo Ralph Lauren de detalle",
+          "price": {
+            "amount": "2.50",
+            "currency_code": "EUR"
+          },
+          "can_buy": true,
+          "instant_buy": true,
+          "is_hidden": false,
+          "is_reserved": false,
+          "reservation": null,
+          "photos": "$p9:props:value:photos"
+        }
+      }
+    ],
+    "a7": [
+      "$",
+      "$Lplugins",
+      null,
+      {
+        "itemId": 1000000001,
+        "plugins": [
+          {
+            "type": "item_status",
+            "data": {
+              "item_id": 1000000001,
+              "is_draft": false,
+              "is_reserved": false,
+              "is_hidden": false,
+              "is_closed": false,
+              "is_processing": false,
+              "transaction_permitted": true
+            }
+          },
+          {
+            "type": "summary",
+            "data": {
+              "item_id": 1000000001,
+              "lines": [
+                {
+                  "elements": [
+                    {
+                      "style": "title",
+                      "type": "text",
+                      "value": "Polo Ralph Lauren de detalle"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "attributes",
+            "data": {
+              "item_id": 1000000001,
+              "attributes": [
+                {
+                  "code": "brand",
+                  "data": {
+                    "value": "Ralph Lauren"
+                  }
+                },
+                {
+                  "code": "size",
+                  "data": {
+                    "value": "M"
+                  }
+                },
+                {
+                  "code": "status",
+                  "data": {
+                    "value": "Muy bueno"
+                  }
+                },
+                {
+                  "code": "color",
+                  "data": {
+                    "value": "Azul"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "description",
+            "data": {
+              "item_id": 1000000001,
+              "description": "Tiene una marca pequena en la manga"
+            }
+          },
+          {
+            "type": "make_offer",
+            "data": {
+              "item_id": 1000000001,
+              "title": "Polo Ralph Lauren de detalle",
+              "price": {
+                "amount": "2.50",
+                "currency_code": "EUR"
+              }
+            }
+          },
+          {
+            "type": "ask_seller",
+            "data": {
+              "item_id": 1000000001,
+              "can_buy": true,
+              "instant_buy": true,
+              "is_closed": false,
+              "is_hidden": false,
+              "is_reserved": false,
+              "reservation": null
+            }
+          },
+          {
+            "type": "seller_badges_info",
+            "data": {
+              "badges": [
+                {
+                  "type": "ACTIVE_LISTER"
+                }
+              ]
+            }
+          },
+          {
+            "type": "user_info_header",
+            "data": {
+              "item_id": 1000000001,
+              "feedback_reputation": 0.98,
+              "feedback_count": 472
+            }
+          }
+        ]
+      }
+    ],
+    "k3": [
+      "$",
+      "$Lpricing",
+      null,
+      {
+        "shippingDetails": {
+          "isPickupOnly": false,
+          "isFreeShipping": false,
+          "price": {
+            "amount": "1.75",
+            "currencyCode": "EUR"
+          }
+        },
+        "children": {
+          "pricingServices": {
+            "services": {
+              "buyerProtection": {
+                "finalPrice": {
+                  "amount": "0.80",
+                  "currencyCode": "EUR"
+                }
+              },
+              "shipping": {
+                "finalPrice": {
+                  "amount": "5.25",
+                  "currencyCode": "EUR"
+                }
+              }
+            },
+            "originalAskingAmount": {
+              "amount": "2.50",
+              "currencyCode": "EUR"
+            },
+            "totalAmount": {
+              "amount": "3.30",
+              "currencyCode": "EUR"
+            }
+          },
+          "item": {
+            "item_id": 1000000001
+          }
+        }
+      }
+    ]
+  }
+}

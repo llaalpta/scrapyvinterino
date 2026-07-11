@@ -19,5 +19,6 @@ Tablas principales:
 
 Estado runtime no relacional:
 
-- Redis mantiene el cache obligatorio de vistos/procesamiento por monitor y politica de evaluacion. Si Redis no esta disponible, el monitor no procesa candidatos y el run falla.
+- Redis mantiene el cache obligatorio de vistos/procesamiento y la cola diferida de reintentos de detalle por monitor y politica de evaluacion. Si Redis no esta disponible, el monitor no procesa candidatos y el run falla.
+- `items.photos` conserva todas las URL publicas firmadas observadas; `availability_flags` conserva senales independientes, `state`, `reason_codes` y `source=public_snapshot`; los precios de proteccion, total sin envio y envio minimo usan las columnas de detalle existentes.
 - Los candidatos descartados por filtros no se persisten como items; quedan reflejados solo en contadores agregados del run.

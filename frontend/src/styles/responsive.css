@@ -289,4 +289,46 @@
   .item-cell {
     min-width: 0;
   }
+
+  .opportunity-detail-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .opportunity-detail-shell {
+    max-height: calc(100dvh - 18px);
+  }
+
+  .opportunity-detail-header {
+    padding: 12px;
+  }
+
+  .opportunity-detail-header h3 {
+    font-size: 16px;
+  }
+
+  .opportunity-detail-content {
+    display: block;
+    overflow-y: auto;
+  }
+
+  .opportunity-gallery {
+    border-right: 0;
+    border-bottom: 1px solid #e5eaf0;
+    padding: 10px;
+  }
+
+  .opportunity-gallery-stage {
+    aspect-ratio: 3 / 4;
+    max-height: 62dvh;
+  }
+
+  .opportunity-detail-data {
+    overflow: visible;
+    padding: 14px;
+  }
+
+  .opportunity-description p {
+    max-height: none;
+  }
 }

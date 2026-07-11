@@ -1,7 +1,11 @@
 from functools import lru_cache
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+VINTED_DETAIL_FIELD_ALLOWLIST = frozenset(
+    {"title", "description", "brand", "size", "status", "price_amount", "currency", "photos"}
+)
 
 
 class Settings(BaseSettings):
@@ -21,7 +25,10 @@ class Settings(BaseSettings):
     vinted_request_retries: int = 1
     vinted_fast_catalog_per_page: int = 5
     vinted_detail_max_candidates_per_run: int = 5
-    vinted_detail_concurrency: int = 2
+    vinted_detail_concurrency: int = Field(default=1, ge=1)
+    vinted_detail_required_fields: str = "title,description,brand,size,status,price_amount,currency,photos"
+    vinted_detail_max_attempts: int = Field(default=3, ge=1, le=10)
+    vinted_detail_retry_backoffs_seconds: tuple[int, ...] = (30, 120)
 
     # Worker consumer (Producer-Consumer pattern)
     worker_consumer_count: int = 2
@@ -61,6 +68,25 @@ class Settings(BaseSettings):
     vinted_auth_cookie: str | None = Field(default=None, repr=False)
     vinted_auth_csrf_token: str | None = Field(default=None, repr=False)
     action_requests_enabled: bool = False
+
+    @model_validator(mode="after")
+    def validate_detail_retry_config(self) -> "Settings":
+        required_fields = {
+            field.strip() for field in self.vinted_detail_required_fields.split(",") if field.strip()
+        }
+        if not required_fields:
+            raise ValueError("VINTED_DETAIL_REQUIRED_FIELDS must contain at least one field")
+        unknown_fields = required_fields - VINTED_DETAIL_FIELD_ALLOWLIST
+        if unknown_fields:
+            raise ValueError(
+                "VINTED_DETAIL_REQUIRED_FIELDS contains unsupported fields: "
+                + ", ".join(sorted(unknown_fields))
+            )
+        if len(self.vinted_detail_retry_backoffs_seconds) != self.vinted_detail_max_attempts - 1:
+            raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS must contain one delay per retry")
+        if any(delay < 0 for delay in self.vinted_detail_retry_backoffs_seconds):
+            raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS cannot contain negative delays")
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

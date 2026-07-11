@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import replace
-from datetime import UTC, datetime
-from typing import Any, Protocol
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -13,12 +13,13 @@ from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_marker
-from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource
+from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource, VintedSession
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
+    VintedCatalogChallengeError,
     VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
@@ -42,7 +43,13 @@ from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_r
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.scheduler import RunEgress, SchedulerCapacityError, choose_run_egress, get_scheduler_runtime_config
 from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
-from vinted_monitor.services.seen_cache import SeenCache, SeenCacheUnavailableError, get_seen_cache
+from vinted_monitor.services.seen_cache import (
+    DetailCandidateStateUpdate,
+    DetailRetryRecord,
+    SeenCache,
+    SeenCacheUnavailableError,
+    get_seen_cache,
+)
 from vinted_monitor.services.vinted_sessions import (
     INCOMPLETE,
     READY,
@@ -70,6 +77,26 @@ SESSION_ITEM_DISCARDED = "discarded"
 SESSION_ITEM_PASSED_WITHOUT_FILTERS = "passed_without_filters"
 SESSION_ITEM_PASSED_WITHOUT_DETAIL = "passed_without_detail"
 SESSION_ITEM_DETAIL_ERROR = "detail_error"
+DEFAULT_DETAIL_REQUIRED_FIELDS = frozenset(
+    {"title", "description", "brand", "size", "status", "price_amount", "currency", "photos"}
+)
+
+
+@dataclass(frozen=True)
+class DetailWorkItem:
+    candidate: CatalogItemCandidate
+    attempt_count: int = 0
+    origin: Literal["catalog", "retry"] = "catalog"
+
+
+@dataclass(frozen=True)
+class MonitorEvaluationResult:
+    passed: int
+    discarded: int
+    pending: int
+    opportunities_created: int
+    terminal_ids: tuple[str, ...]
+    retries: tuple[DetailRetryRecord, ...]
 
 
 class ManualRunProvider(Protocol):
@@ -714,7 +741,7 @@ def execute_monitor_item_detail_probe(
             },
             "detail_probe_run": True,
             "item_id": item_id,
-            "endpoint": f"/api/v2/items/{item_id}/details",
+            "endpoint": f"/items/{item_id}?referrer=catalog",
         },
     )
     record_run_event(
@@ -755,7 +782,7 @@ def execute_monitor_item_detail_probe(
             run=run,
         )
         _merge_run_metadata(run, {**provider_metadata, "detail_probe_run": True, "item_id": item_id})
-        result = provider.probe_item_detail_api(item_ref, referer_url=source.url)
+        result = provider.probe_item_detail_document(item_ref, referer_url=source.url)
         vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
         if isinstance(vinted_session_id, int):
             provider_prepared_session = getattr(provider, "prepared_session", None)
@@ -769,17 +796,12 @@ def execute_monitor_item_detail_probe(
                 context=refreshed_context,
                 settings=settings,
             )
-            if result.get("outcome") == "datadome_challenge":
-                mark_vinted_session_invalid(db, vinted_session_id, reason="DataDome challenge on item detail API probe")
         _merge_run_metadata(
             run,
             {
                 "detail_probe_outcome": result.get("outcome"),
                 "detail_probe_status_code": result.get("status_code"),
                 "detail_probe_duration_ms": result.get("duration_ms"),
-                "detail_probe_matrix_duration_ms": result.get("matrix_duration_ms"),
-                "detail_probe_attempt_count": result.get("attempt_count"),
-                "detail_probe_control_outcome": result.get("control_outcome"),
                 "detail_probe_item_id": item_id,
             },
         )
@@ -795,19 +817,15 @@ def execute_monitor_item_detail_probe(
             auth_mode="public_anonymous",
             status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
             duration_ms=result.get("duration_ms") if isinstance(result.get("duration_ms"), int) else None,
-            level="info" if result.get("outcome") == "accepted_json" else "warning",
+            level="info" if result.get("outcome") == "accepted_html" else "warning",
             details={
                 "detail_probe_run": True,
                 "item_id": item_id,
                 "outcome": result.get("outcome"),
                 "status_code": result.get("status_code"),
                 "duration_ms": result.get("duration_ms"),
-                "matrix_duration_ms": result.get("matrix_duration_ms"),
-                "attempt_count": result.get("attempt_count"),
-                "control_outcome": result.get("control_outcome"),
-                "endpoint": result.get("detail_api_url"),
+                "endpoint": result.get("detail_document_url"),
                 "detail_summary": result.get("detail_summary") or {},
-                "attempts": result.get("attempts") or [],
                 "error": result.get("error"),
             },
         )
@@ -826,12 +844,8 @@ def execute_monitor_item_detail_probe(
                 "outcome": result.get("outcome"),
                 "status_code": result.get("status_code"),
                 "duration_ms": result.get("duration_ms"),
-                "matrix_duration_ms": result.get("matrix_duration_ms"),
-                "attempt_count": result.get("attempt_count"),
-                "control_outcome": result.get("control_outcome"),
-                "endpoint": result.get("detail_api_url"),
+                "endpoint": result.get("detail_document_url"),
                 "detail_summary": result.get("detail_summary") or {},
-                "attempts": result.get("attempts") or [],
                 "error": result.get("error"),
             },
         )
@@ -1145,7 +1159,7 @@ def execute_monitor_run(
         return failed_run
 
     claimed_ids: set[str] = set()
-    processed_ids: list[str] = []
+    claimed_work_items: list[DetailWorkItem] = []
     try:
         unique_candidates = _deduplicate_candidates(result.items)
         record_run_event(
@@ -1164,12 +1178,50 @@ def execute_monitor_run(
                 "total_entries": result.total_entries,
             },
         )
-        claimed_ids = cache.claim_unseen(source.id, policy_hash, [candidate.vinted_item_id for candidate in unique_candidates])
-        monitor_new_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id in claimed_ids]
-        existing_opportunity_ids = _existing_opportunity_item_ids(db, source, monitor_new_candidates)
+        max_detail_candidates = _detail_candidate_limit(run, run_provider)
+        due_retries = cache.claim_due_detail_retries(
+            source.id,
+            policy_hash,
+            due_at=datetime.now(UTC),
+            limit=max_detail_candidates,
+        )
+        if due_retries:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="detail_retry_claimed",
+                proxy_profile_id=proxy_profile_id,
+                message="Due detail retries claimed before current catalog candidates",
+                details={
+                    "retry_count": len(due_retries),
+                    "sample_vinted_item_ids": [retry.candidate.vinted_item_id for retry in due_retries[:10]],
+                    "attempt_counts": [retry.attempt_count for retry in due_retries[:10]],
+                },
+            )
+        catalog_claimed_ids = cache.claim_unseen(
+            source.id,
+            policy_hash,
+            [candidate.vinted_item_id for candidate in unique_candidates],
+        )
+        monitor_new_candidates = [
+            candidate for candidate in unique_candidates if candidate.vinted_item_id in catalog_claimed_ids
+        ]
+        claimed_work_items = [
+            DetailWorkItem(candidate=retry.candidate, attempt_count=retry.attempt_count, origin="retry")
+            for retry in due_retries
+        ] + [DetailWorkItem(candidate=candidate) for candidate in monitor_new_candidates]
+        claimed_ids = {work_item.candidate.vinted_item_id for work_item in claimed_work_items}
+        existing_opportunity_ids = _existing_opportunity_item_ids(
+            db,
+            source,
+            [work_item.candidate for work_item in claimed_work_items],
+        )
         if existing_opportunity_ids:
             already_claimed_existing_ids = [
-                candidate.vinted_item_id for candidate in monitor_new_candidates if candidate.vinted_item_id in existing_opportunity_ids
+                work_item.candidate.vinted_item_id
+                for work_item in claimed_work_items
+                if work_item.candidate.vinted_item_id in existing_opportunity_ids
             ]
             record_run_event(
                 db,
@@ -1187,11 +1239,19 @@ def execute_monitor_run(
             )
             cache.mark_seen(source.id, policy_hash, already_claimed_existing_ids)
             claimed_ids.difference_update(already_claimed_existing_ids)
+            catalog_claimed_ids.difference_update(already_claimed_existing_ids)
             monitor_new_candidates = [
                 candidate for candidate in monitor_new_candidates if candidate.vinted_item_id not in existing_opportunity_ids
             ]
-        seen_candidates = [candidate for candidate in unique_candidates if candidate.vinted_item_id not in claimed_ids]
-        if seen_candidates:
+            claimed_work_items = [
+                work_item
+                for work_item in claimed_work_items
+                if work_item.candidate.vinted_item_id not in existing_opportunity_ids
+            ]
+        unavailable_catalog_candidates = [
+            candidate for candidate in unique_candidates if candidate.vinted_item_id not in catalog_claimed_ids
+        ]
+        if unavailable_catalog_candidates:
             record_run_event(
                 db,
                 run_id=run.id,
@@ -1199,10 +1259,12 @@ def execute_monitor_run(
                 phase="candidate_seen_skipped",
                 level="debug",
                 proxy_profile_id=proxy_profile_id,
-                message="Candidates already seen by this monitor policy were skipped",
+                message="Catalog candidates already seen, processing, or queued for retry were skipped",
                 details={
-                    "seen_hit_count": len(seen_candidates),
-                    "sample_vinted_item_ids": [candidate.vinted_item_id for candidate in seen_candidates[:10]],
+                    "seen_or_pending_count": len(unavailable_catalog_candidates),
+                    "sample_vinted_item_ids": [
+                        candidate.vinted_item_id for candidate in unavailable_catalog_candidates[:10]
+                    ],
                     "policy_hash": policy_hash,
                 },
             )
@@ -1218,6 +1280,7 @@ def execute_monitor_run(
                 "unique_candidate_count": len(unique_candidates),
                 "seen_hit_count": len(unique_candidates) - len(monitor_new_candidates),
                 "seen_miss_count": len(monitor_new_candidates),
+                "detail_retry_due_count": len(due_retries),
                 "policy_hash": policy_hash,
             },
         )
@@ -1226,19 +1289,19 @@ def execute_monitor_run(
             run_provider,
             source,
             run,
-            monitor_new_candidates,
+            claimed_work_items,
             filter_snapshot,
+            max_detail_candidates=max_detail_candidates,
         )
         _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
-        processed_ids = [candidate.vinted_item_id for candidate in monitor_new_candidates]
         run.status = SUCCESS
         run.finished_at = datetime.now(UTC)
         run.items_found = len(result.items)
         run.items_new = len(monitor_new_candidates)
-        run.items_filter_passed = monitor_result["passed"]
-        run.items_discarded_by_filters = monitor_result["discarded"]
-        run.items_filter_pending = monitor_result["pending"]
-        run.opportunities_created = monitor_result["opportunities_created"]
+        run.items_filter_passed = monitor_result.passed
+        run.items_discarded_by_filters = monitor_result.discarded
+        run.items_filter_pending = monitor_result.pending
+        run.opportunities_created = monitor_result.opportunities_created
         run.error_message = None
         source.last_run_at = run.finished_at
         mark_proxy_run_success(db, proxy_profile_id)
@@ -1274,16 +1337,27 @@ def execute_monitor_run(
             },
         )
         db.commit()
-        cache.mark_seen(source.id, policy_hash, processed_ids)
+        cache.finalize_candidate_states(
+            source.id,
+            policy_hash,
+            DetailCandidateStateUpdate(
+                terminal_ids=monitor_result.terminal_ids,
+                retries=monitor_result.retries,
+            ),
+        )
         record_run_event(
             db,
             run_id=run.id,
             source_id=source.id,
-            phase="redis_seen_marked",
+            phase="redis_candidate_state_updated",
             proxy_profile_id=proxy_profile_id,
             details={
-                "marked_seen_count": len(processed_ids),
-                "sample_vinted_item_ids": processed_ids[:10],
+                "marked_seen_count": len(monitor_result.terminal_ids),
+                "retry_scheduled_count": len(monitor_result.retries),
+                "sample_seen_vinted_item_ids": list(monitor_result.terminal_ids[:10]),
+                "sample_retry_vinted_item_ids": [
+                    retry.candidate.vinted_item_id for retry in monitor_result.retries[:10]
+                ],
                 "policy_hash": policy_hash,
             },
         )
@@ -1314,16 +1388,39 @@ def execute_monitor_run(
         )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
-    except DataDomeChallengeError as exc:
+    except (DataDomeChallengeError, VintedCatalogChallengeError) as exc:
         db.rollback()
         run = db.get(Run, run.id)
-        if claimed_ids:
-            cache.release_processing(source.id, policy_hash, list(claimed_ids))
         if run is None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
         try:
-            _record_failed_run(db, run, source, exc, kind="datadome_challenge", penalize_proxy=False)
+            challenge_kind = "cloudflare_challenge" if isinstance(exc, VintedCatalogChallengeError) else "datadome_challenge"
+            _record_failed_run(db, run, source, exc, kind=challenge_kind, penalize_proxy=False)
+            aborted_states = _aborted_detail_candidate_states(
+                claimed_work_items,
+                failing_item_id=getattr(exc, "detail_candidate_id", None),
+            )
+            cache.finalize_candidate_states(
+                source.id,
+                policy_hash,
+                aborted_states,
+            )
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="detail_retry_batch_preserved",
+                level="warning",
+                proxy_profile_id=proxy_profile_id,
+                message="Claimed candidates preserved after anti-bot challenge rolled back the run",
+                details={
+                    "challenge_kind": challenge_kind,
+                    "retry_scheduled_count": len(aborted_states.retries),
+                    "retry_exhausted_count": len(aborted_states.terminal_ids),
+                },
+            )
+            db.commit()
         finally:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise
@@ -1822,6 +1919,14 @@ def _record_failed_run(
         )
     )
     db.commit()
+    if session_failure["recovery_action"] in {
+        "invalidate_session_and_rotate_sticky",
+        "invalidate_session_and_prepare_new",
+    } and isinstance(vinted_session_id, int):
+        persisted_session = db.get(VintedSession, vinted_session_id)
+        if persisted_session is not None and persisted_session.status != "invalid":
+            mark_vinted_session_invalid(db, vinted_session_id, reason=message)
+            db.commit()
     db.refresh(run)
     return run
 
@@ -1910,6 +2015,11 @@ def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_sessio
 
 def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
     text = str(exc).lower()
+    if isinstance(exc, VintedCatalogChallengeError) or kind == "cloudflare_challenge":
+        return {
+            "session_end_reason": "cloudflare_challenge",
+            "recovery_action": "invalidate_session_and_rotate_sticky",
+        }
     if isinstance(exc, DataDomeChallengeError) or kind == "datadome_challenge":
         return {
             "session_end_reason": "datadome_challenge",
@@ -1985,31 +2095,138 @@ def _clear_manual_monitor_runtime(source: SearchSource) -> None:
     source.next_run_at = None
 
 
+def _detail_candidate_limit(run: Run, provider: ManualRunProvider) -> int:
+    settings = get_settings()
+    provider_settings = getattr(provider, "settings", settings)
+    runtime_limit = (run.runtime_metadata or {}).get("detail_max_candidates_per_run")
+    configured_limit = (
+        runtime_limit
+        if runtime_limit is not None
+        else getattr(provider_settings, "vinted_detail_max_candidates_per_run", settings.vinted_detail_max_candidates_per_run)
+    )
+    return max(int(configured_limit), 0)
+
+
+def _detail_required_fields(provider_settings: Any, default_settings: Any) -> frozenset[str]:
+    configured = getattr(
+        provider_settings,
+        "vinted_detail_required_fields",
+        getattr(default_settings, "vinted_detail_required_fields", DEFAULT_DETAIL_REQUIRED_FIELDS),
+    )
+    if isinstance(configured, str):
+        fields = {field.strip() for field in configured.split(",") if field.strip()}
+    else:
+        fields = {str(field).strip() for field in configured if str(field).strip()}
+    return frozenset(fields or DEFAULT_DETAIL_REQUIRED_FIELDS)
+
+
+def _missing_required_detail_fields(item: Item, required_fields: frozenset[str]) -> list[str]:
+    missing: list[str] = []
+    for field_name in sorted(required_fields):
+        value = getattr(item, field_name, None)
+        if field_name == "description":
+            is_missing = value is None
+        elif field_name == "photos":
+            is_missing = not isinstance(value, list) or not value
+        elif isinstance(value, str):
+            is_missing = not value.strip()
+        else:
+            is_missing = value is None
+        if is_missing:
+            missing.append(field_name)
+    return missing
+
+
+def _detail_failure_kind(exc: Exception) -> str:
+    explicit_kind = getattr(exc, "failure_kind", None)
+    if isinstance(explicit_kind, str) and explicit_kind:
+        return explicit_kind
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return f"detail_http_{status_code}"
+    text = str(exc).lower()
+    if "timeout" in text or "timed out" in text:
+        return "detail_timeout"
+    if "parse" in text or "detail data" in text or "html" in text:
+        return "detail_invalid_document"
+    return "detail_transport_or_parser_error"
+
+
+def _detail_retry_delay(backoffs: tuple[int, ...], consumed_attempts: int) -> int:
+    if not backoffs:
+        return 0
+    index = min(max(consumed_attempts - 1, 0), len(backoffs) - 1)
+    return max(int(backoffs[index]), 0)
+
+
+def _aborted_detail_candidate_states(
+    work_items: list[DetailWorkItem],
+    *,
+    failing_item_id: str | None,
+) -> DetailCandidateStateUpdate:
+    settings = get_settings()
+    now = datetime.now(UTC)
+    terminal_ids: list[str] = []
+    retries: list[DetailRetryRecord] = []
+    for work_item in work_items:
+        candidate = work_item.candidate
+        if candidate.vinted_item_id == failing_item_id:
+            attempt_count = work_item.attempt_count + 1
+            if attempt_count >= settings.vinted_detail_max_attempts:
+                terminal_ids.append(candidate.vinted_item_id)
+                continue
+            delay = _detail_retry_delay(settings.vinted_detail_retry_backoffs_seconds, attempt_count)
+            failure_kind = "detail_antibot_challenge"
+        else:
+            attempt_count = work_item.attempt_count
+            delay = 0
+            failure_kind = "detail_run_aborted_before_commit"
+        retries.append(
+            DetailRetryRecord(
+                candidate=candidate,
+                attempt_count=attempt_count,
+                next_attempt_at=now + timedelta(seconds=delay),
+                failure_kind=failure_kind,
+            )
+        )
+    return DetailCandidateStateUpdate(terminal_ids=tuple(terminal_ids), retries=tuple(retries))
+
+
 def _evaluate_monitor_candidates(
     db: Session,
     provider: ManualRunProvider,
     source: SearchSource,
     run: Run,
-    candidates: list[CatalogItemCandidate],
+    work_items: list[DetailWorkItem],
     filters: list[dict],
-) -> dict[str, int]:
-    if not candidates:
-        return {"passed": 0, "discarded": 0, "pending": 0, "opportunities_created": 0}
+    *,
+    max_detail_candidates: int | None = None,
+) -> MonitorEvaluationResult:
+    if not work_items:
+        return MonitorEvaluationResult(0, 0, 0, 0, (), ())
 
     passed = 0
     discarded = 0
     pending = 0
     opportunities_created = 0
-    provider_settings = getattr(provider, "settings", get_settings())
-    runtime_detail_limit = (run.runtime_metadata or {}).get("detail_max_candidates_per_run")
-    configured_detail_limit = (
-        runtime_detail_limit if runtime_detail_limit is not None else provider_settings.vinted_detail_max_candidates_per_run
+    terminal_ids: list[str] = []
+    retry_records: list[DetailRetryRecord] = []
+    resolved_detail_limit = (
+        _detail_candidate_limit(run, provider) if max_detail_candidates is None else max(max_detail_candidates, 0)
     )
-    max_detail_candidates = max(int(configured_detail_limit), 0)
+    settings = get_settings()
+    provider_settings = getattr(provider, "settings", settings)
+    max_attempts = int(getattr(provider_settings, "vinted_detail_max_attempts", settings.vinted_detail_max_attempts))
+    retry_backoffs = tuple(
+        getattr(provider_settings, "vinted_detail_retry_backoffs_seconds", settings.vinted_detail_retry_backoffs_seconds)
+    )
+    required_fields = _detail_required_fields(provider_settings, settings)
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     detail_attempts = 0
 
-    for candidate in candidates:
+    for work_item in work_items:
+        candidate = work_item.candidate
+        attempt_number = work_item.attempt_count + 1
         record_run_event(
             db,
             run_id=run.id,
@@ -2025,6 +2242,8 @@ def _evaluate_monitor_candidates(
                 "brand": candidate.brand,
                 "size": candidate.size,
                 "filter_count": filter_snapshot_term_count(filters),
+                "origin": work_item.origin,
+                "previous_detail_attempts": work_item.attempt_count,
             },
         )
         transient_item = build_transient_catalog_item(candidate)
@@ -2033,7 +2252,7 @@ def _evaluate_monitor_candidates(
         detail: CatalogItemDetail | None = None
         detail_error: str | None = None
 
-        if detail_attempts < max_detail_candidates:
+        if detail_attempts < resolved_detail_limit:
             detail_attempts += 1
             record_run_event(
                 db,
@@ -2044,9 +2263,11 @@ def _evaluate_monitor_candidates(
                 proxy_profile_id=proxy_profile_id,
                 details={
                     "vinted_item_id": candidate.vinted_item_id,
-                    "attempt": detail_attempts,
-                    "max_detail_candidates": max_detail_candidates,
+                    "attempt": attempt_number,
+                    "request_position": detail_attempts,
+                    "max_detail_candidates": resolved_detail_limit,
                     "reason": "filters_configured" if filters else "opportunity_enrichment",
+                    "origin": work_item.origin,
                 },
             )
             record_run_event(
@@ -2059,12 +2280,22 @@ def _evaluate_monitor_candidates(
                 proxy_profile_id=proxy_profile_id,
                 user_agent=None,
                 auth_mode="public_anonymous",
-                details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "referer_url": source.url},
+                details={
+                    "vinted_item_id": candidate.vinted_item_id,
+                    "attempt": attempt_number,
+                    "referer_url": source.url,
+                    "origin": work_item.origin,
+                },
             )
             detail_started_at = time.perf_counter()
             try:
                 detail = provider.fetch_detail(candidate, referer_url=source.url)
+                if detail.vinted_item_id != candidate.vinted_item_id:
+                    raise ValueError(
+                        f"Detail item id {detail.vinted_item_id} does not match requested item {candidate.vinted_item_id}"
+                    )
                 apply_item_detail_data(transient_item, detail)
+                missing_required = _missing_required_detail_fields(transient_item, required_fields)
                 record_run_event(
                     db,
                     run_id=run.id,
@@ -2078,13 +2309,41 @@ def _evaluate_monitor_candidates(
                     auth_mode="public_anonymous",
                     details={
                         "vinted_item_id": candidate.vinted_item_id,
-                        "attempt": detail_attempts,
-                        "has_description": bool(detail.description),
+                        "attempt": attempt_number,
+                        "description_observed": detail.description is not None
+                        or "description" in detail.observed_fields,
                         "photo_count": len(detail.photos),
                         "has_total_price": detail.total_price_amount is not None,
+                        "availability_state": detail.availability_flags.get("state"),
+                        "missing_required": missing_required,
+                        "field_sources": detail.field_sources,
                     },
                 )
-            except DataDomeChallengeError as exc:
+                if missing_required:
+                    pending += 1
+                    evaluation_status = SESSION_ITEM_DETAIL_ERROR
+                    terminal_ids.append(candidate.vinted_item_id)
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_incomplete",
+                        level="warning",
+                        url=candidate.url,
+                        proxy_profile_id=proxy_profile_id,
+                        message="Valid item document is missing configured required detail fields",
+                        details={
+                            "vinted_item_id": candidate.vinted_item_id,
+                            "missing_required": missing_required,
+                            "required_fields": sorted(required_fields),
+                            "terminal": True,
+                        },
+                    )
+            except (DataDomeChallengeError, VintedCatalogChallengeError) as exc:
+                exc.detail_candidate_id = candidate.vinted_item_id
+                challenge_kind = (
+                    "cloudflare_challenge" if isinstance(exc, VintedCatalogChallengeError) else "datadome_challenge"
+                )
                 record_run_event(
                     db,
                     run_id=run.id,
@@ -2098,13 +2357,34 @@ def _evaluate_monitor_candidates(
                     user_agent=None,
                     auth_mode="public_anonymous",
                     message=redact_sensitive_text(str(exc)),
-                    details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "kind": "datadome_challenge"},
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt": attempt_number,
+                        "kind": challenge_kind,
+                    },
                 )
                 raise
             except Exception as exc:
                 pending += 1
                 evaluation_status = SESSION_ITEM_DETAIL_ERROR
                 detail_error = redact_sensitive_text(str(exc))
+                consumed_attempts = attempt_number
+                status_code = getattr(exc, "status_code", None)
+                terminal_http_error = status_code in {404, 410}
+                retry_exhausted = consumed_attempts >= max_attempts
+                failure_kind = _detail_failure_kind(exc)
+                if terminal_http_error or retry_exhausted:
+                    terminal_ids.append(candidate.vinted_item_id)
+                else:
+                    retry_records.append(
+                        DetailRetryRecord(
+                            candidate=candidate,
+                            attempt_count=consumed_attempts,
+                            next_attempt_at=datetime.now(UTC)
+                            + timedelta(seconds=_detail_retry_delay(retry_backoffs, consumed_attempts)),
+                            failure_kind=failure_kind,
+                        )
+                    )
                 record_run_event(
                     db,
                     run_id=run.id,
@@ -2118,11 +2398,60 @@ def _evaluate_monitor_candidates(
                     user_agent=None,
                     auth_mode="public_anonymous",
                     message=detail_error,
-                    details={"vinted_item_id": candidate.vinted_item_id, "attempt": detail_attempts, "terminal": "no_opportunity"},
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt": attempt_number,
+                        "kind": failure_kind,
+                        "status_code": status_code,
+                        "terminal": terminal_http_error or retry_exhausted,
+                        "retry_exhausted": retry_exhausted,
+                    },
                 )
+                if retry_exhausted:
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_retry_exhausted",
+                        level="error",
+                        url=candidate.url,
+                        proxy_profile_id=proxy_profile_id,
+                        message="Detail retry budget exhausted; candidate will be marked seen",
+                        details={
+                            "vinted_item_id": candidate.vinted_item_id,
+                            "attempt_count": consumed_attempts,
+                            "failure_kind": failure_kind,
+                        },
+                    )
+                elif not terminal_http_error:
+                    scheduled = retry_records[-1]
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_retry_scheduled",
+                        level="warning",
+                        url=candidate.url,
+                        proxy_profile_id=proxy_profile_id,
+                        message="Recoverable detail failure scheduled for a later monitor run",
+                        details={
+                            "vinted_item_id": candidate.vinted_item_id,
+                            "attempt_count": scheduled.attempt_count,
+                            "next_attempt_at": scheduled.next_attempt_at.isoformat(),
+                            "failure_kind": scheduled.failure_kind,
+                        },
+                    )
         else:
             pending += 1
             evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
+            retry_records.append(
+                DetailRetryRecord(
+                    candidate=candidate,
+                    attempt_count=work_item.attempt_count,
+                    next_attempt_at=datetime.now(UTC),
+                    failure_kind="detail_budget_deferred",
+                )
+            )
             record_run_event(
                 db,
                 run_id=run.id,
@@ -2131,15 +2460,16 @@ def _evaluate_monitor_candidates(
                 level="warning",
                 url=candidate.url,
                 proxy_profile_id=proxy_profile_id,
-                message="Detail fetch limit reached; opportunity will not be created without detail",
+                message="Detail fetch limit reached; candidate queued without consuming an attempt",
                 details={
                     "vinted_item_id": candidate.vinted_item_id,
-                    "max_detail_candidates": max_detail_candidates,
-                    "terminal": "no_opportunity",
+                    "max_detail_candidates": resolved_detail_limit,
+                    "attempt_count": work_item.attempt_count,
+                    "terminal": False,
                 },
             )
 
-        if detail is not None and evaluation_status == SESSION_ITEM_PASSED:
+        if detail is not None and candidate.vinted_item_id not in terminal_ids and evaluation_status == SESSION_ITEM_PASSED:
             decision = evaluate_exclusion_filters(transient_item, filters)
             evaluation_status = decision.status
             matched_terms = decision.matched_terms
@@ -2162,6 +2492,7 @@ def _evaluate_monitor_candidates(
 
         if evaluation_status == SESSION_ITEM_DISCARDED:
             discarded += 1
+            terminal_ids.append(candidate.vinted_item_id)
             record_run_event(
                 db,
                 run_id=run.id,
@@ -2190,6 +2521,20 @@ def _evaluate_monitor_candidates(
                     "evaluation_status": evaluation_status,
                     "detail_error": detail_error,
                 },
+            )
+            continue
+
+        if candidate.vinted_item_id in terminal_ids:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="opportunity_skipped_incomplete_detail",
+                level="warning",
+                url=candidate.url,
+                proxy_profile_id=proxy_profile_id,
+                message="Opportunity skipped because required item detail was incomplete",
+                details={"vinted_item_id": candidate.vinted_item_id},
             )
             continue
 
@@ -2257,13 +2602,16 @@ def _evaluate_monitor_candidates(
         )
         opportunities_created += 1 if created else 0
         passed += 1
+        terminal_ids.append(candidate.vinted_item_id)
 
-    return {
-        "passed": passed,
-        "discarded": discarded,
-        "pending": pending,
-        "opportunities_created": opportunities_created,
-    }
+    return MonitorEvaluationResult(
+        passed=passed,
+        discarded=discarded,
+        pending=pending,
+        opportunities_created=opportunities_created,
+        terminal_ids=tuple(dict.fromkeys(terminal_ids)),
+        retries=tuple(retry_records),
+    )
 
 
 def _get_or_create_monitor_opportunity(

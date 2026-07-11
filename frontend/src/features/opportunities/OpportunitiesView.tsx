@@ -1,11 +1,14 @@
 import { RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { OpportunityResult, Page, SearchSource } from '../../api';
 import { ItemCell } from '../../components/ItemCell';
 import { Pagination } from '../../components/Pagination';
 import { RowActions } from '../../components/RowActions';
-import { formatDate, formatPrice } from '../../utils/format';
+import { formatDate } from '../../utils/format';
+import { OpportunityDetailDialog } from './OpportunityDetailDialog';
+import { PriceBreakdown } from './PriceBreakdown';
 import { countActiveFilters, evaluationLabel, summarizeFilters, type OpportunityFilters } from './opportunityFilters';
+import { AvailabilityBadge } from './opportunityPresentation';
 
 export function OpportunitiesView({
   filters,
@@ -33,6 +36,8 @@ export function OpportunitiesView({
   onPageSizeChange: (pageSize: number) => void;
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [selectedOpportunity, setSelectedOpportunity] = useState<OpportunityResult | null>(null);
+  const detailTriggerRef = useRef<HTMLElement | null>(null);
   const activeFilterCount = countActiveFilters(filters);
   const filterSummaries = summarizeFilters(filters, sources);
 
@@ -51,6 +56,18 @@ export function OpportunitiesView({
     onFilterChange(field, '');
     setFiltersOpen(false);
     onApplyFilters(nextFilters);
+  }
+
+  function openOpportunityDetails(opportunity: OpportunityResult) {
+    detailTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSelectedOpportunity(opportunity);
+  }
+
+  function closeOpportunityDetails() {
+    setSelectedOpportunity(null);
+    const trigger = detailTriggerRef.current;
+    detailTriggerRef.current = null;
+    window.requestAnimationFrame(() => trigger?.focus());
   }
 
   return (
@@ -149,10 +166,12 @@ export function OpportunitiesView({
             <tr>
               <th>Articulo</th>
               <th>Monitor</th>
-              <th>Estado</th>
+              <th>Filtro</th>
+              <th>Disponibilidad</th>
               <th>Scrape</th>
               <th>Marca</th>
               <th>Talla</th>
+              <th>Condicion</th>
               <th>Precio</th>
               <th>Favs</th>
               <th>Acciones</th>
@@ -161,12 +180,18 @@ export function OpportunitiesView({
           <tbody>
             {opportunityPage.items.length === 0 ? (
               <tr>
-                <td colSpan={9} className="empty">
+                <td colSpan={11} className="empty">
                   No hay oportunidades para los filtros actuales.
                 </td>
               </tr>
             ) : (
-              opportunityPage.items.map((opportunity) => <OpportunityTableRow key={opportunity.id} opportunity={opportunity} />)
+              opportunityPage.items.map((opportunity) => (
+                <OpportunityTableRow
+                  key={opportunity.id}
+                  opportunity={opportunity}
+                  onOpenDetails={() => openOpportunityDetails(opportunity)}
+                />
+              ))
             )}
           </tbody>
         </table>
@@ -176,7 +201,9 @@ export function OpportunitiesView({
         {opportunityPage.items.length === 0 ? (
           <p className="empty-inline">No hay oportunidades para los filtros actuales.</p>
         ) : (
-          opportunityPage.items.map((opportunity) => <OpportunityCard key={opportunity.id} opportunity={opportunity} />)
+          opportunityPage.items.map((opportunity) => (
+            <OpportunityCard key={opportunity.id} opportunity={opportunity} onOpenDetails={() => openOpportunityDetails(opportunity)} />
+          ))
         )}
       </div>
 
@@ -189,24 +216,34 @@ export function OpportunitiesView({
         onPageSizeChange={onPageSizeChange}
         disabled={loading}
       />
+
+      {selectedOpportunity ? (
+        <OpportunityDetailDialog key={selectedOpportunity.id} opportunity={selectedOpportunity} onClose={closeOpportunityDetails} />
+      ) : null}
     </section>
   );
 }
 
-function OpportunityTableRow({ opportunity }: { opportunity: OpportunityResult }) {
+function OpportunityTableRow({ opportunity, onOpenDetails }: { opportunity: OpportunityResult; onOpenDetails: () => void }) {
   return (
     <tr>
       <td>
-        <ItemCell item={opportunity.item} />
+        <ItemCell item={opportunity.item} onOpenDetails={onOpenDetails} />
       </td>
       <td>{opportunity.source_name}</td>
       <td>
         <span className={`status evaluation ${opportunity.evaluation_status}`}>{evaluationLabel(opportunity.evaluation_status)}</span>
       </td>
+      <td>
+        <AvailabilityBadge item={opportunity.item} />
+      </td>
       <td>{formatDate(opportunity.last_scraped_at)}</td>
       <td>{opportunity.item.brand ?? '-'}</td>
       <td>{opportunity.item.size ?? '-'}</td>
-      <td>{formatPrice(opportunity.item)}</td>
+      <td>{opportunity.item.status ?? '-'}</td>
+      <td>
+        <PriceBreakdown item={opportunity.item} />
+      </td>
       <td>{opportunity.item.favorite_count ?? '-'}</td>
       <td>
         <RowActions item={opportunity.item} />
@@ -215,22 +252,31 @@ function OpportunityTableRow({ opportunity }: { opportunity: OpportunityResult }
   );
 }
 
-function OpportunityCard({ opportunity }: { opportunity: OpportunityResult }) {
+function OpportunityCard({ opportunity, onOpenDetails }: { opportunity: OpportunityResult; onOpenDetails: () => void }) {
   return (
     <article className="result-card">
-      <ItemCell item={opportunity.item} />
+      <ItemCell item={opportunity.item} onOpenDetails={onOpenDetails} />
+      <div className="result-card-statuses">
+        <span className={`status evaluation ${opportunity.evaluation_status}`}>{evaluationLabel(opportunity.evaluation_status)}</span>
+        <AvailabilityBadge item={opportunity.item} />
+      </div>
+      <PriceBreakdown item={opportunity.item} />
       <dl>
-        <div>
-          <dt>Precio</dt>
-          <dd>{formatPrice(opportunity.item)}</dd>
-        </div>
         <div>
           <dt>Monitor</dt>
           <dd>{opportunity.source_name}</dd>
         </div>
         <div>
-          <dt>Estado</dt>
-          <dd>{evaluationLabel(opportunity.evaluation_status)}</dd>
+          <dt>Condicion</dt>
+          <dd>{opportunity.item.status ?? '-'}</dd>
+        </div>
+        <div>
+          <dt>Marca</dt>
+          <dd>{opportunity.item.brand ?? '-'}</dd>
+        </div>
+        <div>
+          <dt>Talla</dt>
+          <dd>{opportunity.item.size ?? '-'}</dd>
         </div>
         <div>
           <dt>Scrape</dt>

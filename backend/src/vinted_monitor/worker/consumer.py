@@ -6,6 +6,7 @@ from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import Run
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.datadome import DataDomeChallengeError
+from vinted_monitor.providers.vinted_catalog import VintedCatalogChallengeError
 from vinted_monitor.services.proxies import mark_proxy_challenge_detected, mark_proxy_run_failure
 from vinted_monitor.services.runs import SCHEDULER_TRIGGER, SUCCESS, execute_monitor_run
 from vinted_monitor.services.scheduler import RunEgress
@@ -93,9 +94,9 @@ class TaskConsumer:
                 # ``execute_monitor_run`` owns success/failure proxy bookkeeping for completed runs.
                 return
 
-            except DataDomeChallengeError:
+            except (DataDomeChallengeError, VintedCatalogChallengeError):
                 self.logger.warning(
-                    "consumer_datadome_challenge",
+                    "consumer_antibot_challenge",
                     source_id=task.source_id,
                     task_id=task.task_id,
                     attempt=attempt,
