@@ -134,6 +134,7 @@ export type Item = {
   seller_login: string | null;
   seller_country: string | null;
   favorite_count: number | null;
+  view_count: number | null;
   url: string;
   image_url: string | null;
   description: string | null;

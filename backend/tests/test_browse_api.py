@@ -96,6 +96,7 @@ def build_item(suffix: str, title: str, price: Decimal) -> Item:
         seller_login="pytest_seller",
         seller_country=None,
         favorite_count=1,
+        view_count=11,
         url=f"https://www.vinted.es/items/{PREFIX}{suffix}",
         image_url=f"https://images1.vinted.net/{PREFIX}{suffix}/thumb.webp?s=signed",
         description="Detalle publico de prueba",
@@ -138,6 +139,7 @@ def test_opportunities_api_returns_paginated_opportunities() -> None:
         ]
         assert body["items"][0]["item"]["shipping_price_amount"] == "1.75"
         assert body["items"][0]["item"]["buyer_protection_fee_amount"] == "0.80"
+        assert body["items"][0]["item"]["view_count"] == 11
         assert body["items"][0]["item"]["availability_flags"]["state"] == "reserved"
         assert body["items"][0]["last_scraped_at"] == SEED_NOW.isoformat().replace("+00:00", "Z")
         assert body["items"][0]["last_run_id"] is not None

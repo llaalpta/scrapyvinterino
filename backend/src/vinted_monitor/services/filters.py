@@ -69,16 +69,4 @@ def evaluate_exclusion_filters(item: Item, filter_snapshot: list[dict[str, Any]]
 
 
 def _item_filter_text(item: Item) -> str:
-    values = [
-        item.title,
-        item.brand,
-        item.size,
-        item.status,
-        item.seller_login,
-        item.seller_country,
-        item.description,
-        item.color,
-        item.category,
-        " ".join(item.seller_badges or []),
-    ]
-    return normalize_search_text(" ".join(value for value in values if value))
+    return normalize_search_text(item.description or "")

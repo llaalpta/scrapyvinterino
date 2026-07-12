@@ -14,7 +14,7 @@ def test_detail_performance_modes_default_to_observation_and_serial() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.vinted_detail_fetch_mode == "serial"
-    assert settings.vinted_detail_early_filter_mode == "shadow"
+    assert settings.vinted_detail_early_filter_mode == "enforced"
     assert settings.egress_diagnostic_reuse_ttl_seconds == 300
 
 

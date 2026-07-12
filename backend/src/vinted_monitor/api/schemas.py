@@ -251,6 +251,7 @@ class ItemRead(BaseModel):
     seller_login: str | None
     seller_country: str | None
     favorite_count: int | None
+    view_count: int | None
     url: str
     image_url: str | None
     description: str | None

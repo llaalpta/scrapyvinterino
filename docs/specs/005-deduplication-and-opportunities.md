@@ -22,6 +22,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Parse the public item document's JSON-LD and structurally discovered Next/React Flight records; do not depend on dynamic Flight record ids or the Cloudflare-challenged direct detail API.
 - Anchor every Flight section to the requested item id. Recommendations or unrelated products in the same record must never contribute plugins, photos, availability, shipping, or pricing.
 - Extract detail fields needed for second-stage filtering and opportunity display: title, description, brand, size, physical status, base price/currency, semantic color, category, minimum displayed shipping price, buyer protection fee, total excluding shipping, the complete public photo set, seller rating/badges, and public availability signals when visible.
+- Preserve the catalog `favourite_count` and optional non-negative `view_count` on the opportunity item when exposed by the same catalog response. Missing views remain null and never trigger another Vinted request.
 - Validate a configurable required-field allowlist before filter evaluation. The default clothing policy requires title, observed description (which may be empty), brand, size, physical status, base price/currency, and at least one photo.
 - Persist signed Vinted CDN photo URLs only; image bytes are loaded directly by the PWA and never through the residential Vinted proxy.
 - Keep recoverable detail failures in a bounded Redis retry queue so an item is not lost after leaving the top-five catalog window.
@@ -81,9 +82,14 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Processing locks have an owner token. Expiry allows retry, while a stale worker cannot release a lock reacquired by another worker.
 - Detail requests remain sequential by default. Experimental concurrency is limited to two isolated persistent HTTP lanes cloned from the same prepared context and sticky proxy; PostgreSQL, Redis and persisted events stay on the caller thread.
 - Concurrent scheduling uses strict waves, preserves retry-first input order and does not persist a cookie branch until all results are joined. The selected context is the lane of the last logical successful request, never completion order, and canary mode validates it against the catalog before commit.
-- Blacklist head inspection is observational by default. It may only terminate a response when the canonical item id matches, title/description already prove exclusion, and the explicit enforced mode is enabled; a partial no-match never passes an item.
+- Blacklist head inspection is observational in shadow mode. It may terminate a response only when the canonical item id matches, a safely isolated description suffix proves exclusion, and enforced mode is enabled; a partial no-match never passes an item.
+- Blacklist evaluation uses the public item description only. Catalog title, brand, size, status, seller, color, category and badges never contribute filter text.
+- Enforced head rejection may inspect only a description suffix safely separated from an exact catalog-title prefix. Ambiguous metadata, a missing/mismatched canonical, or a partial no-match continues the same HTTP response to EOF; it never starts a second detail request.
+- Reserved, hidden, processing, closed, shipping-unavailable and otherwise non-buyable public states still create an opportunity after the description passes. Availability is decision data, not an exclusion rule.
+- Missing optional shipping, buyer-protection, total-price or availability signals remain null/unknown and do not block opportunity creation.
 - A run is reported successful only after its PostgreSQL effects and Redis candidate transitions are durable. Recovery paths must not leave contradictory terminal events.
 - Concurrent monitors may share one global `Item` row without either run failing; each monitor still owns its opportunity independently.
+- The evaluation policy hash includes a versioned description-only contract so Redis state produced under earlier multi-field filtering is never mixed with new decisions. Monitors require an explicit baseline for the new policy.
 
 ## Verification
 
@@ -111,4 +117,6 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Confirm configured concurrency does not activate while detail fetch mode is `serial`, and that canary mode never exceeds two in-flight documents.
 - Confirm a five-item wave returns decisions in retry/catalog order even when HTTP completion order differs, and that SQL/Redis/event writes occur only on the caller thread.
 - Confirm early-filter shadow mode never changes persistence, while enforced early discard produces the same terminal Redis/filter result as a complete matching detail.
+- Confirm terms present only outside the description never discard, and an ambiguous head falls through to the full-description decision on the same request.
+- Confirm `view_count` accepts zero and a non-negative integer from catalog JSON, remains null when absent/invalid, and survives Redis detail retries without extra traffic.
 - Confirm overlapping monitors cannot duplicate alerts within one monitor but can independently alert on the same catalog item.

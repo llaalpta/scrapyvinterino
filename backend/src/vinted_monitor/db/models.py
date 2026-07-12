@@ -68,6 +68,7 @@ class Item(Base):
     seller_login: Mapped[str | None] = mapped_column(String(160))
     seller_country: Mapped[str | None] = mapped_column(String(80))
     favorite_count: Mapped[int | None] = mapped_column(Integer)
+    view_count: Mapped[int | None] = mapped_column(Integer)
     url: Mapped[str] = mapped_column(Text)
     image_url: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)

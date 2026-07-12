@@ -465,6 +465,7 @@ class CurlCffiVintedCatalogProvider:
                 detail_url,
                 candidate.vinted_item_id,
                 headers,
+                catalog_title=candidate.title,
                 early_filter_terms=early_filter_terms,
             )
             refreshed_markers = self._refresh_session_context_from_cookies(
@@ -877,6 +878,7 @@ class CurlCffiVintedCatalogProvider:
         item_id: str,
         headers: Mapping[str, str],
         *,
+        catalog_title: str,
         early_filter_terms: tuple[str, ...] = (),
     ) -> tuple[Any, str, int, str, list[str]]:
         assert self._session is not None
@@ -888,6 +890,7 @@ class CurlCffiVintedCatalogProvider:
                 collector = EarlyFilterBodyCollector(
                     terms=early_filter_terms,
                     max_bytes=self.settings.vinted_detail_head_max_bytes,
+                    catalog_title=catalog_title,
                     canonical_validator=lambda canonical, base_url=current_url: _canonical_matches_item(
                         canonical,
                         base_url=base_url,
@@ -950,9 +953,9 @@ class CurlCffiVintedCatalogProvider:
             base_url=detail_url,
             item_id=candidate.vinted_item_id,
         )
-        head_matches = matched_exclusion_terms(snapshot.filter_text, early_filter_terms) if canonical_matches else []
-        final_text = " ".join(value for value in (detail.title, detail.description) if value)
-        final_matches = matched_exclusion_terms(final_text, head_matches)
+        isolated_description = snapshot.isolated_description(candidate.title) if canonical_matches else None
+        head_matches = matched_exclusion_terms(isolated_description or "", early_filter_terms)
+        final_matches = matched_exclusion_terms(detail.description or "", early_filter_terms)
         self._emit_event(
             phase="detail_early_filter_shadow",
             method="GET",
@@ -961,10 +964,12 @@ class CurlCffiVintedCatalogProvider:
                 "vinted_item_id": candidate.vinted_item_id,
                 "head_complete": snapshot.complete,
                 "canonical_matches": canonical_matches,
+                "description_isolated": isolated_description is not None,
                 "head_bytes_observed": snapshot.bytes_observed,
                 "would_discard": bool(head_matches),
                 "match_count": len(head_matches),
-                "equivalent_to_final_title_description": set(head_matches) == set(final_matches),
+                "safe_subset_of_final_description": set(head_matches).issubset(final_matches),
+                "equivalent_to_final_description": set(head_matches) == set(final_matches),
             },
         )
 
@@ -3498,6 +3503,7 @@ def map_catalog_item(raw_item: Mapping[str, Any], base_url: str = "https://www.v
         favorite_count=_optional_int(raw_item.get("favourite_count")),
         url=urljoin(base_url, item_path),
         image_url=_optional_str(photo.get("url")),
+        view_count=_optional_non_negative_int(raw_item.get("view_count")),
         raw=sanitize_catalog_item(raw_item),
     )
 
@@ -3519,6 +3525,7 @@ def sanitize_catalog_item(raw_item: Mapping[str, Any]) -> dict[str, Any]:
         "size_title": raw_item.get("size_title"),
         "status": raw_item.get("status"),
         "favourite_count": raw_item.get("favourite_count"),
+        "view_count": raw_item.get("view_count"),
         "photo": {
             "url": photo.get("url"),
         },
@@ -3580,6 +3587,18 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_non_negative_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _optional_str(value: Any) -> str | None:

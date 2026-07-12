@@ -22,6 +22,7 @@ class CatalogItemCandidate:
     favorite_count: int | None
     url: str
     image_url: str | None
+    view_count: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 

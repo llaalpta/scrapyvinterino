@@ -18,6 +18,10 @@ Ultima actualizacion: 2026-07-12.
 - El parser selectivo `next_flight_v3` sobre el HAR real decodifico 20 de 224 registros: mediana `59.7 ms`, p95 `68.8 ms`, cinco fotos y los mismos valores de envio, total y disponibilidad.
 - Dos canarios C2 residenciales completaron cinco detalles y validaron la rama final aunque `_vinted_fr_session` divergiera. La version con lanes persistentes tardo `5.034 s`; el control C1 reutilizando una sola conexion tardo `4.598 s`, por lo que la concurrencia no se promueve con este proxy.
 - Diez descartes de head forzados recibieron `15-22 KB` y tardaron `455-636 ms`; cada lote termino con API de catalogo aceptada. Esto valida transporte/sesion, no la equivalencia de cualquier descripcion, que permanece en observacion.
+- El HAR de detalle contiene claves de traduccion `item.view_count.*`, pero no un valor de visitas del articulo. Algunos feeds pueden exponer `view_count`; el contrato lo acepta solo como entero no negativo opcional del JSON de catalogo y nunca abre una peticion adicional para obtenerlo.
+- La meta descripcion observada concatena `titulo - descripcion`. El descarte temprano compatible con filtros solo-descripcion debe separar un prefijo de titulo exacto; buscar sobre la meta completa produciria falsos descartes por palabras presentes solo en el titulo.
+- El gate `description_only_v2` comparo el HAR mas 29 documentos vivos: 23 descripciones aislables, 20 descartes potenciales y cero falsos positivos respecto a Flight. Diez cierres forzados y espaciados recibieron `16-22 KB`, no produjeron `429`/challenge y terminaron con catalogo aceptado; `enforced` pasa a ser el valor estable.
+- Los 29 candidatos vivos del catalogo ES incluyeron `view_count`; todos valian `0`, por lo que cero se conserva como dato y no se confunde con ausencia.
 
 ## URL investigada
 

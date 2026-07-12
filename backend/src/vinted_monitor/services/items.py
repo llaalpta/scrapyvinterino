@@ -89,6 +89,7 @@ def get_or_persist_catalog_item(db: Session, candidate: CatalogItemCandidate) ->
                 "seller_login",
                 "seller_country",
                 "favorite_count",
+                "view_count",
                 "url",
                 "image_url",
                 "raw",
@@ -181,6 +182,7 @@ def _item_insert_values(candidate: CatalogItemCandidate, now: datetime) -> dict:
         "seller_login": candidate.seller_login,
         "seller_country": candidate.seller_country,
         "favorite_count": candidate.favorite_count,
+        "view_count": candidate.view_count,
         "url": candidate.url,
         "image_url": candidate.image_url,
         "photos": [],
@@ -203,6 +205,7 @@ def _update_item(item: Item, candidate: CatalogItemCandidate, now: datetime) -> 
     item.seller_login = candidate.seller_login
     item.seller_country = candidate.seller_country
     item.favorite_count = candidate.favorite_count
+    item.view_count = candidate.view_count
     item.url = candidate.url
     item.image_url = candidate.image_url
     item.raw = candidate.raw

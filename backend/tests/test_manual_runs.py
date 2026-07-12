@@ -2434,6 +2434,58 @@ def test_discarded_item_is_not_persisted(source_id: int) -> None:
         assert opportunity_count == 0
 
 
+def test_only_description_filters_and_optional_decision_data_do_not_block_opportunity(source_id: int) -> None:
+    class TitleOnlyMatchProvider(FakeSuccessProvider):
+        def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+            result = super().search(source, page)
+            return replace(
+                result,
+                items=[replace(result.items[0], title="descarte solo en titulo", view_count=0)],
+            )
+
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            self.detail_calls.append(candidate.vinted_item_id)
+            return CatalogItemDetail(
+                vinted_item_id=candidate.vinted_item_id,
+                description="Descripcion permitida",
+                photos=[f"https://images.example.test/{candidate.vinted_item_id}.webp"],
+                availability_flags={
+                    "state": "reserved",
+                    "reason_codes": ["reserved"],
+                    "source": "public_snapshot",
+                },
+            )
+
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.filter_definition = {"blacklist_terms": ["descarte"]}
+        db.commit()
+
+    cache = FakeSeenCache()
+    provider = TitleOnlyMatchProvider(item_count=1)
+    with SessionLocal() as db:
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
+        opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
+        item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
+
+        assert run.status == SUCCESS
+        assert run.items_discarded_by_filters == 0
+        assert run.opportunities_created == 1
+        assert opportunity is not None
+        assert item is not None
+        assert item.view_count == 0
+        assert item.shipping_price_amount is None
+        assert item.buyer_protection_fee_amount is None
+        assert item.total_price_amount is None
+        assert item.availability_flags["state"] == "reserved"
+
+
 def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) -> None:
     with SessionLocal() as db:
         source = db.get(SearchSource, source_id)

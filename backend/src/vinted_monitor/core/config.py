@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     vinted_detail_max_candidates_per_run: int = 5
     vinted_detail_concurrency: int = Field(default=1, ge=1)
     vinted_detail_fetch_mode: Literal["serial", "canary", "parallel"] = "serial"
-    vinted_detail_early_filter_mode: Literal["off", "shadow", "enforced"] = "shadow"
+    vinted_detail_early_filter_mode: Literal["off", "shadow", "enforced"] = "enforced"
     vinted_detail_head_max_bytes: int = Field(default=131072, ge=16384, le=1048576)
     vinted_detail_required_fields: str = "title,description,brand,size,status,price_amount,currency,photos"
     vinted_detail_max_attempts: int = Field(default=3, ge=1, le=10)

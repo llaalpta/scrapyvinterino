@@ -1062,7 +1062,7 @@ function MonitorConfigEditor({
 
       <div className="source-filter-picker compact monitor-filter-editor">
         <label>
-          Terminos excluyentes
+          Terminos excluyentes de la descripcion
           <textarea
             disabled={disabled}
             value={sourceDraft.filterTerms}
@@ -1071,7 +1071,7 @@ function MonitorConfigEditor({
             onChange={(event) => updateSourceDraft(source.id, 'filterTerms', event.target.value)}
           />
         </label>
-        <span>Solo se aplican a este monitor.</span>
+        <span>Solo se buscan en la descripcion publica de este monitor.</span>
       </div>
     </div>
   );

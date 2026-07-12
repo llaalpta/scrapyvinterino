@@ -36,6 +36,7 @@ Status values:
 | Order | Status | Item | Spec | Notes |
 | --- | --- | --- | --- | --- |
 | 14 | done | Fast opportunity pipeline with Redis seen cache | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md`, `docs/specs/007-opportunities-table.md`, `docs/specs/008-scheduler.md` | Make Redis mandatory for monitor seen state, persist only opportunities as product results, and remove seen-results/session legacy. |
+| 14.1 | done | Notification-ready opportunity contract | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/006-local-filters.md` | Description-only filtering, versioned Redis policy, optional catalog views and safe single-request early rejection verified before notification delivery. |
 | 15 | not-started | Notifications | `docs/spec.md` | PWA push, Telegram, webhook, Discord, or email after web monitoring works. |
 
 ## Later

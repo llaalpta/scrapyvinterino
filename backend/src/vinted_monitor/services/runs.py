@@ -80,6 +80,7 @@ SCHEDULER_TRIGGER = "scheduler"
 BASELINE_TRIGGER = "baseline"
 SESSION_PREPARE_TRIGGER = "session_prepare"
 DETAIL_PROBE_TRIGGER = "detail_probe"
+EVALUATION_CONTRACT_VERSION = "description_only_v2"
 SESSION_ITEM_PASSED = "passed"
 SESSION_ITEM_DISCARDED = "discarded"
 SESSION_ITEM_PASSED_WITHOUT_FILTERS = "passed_without_filters"
@@ -1912,6 +1913,7 @@ def _active_source_run_exists(
 
 def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_config) -> dict:
     return {
+        "evaluation_contract": EVALUATION_CONTRACT_VERSION,
         "filter_count": filter_term_count(source.filter_definition),
         "egress_mode": egress.mode,
         "proxy_profile_id": egress.proxy_profile_id,
@@ -2586,6 +2588,7 @@ def _evaluate_monitor_candidates(
                 "title": candidate.title,
                 "price_amount": str(candidate.price_amount),
                 "currency": candidate.currency,
+                "view_count": candidate.view_count,
                 "brand": candidate.brand,
                 "size": candidate.size,
                 "filter_count": filter_snapshot_term_count(filters),
@@ -3118,6 +3121,7 @@ def _deduplicate_candidates(candidates: list[CatalogItemCandidate]) -> list[Cata
 
 def _policy_hash(source: SearchSource, filters: list[dict]) -> str:
     payload = {
+        "evaluation_contract": EVALUATION_CONTRACT_VERSION,
         "url": source.url,
         "normalized_query": source.normalized_query or {},
         "filters": filters,

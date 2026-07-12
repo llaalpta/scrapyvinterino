@@ -19,6 +19,7 @@ def build_candidate(
     seller_login: str | None = "pytest_seller",
     seller_country: str | None = None,
     favorite_count: int | None = 2,
+    view_count: int | None = 3,
     image_url: str | None = "https://images.example.test/item.webp",
 ) -> CatalogItemCandidate:
     return CatalogItemCandidate(
@@ -34,6 +35,7 @@ def build_candidate(
         favorite_count=favorite_count,
         url=f"https://www.vinted.es/items/{vinted_item_id}",
         image_url=image_url,
+        view_count=view_count,
         raw={"id": vinted_item_id, "title": title, "safe": True},
     )
 
@@ -61,6 +63,7 @@ def test_persist_catalog_items_inserts_new_item() -> None:
             assert item.title == "Persisted pytest item"
             assert item.brand == "Pytest Brand"
             assert item.price_amount == Decimal("4.25")
+            assert item.view_count == 3
             assert item.photos == []
             assert item.seller_badges == []
             assert item.availability_flags == {}
@@ -89,6 +92,7 @@ def test_persist_catalog_items_updates_existing_item_without_changing_identity()
                         title="Updated pytest item",
                         price_amount=Decimal("3.99"),
                         favorite_count=5,
+                        view_count=7,
                     )
                 ],
             )
@@ -106,6 +110,7 @@ def test_persist_catalog_items_updates_existing_item_without_changing_identity()
             assert updated.title == "Updated pytest item"
             assert updated.price_amount == Decimal("3.99")
             assert updated.favorite_count == 5
+            assert updated.view_count == 7
     finally:
         cleanup_items()
 
@@ -127,6 +132,7 @@ def test_persist_catalog_items_allows_missing_optional_fields() -> None:
                         seller_login=None,
                         seller_country=None,
                         favorite_count=None,
+                        view_count=None,
                         image_url=None,
                     )
                 ],
@@ -140,6 +146,7 @@ def test_persist_catalog_items_allows_missing_optional_fields() -> None:
             assert item.brand is None
             assert item.price_amount is None
             assert item.image_url is None
+            assert item.view_count is None
     finally:
         cleanup_items()
 

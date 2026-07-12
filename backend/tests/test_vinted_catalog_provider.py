@@ -518,6 +518,7 @@ def test_map_catalog_item_maps_observed_fields() -> None:
     assert item.seller_login == "fixture_seller"
     assert item.seller_country is None
     assert item.favorite_count == 2
+    assert item.view_count is None
     assert item.url == "https://www.vinted.es/items/1000000001-polo-ralph-lauren-de-prueba"
     assert item.image_url == "https://images.example.test/item-1000000001.webp"
 
@@ -531,7 +532,21 @@ def test_map_catalog_item_allows_missing_optional_fields() -> None:
     assert item.status is None
     assert item.seller_login is None
     assert item.favorite_count is None
+    assert item.view_count is None
     assert item.image_url is None
+
+
+@pytest.mark.parametrize(
+    ("raw_view_count", "expected"),
+    [(0, 0), (17, 17), ("8", 8), (-1, None), (1.5, None), (True, None), ("invalid", None)],
+)
+def test_map_catalog_item_validates_optional_view_count(raw_view_count: object, expected: int | None) -> None:
+    raw = {**load_fixture()["items"][0], "view_count": raw_view_count}
+
+    item = map_catalog_item(raw)
+
+    assert item.view_count == expected
+    assert item.raw["view_count"] == raw_view_count
 
 
 def test_sanitize_catalog_item_keeps_only_safe_public_fields() -> None:
@@ -2242,8 +2257,8 @@ def test_curl_provider_enforced_head_filter_aborts_matching_body() -> None:
     body = (
         "<html><head>"
         f'<link rel="canonical" href="{candidate.url}">'
-        "<title>Articulo prohibido</title>"
-        '<meta name="description" content="Descripcion normal">'
+        f"<title>{candidate.title}</title>"
+        f'<meta name="description" content="{candidate.title} - Descripcion prohibido">'
         "</head><body>" + ("x" * 2000) + "</body></html>"
     )
     calls: list[dict] = []

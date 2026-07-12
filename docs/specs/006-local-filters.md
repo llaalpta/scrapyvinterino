@@ -8,7 +8,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 
 - Treat each configured monitor as the operational context for URL, cadence, optional filter terms, and runtime metadata.
 - Treat Vinted catalog URLs as the primary positive search filter for the monitor.
-- Treat monitor-local terms as exclusion filters that discard unwanted candidates, usually by blacklist terms in item detail text.
+- Treat monitor-local terms as exclusion filters that discard unwanted candidates only when they occur in the public item description.
 - Fetch item detail for every Redis-new monitor candidate before filter evaluation and opportunity creation.
 - Create opportunities for monitor candidates unless a configured exclusion filter discards them.
 - Create opportunities even when no local filters are configured, marked as `passed_without_filters`.
@@ -47,12 +47,13 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 - Each monitor run fetches the configured fast catalog page and deduplicates candidates by `vinted_item_id`.
 - An item already seen by the same monitor/policy in Redis is skipped without detail, DB writes, or another opportunity.
 - An item already known by another monitor can still create an opportunity in this monitor.
-- Blacklist matching is case-insensitive and accent-tolerant across title, description, brand, size, status, color, category, and seller when available.
+- Blacklist matching is case-insensitive and accent-tolerant over the public description only.
 - If blacklist terms match, the item is marked discarded and no opportunity is created.
 - Discarded items are not persisted as `items`; the run stores only aggregate discarded counters.
 - If no filters are configured, an opportunity is created with evaluation status `passed_without_filters`.
 - If detail is unavailable or not parseable, no item or opportunity is persisted, the run counts the candidate as pending, and Redis retains it for the configured retry schedule.
 - Public availability is informational and never authorizes an authenticated action. A future purchase must revalidate price, currency, availability, shipping, payment, and user confirmation against the authenticated session.
+- Public availability never acts as an exclusion rule; non-buyable and unknown states may create opportunities and must be represented honestly.
 - Opportunity creation is idempotent for monitor + item in the monitor flow.
 - `opportunities_created`, `items_filter_passed`, `items_discarded_by_filters`, and `items_filter_pending` reflect the monitor run.
 - The API does not accept legacy `filter_rule_ids` or monitor `is_active` patch payloads.
@@ -60,6 +61,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 ## Verification
 
 - Unit tests for blacklist matching and accent/case normalization.
+- Unit tests proving terms in title, brand, size, status, seller, color, category and badges do not discard when absent from the description.
 - Run test with no filters creating `passed_without_filters`.
 - Run test with detail blacklist discarding an item.
 - Run test with detail failure creating no item or opportunity, recording a pending outcome and preserving a Redis retry without marking the item seen.

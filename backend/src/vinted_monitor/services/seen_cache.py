@@ -643,6 +643,7 @@ def _serialize_detail_retry(retry: DetailRetryRecord) -> str:
             "seller_login": candidate.seller_login,
             "seller_country": candidate.seller_country,
             "favorite_count": candidate.favorite_count,
+            "view_count": candidate.view_count,
             "url": candidate.url,
             "image_url": candidate.image_url,
         },
@@ -710,6 +711,7 @@ def _deserialize_detail_retry(raw_payload: Any, *, expected_item_id: str) -> Det
             favorite_count=_optional_int(candidate_payload.get("favorite_count")),
             url=url,
             image_url=_optional_string(candidate_payload.get("image_url")),
+            view_count=_optional_non_negative_int(candidate_payload.get("view_count")),
             raw={},
         )
         candidate = replace(candidate_without_raw, raw=_sanitized_candidate_raw(candidate_without_raw))
@@ -736,6 +738,7 @@ def _sanitized_candidate_raw(candidate: CatalogItemCandidate) -> dict[str, Any]:
         "size_title": candidate.size,
         "status": candidate.status,
         "favourite_count": candidate.favorite_count,
+        "view_count": candidate.view_count,
         "photo": {"url": candidate.image_url},
         "user": {"login": candidate.seller_login},
     }
@@ -759,6 +762,17 @@ def _optional_string(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
+
+
+def _optional_non_negative_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("invalid non-negative integer")
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError("invalid non-negative integer")
+    return parsed
 
 
 def get_seen_cache(

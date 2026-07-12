@@ -137,6 +137,7 @@ def build_candidate(item_id: str = "9370050898") -> CatalogItemCandidate:
         favorite_count=2,
         url=f"https://www.vinted.es/items/{item_id}-camiseta",
         image_url=f"https://images1.vinted.net/t/{item_id}/f800/01.webp?s=signed",
+        view_count=4,
         raw={"cookie": "must-not-be-persisted", "access_token_web": "secret"},
     )
 
@@ -171,6 +172,7 @@ def test_pending_detail_retry_is_not_reclaimed_from_catalog_and_payload_is_sanit
     payload = json.loads(client.strings[retry_key])
     serialized = client.strings[retry_key]
     assert payload["attempt_count"] == 1
+    assert payload["candidate"]["view_count"] == 4
     assert "cookie" not in serialized
     assert "access_token_web" not in serialized
     assert client.expirations[retry_key] == 86_400
@@ -208,7 +210,9 @@ def test_due_detail_retry_is_claimed_once_and_rehydrates_normalized_candidate() 
     assert claimed[0].candidate.price_amount == Decimal("3.50")
     assert claimed[0].candidate.seller_login == "seller"
     assert claimed[0].candidate.seller_country == "ES"
+    assert claimed[0].candidate.view_count == 4
     assert claimed[0].candidate.raw["id"] == retry.candidate.vinted_item_id
+    assert claimed[0].candidate.raw["view_count"] == 4
     assert claimed[0].candidate.raw["user"]["login"] == "seller"
     assert "cookie" not in claimed[0].candidate.raw
 

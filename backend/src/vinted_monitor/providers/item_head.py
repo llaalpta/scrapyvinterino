@@ -18,9 +18,12 @@ class ItemHeadSnapshot:
     complete: bool
     bytes_observed: int
 
-    @property
-    def filter_text(self) -> str:
-        return " ".join(value for value in (self.title, self.description) if value)
+    def isolated_description(self, catalog_title: str) -> str | None:
+        title = catalog_title.strip()
+        prefix = f"{title} - "
+        if not title or not self.description.startswith(prefix):
+            return None
+        return self.description[len(prefix) :].strip()
 
 
 class ItemHeadParser(HTMLParser):
@@ -77,10 +80,12 @@ class EarlyFilterBodyCollector:
         *,
         terms: tuple[str, ...],
         max_bytes: int,
+        catalog_title: str,
         canonical_validator: Callable[[str | None], bool],
     ) -> None:
         self.terms = terms
         self.max_bytes = max_bytes
+        self.catalog_title = catalog_title
         self.canonical_validator = canonical_validator
         self.body = bytearray()
         self.parser = ItemHeadParser()
@@ -100,7 +105,8 @@ class EarlyFilterBodyCollector:
                 self.inspection_finished = True
                 self.snapshot = self.parser.snapshot(bytes_observed=min(len(self.body), self.max_bytes))
                 if self.snapshot.complete and self.canonical_validator(self.snapshot.canonical_url):
-                    self.matched_terms = matched_exclusion_terms(self.snapshot.filter_text, self.terms)
+                    description = self.snapshot.isolated_description(self.catalog_title)
+                    self.matched_terms = matched_exclusion_terms(description or "", self.terms)
                     if self.matched_terms:
                         return CURL_WRITEFUNC_ERROR
         return len(chunk)
