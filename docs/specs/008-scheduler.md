@@ -204,7 +204,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.
 - Unit tests confirming Redis cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
-- Manual check with short interval in local Docker.
+- Live Playwright check through PWA/API/worker/PostgreSQL/Redis with a 60-second interval and 10% jitter: one immediate run plus exactly two scheduler runs, initial persisted deadline in `60..66` seconds, no duplicate cadence, and bounded traffic/cleanup from the owning roadmap contract.
 - Confirm run records identify scheduler-triggered executions.
 - Confirm monitor sessions are created, closed, and associated to punctual runs, and created/associated/stopped for recurring runs.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
