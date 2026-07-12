@@ -77,7 +77,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - safe cookie, token, HTTP session, and proxy sticky-session markers with name, length, `first4****last4` masked preview for long values, and fingerprint, never the full value;
   - egress diagnostic data collected through the same HTTP session/proxy, including IP and country when the diagnostic endpoint returns them.
   - accumulated history is loaded through REST; an SSE connection without a cursor starts at the current publication tail, while `last_event_id` query input takes precedence over the standard `Last-Event-ID` resume header;
-  - the stream cursor is a commit-ordered publication position independent from `run_events.id`, so transactions that commit out of ID order remain deliverable exactly once to the PWA;
+  - the stream cursor is a monotonic publication position independent from `run_events.id`; it represents observed publication order rather than exact database commit timing, so transactions that become visible out of ID order remain deliverable exactly once to the PWA;
+  - every persisted monitor event creates indexed outbox work in its own transaction; publication assigns the durable cursor and removes that work atomically without rescanning event history;
   - the SSE stream announces `stream_ready` with its initial cursor in both `id:` and JSON data plus a three-second reconnect delay, drains complete 100-event backlog batches without polling pauses, and emits a heartbeat every 15 seconds while idle;
   - the SSE response disables intermediary caching/transformation and proxy buffering, and closes promptly after client disconnect while preserving the run-event redaction contract.
 - Database:
@@ -89,7 +90,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - `runs.trigger` and optional `runs.monitor_session_id`;
   - `items` for opportunity items only;
   - `errors`.
-  - `run_event_publications`, with one commit-ordered stream position per persisted monitor event.
+  - `run_event_outbox`, with one pending row per committed monitor event until publication;
+  - `run_event_publications`, with one monotonic stream position per persisted monitor event.
 
 ## Acceptance Criteria
 
@@ -147,6 +149,10 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, viewport, Vinted `x-screen`, egress country match, and any missing required key.
 - Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
+- A rolled-back monitor event leaves neither an event nor outbox work. A committed event leaves exactly one pending outbox row until a serialized publisher atomically creates its unique publication cursor and removes the pending row.
+- Migration 0017 backfills only committed monitor events missing a publication. Runtime publication reads bounded indexed outbox batches; it does not perform a historical anti-join on every SSE poll.
+- Tail startup drains only the outbox rows visible in one repeatable PostgreSQL snapshot while holding the global publication lock, so a continuously active producer cannot prevent `stream_ready`. Events committed after that boundary, including a previously reserved lower event ID, receive later cursors and remain resumable.
+- Normal SSE polls try the publication lock without waiting. Contention yields an empty poll so heartbeat and disconnect checks continue; a later poll publishes the pending rows after the tail fence is released.
 - The Monitors view owns exactly one SSE connection while it is open. Renders and statistics refreshes do not recreate it, leaving the view closes it, and returning or reconnecting resumes from the last received publication cursor.
 - Historical REST loading starts only after `stream_ready`; explicit per-monitor history-loaded state is independent from live event presence. REST history and live events are merged by event ID, including live events received while the historical request is still pending; each event appears at most once.
 - Only `run_succeeded` and `run_failed` schedule a debounced runtime refresh. A terminal batch refreshes current sources, the affected monitor run histories and statistics once; opportunities refresh only when a terminal reports a positive `opportunities_created` count or omits that count. It does not refresh the unused global run list.
@@ -199,7 +205,8 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Supervisor/watchdog tests cover invalid startup configuration, producer expiry grace, recurring-only locked stop, heartbeat recovery during lock acquisition, session/event persistence, DB-first Redis cleanup failure, and unexpected-error process termination.
 - Real-container verification blocks producer progress without external traffic and observes worker exit plus Compose restart; a QA recurring source/session/task proves watchdog database stop and visible Redis-cleanup failure, followed by complete cleanup and service restoration.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
-- PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, atomic activation rollback, concurrent initial admission at capacity one, repeated start rejection, locked-deadline revalidation, and durable window deferral.
+- PostgreSQL/outbox tests cover event commit and rollback, concurrent/inverted commits, serialized duplicate-free publication, atomic publication rollback, bounded batches, historical migration backfill and tail high-water behavior.
+- PostgreSQL tests for inverted event commit order, monotonic duplicate-free publication, JSONB marker roundtrip, atomic activation rollback, concurrent initial admission at capacity one, repeated start rejection, locked-deadline revalidation, and durable window deferral.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.

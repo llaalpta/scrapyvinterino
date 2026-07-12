@@ -16,7 +16,7 @@ from vinted_monitor.core.redaction import (
     redact_sensitive_text,
     sensitive_value_requires_redaction,
 )
-from vinted_monitor.db.models import RunEvent
+from vinted_monitor.db.models import RunEvent, RunEventOutbox
 
 MAX_MESSAGE_LENGTH = 1200
 LOG_LEVELS = {"debug", "info", "warning", "error"}
@@ -61,6 +61,8 @@ def record_run_event(
     )
     db.add(event)
     db.flush()
+    if source_id is not None:
+        db.add(RunEventOutbox(event_id=event.id, created_at=event.created_at))
     return event
 
 

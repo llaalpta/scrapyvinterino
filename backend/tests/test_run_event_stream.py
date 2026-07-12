@@ -16,7 +16,11 @@ from vinted_monitor.services.run_event_stream import (
     monitor_event_stream,
     resolve_monitor_event_cursor,
 )
-from vinted_monitor.services.run_events import redact_persisted_run_event_details, redact_run_event_details
+from vinted_monitor.services.run_events import (
+    record_run_event,
+    redact_persisted_run_event_details,
+    redact_run_event_details,
+)
 
 
 class ConnectedRequest:
@@ -233,25 +237,19 @@ def test_publication_cursor_delivers_transactions_that_commit_out_of_event_id_or
             db.commit()
             source_id = source.id
 
-        first_event = RunEvent(
+        first_event = record_run_event(
+            first_session,
             source_id=source_id,
             phase="pytest_commit_first",
-            level="info",
-            created_at=datetime.now(UTC),
             details={},
         )
-        first_session.add(first_event)
-        first_session.flush()
 
-        second_event = RunEvent(
+        second_event = record_run_event(
+            second_session,
             source_id=source_id,
             phase="pytest_commit_second",
-            level="info",
-            created_at=datetime.now(UTC),
             details={},
         )
-        second_session.add(second_event)
-        second_session.flush()
         second_session.commit()
 
         first_batch = [published for published in load_monitor_events_after(start_cursor) if published.event.source_id == source_id]

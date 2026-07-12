@@ -32,6 +32,8 @@ La disponibilidad periodica no se infiere de la configuracion ni de la capacidad
 
 La API es la unica propietaria de `alembic upgrade head`. Postgres y Redis deben estar sanos antes de iniciar la API; worker y `scheduler-watchdog` esperan despues a que `/health` confirme que la API termino su arranque y migraciones. Ninguno de esos dos servicios ejecuta Alembic.
 
+Las migraciones que introducen trabajo transaccional nuevo para escritores existentes requieren una actualizacion sin versiones mezcladas. En particular, antes de aplicar `0017_run_event_outbox` deben estar detenidos el worker, el watchdog y cualquier API antigua que pueda insertar `run_events`; la API nueva aplica la migracion y solo despues se habilitan los productores. Asi el backfill no puede solaparse con una transaccion 0016 que confirme un evento sin outbox.
+
 El worker valida la configuracion antes de crear sus hilos y termina con error si es invalida. Durante la ejecucion, el proceso principal vigila el heartbeat escrito exclusivamente por el productor; si caduca tras la gracia de arranque, el proceso termina para que `restart: unless-stopped` lo reemplace. Su healthcheck consulta esa misma señal y no sustituye el self-exit: Docker no reinicia un contenedor solo por marcarlo `unhealthy`.
 
 El `scheduler-watchdog` es un proceso separado con `restart: unless-stopped`. Tras su gracia inicial, bloquea solo monitores recurrentes activos, relee el heartbeat y, si sigue ausente, confirma primero en PostgreSQL la parada, el cierre de sesion y el evento `scheduler_worker_unavailable`. Despues intenta retirar tareas aun preparadas en Redis. Un fallo Redis queda registrado pero no revierte la parada; un error inesperado termina el proceso para que Compose lo reinicie.
