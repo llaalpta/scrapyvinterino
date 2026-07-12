@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import delete
 
 from vinted_monitor.api.main import stream_monitor_events
+from vinted_monitor.api.schemas import RunEventRead
 from vinted_monitor.core.redaction import safe_secret_marker
 from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
@@ -207,14 +208,66 @@ async def test_stream_redacts_event_details() -> None:
 
 def test_persisted_safe_markers_survive_json_roundtrip_without_accepting_pre_persistence_forgery() -> None:
     marker = safe_secret_marker("http_session", "audit-safe-marker-value", kind="session")
-    persisted = json.loads(json.dumps({"http_session": marker, "session_markers": [marker]}))
+    persisted = json.loads(
+        json.dumps(
+            {
+                "http_session": marker,
+                "session_markers": [marker],
+                "csrf_token": marker,
+                "request_headers": {"Authorization": marker},
+            }
+        )
+    )
 
     restored = redact_persisted_run_event_details(persisted)
 
     assert restored["http_session"]["masked"] == marker["masked"]
     assert restored["session_markers"][0]["fingerprint"] == marker["fingerprint"]
-    forged = {"http_session": dict(marker)}
-    assert redact_run_event_details(forged)["http_session"] == "<redacted>"
+    assert restored["csrf_token"]["masked"] == marker["masked"]
+    assert restored["request_headers"]["Authorization"]["fingerprint"] == marker["fingerprint"]
+    forged = {"http_session": dict(marker), "csrf_token": dict(marker)}
+    redacted_forgery = redact_run_event_details(forged)
+    assert redacted_forgery["http_session"] == "<redacted>"
+    assert redacted_forgery["csrf_token"] == "<redacted>"
+
+
+@pytest.mark.asyncio
+async def test_rest_schema_and_sse_emit_identical_persisted_marker_details() -> None:
+    marker = safe_secret_marker("access_token_web", "rest-sse-marker-parity", kind="cookie")
+    invalid_marker = {**marker, "unexpected": "forged-extra-field"}
+    persisted = json.loads(
+        json.dumps(
+            {
+                "http_session": marker,
+                "csrf_token": marker,
+                "request_headers": {"Authorization": marker, "X-Request-ID": "qa-parity"},
+                "session_markers": [marker, invalid_marker],
+                "response_body": "raw-body-canary",
+            }
+        )
+    )
+    event = make_event(1, details=persisted)
+    rest_details = RunEventRead.model_validate(event).details
+    stream = monitor_event_stream(
+        0,
+        is_disconnected=ConnectedRequest().is_disconnected,
+        load_events=lambda cursor: [PublishedRunEvent(cursor=1, event=event)] if cursor == 0 else [],
+    )
+
+    await anext(stream)
+    sse_details = event_data(await anext(stream))["details"]
+    await stream.aclose()
+
+    assert rest_details == sse_details
+    assert rest_details["http_session"] == marker
+    assert rest_details["csrf_token"] == marker
+    assert rest_details["request_headers"] == {
+        "Authorization": marker,
+        "X-Request-ID": "qa-parity",
+    }
+    assert rest_details["session_markers"] == "<redacted>"
+    assert rest_details["response_body"] == "<redacted>"
+    assert "raw-body-canary" not in json.dumps(rest_details)
 
 
 def test_publication_cursor_delivers_transactions_that_commit_out_of_event_id_order() -> None:

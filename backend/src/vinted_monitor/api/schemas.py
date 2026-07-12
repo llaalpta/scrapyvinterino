@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from vinted_monitor.services.run_events import redact_run_event_details
+from vinted_monitor.services.run_events import redact_persisted_run_event_details
 from vinted_monitor.services.scheduler import SchedulerConfigError, normalize_scheduler_config
 from vinted_monitor.services.search_sources import validate_search_source_name, validate_vinted_catalog_url
 
@@ -387,7 +387,10 @@ class RunEventRead(BaseModel):
     @field_validator("details", mode="before")
     @classmethod
     def validate_details(cls, value: dict[str, Any] | None) -> dict[str, Any]:
-        return redact_run_event_details(value)
+        # RunEventRead is an outbound schema for database-loaded events. JSONB
+        # strips the runtime marker subclass, so restore only structurally valid
+        # safe markers before applying the complete recursive redaction pass.
+        return redact_persisted_run_event_details(value)
 
 
 class ActionRequestCreate(BaseModel):

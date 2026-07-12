@@ -45,10 +45,59 @@ MARKER_ONLY_KEYS = frozenset(
 )
 SANITIZED_HEADER_CONTAINER_KEYS = frozenset({"request_headers", "response_headers"})
 SENSITIVE_CONTENT_KEYS = frozenset({"body_snippet", "html", "response_body"})
+SAFE_SECRET_MARKER_KINDS = frozenset(
+    {"cookie", "header", "http_session", "proxy_session", "secret", "session", "session_secret", "set-cookie"}
+)
+SAFE_SECRET_MARKER_NAMES = frozenset(
+    {
+        "__cf_bm",
+        "access_token_web",
+        "anon_id",
+        "authorization",
+        "cookie",
+        "csrf_token",
+        "datadome",
+        "ddk",
+        "http_session",
+        "http_session_id",
+        "jspl",
+        "password",
+        "proxy_session",
+        "proxy_sticky_session_id",
+        "refresh_token",
+        "secret",
+        "set-cookie",
+        "token",
+        "v_udt",
+        "x-anon-id",
+        "x-csrf-token",
+        "x-v-udt",
+    }
+)
+MAX_MARKER_SECRET_LENGTH = 1_000_000
+_SAFE_MARKER_FACTORY_TOKEN = object()
+_REDACTED_MARKER_NAME_PATTERN = re.compile(r"<redacted-name:sha256:[0-9a-f]{12}>")
 
 
 class SafeSecretMarker(dict[str, Any]):
-    """Runtime-branded mapping created only after a raw secret has been reduced."""
+    """Immutable runtime-branded mapping created only by this module's factory."""
+
+    def __init__(self, value: Mapping[str, Any], *, _factory_token: object | None = None) -> None:
+        if _factory_token is not _SAFE_MARKER_FACTORY_TOKEN:
+            raise TypeError("SafeSecretMarker values must be created by safe_secret_marker")
+        dict.__init__(self, value)
+
+    def _immutable(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("SafeSecretMarker values are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
 
 
 def redact_sensitive_text(value: str) -> str:
@@ -79,11 +128,13 @@ def redact_sensitive_value(value: Any, *, key: str | None = None) -> Any:
 
 
 def safe_secret_marker(name: str, value: str, *, kind: str = "session") -> SafeSecretMarker:
-    normalized = value or ""
-    return SafeSecretMarker(
+    normalized = str(value or "")
+    normalized_kind = str(kind).strip().lower()
+    safe_kind = normalized_kind if normalized_kind in SAFE_SECRET_MARKER_KINDS else "secret"
+    return _new_safe_secret_marker(
         {
-            "kind": kind,
-            "name": name,
+            "kind": safe_kind,
+            "name": _safe_marker_name(name),
             "masked": mask_secret(normalized),
             "length": len(normalized),
             "fingerprint": fingerprint_secret(normalized),
@@ -113,12 +164,6 @@ def safe_cookie_markers(cookies: Any) -> list[dict[str, Any]]:
         if not name:
             continue
         marker = safe_secret_marker(name, value, kind="cookie")
-        domain = getattr(cookie, "domain", None)
-        expires = getattr(cookie, "expires", None)
-        if domain:
-            marker["domain"] = str(domain)
-        if expires:
-            marker["expires"] = str(expires)
         markers.append(marker)
     return markers
 
@@ -144,7 +189,8 @@ def safe_headers(headers: Mapping[str, Any] | None) -> dict[str, Any]:
         if lowered in {"cookie", "set-cookie"}:
             safe[name] = safe_cookie_header_markers(text_value, kind=lowered)
         elif _is_sensitive_key(name):
-            safe[name] = safe_secret_marker(name, text_value, kind="header")
+            marker = safe_secret_marker(name, text_value, kind="header")
+            safe[marker["name"]] = marker
         else:
             safe[name] = redact_sensitive_text(text_value)[:1200]
     return safe
@@ -158,12 +204,7 @@ def safe_cookie_header_markers(header_value: str, *, kind: str = "cookie") -> li
         return [safe_secret_marker(kind, header_value, kind=kind)]
     markers: list[dict[str, Any]] = []
     for name, morsel in parsed.items():
-        marker = safe_secret_marker(name, morsel.value, kind=kind)
-        if morsel["domain"]:
-            marker["domain"] = morsel["domain"]
-        if morsel["expires"]:
-            marker["expires"] = morsel["expires"]
-        markers.append(marker)
+        markers.append(safe_secret_marker(name, morsel.value, kind=kind))
     return markers or [safe_secret_marker(kind, header_value, kind=kind)]
 
 
@@ -173,24 +214,60 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def is_safe_secret_marker(value: Any) -> bool:
-    if not isinstance(value, SafeSecretMarker):
-        return False
+    return isinstance(value, SafeSecretMarker) and _is_safe_secret_marker_mapping(value)
+
+
+def restore_persisted_safe_secret_marker(value: Any) -> SafeSecretMarker | None:
+    if not isinstance(value, Mapping) or not _is_safe_secret_marker_mapping(value):
+        return None
+    return _new_safe_secret_marker(value)
+
+
+def _new_safe_secret_marker(value: Mapping[str, Any]) -> SafeSecretMarker:
+    return SafeSecretMarker(value, _factory_token=_SAFE_MARKER_FACTORY_TOKEN)
+
+
+def _is_safe_secret_marker_mapping(value: Mapping[str, Any]) -> bool:
     required = {"kind", "name", "masked", "length", "fingerprint"}
-    allowed = required | {"domain", "expires"}
-    if not required.issubset(value) or not set(value).issubset(allowed):
+    if set(value) != required:
         return False
+    kind = value.get("kind")
+    name = value.get("name")
+    length = value.get("length")
     masked = value.get("masked")
     fingerprint = value.get("fingerprint")
-    return bool(
-        isinstance(value.get("kind"), str)
-        and isinstance(value.get("name"), str)
-        and isinstance(value.get("length"), int)
-        and not isinstance(value.get("length"), bool)
+    if not (
+        isinstance(kind, str)
+        and kind in SAFE_SECRET_MARKER_KINDS
+        and isinstance(name, str)
+        and _is_safe_marker_name(name)
+        and isinstance(length, int)
+        and not isinstance(length, bool)
+        and 0 <= length <= MAX_MARKER_SECRET_LENGTH
         and isinstance(masked, str)
-        and (masked in {"<empty>", "<masked>"} or re.fullmatch(r".{4}\*{4}.{4}", masked))
         and isinstance(fingerprint, str)
-        and re.fullmatch(r"sha256:(?:empty|[0-9a-f]{12})", fingerprint)
-        and all(isinstance(value.get(optional), str) for optional in {"domain", "expires"} if optional in value)
+    ):
+        return False
+    if length == 0:
+        return masked == "<empty>" and fingerprint == "sha256:empty"
+    if not re.fullmatch(r"sha256:[0-9a-f]{12}", fingerprint):
+        return False
+    if length < 12:
+        return masked == "<masked>"
+    return bool(re.fullmatch(r".{4}\*{4}.{4}", masked))
+
+
+def _safe_marker_name(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if normalized.lower() in SAFE_SECRET_MARKER_NAMES:
+        return normalized
+    return f"<redacted-name:{fingerprint_secret(normalized)}>"
+
+
+def _is_safe_marker_name(value: str) -> bool:
+    return bool(
+        value.lower() in SAFE_SECRET_MARKER_NAMES
+        or _REDACTED_MARKER_NAME_PATTERN.fullmatch(value)
     )
 
 
