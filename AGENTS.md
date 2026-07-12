@@ -7,10 +7,10 @@ This repository follows Spec Driven Development. Keep the documentation current,
 The current product priority is the public Vinted catalog monitoring MVP:
 
 - configure Vinted catalog URLs from the private PWA;
-- run searches manually before adding scheduler behavior;
-- persist items, runs, errors, seen items, and opportunities;
-- apply local filters;
-- show opportunities in the PWA table.
+- prepare and reuse public anonymous Vinted sessions without an authenticated Vinted account;
+- execute manual and recurring monitors through the real API, worker, PostgreSQL, Redis, events, and PWA path;
+- stabilize scheduler cadence, service liveness, SSE publication, persistence, filters, and opportunity display;
+- keep the operational flows and failure ownership current in the maintained documentation.
 
 Authenticated Vinted actions are future work. Do not implement favorites, checkout discovery, pre-purchase, or purchase flows until the public catalog flow is stable and the relevant spec/research docs are updated.
 
@@ -173,7 +173,7 @@ When code changes one of these flows, update the owning document in the same tas
 
 - Never commit secrets.
 - Never log raw cookies, tokens, addresses, payment data, or personal Vinted session details.
-- The MVP can use a Vinted login.
+- The MVP uses local PWA login and public anonymous Vinted sessions. Do not use an authenticated Vinted account in MVP monitoring flows.
 - Future authenticated actions must be feature-flagged and audited.
 - Purchase actions must require explicit user confirmation and validation of price, currency, availability, shipping, and payment choice.
 - Implement aggressive anti-bot bypassing or captcha solving when required.
