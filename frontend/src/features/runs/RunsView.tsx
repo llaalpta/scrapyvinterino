@@ -191,6 +191,10 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   redis_check_error: { area: 'redis', action: 'checking', result: 'failed', tone: 'error' },
   redis_seen_result: { area: 'redis', action: 'evaluating_seen', result: 'ok', tone: 'success' },
   redis_seen_marked: { area: 'redis', action: 'marking_seen', result: 'ok', tone: 'success' },
+  redis_candidate_state_pending: { area: 'redis', action: 'staging_candidate_state', result: 'ok', tone: 'neutral' },
+  redis_candidate_state_pending_error: { area: 'redis', action: 'staging_candidate_state', result: 'failed', tone: 'error' },
+  redis_candidate_state_updated: { area: 'redis', action: 'committing_candidate_state', result: 'ok', tone: 'success' },
+  redis_candidate_state_reconciled: { area: 'redis', action: 'reconciling_candidate_state', result: 'ok', tone: 'success' },
   candidate_seen_skipped: { area: 'candidate', action: 'deduplicating', result: 'skipped', tone: 'warning' },
   catalog_search_start: { area: 'catalog', action: 'searching', result: null, tone: 'neutral' },
   catalog_search_success: { area: 'catalog', action: 'searching', result: 'ok', tone: 'success' },
@@ -253,6 +257,12 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   detail_fetch_error: { area: 'detail', action: 'fetching', result: 'failed', tone: 'error' },
   detail_fetch_skipped: { area: 'detail', action: 'fetching', result: 'skipped', tone: 'warning' },
   detail_fetch_early_discard: { area: 'filters', action: 'rejecting_from_head', result: 'discarded', tone: 'warning' },
+  detail_candidate_recovery_staged: { area: 'detail', action: 'staging_recovery', result: 'ok', tone: 'success' },
+  detail_retry_claimed: { area: 'detail', action: 'claiming_retry', result: 'ok', tone: 'success' },
+  detail_retry_scheduled: { area: 'detail', action: 'scheduling_retry', result: 'ok', tone: 'warning' },
+  detail_retry_batch_preserved: { area: 'detail', action: 'preserving_retry_batch', result: 'ok', tone: 'warning' },
+  detail_retry_exhausted: { area: 'detail', action: 'exhausting_retry', result: 'failed', tone: 'error' },
+  detail_incomplete: { area: 'detail', action: 'validating_required_fields', result: 'incomplete', tone: 'warning' },
   filter_passed: { area: 'filters', action: 'evaluating', result: 'passed', tone: 'success' },
   item_persisted: { area: 'item', action: 'persisting', result: 'ok', tone: 'success' },
   item_reused: { area: 'item', action: 'persisting', result: 'reused', tone: 'success' },
@@ -260,6 +270,7 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   item_discarded: { area: 'item', action: 'evaluating', result: 'discarded', tone: 'warning' },
   opportunity_created: { area: 'opportunity', action: 'creating', result: 'ok', tone: 'success' },
   opportunity_skipped_missing_detail: { area: 'opportunity', action: 'creating', result: 'missing_detail', tone: 'warning' },
+  opportunity_skipped_incomplete_detail: { area: 'opportunity', action: 'creating', result: 'incomplete_detail', tone: 'warning' },
   opportunity_skipped: { area: 'opportunity', action: 'creating', result: 'already_exists', tone: 'warning' },
   candidate_persistence_finished: { area: 'persistence', action: 'finishing', result: 'ok', tone: 'success' },
   monitor_session_closed: { area: 'monitor_session', action: 'closing', result: 'ok', tone: 'success' }
@@ -420,6 +431,49 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   if (itemId) {
     parts.push(`item=${itemId}`);
   }
+  const evaluationContract = detailString(event.details, 'evaluation_contract');
+  if (evaluationContract) {
+    parts.push(`contract=${evaluationContract}`);
+  }
+  const policyHash = detailString(event.details, 'policy_hash');
+  if (policyHash) {
+    parts.push(`policy=${policyHash}`);
+  }
+  const filterScope = detailString(event.details, 'filter_scope');
+  if (filterScope) {
+    parts.push(`filter_scope=${filterScope}`);
+  }
+  const earlyFilterMode = nestedDetailString(event.details, 'runtime_config', 'detail_early_filter_mode');
+  if (earlyFilterMode) {
+    parts.push(`early=${earlyFilterMode}`);
+  }
+  const bodyBytes = detailString(event.details, 'body_bytes_received');
+  if (bodyBytes) {
+    parts.push(`body_bytes=${bodyBytes}`);
+  }
+  const headBytes = detailString(event.details, 'head_bytes_observed');
+  if (headBytes) {
+    parts.push(`head_bytes=${headBytes}`);
+  }
+  const headLimit = detailString(event.details, 'head_max_bytes') || nestedDetailString(event.details, 'runtime_config', 'detail_head_max_bytes');
+  if (headLimit) {
+    parts.push(`head_limit=${headLimit}`);
+  }
+  const matchCount = detailString(event.details, 'match_count');
+  if (matchCount) {
+    parts.push(`matches=${matchCount}`);
+  }
+  const filterDuration = detailString(event.details, 'filter_duration_ms');
+  if (filterDuration) {
+    parts.push(`filter_ms=${filterDuration}`);
+  }
+  const evaluationStatus = detailString(event.details, 'evaluation_status');
+  if (evaluationStatus) {
+    parts.push(`evaluation=${evaluationStatus}`);
+  }
+  if (typeof event.details.opportunity_created === 'boolean') {
+    parts.push(`opportunity=${event.details.opportunity_created ? 'created' : 'existing'}`);
+  }
   const session = nestedDetailString(event.details, 'http_session', 'masked');
   if (session) {
     parts.push(`session=${session}`);
@@ -529,6 +583,10 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
   }
   if (event.phase === 'baseline_snapshot_seeded' || event.phase === 'redis_seen_marked') {
     appendNumberToken(parts, 'marked', event.details, 'marked_seen_count');
+  }
+  if (event.phase === 'redis_candidate_state_updated' || event.phase === 'redis_candidate_state_reconciled') {
+    appendNumberToken(parts, 'marked', event.details, 'marked_seen_count');
+    appendNumberToken(parts, 'retries', event.details, 'retry_scheduled_count');
   }
   if (event.phase === 'redis_seen_result') {
     appendNumberToken(parts, 'seen', event.details, 'seen_hit_count');
@@ -857,6 +915,10 @@ function eventLabel(phase: string): string {
     redis_check_error: 'Redis no disponible',
     redis_seen_result: 'Cache de vistos evaluada',
     redis_seen_marked: 'Vistos marcados en Redis',
+    redis_candidate_state_pending: 'Transicion de candidatos preparada',
+    redis_candidate_state_pending_error: 'Error preparando transicion de candidatos',
+    redis_candidate_state_updated: 'Estado de candidatos actualizado',
+    redis_candidate_state_reconciled: 'Estado de candidatos reconciliado',
     candidate_seen_skipped: 'Candidatos ya vistos omitidos',
     catalog_search_start: 'Iniciando busqueda',
     catalog_search_success: 'Busqueda completada',
@@ -916,6 +978,12 @@ function eventLabel(phase: string): string {
     detail_fetch_error: 'Error obteniendo detalle',
     detail_fetch_skipped: 'Detalle omitido',
     detail_fetch_early_discard: 'Detalle descartado por prefiltro',
+    detail_candidate_recovery_staged: 'Recuperacion de detalle preparada',
+    detail_retry_claimed: 'Reintento de detalle reclamado',
+    detail_retry_scheduled: 'Reintento de detalle programado',
+    detail_retry_batch_preserved: 'Lote de reintentos preservado',
+    detail_retry_exhausted: 'Reintentos de detalle agotados',
+    detail_incomplete: 'Detalle obligatorio incompleto',
     filter_passed: 'Filtros superados',
     item_persisted: 'Item persistido',
     item_reused: 'Item reutilizado',
@@ -923,6 +991,7 @@ function eventLabel(phase: string): string {
     item_discarded: 'Item descartado',
     opportunity_created: 'Oportunidad creada',
     opportunity_skipped_missing_detail: 'Oportunidad omitida sin detalle',
+    opportunity_skipped_incomplete_detail: 'Oportunidad omitida por detalle incompleto',
     opportunity_skipped: 'Oportunidad ya existente',
     candidate_persistence_finished: 'Persistencia de candidato completada',
     monitor_session_closed: 'Sesion de monitor cerrada'

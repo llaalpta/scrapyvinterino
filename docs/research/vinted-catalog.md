@@ -22,6 +22,9 @@ Ultima actualizacion: 2026-07-12.
 - La meta descripcion observada concatena `titulo - descripcion`. El descarte temprano compatible con filtros solo-descripcion debe separar un prefijo de titulo exacto; buscar sobre la meta completa produciria falsos descartes por palabras presentes solo en el titulo.
 - El gate `description_only_v2` comparo el HAR mas 29 documentos vivos: 23 descripciones aislables, 20 descartes potenciales y cero falsos positivos respecto a Flight. Diez cierres forzados y espaciados recibieron `16-22 KB`, no produjeron `429`/challenge y terminaron con catalogo aceptado; `enforced` pasa a ser el valor estable.
 - Los 29 candidatos vivos del catalogo ES incluyeron `view_count`; todos valian `0`, por lo que cero se conserva como dato y no se confunde con ausencia.
+- La auditoria independiente de `884c533` reproceso offline el HAR de navegacion disponible: el documento de `2,350,064` bytes produjo titulo, canonical y descripcion Flight, y el sufijo meta aislado de 24 caracteres fue semanticamente identico a la descripcion Flight normalizada. Los casos de titulo-only y shadow equivalence quedan cubiertos a nivel provider con una sola GET simulada.
+- El escaneo de 505 eventos locales encontro un unico `response.body_snippet` HTML historico en un probe fallido y ningun secreto, userinfo o URL firmada. El provider pasa a registrar solo observaciones de longitud/tipo, la redaccion bloquea claves de contenido y `0015_redact_event_bodies` elimina snippets existentes de forma irreversible; el reescaneo termino con cero hallazgos.
+- El control final uso PostgreSQL desechable para `upgrade/downgrade/upgrade`, namespace Redis real aislado, 372 tests backend, Ruff, lint/build PWA y Playwright desktop/mobile sin errores ni overflow. No genero trafico nuevo contra Vinted.
 
 ## URL investigada
 

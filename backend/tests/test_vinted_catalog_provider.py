@@ -851,6 +851,7 @@ def test_curl_provider_catalog_api_probe_calls_api_with_incomplete_datadome_cont
 
 def test_curl_provider_catalog_api_probe_reports_challenge_without_raising() -> None:
     calls: list[dict] = []
+    challenge_body = "<html>geo.captcha-delivery.com datadome=raw-secret</html>"
 
     def handler(call: dict) -> FakeResponse:
         if path(call) == "/catalog":
@@ -868,7 +869,7 @@ def test_curl_provider_catalog_api_probe_reports_challenge_without_raising() -> 
         if path(call) == "/api/v2/catalog/items":
             return FakeResponse(
                 403,
-                text="<html>geo.captcha-delivery.com datadome=raw-secret</html>",
+                text=challenge_body,
                 headers={"content-type": "text/html", "set-cookie": "datadome=raw-secret; Path=/;"},
             )
         return FakeResponse(404)
@@ -882,7 +883,14 @@ def test_curl_provider_catalog_api_probe_reports_challenge_without_raising() -> 
 
     assert probe["outcome"] == "challenge"
     assert probe["status_code"] == 403
-    assert "body_snippet" in probe["response"]
+    assert "body_snippet" not in probe["response"]
+    assert probe["response"]["body_observation"] == {
+        "bytes": len(challenge_body.encode("utf-8")),
+        "chars": len(challenge_body),
+        "sampled_chars": len(challenge_body),
+        "looks_like_html": True,
+        "looks_like_json": False,
+    }
     assert "raw-secret" not in json.dumps(probe)
 
 
@@ -2277,6 +2285,77 @@ def test_curl_provider_enforced_head_filter_aborts_matching_body() -> None:
         provider.fetch_detail(candidate, early_filter_terms=("prohibido",))
 
     assert captured.value.matched_terms == ["prohibido"]
+    assert len(calls) == 1
+
+
+def test_curl_provider_enforced_head_filter_ignores_catalog_title_and_finishes_same_request() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    description = "Tiene una marca pequena en la manga"
+    body = (
+        "<html><head>"
+        f'<link rel="canonical" href="{candidate.url}">'
+        f"<title>{candidate.title}</title>"
+        f'<meta name="description" content="{candidate.title} - {description}">'
+        f"</head><body>{build_item_detail_flight_html()}</body></html>"
+    )
+    calls: list[dict] = []
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(
+            egress_diagnostic_url=None,
+            vinted_detail_early_filter_mode="enforced",
+        ),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(200, text=body, headers={"content-type": "text/html"}),
+            calls,
+        ),
+    )
+
+    detail = provider.fetch_detail(candidate, early_filter_terms=("polo",))
+
+    assert detail.description == description
+    assert len(calls) == 1
+
+
+def test_curl_provider_shadow_head_filter_matches_only_final_description() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    description = "Tiene una marca pequena en la manga"
+    body = (
+        "<html><head>"
+        f'<link rel="canonical" href="{candidate.url}">'
+        f"<title>{candidate.title}</title>"
+        f'<meta name="description" content="{candidate.title} - {description}">'
+        f"</head><body>{build_item_detail_flight_html()}</body></html>"
+    )
+    calls: list[dict] = []
+    events: list[dict] = []
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(
+            egress_diagnostic_url=None,
+            vinted_detail_early_filter_mode="shadow",
+        ),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(200, text=body, headers={"content-type": "text/html"}),
+            calls,
+        ),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    detail = provider.fetch_detail(candidate, early_filter_terms=("marca", "polo"))
+
+    shadow = next(event for event in events if event["phase"] == "detail_early_filter_shadow")
+    assert detail.description == description
+    assert shadow["details"] == {
+        "vinted_item_id": candidate.vinted_item_id,
+        "head_complete": True,
+        "canonical_matches": True,
+        "description_isolated": True,
+        "filter_scope": "description",
+        "head_bytes_observed": len(body.encode("utf-8")),
+        "would_discard": True,
+        "match_count": 1,
+        "safe_subset_of_final_description": True,
+        "equivalent_to_final_description": True,
+    }
     assert len(calls) == 1
 
 

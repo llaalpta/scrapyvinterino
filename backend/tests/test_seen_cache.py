@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -215,6 +216,41 @@ def test_due_detail_retry_is_claimed_once_and_rehydrates_normalized_candidate() 
     assert claimed[0].candidate.raw["view_count"] == 4
     assert claimed[0].candidate.raw["user"]["login"] == "seller"
     assert "cookie" not in claimed[0].candidate.raw
+
+
+def test_baseline_and_zero_view_retry_are_isolated_by_policy_hash() -> None:
+    client = FakeRedis()
+    cache = build_cache(client)
+    item_id = "9370050898"
+    candidate = replace(build_candidate(item_id), view_count=0)
+    retry = DetailRetryRecord(
+        candidate=candidate,
+        attempt_count=1,
+        next_attempt_at=datetime.fromtimestamp(1_000, UTC),
+        failure_kind="transport_error",
+    )
+
+    cache.mark_baseline(7, "legacy-policy")
+    cache.stage_candidate_retries(7, "legacy-policy", (retry,))
+
+    assert cache.has_baseline(7, "legacy-policy") is True
+    assert cache.has_baseline(7, "description-only-policy") is False
+    assert cache.claim_due_detail_retries(
+        7,
+        "description-only-policy",
+        due_at=datetime.fromtimestamp(1_000, UTC),
+        limit=1,
+    ) == []
+
+    claimed = cache.claim_due_detail_retries(
+        7,
+        "legacy-policy",
+        due_at=datetime.fromtimestamp(1_000, UTC),
+        limit=1,
+    )
+
+    assert len(claimed) == 1
+    assert claimed[0].candidate.view_count == 0
 
 
 def test_terminal_transition_marks_seen_and_removes_retry_and_processing_lock() -> None:

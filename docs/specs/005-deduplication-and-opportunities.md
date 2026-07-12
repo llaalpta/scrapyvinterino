@@ -118,5 +118,6 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Confirm a five-item wave returns decisions in retry/catalog order even when HTTP completion order differs, and that SQL/Redis/event writes occur only on the caller thread.
 - Confirm early-filter shadow mode never changes persistence, while enforced early discard produces the same terminal Redis/filter result as a complete matching detail.
 - Confirm terms present only outside the description never discard, and an ambiguous head falls through to the full-description decision on the same request.
+- Keep `enforced` as the default only while every isolatable audit sample has normalized meta suffix equal to the normalized Flight description and early matches remain a subset of final description matches; any counterexample returns the default to `shadow`.
 - Confirm `view_count` accepts zero and a non-negative integer from catalog JSON, remains null when absent/invalid, and survives Redis detail retries without extra traffic.
 - Confirm overlapping monitors cannot duplicate alerts within one monitor but can independently alert on the same catalog item.

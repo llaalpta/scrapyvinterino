@@ -538,6 +538,7 @@ class CurlCffiVintedCatalogProvider:
                     duration_ms=_elapsed_ms(started_at),
                     details={
                         **response_details,
+                        "filter_scope": "description",
                         "match_count": len(early_matched_terms),
                         "head_max_bytes": self.settings.vinted_detail_head_max_bytes,
                     },
@@ -965,6 +966,7 @@ class CurlCffiVintedCatalogProvider:
                 "head_complete": snapshot.complete,
                 "canonical_matches": canonical_matches,
                 "description_isolated": isolated_description is not None,
+                "filter_scope": "description",
                 "head_bytes_observed": snapshot.bytes_observed,
                 "would_discard": bool(head_matches),
                 "match_count": len(head_matches),
@@ -1512,29 +1514,25 @@ class CurlCffiVintedCatalogProvider:
         outcome = "rejected"
         error: str | None = None
         accepted_payload: Mapping[str, Any] | None = None
-        body_snippet = getattr(response, "text", "")[:1200]
+        body_text = str(getattr(response, "text", "") or "")
+        body_snippet = body_text[:1200]
 
         if is_cloudflare_challenge(response.status_code, dict(response.headers)):
             outcome = "challenge"
             response_details["challenge_kind"] = "cloudflare"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
         elif is_datadome_challenge(response.status_code, dict(response.headers), body_snippet):
             outcome = "challenge"
             response_details["challenge_kind"] = "datadome"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
         elif response.status_code >= 400:
             outcome = "rejected"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
         elif "json" not in content_type.lower():
             outcome = "non_json"
-            response_details["body_snippet"] = redact_sensitive_text(body_snippet)
         else:
             try:
                 payload = response.json()
             except Exception as exc:
                 outcome = "non_json"
                 error = redact_sensitive_text(str(exc))
-                response_details["body_snippet"] = redact_sensitive_text(body_snippet)
             else:
                 if isinstance(payload, Mapping):
                     outcome = "accepted_json"
@@ -1544,7 +1542,9 @@ class CurlCffiVintedCatalogProvider:
                     response_details["items_count"] = len(items) if isinstance(items, list) else None
                 else:
                     outcome = "non_json"
-                    response_details["body_snippet"] = redact_sensitive_text(body_snippet)
+
+        if outcome != "accepted_json":
+            response_details["body_observation"] = _body_observation(body_text)
 
         event_phase = "catalog_api_probe_success" if outcome == "accepted_json" else "catalog_api_probe_failed"
         self._emit_event(
@@ -1563,6 +1563,7 @@ class CurlCffiVintedCatalogProvider:
                 "request_profile": "api_har146",
                 "response_summary": _response_summary(response.headers),
                 "content_type": response_details.get("content_type"),
+                "body_bytes_received": (response_details.get("body_observation") or {}).get("bytes"),
                 "items_count": response_details.get("items_count"),
                 "json_keys": response_details.get("json_keys"),
                 "request_headers": safe_headers(headers),
@@ -2396,6 +2397,17 @@ def _response_summary(headers: Mapping[str, Any]) -> dict[str, Any]:
             "critical_ch": _header_value(headers, "critical-ch"),
         }.items()
         if value
+    }
+
+
+def _body_observation(body: str) -> dict[str, Any]:
+    stripped = body.lstrip()
+    return {
+        "bytes": len(body.encode("utf-8")),
+        "chars": len(body),
+        "sampled_chars": min(len(body), 1200),
+        "looks_like_html": stripped.startswith(("<!DOCTYPE", "<!doctype", "<html", "<HTML")),
+        "looks_like_json": stripped.startswith(("{", "[")),
     }
 
 

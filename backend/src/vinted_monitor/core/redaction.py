@@ -44,6 +44,7 @@ MARKER_ONLY_KEYS = frozenset(
     }
 )
 SANITIZED_HEADER_CONTAINER_KEYS = frozenset({"request_headers", "response_headers"})
+SENSITIVE_CONTENT_KEYS = frozenset({"body_snippet", "html", "response_body"})
 
 
 class SafeSecretMarker(dict[str, Any]):
@@ -199,6 +200,8 @@ def is_safe_secret_marker_collection(value: Any) -> bool:
 
 def sensitive_value_requires_redaction(key: str, value: Any) -> bool:
     lowered = key.lower()
+    if lowered in SENSITIVE_CONTENT_KEYS:
+        return True
     safe_marker_value = is_safe_secret_marker(value) or is_safe_secret_marker_collection(value)
     if lowered in MARKER_ONLY_KEYS:
         return not safe_marker_value

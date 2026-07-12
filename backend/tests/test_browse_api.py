@@ -52,8 +52,8 @@ def seed_browser_data() -> dict[str, int]:
         db.add_all([run_a, run_b])
         db.flush()
 
-        item_a = build_item("source-a", "Source A item", Decimal("9.50"))
-        item_b = build_item("source-b", "Source B item", Decimal("2.00"))
+        item_a = build_item("source-a", "Source A item", Decimal("9.50"), view_count=None)
+        item_b = build_item("source-b", "Source B item", Decimal("2.00"), view_count=0)
         db.add_all([item_a, item_b])
         db.flush()
 
@@ -84,7 +84,7 @@ def seed_browser_data() -> dict[str, int]:
         return {"source_a": source_a.id, "source_b": source_b.id}
 
 
-def build_item(suffix: str, title: str, price: Decimal) -> Item:
+def build_item(suffix: str, title: str, price: Decimal, *, view_count: int | None = 11) -> Item:
     return Item(
         vinted_item_id=f"{PREFIX}{suffix}",
         title=title,
@@ -96,7 +96,7 @@ def build_item(suffix: str, title: str, price: Decimal) -> Item:
         seller_login="pytest_seller",
         seller_country=None,
         favorite_count=1,
-        view_count=11,
+        view_count=view_count,
         url=f"https://www.vinted.es/items/{PREFIX}{suffix}",
         image_url=f"https://images1.vinted.net/{PREFIX}{suffix}/thumb.webp?s=signed",
         description="Detalle publico de prueba",
@@ -139,10 +139,14 @@ def test_opportunities_api_returns_paginated_opportunities() -> None:
         ]
         assert body["items"][0]["item"]["shipping_price_amount"] == "1.75"
         assert body["items"][0]["item"]["buyer_protection_fee_amount"] == "0.80"
-        assert body["items"][0]["item"]["view_count"] == 11
+        assert body["items"][0]["item"]["view_count"] == 0
         assert body["items"][0]["item"]["availability_flags"]["state"] == "reserved"
         assert body["items"][0]["last_scraped_at"] == SEED_NOW.isoformat().replace("+00:00", "Z")
         assert body["items"][0]["last_run_id"] is not None
+
+        null_response = client.get("/api/opportunities?page=1&page_size=25", params={"source_id": ids["source_a"]})
+        assert null_response.status_code == 200
+        assert null_response.json()["items"][0]["item"]["view_count"] is None
     finally:
         cleanup_browser_data()
 

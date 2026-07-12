@@ -125,10 +125,14 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
+- Run configuration logs identify the evaluation contract, policy hash, description-only filter scope, detail mode, early-filter mode and head byte limit. Detail/filter logs expose received bytes, match counts and durations without response content.
+- Rejected HTTP responses use a safe body observation containing lengths and type flags; response body snippets are never persisted or returned.
 - The PWA Monitors view renders selected monitor accumulated logs as a non-interactive operational checklist: one wrapped multi-line block per event with run id, exact time, state, label, method, URL, status, ms, recovered/missing context, safe cookie flags, API parameters, and failure/skip reason when available, whether the monitor is active or stopped.
 - Redacted JSON `run_events.details` remains available through API/database for technical audit, but the main PWA log timeline does not render expandable JSON details.
 - The selected monitor log console supports local level filtering and text search without mutating persisted `run_events`.
 - The selected monitor log timeline can be cleared locally with `Limpiar vista`; this stores the currently visible event IDs as hidden in the browser session and never deletes persisted `run_events`.
+
+For manual opportunity-pipeline diagnosis, preserve the run id and the events for configuration, catalog response, Redis seen result, each candidate detail/early-filter result, filter decision, persistence/opportunity result, Redis terminal transition and final run status. Export only API/PWA-redacted events; never attach `.env`, raw cookies, proxy URLs with userinfo, response bodies or complete HAR files.
 - The PWA Monitors view is organized as three top-level cards: new monitor configuration, the single compact monitor table, and the selected-monitor detail. The table and detail are stacked instead of nested inside a parent card.
 - Active monitors appear before inactive monitors in the PWA's single compact monitor table, using status chips and row styling instead of separate active/inactive sections, and show a selected-monitor detail with session summary, read-only configuration, performance card, logs, and a working stop control.
 - Active monitor detail does not show an `Ejecutar ahora` button because periodic execution is already configured.

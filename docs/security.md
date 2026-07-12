@@ -9,7 +9,7 @@
 - Proxies residenciales son opcionales; credenciales cifradas en `proxy_profiles` con clave local.
 - El acceso directo al catalogo publico de Vinted esta bloqueado por defecto mediante `VINTED_DIRECT_CATALOG_ENABLED=false`; para trafico real se debe configurar un proxy compatible con el pais objetivo.
 - Cada proxy de Vinted debe declarar pais; locale, `Accept-Language`, viewport y Vinted `x-screen` se resuelven desde presets internos y no son editables desde la PWA/API. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
-- No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML ni payloads raw completos en logs o respuestas API.
+- No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML, snippets de cuerpos HTTP ni payloads raw completos en logs o respuestas API. Las respuestas rechazadas conservan solo longitud, tipo aparente, status y headers saneados.
 - Los HAR de investigacion nunca se commitean. Los fixtures de detalle deben ser subconjuntos compactos, inventados y saneados sin cookies, tokens ni identificadores personales.
 - Los reintentos Redis guardan solo el candidato publico normalizado, contador, tipo de fallo y siguiente fecha; no guardan HTML/Flight, cookies, sesiones ni `raw` de origen.
 - Las fotos se persisten como URL HTTPS firmada y solo se aceptan hosts `images*.vinted.net`; se conserva la query de firma. El worker no descarga bytes ni envia cookies/proxy Vinted al CDN.
@@ -20,6 +20,7 @@
 - La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
 - Los marcadores seguros de cookies, tokens, headers sensibles, sesion HTTP y sesion sticky de proxy pueden incluir nombre, longitud, mascara `first4****last4` y fingerprint corto. Si el valor es corto, la mascara no muestra ningun caracter.
 - La redaccion de logs debe aplicarse de forma recursiva a `details`, incluyendo listas y objetos anidados.
+- Las claves heredadas `body_snippet`, `html` y `response_body` se redactan tambien al leer; la migracion de saneamiento elimina los `body_snippet` ya persistidos y su downgrade nunca restaura contenido.
 - La misma redaccion se aplica antes de enviar excepciones a `structlog`/stdout; ningun logger puede recibir `str(exc)` sin sanear.
 - Los campos contenedores de cookies, cabeceras y sesiones solo conservan marcadores creados por el redactor en runtime; cadenas crudas o diccionarios que imitan su forma se sustituyen completos por `<redacted>`.
 - Implementar donde sea necesario bypass agresivo anti-bot.

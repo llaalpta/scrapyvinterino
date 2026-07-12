@@ -2473,8 +2473,12 @@ def test_only_description_filters_and_optional_decision_data_do_not_block_opport
         run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
         item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+        config_event = next(event for event in events if event.phase == "run_config_resolved")
+        filter_event = next(event for event in events if event.phase == "candidate_filter_decision")
 
         assert run.status == SUCCESS
+        assert run.runtime_metadata["evaluation_contract"] == "description_only_v2"
         assert run.items_discarded_by_filters == 0
         assert run.opportunities_created == 1
         assert opportunity is not None
@@ -2484,6 +2488,12 @@ def test_only_description_filters_and_optional_decision_data_do_not_block_opport
         assert item.buyer_protection_fee_amount is None
         assert item.total_price_amount is None
         assert item.availability_flags["state"] == "reserved"
+        assert config_event.details["evaluation_contract"] == "description_only_v2"
+        assert config_event.details["filter_scope"] == "description"
+        assert config_event.details["runtime_config"]["detail_early_filter_mode"] == "enforced"
+        assert config_event.details["runtime_config"]["detail_head_max_bytes"] == 131_072
+        assert filter_event.details["filter_scope"] == "description"
+        assert filter_event.details["match_count"] == 0
 
 
 def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) -> None:
