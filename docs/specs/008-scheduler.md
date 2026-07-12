@@ -98,7 +98,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
 - Before that immediate recurring run begins, activation persists `next_run_at` from the activation timestamp, interval, jitter and allowed window. The scheduler treats this PostgreSQL value as authoritative over any in-process due-time cache, so activation cannot also enqueue an immediately due scheduler run.
-- Activation reserves its initial egress before committing active state. A failure before creating the initial run compensates the activation, leaving no active source, deadline, or open monitor session.
+- Initial recurring admission is serialized with a PostgreSQL transaction-scoped advisory lock before capacity and egress selection. With capacity one, two concurrent starts produce exactly one `201` and one `409` without exceeding capacity.
+- Activation reserves its initial egress and persists active state, monitor session, `next_run_at`, and the initial running row in one transaction. A failure before creating that run rolls the transaction back, leaving no active source, deadline, run, or monitor session to compensate.
 - Starting an already active recurring monitor is rejected without changing its session, activation timestamp, deadline, or run history.
 - The scheduler rechecks the persisted deadline after locking a due source and persists window deferrals independently from later capacity failures.
 - With a 60-second interval and 10% jitter, the minimum interval floor makes the first post-activation due time 60 to 66 seconds after activation, plus scheduler tick latency.
@@ -183,7 +184,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Unit tests for next-run calculation.
 - Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
-- PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, activation compensation, repeated start rejection, locked-deadline revalidation, and durable window deferral.
+- PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, atomic activation rollback, concurrent initial admission at capacity one, repeated start rejection, locked-deadline revalidation, and durable window deferral.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.

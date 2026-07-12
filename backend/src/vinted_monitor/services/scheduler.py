@@ -6,7 +6,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings
@@ -39,6 +39,7 @@ RUNTIME_CONFIG_KEYS = {
     "stop_monitor_after_consecutive_failures",
     "proxy_cooldown_minutes",
 }
+INITIAL_RUN_ADMISSION_LOCK_ID = 814_208_009
 
 
 class SchedulerConfigError(ValueError):
@@ -223,6 +224,11 @@ def ensure_scheduler_can_activate(db: Session, settings: Settings, *, source_id:
             active_count -= 1
     if active_count >= state.effective_capacity:
         raise SchedulerCapacityError("Scheduler capacity limit reached")
+
+
+def acquire_initial_run_admission_lock(db: Session) -> None:
+    """Serialize recurring activation until its first running row is committed."""
+    db.execute(select(func.pg_advisory_xact_lock(INITIAL_RUN_ADMISSION_LOCK_ID)))
 
 
 def choose_run_egress(
