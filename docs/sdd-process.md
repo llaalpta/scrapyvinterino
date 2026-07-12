@@ -4,20 +4,42 @@ This project uses Spec Driven Development to keep product intent, architecture, 
 
 ## Default Flow
 
-1. Check `git status --short --branch` and confirm the current branch matches the requested spec or fix.
-2. Understand the requested change.
-3. Check `docs/roadmap.md` to identify the current priority.
-4. Read the existing documentation that owns the affected area.
-5. Update the existing document if the change affects behavior, architecture, risk, security, deployment, or data.
-6. Define acceptance criteria.
-7. Implement the smallest useful vertical slice.
-8. Verify with focused checks.
-9. Run an explicit implementer self-review.
-10. Fix or explicitly defer self-review findings.
-11. Commit the code and documentation together.
-12. For non-trivial work, propose a separate implementation audit in the final response.
+Work advances through one independently demonstrable roadmap task at a time:
+
+1. Inspect status/branch, roadmap priority, and the documents that own the requested behavior.
+2. Decompose broad work into contained tasks with meaningful outcomes.
+3. From a clean `develop`, persist the checklist and task contracts on a product-code-free `plan/<scope>` branch, then review/integrate that branch.
+4. Define the active task's scope, exclusions, acceptance/failure criteria, affected state, real integration proof for operational behavior, cleanup, and external traffic envelope.
+5. Obtain explicit confirmation before starting the planned implementation task; the planning commit is not implementation authorization.
+6. From a clean worktree, create its branch from the updated `develop`; never modify the roadmap on an unrelated feature branch.
+7. Update the owning documentation before changing implementation code.
+8. Implement only the active vertical slice.
+9. Run focused checks during development.
+10. Exercise the real operational path through the actual containers, entrypoints, database, queues/cache, events, and UI involved. Use semantic consistency checks and a process dry run for documentation-only governance.
+11. Run implementer self-review, then an automatic independent read-only rubber-duck audit.
+12. Fix valid findings and repeat the affected verification plus bounded audit. Stop after at most three loops and split newly discovered scope into another task.
+13. Run the appropriate regression gate once near closure, update roadmap evidence/status, and commit code/docs together.
+14. Before a dependent task, review and merge its prerequisite into `develop`, or obtain explicit user authorization for an equivalent local integration; never branch from a `develop` that lacks required work.
+15. Stop and request confirmation before starting the next roadmap task or branch.
 
 Documentation and implementation should move together. A feature is not done if the relevant docs are stale.
+
+## Planning and Task Contract
+
+A plan is a queue of small deliverables, not one large implementation divided by technical layer. Avoid tasks called only "backend", "frontend", "tests", or "cleanup"; those usually create incomplete cross-task behavior.
+
+Each planned task records:
+
+- operational or user outcome;
+- owning docs/spec;
+- dependencies and explicit out-of-scope follow-ups;
+- affected services and PostgreSQL/Redis/browser state;
+- acceptance criteria and honest stop/error behavior;
+- real integration scenario, evidence to capture, and cleanup;
+- bounded Vinted/proxy request allowance when external behavior is essential;
+- suggested branch name.
+
+Plan mode persists its checklist on a dedicated `plan/<scope>` branch from clean `develop`, without product code or contamination of another feature branch. That planning branch is reviewed/integrated first. The first implementation starts only after a separate confirmation and on its own task branch. After its audit and commit, the agent pauses even when the next checklist item is obvious. Scope discovered during implementation is added to the roadmap instead of silently expanding the branch.
 
 ## Branch and PR Discipline
 
@@ -32,8 +54,6 @@ Name branches by scope, for example:
 - `fix/010-rate-limit-refresh`
 
 Do not keep stacking unrelated specs on a long-lived feature branch. If the current branch scope does not match the requested work, switch or create the correct branch before editing files.
-
-The existing `feature/fast-opportunity-pipeline` branch is a pre-policy development branch. Future specs should not continue accumulating on it unless the user explicitly chooses that as a temporary exception.
 
 ## Post-Implementation Self-Review
 
@@ -54,22 +74,42 @@ For frontend work, a screen is not done just because it compiles. Navigation mus
 
 Frontend structure is part of the acceptance bar. Before adding a non-trivial PWA flow, keep the React root thin, place feature screens under `frontend/src/features/`, shared UI under `frontend/src/components/`, composition under `frontend/src/app/`, cross-feature state hooks under `frontend/src/hooks/`, and styles under `frontend/src/styles/`. Do not continue growing a multi-view `App.tsx` monolith when the change adds new state, controls, or views.
 
-## Independent Audit Proposal
+## Automatic Independent Audit
 
-The implementer self-review is mandatory and is not a substitute for a later independent audit.
+The implementer self-review is mandatory and is followed automatically by a separate read-only audit before task closure.
 
-After every non-trivial implementation, propose a separate audit/review pass. Do not run it automatically unless the user asks for it. The audit proposal should name the relevant layers instead of being generic:
+Use the lowest-cost/lower-reasoning independent reviewer exposed by the platform for a tightly scoped rubber-duck pass. If the platform cannot select a model, use the simplest independent reviewer available and constrain it to the active task. The reviewer does not edit, commit, call external services, or reopen unrelated architecture.
 
-- spec and roadmap alignment;
-- API contracts and negative paths;
-- scripts and CLI entrypoints;
-- database schema, migrations, and persistence checks;
-- Redis/cache behavior and expiry assumptions;
-- worker, scheduler, and background jobs;
-- frontend UI, state, and disabled/empty states;
-- Docker/runtime configuration and environment variables;
-- logs, redaction, and observability;
-- verification gaps and missing smoke tests.
+The audit checks only the relevant parts of:
+
+- spec/roadmap alignment and stale documentation;
+- API/UI contracts and negative/fail-stop paths;
+- database transactions/migrations and Redis/queue/cache state;
+- worker, scheduler, service startup/health and concurrency;
+- events, logs, redaction and observability;
+- real integration evidence, cleanup, and remaining gaps;
+- obsolete adapters, fallback paths, test-only residue, and legacy descriptions.
+
+The implementer reproduces each actionable finding. Valid findings enter another focused implementation-real-test-audit loop; false positives are rejected with evidence. One clean pass is sufficient and rechecks cover only changed findings, with three total passes as the maximum. A finding that requires a new outcome becomes a new roadmap task and waits for user confirmation.
+
+If the platform exposes no independent reviewer, the task remains open and the limitation is reported. A second implementer pass is still self-review, not an independent audit.
+
+## Verification Hierarchy
+
+Verification follows this order:
+
+1. Real integration acceptance through the actual service entrypoint and containers.
+2. Persistent/runtime evidence in PostgreSQL, Redis queues/cache, events/logs, and browser state.
+3. Focused automated tests for the changed contracts and deterministic failure paths.
+4. One broader regression suite near task closure when risk warrants it.
+
+A large passing suite cannot replace the first two levels. Mocks and synthetic events are supporting tools for rare races, malformed data, redaction, or precise edge cases; they are not sufficient proof of coordination between API, worker, scheduler, consumers, Docker, Redis, PostgreSQL, SSE, and PWA.
+
+Real Vinted/proxy tests are bounded in the task contract. Record the expected request/run count, keep the test monitor controlled, avoid secret output, and stop the monitor plus clean QA state after verification. If external traffic is not necessary to prove the task, use the real local stack without external calls.
+
+Required dependencies fail visibly and stop the affected operation or service by default. Do not invent a degraded mode, fallback, compatibility mode, new silent retry policy, or alternate provider merely to make a test pass. Such behavior needs explicit product value, acceptance criteria, and user authorization.
+
+Documentation-only process or governance tasks use proportional acceptance evidence: clean diffs, valid references, cross-document consistency, and an executable dry run of the documented gates. They do not start unrelated application containers merely to manufacture integration evidence.
 
 ## Browser QA Rule
 
@@ -190,16 +230,20 @@ Research docs are for facts learned from investigation.
 Before considering work done:
 
 - Branch scope was checked and matches the spec or coherent fix.
+- The roadmap task is small enough to ship and demonstrate independently.
 - Relevant docs are current.
 - No duplicate or contradictory docs were introduced.
 - Code matches the documented architecture.
 - UI/API/database behavior matches what the user can actually do.
+- Real integration evidence covers the actual services and state stores promised by the task.
 - Non-trivial frontend changes follow the documented module boundaries instead of adding more mixed responsibility to the app root.
 - For PWA changes, Playwright or equivalent browser QA covered the live app.
 - Post-implementation self-review completed.
 - Self-review findings fixed, rejected with reason, or deferred into the owning spec/roadmap.
-- A separate audit proposal was included for non-trivial work.
+- The independent read-only audit completed automatically and its findings were resolved or moved to a later task.
 - Frontend/container ownership was checked before restarting or recreating Vite/Docker services.
 - Process docs were updated with generalized prevention rules if the work revealed a repeatable quality gap.
 - Checks were run or skipped with a clear reason.
+- QA rows, Redis keys, queue entries, sessions, and temporary processes were cleaned.
 - Git status is clean after commit.
+- Work stopped pending explicit confirmation before the next task.
