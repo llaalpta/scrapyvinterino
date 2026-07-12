@@ -423,6 +423,113 @@ def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(mo
             db.commit()
 
 
+def test_scheduler_runner_rechecks_persisted_deadline_after_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_redis = FakeRedis()
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    moved_deadline = now + timedelta(seconds=60)
+
+    with SessionLocal() as db:
+        previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
+        if previously_active_source_ids:
+            db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
+                {SearchSource.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        source = SearchSource(
+            name="pytest locked deadline recheck",
+            url="https://www.vinted.es/catalog?search_text=locked-deadline",
+            normalized_query={"search_text": ["locked-deadline"]},
+            is_active=True,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+            next_run_at=now,
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    def move_deadline_before_lock():
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            source.next_run_at = moved_deadline
+            db.commit()
+        return type("Cache", (), {"client": fake_redis})()
+
+    monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", move_deadline_before_lock)
+    try:
+        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+
+        assert runner.run_once(now=now) == []
+        assert runner.next_due_by_source_id[source_id] == moved_deadline
+        assert fake_redis.values == []
+    finally:
+        with SessionLocal() as db:
+            for active_source_id in previously_active_source_ids:
+                active_source = db.get(SearchSource, active_source_id)
+                if active_source is not None:
+                    active_source.is_active = True
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+            db.commit()
+
+
+def test_scheduler_window_deferral_survives_cache_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime(2026, 7, 3, 6, 0, tzinfo=UTC)
+
+    with SessionLocal() as db:
+        previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
+        if previously_active_source_ids:
+            db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
+                {SearchSource.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        source = SearchSource(
+            name="pytest durable window deferral",
+            url="https://www.vinted.es/catalog?search_text=durable-window",
+            normalized_query={"search_text": ["durable-window"]},
+            is_active=True,
+            monitor_mode="window",
+            scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": ["10:00-11:00"]},
+            next_run_at=now,
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    monkeypatch.setattr(
+        "vinted_monitor.worker.scheduler.get_seen_cache",
+        lambda: (_ for _ in ()).throw(RuntimeError("synthetic cache failure")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="synthetic cache failure"):
+            SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)).run_once(now=now)
+
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.next_run_at == datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
+    finally:
+        with SessionLocal() as db:
+            for active_source_id in previously_active_source_ids:
+                active_source = db.get(SearchSource, active_source_id)
+                if active_source is not None:
+                    active_source.is_active = True
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+            db.commit()
+
+
 def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())

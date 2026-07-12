@@ -37,6 +37,7 @@ export function DashboardApp() {
         <SourcesView
           detailProbeMessages={dashboard.detailProbeMessages}
           detailProbeRefs={dashboard.detailProbeRefs}
+          monitorEventHistoryLoadedBySource={dashboard.monitorEventHistoryLoadedBySource}
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
           monitorRunsBySource={dashboard.monitorRunsBySource}
@@ -61,6 +62,7 @@ export function DashboardApp() {
           sources={dashboard.sources}
           sourceUrl={dashboard.sourceUrl}
           streamStatus={dashboard.monitorStreamStatus}
+          streamReady={dashboard.monitorStreamReady}
           setSourceName={dashboard.setSourceName}
           setSourceUrl={dashboard.setSourceUrl}
           updateDetailProbeRef={dashboard.updateDetailProbeRef}

@@ -78,6 +78,10 @@ class SchedulerRunner:
                         continue
                     due_sources.append((due_at, source.id, source, config))
 
+            # Window deferrals are durable scheduling decisions and must not be
+            # rolled back by a later cache or egress failure in this cycle.
+            db.commit()
+
             cache = get_seen_cache()
             active_proxy_counts, active_direct_count = active_run_egress_counts(db)
             active_task_ids = set(
@@ -129,6 +133,17 @@ class SchedulerRunner:
                     self.next_due_by_source_id.pop(source_id, None)
                     continue
                 config = source_config(source)
+                locked_due_at = source.next_run_at or current_time
+                self.next_due_by_source_id[source_id] = locked_due_at
+                if locked_due_at > current_time:
+                    db.commit()
+                    continue
+                if not is_within_allowed_windows(current_time, config.allowed_windows, self.timezone):
+                    next_due = next_run_after(current_time, config, self.rng, self.timezone)
+                    self.next_due_by_source_id[source_id] = next_due
+                    source.next_run_at = next_due
+                    db.commit()
+                    continue
                 pending_task = pending_by_source_id.get(source_id)
                 if pending_task is not None:
                     next_due = next_run_after(current_time, config, self.rng, self.timezone)

@@ -72,8 +72,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - exact event timestamp and one non-interactive operational checklist entry per event in the PWA console;
   - safe cookie, token, HTTP session, and proxy sticky-session markers with name, length, `first4****last4` masked preview for long values, and fingerprint, never the full value;
   - egress diagnostic data collected through the same HTTP session/proxy, including IP and country when the diagnostic endpoint returns them.
-  - accumulated history is loaded through REST; an SSE connection without a cursor starts at the current tail, while `last_event_id` query input takes precedence over the standard `Last-Event-ID` resume header;
-  - the SSE stream announces `stream_ready` with its initial cursor and a three-second reconnect delay, drains complete 100-event backlog batches without polling pauses, and emits a heartbeat every 15 seconds while idle;
+  - accumulated history is loaded through REST; an SSE connection without a cursor starts at the current publication tail, while `last_event_id` query input takes precedence over the standard `Last-Event-ID` resume header;
+  - the stream cursor is a commit-ordered publication position independent from `run_events.id`, so transactions that commit out of ID order remain deliverable exactly once to the PWA;
+  - the SSE stream announces `stream_ready` with its initial cursor in both `id:` and JSON data plus a three-second reconnect delay, drains complete 100-event backlog batches without polling pauses, and emits a heartbeat every 15 seconds while idle;
   - the SSE response disables intermediary caching/transformation and proxy buffering, and closes promptly after client disconnect while preserving the run-event redaction contract.
 - Database:
   - `app_settings`;
@@ -84,6 +85,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - `runs.trigger` and optional `runs.monitor_session_id`;
   - `items` for opportunity items only;
   - `errors`.
+  - `run_event_publications`, with one commit-ordered stream position per persisted monitor event.
 
 ## Acceptance Criteria
 
@@ -91,11 +93,14 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - A monitor can be stopped without deleting it.
 - A new monitor is inactive until launched.
 - Punctual/manual execution can run from inactive state, creates a monitor session, closes that session after the run, and returns to inactive state.
-- Runs are not triggered outside configured local-time windows.
+- Scheduler-triggered runs are not dispatched outside configured local-time windows. Explicit user activation still performs its promised immediate run before later runs follow the configured window.
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
 - Before that immediate recurring run begins, activation persists `next_run_at` from the activation timestamp, interval, jitter and allowed window. The scheduler treats this PostgreSQL value as authoritative over any in-process due-time cache, so activation cannot also enqueue an immediately due scheduler run.
+- Activation reserves its initial egress before committing active state. A failure before creating the initial run compensates the activation, leaving no active source, deadline, or open monitor session.
+- Starting an already active recurring monitor is rejected without changing its session, activation timestamp, deadline, or run history.
+- The scheduler rechecks the persisted deadline after locking a due source and persists window deferrals independently from later capacity failures.
 - With a 60-second interval and 10% jitter, the minimum interval floor makes the first post-activation due time 60 to 66 seconds after activation, plus scheduler tick latency.
 - Launching a manual, recurring, duration, window, or scheduler run is blocked until `Recalibrar listado inicial` has created a valid Redis snapshot for the monitor's current policy hash.
 - Launching or recalibrating is blocked when the saved URL contains catalog filters that cannot be translated to the fast API.
@@ -129,11 +134,12 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, viewport, Vinted `x-screen`, egress country match, and any missing required key.
 - Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
-- The Monitors view owns exactly one SSE connection while it is open. Renders and statistics refreshes do not recreate it, leaving the view closes it, and returning resumes from the last received cursor.
-- REST history and live events are merged by event ID, including live events received while the historical request is still pending; each event appears at most once.
+- The Monitors view owns exactly one SSE connection while it is open. Renders and statistics refreshes do not recreate it, leaving the view closes it, and returning or reconnecting resumes from the last received publication cursor.
+- Historical REST loading starts only after `stream_ready`; explicit per-monitor history-loaded state is independent from live event presence. REST history and live events are merged by event ID, including live events received while the historical request is still pending; each event appears at most once.
 - Only `run_succeeded` and `run_failed` schedule a debounced runtime refresh. A terminal batch refreshes current sources, the affected monitor run histories and statistics once; opportunities refresh only when a terminal reports a positive `opportunities_created` count or omits that count. It does not refresh the unused global run list.
+- A terminal batch already received remains pending across navigation away from Monitors and is applied or retried without requiring another terminal event.
 - The monitor log follows the newest event while the reader remains at the bottom. Scrolling upward suspends forced scrolling and exposes a new-event control that returns to the tail on desktop and mobile.
-- An SSE error is presented as a reconnecting state because browser `EventSource` retries automatically.
+- An SSE error is presented as a reconnecting state; the dashboard closes the failed instance and creates one replacement after three seconds with the latest explicit publication cursor.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - Run configuration logs identify the evaluation contract, policy hash, description-only filter scope, detail mode, early-filter mode and head byte limit. Detail/filter logs expose received bytes, match counts and durations without response content.
 - Rejected HTTP responses use a safe body observation containing lengths and type flags; response body snippets are never persisted or returned.
@@ -177,6 +183,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Unit tests for next-run calculation.
 - Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
+- PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, activation compensation, repeated start rejection, locked-deadline revalidation, and durable window deferral.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.

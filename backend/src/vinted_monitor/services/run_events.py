@@ -9,7 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.redaction import (
+    MARKER_ONLY_KEYS,
     SENSITIVE_HEADER_TOKENS,
+    SafeSecretMarker,
+    is_safe_secret_marker,
     redact_sensitive_text,
     sensitive_value_requires_redaction,
 )
@@ -69,6 +72,11 @@ def redact_run_event_details(details: dict[str, Any] | None) -> dict[str, Any]:
     return _redacted_details(details or {})
 
 
+def redact_persisted_run_event_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Redact a DB-loaded event while restoring only strict markers sanitized before persistence."""
+    return _redacted_details(_restore_persisted_markers(details or {}))
+
+
 def _event_timestamp() -> datetime:
     global _last_event_timestamp
     with _timestamp_lock:
@@ -102,6 +110,24 @@ def _redacted_message(message: str | None) -> str | None:
 
 def _redacted_details(details: dict) -> dict:
     return _redact_value(details)
+
+
+def _restore_persisted_markers(value: Any, *, key: str | None = None) -> Any:
+    lowered_key = key.lower() if key is not None else None
+    if lowered_key in MARKER_ONLY_KEYS:
+        if isinstance(value, dict):
+            candidate = SafeSecretMarker(value)
+            return candidate if is_safe_secret_marker(candidate) else value
+        if isinstance(value, list):
+            candidates = [SafeSecretMarker(child) if isinstance(child, dict) else child for child in value]
+            if all(is_safe_secret_marker(candidate) for candidate in candidates):
+                return candidates
+            return value
+    if isinstance(value, dict):
+        return {child_key: _restore_persisted_markers(child_value, key=str(child_key)) for child_key, child_value in value.items()}
+    if isinstance(value, list):
+        return [_restore_persisted_markers(child_value) for child_value in value]
+    return value
 
 
 def _redact_value(value: Any, *, key: str | None = None) -> Any:

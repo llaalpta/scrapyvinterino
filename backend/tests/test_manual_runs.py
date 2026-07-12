@@ -1996,6 +1996,9 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
         response = client.post(f"/api/monitors/{source_id}/start")
 
         assert response.status_code == 201
+        second_response = client.post(f"/api/monitors/{source_id}/start")
+        assert second_response.status_code == 409
+        assert "already active" in second_response.json()["detail"]
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
             session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
@@ -2012,6 +2015,51 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
             assert [entry.id for entry in source_runs] == [run.id]
     finally:
         app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = TestClient(app)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest activation compensation",
+            url="https://www.vinted.es/catalog?search_text=activation-compensation",
+            normalized_query={"search_text": ["activation-compensation"]},
+            is_active=False,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+        )
+        db.add(source)
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
+        db.commit()
+        source_id = source.id
+
+    _enable_direct_runtime(monkeypatch)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    monkeypatch.setattr(
+        "vinted_monitor.api.main.execute_monitor_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SeenCacheUnavailableError("synthetic initial run failure")),
+    )
+    try:
+        response = client.post(f"/api/monitors/{source_id}/start")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "synthetic initial run failure"
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            sessions = list(db.scalars(select(MonitorSession).where(MonitorSession.source_id == source_id)))
+            runs = list(db.scalars(select(Run).where(Run.source_id == source_id)))
+            assert source is not None
+            assert source.is_active is False
+            assert source.monitor_started_at is None
+            assert source.monitor_until is None
+            assert source.next_run_at is None
+            assert len(sessions) == 1
+            assert sessions[0].stopped_at is not None
+            assert sessions[0].stop_reason == "stopped"
+            assert runs == []
+    finally:
         cleanup_source(source_id)
 
 

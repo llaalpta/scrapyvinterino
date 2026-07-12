@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
@@ -32,7 +33,7 @@ from vinted_monitor.api.schemas import (
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.db.models import RunEvent, SearchSource
+from vinted_monitor.db.models import Run, RunEvent, SearchSource
 from vinted_monitor.db.session import get_db
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.services.actions import create_action_request
@@ -72,6 +73,7 @@ from vinted_monitor.services.runs import (
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
     SchedulerConfigError,
+    choose_run_egress,
     ensure_scheduler_can_activate,
     get_scheduler_state,
     update_scheduler_config,
@@ -198,11 +200,27 @@ def post_monitor_start(
             return execute_manual_run(db, monitor_id, provider=provider)
         ensure_scheduler_can_activate(db, settings, source_id=monitor_id)
         ensure_monitor_baseline_ready(db, monitor_id)
-        start_source_monitor(db, monitor_id)
-        return execute_monitor_run(db, monitor_id, provider=provider)
+        egress = choose_run_egress(db, settings)
+        activated = start_source_monitor(db, monitor_id)
+        activated_at = activated.monitor_started_at
+        try:
+            return execute_monitor_run(db, monitor_id, provider=provider, egress=egress)
+        except Exception:
+            db.rollback()
+            initial_run_id = db.scalar(
+                select(Run.id).where(
+                    Run.source_id == monitor_id,
+                    Run.started_at >= activated_at,
+                )
+            )
+            if initial_run_id is None:
+                stop_source_monitor(db, monitor_id)
+            raise
     except (SearchSourceNotFoundError, SourceUpdateNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -402,7 +420,7 @@ async def stream_monitor_events(
     last_event_id: Annotated[int | None, Query(ge=0)] = None,
     last_event_id_header: Annotated[int | None, Header(alias="Last-Event-ID", ge=0)] = None,
 ):
-    initial_cursor = resolve_monitor_event_cursor(last_event_id, last_event_id_header)
+    initial_cursor = await asyncio.to_thread(resolve_monitor_event_cursor, last_event_id, last_event_id_header)
     return StreamingResponse(
         monitor_event_stream(initial_cursor, is_disconnected=request.is_disconnected),
         media_type="text/event-stream",

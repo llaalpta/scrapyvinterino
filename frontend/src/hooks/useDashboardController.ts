@@ -64,6 +64,7 @@ export function useDashboardController() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [monitorRunsBySource, setMonitorRunsBySource] = useState<Record<number, Run[]>>({});
   const [monitorEventsBySource, setMonitorEventsBySource] = useState<Record<number, RunEvent[]>>({});
+  const [monitorEventHistoryLoadedBySource, setMonitorEventHistoryLoadedBySource] = useState<Record<number, boolean>>({});
   const [monitorHiddenEventIdsBySource, setMonitorHiddenEventIdsBySource] = useState<Record<number, number[]>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
@@ -87,6 +88,7 @@ export function useDashboardController() {
   const [activeSection, setActiveSection] = useState('opportunities');
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [monitorStreamStatus, setMonitorStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
+  const [monitorStreamReady, setMonitorStreamReady] = useState(false);
   const activeTitle = useMemo(() => navItems.find((item) => item.id === activeSection)?.label ?? 'Oportunidades', [activeSection]);
   const activeSubtitle = useMemo(
     () => sectionSubtitle(activeSection, opportunityPage.total, sources.length),
@@ -96,6 +98,9 @@ export function useDashboardController() {
   const monitorStreamSeenEventIdsRef = useRef<Set<number>>(new Set());
   const pendingTerminalEventsRef = useRef<Map<number, boolean>>(new Map());
   const terminalRefreshTimerRef = useRef<number | null>(null);
+  const monitorStreamReconnectTimerRef = useRef<number | null>(null);
+  const monitorRunsRequestGenerationRef = useRef<Map<number, number>>(new Map());
+  const monitorStatsRequestGenerationRef = useRef<Map<number, number>>(new Map());
   const monitorStreamRuntimeRef = useRef({
     sourceIds: new Set<number>(),
     statsRanges: monitorStatsRangeBySource,
@@ -162,47 +167,75 @@ export function useDashboardController() {
 
     let disposed = false;
     const pendingTerminalEvents = pendingTerminalEventsRef.current;
-    const stream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
+    let stream: EventSource | null = null;
 
     const refreshTerminalBatch = async () => {
       const pending = new Map(pendingTerminalEvents);
       pendingTerminalEvents.clear();
       terminalRefreshTimerRef.current = null;
-      if (disposed || pending.size === 0) {
+      if (pending.size === 0) {
         return;
       }
 
       const sourceIds = [...pending.keys()];
       const runtime = monitorStreamRuntimeRef.current;
       const shouldRefreshOpportunities = [...pending.values()].some(Boolean);
-      try {
-        const [sourceData, runEntries, statsEntries, opportunityData] = await Promise.all([
-          fetchSources(),
-          Promise.all(
-            sourceIds.map(async (sourceId) => [sourceId, await fetchRuns({ source_id: sourceId, limit: MONITOR_RUN_HISTORY_LIMIT })] as const)
-          ),
-          Promise.all(
-            sourceIds.map(async (sourceId) => {
-              const range = runtime.statsRanges[sourceId] ?? DEFAULT_MONITOR_STATS_RANGE;
-              return [sourceId, await fetchMonitorStats(sourceId, range)] as const;
-            })
-          ),
+      const runRequests = sourceIds.map(async (sourceId) => {
+        const generation = nextRequestGeneration(monitorRunsRequestGenerationRef.current, sourceId);
+        const sourceRuns = await fetchRuns({ source_id: sourceId, limit: MONITOR_RUN_HISTORY_LIMIT });
+        return [sourceId, sourceRuns, generation] as const;
+      });
+      const statsRequests = sourceIds.map(async (sourceId) => {
+        const generation = nextRequestGeneration(monitorStatsRequestGenerationRef.current, sourceId);
+        const range = runtime.statsRanges[sourceId] ?? DEFAULT_MONITOR_STATS_RANGE;
+        const stats = await fetchMonitorStats(sourceId, range);
+        return [sourceId, stats, generation] as const;
+      });
+      const [sourceResult, runResults, statsResults, opportunityResult] = await Promise.all([
+        settlePromise(fetchSources()),
+        Promise.allSettled(runRequests),
+        Promise.allSettled(statsRequests),
+        settlePromise(
           shouldRefreshOpportunities
             ? fetchOpportunities(buildOpportunityQuery(runtime.opportunityFilters, 1, runtime.opportunitiesPageSize))
             : Promise.resolve(null)
-        ]);
-        if (disposed) {
-          return;
-        }
-        setSources(sourceData);
+        )
+      ]);
+
+      if (sourceResult.status === 'fulfilled') {
+        setSources(sourceResult.value);
+      }
+      const runEntries = runResults
+        .filter((result): result is PromiseFulfilledResult<Awaited<(typeof runRequests)[number]>> => result.status === 'fulfilled')
+        .map((result) => result.value)
+        .filter((entry) => monitorRunsRequestGenerationRef.current.get(entry[0]) === entry[2])
+        .map(([sourceId, sourceRuns]) => [sourceId, sourceRuns] as const);
+      if (runEntries.length > 0) {
         setMonitorRunsBySource((current) => ({ ...current, ...Object.fromEntries(runEntries) }));
+      }
+      const statsEntries = statsResults
+        .filter((result): result is PromiseFulfilledResult<Awaited<(typeof statsRequests)[number]>> => result.status === 'fulfilled')
+        .map((result) => result.value)
+        .filter((entry) => monitorStatsRequestGenerationRef.current.get(entry[0]) === entry[2])
+        .map(([sourceId, stats]) => [sourceId, stats] as const);
+      if (statsEntries.length > 0) {
         setMonitorStatsBySource((current) => ({ ...current, ...Object.fromEntries(statsEntries) }));
-        if (opportunityData) {
-          setOpportunityPage(opportunityData);
-        }
-      } catch (caught) {
-        if (!disposed) {
-          setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el monitor terminado');
+      }
+      if (opportunityResult.status === 'fulfilled' && opportunityResult.value) {
+        setOpportunityPage(opportunityResult.value);
+      }
+
+      const failed = sourceResult.status === 'rejected'
+        || runResults.some((result) => result.status === 'rejected')
+        || statsResults.some((result) => result.status === 'rejected')
+        || opportunityResult.status === 'rejected';
+      if (failed) {
+        pending.forEach((refreshOpportunities, sourceId) => {
+          pendingTerminalEvents.set(sourceId, (pendingTerminalEvents.get(sourceId) ?? false) || refreshOpportunities);
+        });
+        setError('No se pudo actualizar por completo el monitor terminado');
+        if (terminalRefreshTimerRef.current === null) {
+          terminalRefreshTimerRef.current = window.setTimeout(() => void refreshTerminalBatch(), 3000);
         }
       }
     };
@@ -224,35 +257,77 @@ export function useDashboardController() {
       }
     };
 
-    stream.addEventListener('open', () => setMonitorStreamStatus('connected'));
-    stream.addEventListener('error', () => setMonitorStreamStatus('error'));
-    stream.addEventListener('stream_ready', (message) => {
-      const ready = parseStreamReady(message);
-      if (ready !== null) {
-        monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, ready);
-      }
-    });
-    stream.addEventListener('monitor_event', (message) => {
-      const event = parseRunEvent(message);
-      if (!event || monitorStreamSeenEventIdsRef.current.has(event.id)) {
+    const connect = () => {
+      if (disposed) {
         return;
       }
-      monitorStreamSeenEventIdsRef.current.add(event.id);
-      monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, event.id);
-      setMonitorEventsBySource((current) => mergeMonitorEventRecords(current, event));
-      scheduleTerminalRefresh(event);
-    });
+      setMonitorStreamStatus('connecting');
+      setMonitorStreamReady(false);
+      stream?.close();
+      stream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
+      stream.addEventListener('open', () => setMonitorStreamStatus('connected'));
+      stream.addEventListener('error', () => {
+        if (disposed) {
+          return;
+        }
+        setMonitorStreamStatus('error');
+        setMonitorStreamReady(false);
+        stream?.close();
+        if (monitorStreamReconnectTimerRef.current === null) {
+          monitorStreamReconnectTimerRef.current = window.setTimeout(() => {
+            monitorStreamReconnectTimerRef.current = null;
+            connect();
+          }, 3000);
+        }
+      });
+      stream.addEventListener('stream_ready', (message) => {
+        const ready = parseStreamCursor(message) ?? parseStreamReady(message);
+        if (ready !== null) {
+          monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, ready);
+          setMonitorStreamReady(true);
+        }
+      });
+      stream.addEventListener('monitor_event', (message) => {
+        const event = parseRunEvent(message);
+        if (!event || monitorStreamSeenEventIdsRef.current.has(event.id)) {
+          return;
+        }
+        monitorStreamSeenEventIdsRef.current.add(event.id);
+        const cursor = parseStreamCursor(message);
+        if (cursor !== null) {
+          monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, cursor);
+        }
+        setMonitorEventsBySource((current) => mergeMonitorEventRecords(current, event));
+        scheduleTerminalRefresh(event);
+      });
+    };
+
+    connect();
+    if (pendingTerminalEvents.size > 0 && terminalRefreshTimerRef.current === null) {
+      terminalRefreshTimerRef.current = window.setTimeout(() => void refreshTerminalBatch(), 0);
+    }
 
     return () => {
       disposed = true;
-      stream.close();
+      stream?.close();
+      stream = null;
+      setMonitorStreamReady(false);
+      if (monitorStreamReconnectTimerRef.current !== null) {
+        window.clearTimeout(monitorStreamReconnectTimerRef.current);
+        monitorStreamReconnectTimerRef.current = null;
+      }
+    };
+  }, [activeSection]);
+
+  useEffect(() => {
+    const pendingTerminalEvents = pendingTerminalEventsRef.current;
+    return () => {
       if (terminalRefreshTimerRef.current !== null) {
         window.clearTimeout(terminalRefreshTimerRef.current);
-        terminalRefreshTimerRef.current = null;
       }
       pendingTerminalEvents.clear();
     };
-  }, [activeSection]);
+  }, []);
 
   const refreshRuntime = useCallback(async (sourceData = sources) => {
     const [opportunityData, runData] = await Promise.all([fetchOpportunities(), fetchRuns()]);
@@ -650,13 +725,19 @@ export function useDashboardController() {
 
   async function loadMonitorStats(sourceId: number, range = monitorStatsRangeBySource[sourceId] ?? DEFAULT_MONITOR_STATS_RANGE) {
     setMonitorStatsRangeBySource((current) => ({ ...current, [sourceId]: range }));
+    const generation = nextRequestGeneration(monitorStatsRequestGenerationRef.current, sourceId);
     const stats = await fetchMonitorStats(sourceId, range);
-    setMonitorStatsBySource((current) => ({ ...current, [sourceId]: stats }));
+    if (monitorStatsRequestGenerationRef.current.get(sourceId) === generation) {
+      setMonitorStatsBySource((current) => ({ ...current, [sourceId]: stats }));
+    }
   }
 
   async function loadMonitorRuns(sourceId: number, limit = MONITOR_RUN_HISTORY_LIMIT) {
+    const generation = nextRequestGeneration(monitorRunsRequestGenerationRef.current, sourceId);
     const sourceRuns = await fetchRuns({ source_id: sourceId, limit });
-    setMonitorRunsBySource((current) => ({ ...current, [sourceId]: sourceRuns }));
+    if (monitorRunsRequestGenerationRef.current.get(sourceId) === generation) {
+      setMonitorRunsBySource((current) => ({ ...current, [sourceId]: sourceRuns }));
+    }
   }
 
   const loadMonitorEvents = useCallback(async (sourceId: number) => {
@@ -666,6 +747,7 @@ export function useDashboardController() {
         ...current,
         [sourceId]: mergeRunEvents(events, current[sourceId] ?? [])
       }));
+      setMonitorEventHistoryLoadedBySource((current) => ({ ...current, [sourceId]: true }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudieron cargar los logs acumulados');
     }
@@ -744,8 +826,10 @@ export function useDashboardController() {
     monitorStatsRangeBySource,
     monitorRunsBySource,
     monitorEventsBySource,
+    monitorEventHistoryLoadedBySource,
     monitorHiddenEventIdsBySource,
     monitorStreamStatus,
+    monitorStreamReady,
     opportunityPage,
     proxyDraft,
     proxyProfiles,
@@ -918,6 +1002,27 @@ function parseStreamReady(message: MessageEvent): number | null {
     return typeof payload.last_event_id === 'number' ? payload.last_event_id : null;
   } catch {
     return null;
+  }
+}
+
+function parseStreamCursor(message: MessageEvent): number | null {
+  if (!message.lastEventId || !/^\d+$/.test(message.lastEventId)) {
+    return null;
+  }
+  return Number(message.lastEventId);
+}
+
+function nextRequestGeneration(generations: Map<number, number>, sourceId: number): number {
+  const generation = (generations.get(sourceId) ?? 0) + 1;
+  generations.set(sourceId, generation);
+  return generation;
+}
+
+async function settlePromise<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> {
+  try {
+    return { status: 'fulfilled', value: await promise };
+  } catch (reason) {
+    return { status: 'rejected', reason };
   }
 }
 

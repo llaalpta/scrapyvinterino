@@ -14,6 +14,7 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services import search_sources as search_sources_service
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
 from vinted_monitor.services.search_sources import (
+    SearchSourceActiveError,
     SearchSourceNotFoundError,
     archive_source,
     catalog_filter_compatibility,
@@ -64,6 +65,42 @@ def test_start_source_monitor_persists_first_recurring_deadline_with_interval_fl
 
             assert activated.monitor_started_at == started_at
             assert activated.next_run_at == started_at + timedelta(seconds=expected_delay)
+    finally:
+        with SessionLocal() as db:
+            db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            db.commit()
+
+
+def test_start_source_monitor_rejects_a_second_activation() -> None:
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest duplicate activation",
+            url="https://www.vinted.es/catalog?search_text=duplicate-activation",
+            normalized_query={"search_text": ["duplicate-activation"]},
+            is_active=False,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        with SessionLocal() as db:
+            first = start_source_monitor(db, source_id)
+            first_started_at = first.monitor_started_at
+            first_deadline = first.next_run_at
+
+            with pytest.raises(SearchSourceActiveError, match="already active"):
+                start_source_monitor(db, source_id)
+
+            db.refresh(first)
+            assert first.monitor_started_at == first_started_at
+            assert first.next_run_at == first_deadline
+            assert db.query(MonitorSession).filter(MonitorSession.source_id == source_id).count() == 1
     finally:
         with SessionLocal() as db:
             db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)

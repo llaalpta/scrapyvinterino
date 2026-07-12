@@ -11,6 +11,7 @@ const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 export function SourcesView({
   detailProbeMessages,
   detailProbeRefs,
+  monitorEventHistoryLoadedBySource,
   monitorEventsBySource,
   monitorHiddenEventIdsBySource,
   monitorRunsBySource,
@@ -35,6 +36,7 @@ export function SourcesView({
   sources,
   sourceUrl,
   streamStatus,
+  streamReady,
   setSourceName,
   setSourceUrl,
   updateDetailProbeRef,
@@ -42,6 +44,7 @@ export function SourcesView({
 }: {
   detailProbeMessages: Record<number, string>;
   detailProbeRefs: Record<number, string>;
+  monitorEventHistoryLoadedBySource: Record<number, boolean>;
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorHiddenEventIdsBySource: Record<number, number[]>;
   monitorRunsBySource: Record<number, Run[]>;
@@ -66,6 +69,7 @@ export function SourcesView({
   sources: SearchSource[];
   sourceUrl: string;
   streamStatus: 'connecting' | 'connected' | 'error';
+  streamReady: boolean;
   setSourceName: (value: string) => void;
   setSourceUrl: (value: string) => void;
   updateDetailProbeRef: (sourceId: number, value: string) => void;
@@ -122,10 +126,10 @@ export function SourcesView({
   }, [monitorRunsBySource, onLoadMonitorRuns, selectedSource]);
 
   useEffect(() => {
-    if (!selectedSource) {
+    if (!selectedSource || !streamReady) {
       return;
     }
-    if (monitorEventsBySource[selectedSource.id]) {
+    if (monitorEventHistoryLoadedBySource[selectedSource.id]) {
       loadingEventsRef.current.delete(selectedSource.id);
       return;
     }
@@ -138,7 +142,7 @@ export function SourcesView({
       loadingEventsRef.current.delete(selectedSource.id);
       setLoadingMonitorEventsBySource((current) => ({ ...current, [selectedSource.id]: false }));
     });
-  }, [monitorEventsBySource, onLoadMonitorEvents, selectedSource]);
+  }, [monitorEventHistoryLoadedBySource, onLoadMonitorEvents, selectedSource, streamReady]);
 
   useEffect(() => {
     if (requestedSelectedMonitorId === null || !window.matchMedia('(max-width: 820px)').matches) {

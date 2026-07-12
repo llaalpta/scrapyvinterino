@@ -152,6 +152,8 @@ def start_source_monitor(
 ) -> SearchSource:
     source = _get_live_source(db, source_id)
     _validate_monitor_runtime_config(source)
+    if source.is_active:
+        raise SearchSourceActiveError(f"Search source {source_id} is already active")
     started_at = now or datetime.now(UTC)
     source.monitor_started_at = started_at
     source.last_run_at = None

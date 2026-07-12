@@ -12,6 +12,7 @@ Tablas principales:
 - `proxy_profiles`: pool global de proxys configurables desde UI con secretos cifrados, tipo, capacidad y estado operativo.
 - `vinted_sessions`: sesiones anonimas publicas de Vinted propiedad de un monitor y asociadas al proxy sticky usado; guardan cookies/tokens cifrados, contexto seguro, contador de uso, expiracion e invalidacion.
 - `run_events`: eventos HTTP y operativos saneados para depurar monitores/runs.
+- `run_event_publications`: cursor SSE global y monotono asignado a eventos ya confirmados; desacopla el orden de entrega del ID reservado dentro de transacciones concurrentes.
 - `action_requests`: acciones solicitadas por usuario.
 - `action_executions`: resultado de acciones autenticadas futuras.
 - `checkout_snapshots`: opciones de envio/pago futuras.

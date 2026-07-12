@@ -4,17 +4,26 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 
-from vinted_monitor.db.models import RunEvent
+from vinted_monitor.db.models import RunEvent, RunEventPublication
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.services.run_events import redact_run_event_details
+from vinted_monitor.services.run_events import redact_persisted_run_event_details
 
 EVENT_BATCH_SIZE = 100
 HEARTBEAT_INTERVAL_SECONDS = 15.0
 POLL_INTERVAL_SECONDS = 2.0
 RECONNECT_DELAY_MILLISECONDS = 3000
+RUN_EVENT_PUBLICATION_LOCK_ID = 814_208_008
+
+
+@dataclass(frozen=True)
+class PublishedRunEvent:
+    cursor: int
+    event: RunEvent
 
 
 def resolve_monitor_event_cursor(
@@ -31,32 +40,50 @@ def resolve_monitor_event_cursor(
 
 
 def latest_monitor_event_id() -> int:
+    publish_committed_monitor_events()
     with SessionLocal() as db:
-        return int(
-            db.scalar(
-                select(func.coalesce(func.max(RunEvent.id), 0)).where(RunEvent.source_id.is_not(None))
+        return int(db.scalar(select(func.coalesce(func.max(RunEventPublication.position), 0))) or 0)
+
+
+def publish_committed_monitor_events() -> None:
+    with SessionLocal() as db:
+        db.execute(select(func.pg_advisory_xact_lock(RUN_EVENT_PUBLICATION_LOCK_ID)))
+        candidate_ids = (
+            select(RunEvent.id)
+            .outerjoin(RunEventPublication, RunEventPublication.event_id == RunEvent.id)
+            .where(
+                RunEvent.source_id.is_not(None),
+                RunEventPublication.event_id.is_(None),
             )
-            or 0
+            .order_by(RunEvent.id.asc())
         )
+        statement = (
+            insert(RunEventPublication)
+            .from_select(["event_id"], candidate_ids)
+            .on_conflict_do_nothing(index_elements=[RunEventPublication.event_id])
+        )
+        db.execute(statement)
+        db.commit()
 
 
-def load_monitor_events_after(cursor: int) -> list[RunEvent]:
+def load_monitor_events_after(cursor: int) -> list[PublishedRunEvent]:
+    publish_committed_monitor_events()
     with SessionLocal() as db:
-        return list(
-            db.scalars(
-                select(RunEvent)
-                .where(RunEvent.id > cursor, RunEvent.source_id.is_not(None))
-                .order_by(RunEvent.id.asc())
+        rows = db.execute(
+            select(RunEventPublication.position, RunEvent)
+                .join(RunEvent, RunEvent.id == RunEventPublication.event_id)
+                .where(RunEventPublication.position > cursor)
+                .order_by(RunEventPublication.position.asc())
                 .limit(EVENT_BATCH_SIZE)
-            )
         )
+        return [PublishedRunEvent(cursor=int(position), event=event) for position, event in rows]
 
 
 async def monitor_event_stream(
     initial_cursor: int,
     *,
     is_disconnected: Callable[[], Awaitable[bool]],
-    load_events: Callable[[int], list[RunEvent]] = load_monitor_events_after,
+    load_events: Callable[[int], list[PublishedRunEvent]] = load_monitor_events_after,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
@@ -67,11 +94,11 @@ async def monitor_event_stream(
     yield _stream_ready_message(current_id)
 
     while not await is_disconnected():
-        events = load_events(current_id)
+        events = await asyncio.to_thread(load_events, current_id)
         if events:
-            for event in events:
-                current_id = event.id
-                yield _monitor_event_message(event)
+            for published in events:
+                current_id = published.cursor
+                yield _monitor_event_message(published)
             # Query again immediately after every non-empty batch. This drains a
             # backlog larger than EVENT_BATCH_SIZE without adding poll latency.
             continue
@@ -87,10 +114,11 @@ async def monitor_event_stream(
 
 def _stream_ready_message(cursor: int) -> str:
     payload = json.dumps({"last_event_id": cursor})
-    return f"event: stream_ready\nretry: {RECONNECT_DELAY_MILLISECONDS}\ndata: {payload}\n\n"
+    return f"id: {cursor}\nevent: stream_ready\nretry: {RECONNECT_DELAY_MILLISECONDS}\ndata: {payload}\n\n"
 
 
-def _monitor_event_message(event: RunEvent) -> str:
+def _monitor_event_message(published: PublishedRunEvent) -> str:
+    event = published.event
     payload = {
         "id": event.id,
         "source_id": event.source_id,
@@ -107,6 +135,6 @@ def _monitor_event_message(event: RunEvent) -> str:
         "user_agent": event.user_agent,
         "auth_mode": event.auth_mode,
         "message": event.message,
-        "details": redact_run_event_details(event.details),
+        "details": redact_persisted_run_event_details(event.details),
     }
-    return f"id: {event.id}\nevent: monitor_event\ndata: {json.dumps(payload)}\n\n"
+    return f"id: {published.cursor}\nevent: monitor_event\ndata: {json.dumps(payload)}\n\n"
