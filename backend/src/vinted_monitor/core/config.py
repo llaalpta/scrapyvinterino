@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     scheduler_poll_interval_seconds: int = 5
     scheduler_worker_heartbeat_interval_seconds: int = Field(default=5, ge=1, le=60)
     scheduler_worker_heartbeat_timeout_seconds: int = Field(default=30, ge=5, le=600)
+    scheduler_watchdog_poll_interval_seconds: int = Field(default=5, ge=1, le=60)
+    scheduler_watchdog_startup_grace_seconds: int = Field(default=30, ge=1, le=600)
     scheduler_timezone: str = "Europe/Madrid"
     log_level: str = "INFO"
 
@@ -105,6 +107,10 @@ class Settings(BaseSettings):
     def validate_scheduler_liveness_config(self) -> "Settings":
         if self.scheduler_worker_heartbeat_timeout_seconds < self.scheduler_worker_heartbeat_interval_seconds * 2:
             raise ValueError("SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS must allow at least two heartbeats")
+        if self.scheduler_watchdog_startup_grace_seconds < self.scheduler_worker_heartbeat_interval_seconds:
+            raise ValueError("SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS must allow the first heartbeat")
+        if self.scheduler_watchdog_poll_interval_seconds > self.scheduler_worker_heartbeat_timeout_seconds:
+            raise ValueError("SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS cannot exceed the heartbeat timeout")
         return self
 
     @model_validator(mode="after")

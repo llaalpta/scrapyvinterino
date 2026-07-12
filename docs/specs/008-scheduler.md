@@ -39,6 +39,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 
 - Worker:
   - scheduler loop;
+  - process supervisor that exits when producer progress expires;
+  - independent fail-stop watchdog for active recurring monitors;
   - bounded monitor run executor;
   - Redis seen cache client;
   - isolated provider/session factory.
@@ -52,6 +54,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - ownership rule: `.env` owns deployment, secrets, worker and anti-bot defaults; UI `app_settings` owns daily operation only;
   - deployment scheduler enable flag in `.env` as an operational gate;
   - deployment-owned producer heartbeat interval and timeout; the scheduler producer refreshes its own heartbeat while waiting between polls;
+  - deployment-owned watchdog poll interval and startup grace, both bounded against the producer heartbeat contract;
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
@@ -114,6 +117,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Recurring activation requires a fresh heartbeat written by the scheduler producer itself. Missing, malformed, naive, implausibly future, or expired heartbeat state returns `503` and leaves the source, deadline, monitor session and runs unchanged.
 - `GET /api/scheduler` exposes `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is false unless UI/deployment gates, capacity and the live producer are all available.
 - The PWA treats scheduler refresh failure as unavailable/unknown, discards any previously usable scheduler state, and blocks recurring launch. It never labels missing producer availability as a degraded operating mode.
+- Invalid deployment scheduler configuration terminates worker startup. Once started, the worker supervisor terminates the process when its own producer heartbeat expires; Compose owns restart and reports heartbeat health.
+- The scheduler watchdog starts only after API health confirms API-owned migrations are complete. After its startup grace, an expired producer heartbeat locks active non-manual sources and rechecks liveness before changing them.
+- If liveness is still absent after the lock, the watchdog makes PostgreSQL authoritative first: it clears active/deadline/duration state, closes the active monitor session with `scheduler_worker_unavailable`, and persists one sanitized warning event per stopped source. Manual monitors remain unchanged.
+- Ready-task cleanup happens only after the PostgreSQL stop commits. Redis cleanup failure is logged visibly and never rolls back the inactive source; a later consumer must treat that inactive database state as authoritative.
+- An unexpected watchdog iteration error terminates the watchdog process so Compose restarts it; it is not converted into a silent polling loop.
 - Launching any monitor creates a monitor session; recurring sessions remain active until stopped/expired/failed, while punctual sessions close after the run.
 - A recurring monitor with `stop_after_vinted_session_uses=N` stops automatically after the Nth completed run in that active monitor session that used the same `vinted_session_id`, and records `vinted_session_use_limit_reached`.
 - The scheduler only considers active recurring monitors.
@@ -188,6 +196,8 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Unit tests for next-run calculation.
 - Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
 - PostgreSQL/API tests for missing, fresh, expired, malformed, naive and future producer heartbeat plus mutation-free recurring `503`; producer tests cover heartbeat during disabled/idle operation and scheduler polls longer than the heartbeat interval.
+- Supervisor/watchdog tests cover invalid startup configuration, producer expiry grace, recurring-only locked stop, heartbeat recovery during lock acquisition, session/event persistence, DB-first Redis cleanup failure, and unexpected-error process termination.
+- Real-container verification blocks producer progress without external traffic and observes worker exit plus Compose restart; a QA recurring source/session/task proves watchdog database stop and visible Redis-cleanup failure, followed by complete cleanup and service restoration.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
 - PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, atomic activation rollback, concurrent initial admission at capacity one, repeated start rejection, locked-deadline revalidation, and durable window deferral.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
