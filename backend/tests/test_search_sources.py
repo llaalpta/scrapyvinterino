@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from datetime import UTC, datetime, timedelta
 from threading import Event
 
 import pytest
@@ -32,6 +33,44 @@ def test_validate_search_source_name_trims_surrounding_whitespace() -> None:
 def test_validate_search_source_name_rejects_blank_value() -> None:
     with pytest.raises(ValueError, match="cannot be empty"):
         validate_search_source_name("   ")
+
+
+@pytest.mark.parametrize(("jitter_seconds", "expected_delay"), [(-6, 60), (6, 66)])
+def test_start_source_monitor_persists_first_recurring_deadline_with_interval_floor(
+    jitter_seconds: int,
+    expected_delay: int,
+) -> None:
+    class FixedRng:
+        def uniform(self, _minimum: float, _maximum: float) -> float:
+            return jitter_seconds
+
+    started_at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name=f"pytest activation cadence {jitter_seconds}",
+            url="https://www.vinted.es/catalog?search_text=cadence",
+            normalized_query={"search_text": ["cadence"]},
+            is_active=False,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 10, "allowed_windows": []},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        with SessionLocal() as db:
+            activated = start_source_monitor(db, source_id, now=started_at, rng=FixedRng())
+
+            assert activated.monitor_started_at == started_at
+            assert activated.next_run_at == started_at + timedelta(seconds=expected_delay)
+    finally:
+        with SessionLocal() as db:
+            db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            db.commit()
 
 
 def test_validate_vinted_catalog_url_preserves_original_after_trim() -> None:

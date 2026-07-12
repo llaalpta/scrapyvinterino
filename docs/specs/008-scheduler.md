@@ -95,6 +95,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
+- Before that immediate recurring run begins, activation persists `next_run_at` from the activation timestamp, interval, jitter and allowed window. The scheduler treats this PostgreSQL value as authoritative over any in-process due-time cache, so activation cannot also enqueue an immediately due scheduler run.
+- With a 60-second interval and 10% jitter, the minimum interval floor makes the first post-activation due time 60 to 66 seconds after activation, plus scheduler tick latency.
 - Launching a manual, recurring, duration, window, or scheduler run is blocked until `Recalibrar listado inicial` has created a valid Redis snapshot for the monitor's current policy hash.
 - Launching or recalibrating is blocked when the saved URL contains catalog filters that cannot be translated to the fast API.
 - `Guardar` is the only PWA action that persists monitor configuration.
@@ -173,6 +175,8 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 ## Verification
 
 - Unit tests for next-run calculation.
+- Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
+- SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.
@@ -209,3 +213,4 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Confirm anonymous session refresh failure marks only the affected run failed and does not stop the scheduler loop.
 - Confirm redaction tests cover nested details, URLs, bearer tokens, cookies, token-like assignments, masked values, and fingerprints.
 - Confirm PWA build succeeds after adding the log timeline and stream event fields.
+- Confirm Playwright observes one pending SSE request while Monitors remains open, no repeated REST traffic while idle, sub-two-second single delivery, one directed terminal refresh, cursor resume after navigation, and tail-follow/new-event behavior on desktop and mobile.

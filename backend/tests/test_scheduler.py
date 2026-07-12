@@ -374,6 +374,55 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
             db.commit()
 
 
+def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    persisted_due_at = now + timedelta(seconds=60)
+
+    with SessionLocal() as db:
+        previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
+        if previously_active_source_ids:
+            db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
+                {SearchSource.is_active: False},
+                synchronize_session=False,
+            )
+        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        source = SearchSource(
+            name="pytest persisted activation deadline",
+            url="https://www.vinted.es/catalog?search_text=persisted-deadline",
+            normalized_query={"search_text": ["persisted-deadline"]},
+            is_active=True,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+            next_run_at=persisted_due_at,
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        runner.next_due_by_source_id[source_id] = now
+
+        assert runner.run_once(now=now) == []
+        assert runner.next_due_by_source_id[source_id] == persisted_due_at
+        assert fake_redis.values == []
+    finally:
+        with SessionLocal() as db:
+            for active_source_id in previously_active_source_ids:
+                active_source = db.get(SearchSource, active_source_id)
+                if active_source is not None:
+                    active_source.is_active = True
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+            if setting is not None:
+                db.delete(setting)
+            db.commit()
+
+
 def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())

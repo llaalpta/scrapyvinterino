@@ -1,3 +1,4 @@
+import random
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
@@ -9,7 +10,12 @@ from vinted_monitor.db.models import SearchSource
 from vinted_monitor.providers.catalog_url import analyze_catalog_url, ensure_catalog_url_filters_supported
 from vinted_monitor.services.filters import normalize_filter_definition
 from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
-from vinted_monitor.services.scheduler import normalize_scheduler_config
+from vinted_monitor.services.scheduler import (
+    get_scheduler_timezone,
+    next_run_after,
+    normalize_scheduler_config,
+    source_config,
+)
 from vinted_monitor.services.seen_cache import get_seen_cache
 from vinted_monitor.services.task_queue import TaskQueueError, cancel_ready_task_for_source
 from vinted_monitor.services.vinted_sessions import invalidate_vinted_sessions_for_source
@@ -137,24 +143,37 @@ def update_source(
     return source
 
 
-def start_source_monitor(db: Session, source_id: int) -> SearchSource:
+def start_source_monitor(
+    db: Session,
+    source_id: int,
+    *,
+    now: datetime | None = None,
+    rng: random.Random | None = None,
+) -> SearchSource:
     source = _get_live_source(db, source_id)
     _validate_monitor_runtime_config(source)
-    now = datetime.now(UTC)
-    source.monitor_started_at = now
+    started_at = now or datetime.now(UTC)
+    source.monitor_started_at = started_at
     source.last_run_at = None
     if source.monitor_mode == "duration":
         if source.duration_minutes is None:
             raise SearchSourceConfigError("duration_minutes is required for duration monitor mode")
         from datetime import timedelta
 
-        source.monitor_until = now + timedelta(minutes=source.duration_minutes)
+        source.monitor_until = started_at + timedelta(minutes=source.duration_minutes)
     else:
         source.monitor_until = None
-    source.next_run_at = now
     source.is_active = source.monitor_mode != "manual"
     if source.is_active:
-        start_monitor_session(db, source, started_at=now)
+        source.next_run_at = next_run_after(
+            started_at,
+            source_config(source),
+            rng,
+            get_scheduler_timezone(get_settings()),
+        )
+        start_monitor_session(db, source, started_at=started_at)
+    else:
+        source.next_run_at = None
     db.commit()
     db.refresh(source)
     return source

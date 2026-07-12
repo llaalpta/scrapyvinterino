@@ -1981,7 +1981,7 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
             normalized_query={"order": ["newest_first"]},
             is_active=False,
             monitor_mode="continuous",
-            scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
         )
         db.add(source)
         update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
@@ -1991,6 +1991,7 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
     _enable_direct_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    monkeypatch.setattr("vinted_monitor.services.runs.choose_run_egress", lambda *_args, **_kwargs: _test_direct_egress())
     try:
         response = client.post(f"/api/monitors/{source_id}/start")
 
@@ -1999,12 +2000,16 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
             source = db.get(SearchSource, source_id)
             session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
             run = db.get(Run, response.json()["id"])
+            source_runs = list(db.scalars(select(Run).where(Run.source_id == source_id)))
             assert source is not None
             assert source.is_active is True
+            assert source.monitor_started_at is not None
+            assert source.next_run_at == source.monitor_started_at + timedelta(seconds=60)
             assert session is not None
             assert session.stopped_at is None
             assert run is not None
             assert run.monitor_session_id == session.id
+            assert [entry.id for entry in source_runs] == [run.id]
     finally:
         app.dependency_overrides.clear()
         cleanup_source(source_id)

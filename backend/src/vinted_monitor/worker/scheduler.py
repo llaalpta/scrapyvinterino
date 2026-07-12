@@ -64,13 +64,17 @@ class SchedulerRunner:
             submitted: list[int] = []
             due_sources = []
             for source in sources:
-                due_at = self.next_due_by_source_id.setdefault(
-                    source.id, source.next_run_at or current_time,
-                )
+                # PostgreSQL owns scheduling state. The dictionary is only an
+                # observable mirror and must never override a newer persisted
+                # activation deadline.
+                due_at = source.next_run_at or current_time
+                self.next_due_by_source_id[source.id] = due_at
                 config = source_config(source)
                 if due_at <= current_time:
                     if not is_within_allowed_windows(current_time, config.allowed_windows, self.timezone):
-                        self.next_due_by_source_id[source.id] = next_run_after(current_time, config, self.rng, self.timezone)
+                        next_due = next_run_after(current_time, config, self.rng, self.timezone)
+                        self.next_due_by_source_id[source.id] = next_due
+                        source.next_run_at = next_due
                         continue
                     due_sources.append((due_at, source.id, source, config))
 
