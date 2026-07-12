@@ -83,6 +83,7 @@ export function DashboardApp() {
           savingProxy={dashboard.savingProxy}
           savingScheduler={dashboard.savingScheduler}
           scheduler={dashboard.scheduler}
+          schedulerAvailabilityError={dashboard.schedulerAvailabilityError}
           setProxyDraft={dashboard.setProxyDraft}
           testingProxyIds={dashboard.testingProxyIds}
         />

@@ -14,6 +14,7 @@ export function SettingsView({
   savingProxy,
   savingScheduler,
   scheduler,
+  schedulerAvailabilityError,
   setProxyDraft,
   testingProxyIds
 }: {
@@ -28,6 +29,7 @@ export function SettingsView({
   savingProxy: boolean;
   savingScheduler: boolean;
   scheduler: SchedulerState | null;
+  schedulerAvailabilityError: string | null;
   setProxyDraft: (draft: ProxyDraft) => void;
   testingProxyIds: number[];
 }) {
@@ -37,12 +39,13 @@ export function SettingsView({
     }
     onUpdateSchedulerConfig({ [field]: Number(value) });
   };
+  const schedulerStatus = scheduler ? getSchedulerStatus(scheduler) : null;
 
   return (
     <section className="section-panel">
       <div className="panel-heading">
         <h3>Ajustes</h3>
-        <span>{scheduler?.effective_enabled ? 'Scheduler activo' : 'Scheduler parado'}</span>
+        <span>{schedulerStatus?.label ?? 'Scheduler no disponible'}</span>
       </div>
       {scheduler ? (
         <div className="settings-body">
@@ -50,7 +53,7 @@ export function SettingsView({
             <div className="settings-section-heading">
               <div>
                 <h4>Estado del scheduler</h4>
-                <p>Control operativo y capacidad efectiva para monitores periodicos.</p>
+                <p>{schedulerStatus?.description}</p>
               </div>
               <button type="button" disabled={savingScheduler} onClick={onToggleScheduler}>
                 <Power size={17} />
@@ -60,6 +63,7 @@ export function SettingsView({
             <div className="settings-summary-grid">
               <SummaryItem label="Scheduler" value={scheduler.enabled ? 'Habilitado en la UI' : 'Deshabilitado en la UI'} />
               <SummaryItem label="Runtime" value={scheduler.runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
+              <SummaryItem label="Worker" value={getWorkerStatus(scheduler)} />
               <SummaryItem label="Capacidad" value={`${scheduler.active_periodic_monitors}/${scheduler.effective_capacity} monitores activos`} />
               <SummaryItem label="Egress" value={`${scheduler.proxy_capacity} proxy / ${scheduler.direct_capacity} directo`} />
               <SummaryItem label="Directo" value={scheduler.direct_runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
@@ -177,7 +181,7 @@ export function SettingsView({
           </section>
         </div>
       ) : (
-        <p className="empty-inline">No se pudo cargar la configuracion del scheduler.</p>
+        <p className="empty-inline">{schedulerAvailabilityError ?? 'No se pudo cargar la configuracion del scheduler.'}</p>
       )}
 
       <div className="proxy-section">
@@ -454,6 +458,9 @@ function HelpTooltip({ text }: { text: string }) {
 }
 
 function getCapacityHint(scheduler: SchedulerState) {
+  if (!scheduler.worker_available) {
+    return 'El worker no esta disponible: recuperalo antes de lanzar monitores periodicos.';
+  }
   if (!scheduler.direct_runtime_enabled && scheduler.proxy_capacity <= 0) {
     return 'Salida directa bloqueada por .env: configura un proxy activo de ES antes de lanzar runs.';
   }
@@ -464,6 +471,62 @@ function getCapacityHint(scheduler: SchedulerState) {
     return 'Sin proxys activos: el scheduler puede usar salida directa limitada.';
   }
   return 'Sin capacidad de salida: activa proxys o permite salida directa.';
+}
+
+function getSchedulerStatus(scheduler: SchedulerState) {
+  if (scheduler.effective_enabled) {
+    return {
+      label: 'Scheduler activo',
+      description: 'El productor esta disponible para ejecutar monitores periodicos.'
+    };
+  }
+  if (scheduler.enabled && scheduler.runtime_enabled && !scheduler.worker_available) {
+    return {
+      label: 'Scheduler no disponible',
+      description: 'El productor no esta disponible: no se pueden iniciar ni ejecutar monitores periodicos.'
+    };
+  }
+  if (scheduler.enabled && !scheduler.runtime_enabled) {
+    return {
+      label: 'Scheduler bloqueado',
+      description: 'La interfaz lo habilita, pero el despliegue lo bloquea mediante .env.'
+    };
+  }
+  if (scheduler.enabled && scheduler.runtime_enabled) {
+    return {
+      label: 'Scheduler sin capacidad',
+      description: 'El productor esta disponible, pero falta capacidad de salida para monitores periodicos.'
+    };
+  }
+  return {
+    label: 'Scheduler parado',
+    description: 'Habilitalo en la interfaz para permitir monitores periodicos.'
+  };
+}
+
+function getWorkerStatus(scheduler: SchedulerState) {
+  const lastSeen = formatWorkerLastSeen(scheduler.worker_last_seen_at);
+  if (!scheduler.worker_available) {
+    return lastSeen ? `No disponible; ultima senal ${lastSeen}` : 'No disponible; sin senal registrada';
+  }
+  return lastSeen ? `Disponible; ultima senal ${lastSeen}` : 'Disponible';
+}
+
+function formatWorkerLastSeen(value: string | null) {
+  if (!value) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+  return new Intl.DateTimeFormat('es-ES', {
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    month: '2-digit',
+    second: '2-digit'
+  }).format(new Date(timestamp));
 }
 
 export type ProxyDraft = {

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.db.models import AppSetting, ProxyProfile, Run, SearchSource
 from vinted_monitor.services.monitor_sessions import stop_active_monitor_session
+from vinted_monitor.services.scheduler_liveness import scheduler_worker_availability
 
 SCHEDULER_SETTING_KEY = "scheduler"
 DEFAULT_INTERVAL_SECONDS = 300
@@ -50,6 +51,10 @@ class SchedulerCapacityError(ValueError):
     pass
 
 
+class SchedulerUnavailableError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class SourceSchedulerConfig:
     interval_seconds: int = DEFAULT_INTERVAL_SECONDS
@@ -85,6 +90,8 @@ class SchedulerState:
     enabled: bool
     runtime_enabled: bool
     effective_enabled: bool
+    worker_available: bool
+    worker_last_seen_at: datetime | None
     max_concurrent_runs: int
     per_source_concurrency: int
     poll_interval_seconds: int
@@ -113,7 +120,12 @@ class RunEgress:
     proxy_url: str | None = None
 
 
-def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
+def get_scheduler_state(
+    db: Session,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> SchedulerState:
     runtime_config = get_scheduler_runtime_config(db, settings)
     runtime_enabled = settings.scheduler_enabled
     target_country_code = settings.vinted_target_country_code.strip().upper()
@@ -126,10 +138,13 @@ def get_scheduler_state(db: Session, settings: Settings) -> SchedulerState:
         else 0
     )
     effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity + direct_capacity)
+    worker = scheduler_worker_availability(db, settings, now=now)
     return SchedulerState(
         enabled=runtime_config.enabled,
         runtime_enabled=runtime_enabled,
-        effective_enabled=runtime_config.enabled and runtime_enabled and effective_capacity > 0,
+        effective_enabled=runtime_config.enabled and runtime_enabled and effective_capacity > 0 and worker.available,
+        worker_available=worker.available,
+        worker_last_seen_at=worker.last_seen_at,
         max_concurrent_runs=runtime_config.max_concurrent_runs,
         per_source_concurrency=max(settings.scheduler_per_source_concurrency, 1),
         poll_interval_seconds=max(settings.scheduler_poll_interval_seconds, 1),
@@ -215,6 +230,8 @@ def ensure_scheduler_can_activate(db: Session, settings: Settings, *, source_id:
         raise SchedulerCapacityError("Scheduler runtime is disabled")
     if not state.enabled:
         raise SchedulerCapacityError("Scheduler is disabled in settings")
+    if not state.worker_available:
+        raise SchedulerUnavailableError("Scheduler worker is unavailable")
     if state.effective_capacity <= 0:
         raise SchedulerCapacityError("No scheduler egress capacity is available")
     active_count = state.active_periodic_monitors

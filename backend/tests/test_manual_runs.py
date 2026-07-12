@@ -55,6 +55,7 @@ from vinted_monitor.services.runs import (
     execute_monitor_run,
 )
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, RunEgress, update_scheduler_config, update_scheduler_enabled
+from vinted_monitor.services.scheduler_liveness import SchedulerWorkerAvailability
 from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
@@ -593,6 +594,10 @@ def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
     settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
     monkeypatch.setattr("vinted_monitor.api.main.settings", settings)
     monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "vinted_monitor.services.scheduler.scheduler_worker_availability",
+        lambda *_args, **_kwargs: SchedulerWorkerAvailability(available=True, last_seen_at=datetime.now(UTC)),
+    )
     return settings
 
 

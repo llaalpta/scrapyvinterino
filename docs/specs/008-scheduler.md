@@ -51,6 +51,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Configuration:
   - ownership rule: `.env` owns deployment, secrets, worker and anti-bot defaults; UI `app_settings` owns daily operation only;
   - deployment scheduler enable flag in `.env` as an operational gate;
+  - deployment-owned producer heartbeat interval and timeout; the scheduler producer refreshes its own heartbeat while waiting between polls;
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
@@ -110,6 +111,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Monitor active state is controlled only by `POST /api/monitors/{id}/start` and `POST /api/monitors/{id}/stop`; monitor configuration `PATCH` rejects legacy `is_active` payloads.
 - Active monitor configuration is read-only until the monitor is stopped; direct monitor configuration `PATCH` while active is rejected.
 - Launching a recurring monitor is rejected when the effective scheduler is disabled or no scheduler capacity is available.
+- Recurring activation requires a fresh heartbeat written by the scheduler producer itself. Missing, malformed, naive, implausibly future, or expired heartbeat state returns `503` and leaves the source, deadline, monitor session and runs unchanged.
+- `GET /api/scheduler` exposes `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is false unless UI/deployment gates, capacity and the live producer are all available.
+- The PWA treats scheduler refresh failure as unavailable/unknown, discards any previously usable scheduler state, and blocks recurring launch. It never labels missing producer availability as a degraded operating mode.
 - Launching any monitor creates a monitor session; recurring sessions remain active until stopped/expired/failed, while punctual sessions close after the run.
 - A recurring monitor with `stop_after_vinted_session_uses=N` stops automatically after the Nth completed run in that active monitor session that used the same `vinted_session_id`, and records `vinted_session_use_limit_reached`.
 - The scheduler only considers active recurring monitors.
@@ -183,6 +187,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 
 - Unit tests for next-run calculation.
 - Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
+- PostgreSQL/API tests for missing, fresh, expired, malformed, naive and future producer heartbeat plus mutation-free recurring `503`; producer tests cover heartbeat during disabled/idle operation and scheduler polls longer than the heartbeat interval.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
 - PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, atomic activation rollback, concurrent initial admission at capacity one, repeated start rejection, locked-deadline revalidation, and durable window deferral.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.

@@ -20,13 +20,15 @@ La configuracion no debe tener dos fuentes de verdad activas:
 
 | Dueño | Uso |
 | --- | --- |
-| `.env` | Infraestructura, secretos, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS, `APP_SECRET_KEY`, `SCHEDULER_ENABLED`, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
+| `.env` | Infraestructura, secretos, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS, `APP_SECRET_KEY`, `SCHEDULER_ENABLED`, intervalo/timeout del heartbeat del productor, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
 | PWA | Operacion diaria: habilitar scheduler en app, runs simultaneos, salida directa, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. |
 | Backend | Limites duros de validacion y defaults seguros cuando no hay override operativo. |
 
 Algunos valores `.env` tambien sirven como defaults cuando aun no existe override operativo en `app_settings.scheduler`; por ejemplo `VINTED_REQUEST_TIMEOUT_MS`. Una vez guardado desde la PWA, el valor persistido en DB es la fuente de verdad operativa.
 
 Redis conserva AOF en un volumen Docker tanto en desarrollo como en el ejemplo de produccion. El worker se despliega como una unica instancia con varios consumidores internos: recupera las listas `vinted:task_queue:processing*` antes de iniciar scheduler y consumidores, y no se deben arrancar replicas independientes hasta incorporar ownership/visibility timeout distribuido.
+
+La disponibilidad periodica no se infiere de la configuracion ni de la capacidad: el productor del scheduler persiste su heartbeat UTC en `app_settings.scheduler_worker_heartbeat`. La API y la PWA consideran el scheduler no disponible cuando la señal falta, es invalida o supera el timeout; el watchdog, self-exit y restart ownership pertenecen a la tarea 14.5.
 
 Fuera de `development` y `test`, el backend rechaza al arrancar una `APP_SECRET_KEY` de menos de 32 caracteres o igual a cualquiera de los placeholders versionados. Cada despliegue debe generar y custodiar un valor aleatorio propio; cambiarlo exige recifrar previamente las credenciales de proxy y los contextos de sesion existentes.
 

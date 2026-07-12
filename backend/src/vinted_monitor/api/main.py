@@ -73,6 +73,7 @@ from vinted_monitor.services.runs import (
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
     SchedulerConfigError,
+    SchedulerUnavailableError,
     acquire_initial_run_admission_lock,
     choose_run_egress,
     ensure_scheduler_can_activate,
@@ -224,6 +225,8 @@ def post_monitor_start(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SearchSourceActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (BaselineRequiredError, SeenCacheUnavailableError, VintedSessionRequiredError) as exc:

@@ -4,7 +4,7 @@ Tablas principales:
 
 - `users`: acceso local.
 - `search_sources`: monitores de oportunidad reutilizables; guardan URL, modo, cadencia, `filter_definition` con terminos excluyentes propios del monitor y estado runtime. `archived_at` oculta un monitor sin borrar historico.
-- `app_settings`: configuracion global mutable desde la PWA, como el estado UI del scheduler.
+- `app_settings`: estado global con ownership por clave. `scheduler` contiene la configuracion operativa mutable desde la PWA; `scheduler_worker_heartbeat` contiene exclusivamente la ultima señal UTC escrita por el productor, cuya caducidad se configura en `.env`.
 - `monitor_sessions`: periodos historicos de lanzamiento de un monitor; los puntuales se cierran al terminar y los recurrentes quedan abiertos hasta parada, expiracion o fallo.
 - `runs`: ejecuciones de monitor, con `trigger`, `monitor_session_id`, `task_id` indexado para redelivery idempotente, contadores de filtrado y metadatos runtime.
 - `items`: articulos normalizados de Vinted que llegaron a oportunidad; `vinted_item_id` define identidad de catalogo/cache.

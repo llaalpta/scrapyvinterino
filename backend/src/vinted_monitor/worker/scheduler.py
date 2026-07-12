@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import random
 import time
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from vinted_monitor.services.scheduler import (
     next_run_after,
     source_config,
 )
+from vinted_monitor.services.scheduler_liveness import touch_scheduler_worker_heartbeat
 from vinted_monitor.services.seen_cache import get_seen_cache
 from vinted_monitor.services.task_queue import MonitorTask, enqueue_task, pending_tasks, processing_queue_key
 
@@ -37,19 +39,26 @@ class SchedulerRunner:
         self,
         settings: Settings,
         rng: random.Random | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.settings = settings
         self.rng = rng or random.Random()
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._sleep = sleep or time.sleep
         self.timezone = get_scheduler_timezone(settings)
         self.next_due_by_source_id: dict[int, datetime] = {}
+        self._last_heartbeat_at: datetime | None = None
         self.logger = structlog.get_logger()
 
     def run_once(self, now: datetime | None = None) -> list[int]:
         """Evaluate due monitors and enqueue tasks.  Return submitted source IDs."""
-        current_time = now or datetime.now(UTC)
+        current_time = now or self._clock()
 
+        self._write_heartbeat_if_due(current_time)
         with SessionLocal() as db:
-            state = get_scheduler_state(db, self.settings)
+            state = get_scheduler_state(db, self.settings, now=current_time)
             if not state.effective_enabled:
                 return []
 
@@ -227,4 +236,25 @@ class SchedulerRunner:
                     self.logger.info("scheduler_enqueued_tasks", source_ids=submitted)
             except Exception as exc:
                 self.logger.error("scheduler_loop_error", error=str(exc))
-            time.sleep(max(self.settings.scheduler_poll_interval_seconds, 1))
+            self._sleep_until_next_poll()
+
+    def _write_heartbeat_if_due(self, current_time: datetime) -> None:
+        if (
+            self._last_heartbeat_at is not None
+            and current_time - self._last_heartbeat_at
+            < timedelta(seconds=self.settings.scheduler_worker_heartbeat_interval_seconds)
+        ):
+            return
+        with SessionLocal() as db:
+            touch_scheduler_worker_heartbeat(db, now=current_time)
+            db.commit()
+        self._last_heartbeat_at = current_time
+
+    def _sleep_until_next_poll(self) -> None:
+        remaining = float(max(self.settings.scheduler_poll_interval_seconds, 1))
+        heartbeat_interval = float(self.settings.scheduler_worker_heartbeat_interval_seconds)
+        while remaining > 0:
+            delay = min(remaining, heartbeat_interval)
+            self._sleep(delay)
+            remaining -= delay
+            self._write_heartbeat_if_due(self._clock())

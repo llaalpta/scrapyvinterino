@@ -123,6 +123,8 @@ class SchedulerStateRead(BaseModel):
     enabled: bool
     runtime_enabled: bool
     effective_enabled: bool
+    worker_available: bool
+    worker_last_seen_at: datetime | None
     max_concurrent_runs: int
     per_source_concurrency: int
     poll_interval_seconds: int

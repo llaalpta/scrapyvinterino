@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from zoneinfo import ZoneInfo
@@ -24,6 +25,10 @@ from vinted_monitor.services.scheduler import (
     update_scheduler_config,
     update_scheduler_enabled,
     validate_proxy_settings,
+)
+from vinted_monitor.services.scheduler_liveness import (
+    SCHEDULER_WORKER_HEARTBEAT_KEY,
+    touch_scheduler_worker_heartbeat,
 )
 from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.worker.scheduler import SchedulerRunner
@@ -66,18 +71,26 @@ class FakeRedis:
 
 
 @pytest.fixture(autouse=True)
-def cleanup_scheduler_setting():
+def preserve_scheduler_settings():
+    keys = (SCHEDULER_SETTING_KEY, SCHEDULER_WORKER_HEARTBEAT_KEY)
+    original_values: dict[str, dict] = {}
     with SessionLocal() as db:
-        setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
-        if setting is not None:
-            db.delete(setting)
-            db.commit()
+        for key in keys:
+            setting = db.get(AppSetting, key)
+            if setting is not None:
+                original_values[key] = deepcopy(setting.value)
+                db.delete(setting)
+        db.commit()
     yield
     with SessionLocal() as db:
-        setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
-        if setting is not None:
-            db.delete(setting)
-            db.commit()
+        for key in keys:
+            setting = db.get(AppSetting, key)
+            if setting is not None:
+                db.delete(setting)
+        db.flush()
+        for key, value in original_values.items():
+            db.add(AppSetting(key=key, value=value))
+        db.commit()
 
 
 def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
@@ -91,9 +104,13 @@ def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
         assert state.effective_enabled is False
 
     with SessionLocal() as db:
-        state = get_scheduler_state(db, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        enabled_settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
+        touch_scheduler_worker_heartbeat(db)
+        db.commit()
+        state = get_scheduler_state(db, enabled_settings)
 
         assert state.enabled is True
+        assert state.worker_available is True
         assert state.effective_enabled is True
 
 
@@ -104,6 +121,8 @@ def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:
 
     assert response.status_code == 200
     payload = response.json()
+    assert "worker_available" in payload
+    assert "worker_last_seen_at" in payload
     assert "max_runs_per_proxy" not in payload
     assert "request_retries" not in payload
 
