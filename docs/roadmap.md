@@ -29,6 +29,7 @@ Status values:
 | 13 | done | Producer-Consumer + DataDome bypass | `docs/specs/010-producer-consumer-bypass.md` | Prepared residential session, catalog baseline, reliable queue recovery and five-item public-detail run verified live on 2026-07-11. |
 | 13.1 | done | Prepared session hardening | `docs/specs/010-producer-consumer-bypass.md` | Require strict prepared context (`datadome`, `__cf_bm`, CSRF, anon, access, `v_udt`, geo/locale/screen) before a monitor-owned session becomes reusable. |
 | 13.2 | done | Public item document enrichment | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/010-producer-consumer-bypass.md` | Structural JSON-LD/Next Flight parsing, resilient Redis retries, public availability/pricing, complete direct-CDN photos, production-path detail probe, and accessible opportunity gallery verified against the supplied HAR plus backend/PWA tests. |
+| 13.3 | done | Fast item detail pipeline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/010-producer-consumer-bypass.md` | Separate timings, recent sticky egress reuse, selective Flight parser and safe early-rejection shadow shipped; C2 remains canary-only because the live persistent C1 control was faster. |
 
 ## Next
 

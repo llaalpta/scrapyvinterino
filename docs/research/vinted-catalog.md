@@ -2,7 +2,7 @@
 
 Fecha de observacion inicial: 2026-07-02.
 
-Ultima actualizacion: 2026-07-11.
+Ultima actualizacion: 2026-07-12.
 
 ## Evidencia del documento de detalle
 
@@ -12,6 +12,12 @@ Ultima actualizacion: 2026-07-11.
 - `plugins` aporta descripcion, atributos, estado y senales de transaccion; el bloque del item aporta fotos firmadas y comprabilidad; `shippingDetails.price` es el envio minimo mostrado; `pricingServices` aporta base, proteccion y total sin envio.
 - Las URL firmadas `images*.vinted.net/.../f800/...?...` cargan sin cookies de Vinted. El backend guarda solo las URL y el navegador las descarga directamente conservando la firma y la query.
 - Los HAR son entradas locales de investigacion y no se incorporan al repositorio porque contienen material bruto de navegacion y sesion.
+- El documento decodificado observado mide unos 2.35 MB. Titulo, canonical y meta descripcion aparecen antes de 16 KB, pero shipping/pricing termina alrededor del 96.5 %, plugins al 97.2 % y el item rico al 97.8 %.
+- Cortar cuando el detalle aceptado parece completo ahorraria solo unos 6 KB comprimidos y cerca de 2 ms en el HAR; no compensa perder overrides o bloqueos tardios. Un descarte inequívoco por titulo/descripcion si puede evitar casi todo el cuerpo, pero debe validar equivalencia y continuidad de sesion antes de activarse.
+- Los cinco detalles residenciales auditados rotaron la cookie de sesion. La concurrencia debe aislar jars, conservar orden logico y validar el contexto resultante; compartir el jar mutable entre hilos no es un contrato seguro.
+- El parser selectivo `next_flight_v3` sobre el HAR real decodifico 20 de 224 registros: mediana `59.7 ms`, p95 `68.8 ms`, cinco fotos y los mismos valores de envio, total y disponibilidad.
+- Dos canarios C2 residenciales completaron cinco detalles y validaron la rama final aunque `_vinted_fr_session` divergiera. La version con lanes persistentes tardo `5.034 s`; el control C1 reutilizando una sola conexion tardo `4.598 s`, por lo que la concurrencia no se promueve con este proxy.
+- Diez descartes de head forzados recibieron `15-22 KB` y tardaron `455-636 ms`; cada lote termino con API de catalogo aceptada. Esto valida transporte/sesion, no la equivalencia de cualquier descripcion, que permanece en observacion.
 
 ## URL investigada
 

@@ -59,6 +59,7 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - Response cookie rotation refreshes the in-memory context and the encrypted prepared-session row while retaining the reusable logical catalog screen.
 - The item detail probe reports parser version, source map, required/optional missing fields, photo count, safe pricing fields, and availability state; it emits `detail_probe_finished` plus `run_succeeded` on success.
 - Egress diagnostics never send the prepared Vinted cookie jar to the diagnostic endpoint. They may log the same proxy/session marker, response IP/country and safe response headers, but cookies from `access_token_web`, `refresh_token_web`, `datadome`, `anon_id`, `v_udt`, `__cf_bm` or the Vinted session jar must remain absent from the diagnostic request.
+- A successful egress diagnostic is reusable for 300 seconds only by the same prepared session and proxy sticky id. Cookie refresh does not extend that validation; proxy/session failure, country mismatch or session invalidation clears it.
 - Catalog API requests are blocked unless the prepared session has CSRF token, anon id, `access_token_web`, `v_udt`, `__cf_bm`, locale, egress country, `x-screen=catalog` and `datadome`. A DataDome challenge or rejection invalidates the session.
 - Successful silent refreshes update the same encrypted `vinted_sessions` row with the refreshed cookies/tokens/context, preserving the sticky proxy identity, request count and max request budget.
 - Proxy failures use exponential cooldown; DataDome challenges use the configured challenge penalty multiplier.
@@ -72,6 +73,16 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - Before wiring a new ephemeral HTTP client into Redis workers or live Vinted catalog traffic, `scripts/verify_impersonation.py` exits successfully with exact Chrome 120 `User-Agent`, `sec-ch-ua`, and `Accept-Encoding` echoes, no Python/curl/cffi/requests leak markers in header values or non-browser header names, and expected BrowserLeaks TLS 1.3 / HTTP/2 fields. The standard Chrome header name `Upgrade-Insecure-Requests` is allowed.
 - Manual and worker-owned catalog runs use the configured browser profile; the default is `chrome146`. Direct runs without a proxy are blocked by default and are available only when explicitly enabled by deployment configuration.
 - Runtime browser profiles define ordered lowercase request headers for bootstrap and catalog API calls, and Vinted requests pass `default_headers=False` so `curl_cffi` owns TLS/HTTP2 impersonation but does not add duplicate browser headers. The code never manually sends HTTP/2 pseudo headers, `host`, `cookie`, `content-length`, or hop-by-hop headers such as `connection` or `te`; cookie values come only from the session cookie jar.
+
+## Detail performance gate
+
+- `serial` is the default detail execution mode even when a deployment configures concurrency greater than one.
+- `canary` uses strict waves of at most two and validates the selected final cookie context with the catalog API before business commit. `parallel` is eligible only after controlled canaries reduce p50 batch duration by at least 25 percent without worse p95, challenge, `429`, parser mismatch, invalid session or Redis residue.
+- A canary cookie/context incompatibility is recorded with safe fingerprints and leaves production in `serial`; it does not create permanent independent session lanes.
+- The 2026-07-12 residential canary completed five details and final catalog validation with two lanes, but took `5.034 s` versus `4.598 s` for the real persistent-session C1 control. It therefore failed the performance promotion gate and production remains `serial`.
+- Ten controlled early closes received only `15-22 KB` per rejected document in `455-636 ms` and preserved a final accepted catalog context. Enforcement still requires the separate 30-document semantic-equivalence gate; the default remains `shadow`.
+- Detail timing separates HTTP, parser, filter and persistence. Events record counts, durations and safe fingerprints, never HTML, raw cookies, blacklist content or proxy credentials.
+- Accepted opportunities read the public document to EOF. Early response termination is reserved for proven blacklist rejection because shipping, pricing, availability and the complete gallery occur near the end of observed Flight data.
 
 ## Known Limitations
 

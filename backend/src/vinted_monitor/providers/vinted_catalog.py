@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -13,10 +14,13 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
+from curl_cffi.const import CurlECode
 from curl_cffi.requests import Session
+from curl_cffi.requests.exceptions import RequestException
 
 from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text, safe_cookie_markers, safe_headers, safe_secret_marker
+from vinted_monitor.core.text import matched_exclusion_terms
 from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult
 from vinted_monitor.providers.catalog_url import build_catalog_api_params
@@ -31,13 +35,14 @@ from vinted_monitor.providers.datadome import (
     human_delay,
     is_datadome_challenge,
 )
+from vinted_monitor.providers.item_head import EarlyFilterBodyCollector, inspect_item_head
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
 NEXT_FLIGHT_RECORD_ID_PATTERN = re.compile(r"^[0-9A-Za-z]+$")
 VINTED_IMAGE_HOST_PATTERN = re.compile(r"^images\d*\.vinted\.net$", re.IGNORECASE)
 VINTED_ITEM_PATH_PATTERN = re.compile(r"^/items/(\d+)(?:-[^/]+)?/?$")
-DETAIL_PARSER_VERSION = "next_flight_v2"
+DETAIL_PARSER_VERSION = "next_flight_v3"
 CSRF_TOKEN_PATTERNS = (
     re.compile(r'"CSRF_TOKEN"\s*:\s*"([^"]+)"'),
     re.compile(r'\\"CSRF_TOKEN\\"\s*:\s*\\"([^"\\]+)\\"'),
@@ -90,6 +95,7 @@ class PreparedCatalogSession:
     vinted_screen: str | None = None
     egress_ip: str | None = None
     egress_country_code: str | None = None
+    egress_validated_at: datetime | None = None
 
 
 @dataclass
@@ -119,6 +125,49 @@ class VintedItemDetailHTTPError(VintedCatalogProviderError):
         self.status_code = status_code
         self.failure_kind = f"detail_http_{status_code}"
         self.retryable = status_code not in {404, 410}
+
+
+class VintedItemEarlyDiscard(Exception):
+    def __init__(self, item_id: str, matched_terms: list[str]) -> None:
+        super().__init__(f"Vinted item {item_id} matched exclusion terms before full detail download")
+        self.item_id = item_id
+        self.matched_terms = matched_terms
+
+
+class VintedDetailDeferred(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class DetailFetchOutcome:
+    position: int
+    candidate: CatalogItemCandidate
+    detail: CatalogItemDetail | None
+    error: Exception | None
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class DetailBatchResult:
+    outcomes: tuple[DetailFetchOutcome, ...]
+    configured_concurrency: int
+    effective_concurrency: int
+    makespan_ms: int
+    summed_duration_ms: int
+    divergent_cookie_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _LaneFetchResult:
+    outcome: DetailFetchOutcome
+    context: PreparedCatalogSession | None
+    events: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _DetailLane:
+    provider: Any
+    events: list[dict[str, Any]]
 
 
 class VintedCatalogRateLimitError(VintedCatalogProviderError):
@@ -211,6 +260,7 @@ class CurlCffiVintedCatalogProvider:
         self._egress_diagnosed = False
         self._catalog_session_context = CatalogSessionContext()
         self._egress_context = EgressContext()
+        self._egress_validated_at: datetime | None = None
         self._last_bootstrap_html = ""
         self._last_item_document_html = ""
         self.prepared_session_refreshed = False
@@ -229,6 +279,7 @@ class CurlCffiVintedCatalogProvider:
                 ip=prepared_session.egress_ip,
                 country_code=_normalize_country_code(prepared_session.egress_country_code),
             )
+            self._egress_validated_at = prepared_session.egress_validated_at
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
         last_error: VintedCatalogProviderError | None = None
@@ -376,9 +427,16 @@ class CurlCffiVintedCatalogProvider:
             vinted_screen=context.screen,
             egress_ip=self._egress_context.ip,
             egress_country_code=self._egress_context.country_code,
+            egress_validated_at=self._egress_validated_at,
         )
 
-    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
+    def fetch_detail(
+        self,
+        candidate: CatalogItemCandidate,
+        *,
+        referer_url: str | None = None,
+        early_filter_terms: tuple[str, ...] = (),
+    ) -> CatalogItemDetail:
         self._ensure_session()
         self._diagnose_egress(attempt=1)
         assert self._session is not None
@@ -403,10 +461,11 @@ class CurlCffiVintedCatalogProvider:
         )
         started_at = time.perf_counter()
         try:
-            response, final_url, redirect_count = self._request_item_detail_response(
+            response, final_url, redirect_count, response_text, early_matched_terms = self._request_item_detail_response(
                 detail_url,
                 candidate.vinted_item_id,
                 headers,
+                early_filter_terms=early_filter_terms,
             )
             refreshed_markers = self._refresh_session_context_from_cookies(
                 cookies_before=cookies_before_request,
@@ -426,6 +485,7 @@ class CurlCffiVintedCatalogProvider:
                 "refreshed_markers": refreshed_markers,
                 "final_url": final_url,
                 "redirect_count": redirect_count,
+                "body_bytes_received": len(response_text.encode("utf-8")),
             }
             if is_cloudflare_challenge(response.status_code, dict(response.headers)):
                 self._emit_event(
@@ -439,7 +499,7 @@ class CurlCffiVintedCatalogProvider:
                     details=response_details,
                 )
                 raise VintedCatalogChallengeError("Cloudflare challenge detected on item detail request")
-            if is_datadome_challenge(response.status_code, dict(response.headers), response.text[:3000]):
+            if is_datadome_challenge(response.status_code, dict(response.headers), response_text[:3000]):
                 self._emit_event(
                     phase="detail_http_request_error",
                     method="GET",
@@ -468,6 +528,20 @@ class CurlCffiVintedCatalogProvider:
                 raise VintedCatalogProviderError(
                     f"Vinted detail request returned non-HTML content for {candidate.vinted_item_id}"
                 )
+            if early_matched_terms:
+                self._emit_event(
+                    phase="detail_early_filter_enforced",
+                    method="GET",
+                    url=detail_url,
+                    status_code=response.status_code,
+                    duration_ms=_elapsed_ms(started_at),
+                    details={
+                        **response_details,
+                        "match_count": len(early_matched_terms),
+                        "head_max_bytes": self.settings.vinted_detail_head_max_bytes,
+                    },
+                )
+                raise VintedItemEarlyDiscard(candidate.vinted_item_id, early_matched_terms)
             self._emit_event(
                 phase="detail_http_request_success",
                 method="GET",
@@ -476,8 +550,9 @@ class CurlCffiVintedCatalogProvider:
                 duration_ms=_elapsed_ms(started_at),
                 details=response_details,
             )
+            parse_started_at = time.perf_counter()
             try:
-                detail = parse_item_detail_html(response.text, candidate)
+                detail = parse_item_detail_html(response_text, candidate)
             except Exception as exc:
                 safe_error = redact_sensitive_text(str(exc))
                 self._emit_event(
@@ -485,13 +560,13 @@ class CurlCffiVintedCatalogProvider:
                     method="GET",
                     url=detail_url,
                     status_code=response.status_code,
-                    duration_ms=_elapsed_ms(started_at),
+                    duration_ms=_elapsed_ms(parse_started_at),
                     level="error",
                     message=safe_error,
                     details={
                         "vinted_item_id": candidate.vinted_item_id,
                         "referer_url": referer_url,
-                        "html_length": len(response.text or ""),
+                        "html_length": len(response_text),
                         "error": safe_error,
                     },
                 )
@@ -503,11 +578,11 @@ class CurlCffiVintedCatalogProvider:
                 method="GET",
                 url=detail_url,
                 status_code=response.status_code,
-                duration_ms=_elapsed_ms(started_at),
+                duration_ms=_elapsed_ms(parse_started_at),
                 details={
                     "vinted_item_id": candidate.vinted_item_id,
                     "referer_url": referer_url,
-                    "html_length": len(response.text or ""),
+                    "html_length": len(response_text),
                     "has_description": bool(detail.description),
                     "description_observed": "description" in detail.observed_fields,
                     "photo_count": len(detail.photos),
@@ -515,10 +590,20 @@ class CurlCffiVintedCatalogProvider:
                     "availability_state": detail.availability_flags.get("state"),
                     "field_sources": detail.field_sources,
                     "missing_fields": detail.raw.get("missing_fields", []),
+                    "request_to_parse_ms": _elapsed_ms(started_at),
                 },
+            )
+            self._emit_early_filter_shadow(
+                candidate,
+                response_text,
+                detail,
+                early_filter_terms=early_filter_terms,
+                detail_url=detail_url,
             )
             return detail
         except (DataDomeChallengeError, VintedCatalogChallengeError):
+            raise
+        except VintedItemEarlyDiscard:
             raise
         except Exception as exc:
             if not isinstance(exc, VintedCatalogProviderError):
@@ -544,33 +629,302 @@ class CurlCffiVintedCatalogProvider:
                 ) from exc
             raise
 
+    def fetch_detail_batch(
+        self,
+        candidates: list[CatalogItemCandidate],
+        *,
+        referer_url: str,
+        early_filter_terms: tuple[str, ...] = (),
+        concurrency: int = 2,
+        canary: bool = False,
+    ) -> DetailBatchResult:
+        if not candidates:
+            return DetailBatchResult((), concurrency, 0, 0, 0, ())
+        self._ensure_session()
+        current_context = self.export_prepared_session(
+            proxy_session_id=self.prepared_session.proxy_session_id if self.prepared_session else None
+        )
+        resolved_concurrency = min(max(concurrency, 1), 2, len(candidates))
+        lanes = [self._create_detail_lane(current_context) for _ in range(resolved_concurrency)]
+        batch_started_at = time.perf_counter()
+        outcomes: list[DetailFetchOutcome] = []
+        divergent_cookie_names: set[str] = set()
+        self._emit_event(
+            phase="detail_batch_started",
+            details={
+                "candidate_count": len(candidates),
+                "configured_concurrency": concurrency,
+                "effective_concurrency": resolved_concurrency,
+                "mode": "canary" if canary else "parallel",
+            },
+        )
+
+        stop_after_wave = False
+        for wave_start in range(0, len(candidates), resolved_concurrency):
+            wave_candidates = candidates[wave_start : wave_start + resolved_concurrency]
+            with ThreadPoolExecutor(max_workers=len(wave_candidates), thread_name_prefix="vinted-detail") as executor:
+                futures = [
+                    executor.submit(
+                        self._fetch_detail_lane,
+                        lane=lanes[offset],
+                        position=wave_start + offset,
+                        candidate=candidate,
+                        referer_url=referer_url,
+                        early_filter_terms=early_filter_terms,
+                    )
+                    for offset, candidate in enumerate(wave_candidates)
+                ]
+                lane_results = [future.result() for future in futures]
+
+            for lane_result in lane_results:
+                for event in lane_result.events:
+                    self._emit_event(**event)
+
+            challenge_result = next(
+                (
+                    result
+                    for result in lane_results
+                    if isinstance(result.outcome.error, (DataDomeChallengeError, VintedCatalogChallengeError))
+                ),
+                None,
+            )
+            if challenge_result is not None:
+                error = challenge_result.outcome.error
+                assert error is not None
+                error.detail_candidate_id = challenge_result.outcome.candidate.vinted_item_id
+                self._close_detail_lanes(lanes)
+                raise error
+
+            observed_contexts = [result.context for result in lane_results if result.context is not None]
+            if observed_contexts:
+                cookie_names = set().union(*(set(context.cookies or {}) for context in observed_contexts))
+                for cookie_name in cookie_names.intersection(SESSION_REFRESH_COOKIE_NAMES):
+                    observed = {(context.cookies or {}).get(cookie_name) for context in observed_contexts}
+                    if len(observed) > 1:
+                        divergent_cookie_names.add(cookie_name)
+            successful_contexts = [
+                result.context
+                for result in lane_results
+                if result.context is not None
+                and (result.outcome.error is None or isinstance(result.outcome.error, VintedItemEarlyDiscard))
+            ]
+            if successful_contexts:
+                current_context = successful_contexts[-1]
+
+            outcomes.extend(result.outcome for result in lane_results)
+            if any(
+                isinstance(result.outcome.error, VintedItemDetailHTTPError)
+                and result.outcome.error.status_code == 429
+                for result in lane_results
+            ):
+                stop_after_wave = True
+                remaining_start = wave_start + len(wave_candidates)
+                for position, candidate in enumerate(candidates[remaining_start:], start=remaining_start):
+                    outcomes.append(
+                        DetailFetchOutcome(
+                            position=position,
+                            candidate=candidate,
+                            detail=None,
+                            error=VintedDetailDeferred("detail_rate_limit_wave_stopped"),
+                            duration_ms=0,
+                        )
+                    )
+                break
+
+        self._close_detail_lanes(lanes)
+        self._adopt_prepared_session(current_context)
+        validation_outcome: str | None = None
+        if canary and not stop_after_wave:
+            self._ensure_session()
+            validation = self._probe_catalog_api_request(referer_url, include_payload=False)
+            validation_outcome = str(validation.get("outcome") or "unknown")
+            if validation_outcome != "accepted_json":
+                self._emit_event(
+                    phase="detail_batch_canary_failed",
+                    level="error",
+                    message="Concurrent detail cookie context failed final catalog validation",
+                    details={
+                        "validation_outcome": validation_outcome,
+                        "divergent_cookie_names": sorted(divergent_cookie_names),
+                    },
+                )
+                raise VintedCatalogSessionContextError(
+                    f"Concurrent detail context validation failed: {validation_outcome}"
+                )
+
+        makespan_ms = _elapsed_ms(batch_started_at)
+        summed_duration_ms = sum(outcome.duration_ms for outcome in outcomes)
+        self._emit_event(
+            phase="detail_batch_finished",
+            duration_ms=makespan_ms,
+            details={
+                "candidate_count": len(candidates),
+                "configured_concurrency": concurrency,
+                "effective_concurrency": resolved_concurrency,
+                "summed_duration_ms": summed_duration_ms,
+                "makespan_ms": makespan_ms,
+                "speedup_ratio": round(summed_duration_ms / makespan_ms, 3) if makespan_ms else None,
+                "divergent_cookie_names": sorted(divergent_cookie_names),
+                "canary_validation_outcome": validation_outcome,
+                "stopped_after_rate_limit": stop_after_wave,
+            },
+        )
+        return DetailBatchResult(
+            outcomes=tuple(sorted(outcomes, key=lambda outcome: outcome.position)),
+            configured_concurrency=concurrency,
+            effective_concurrency=resolved_concurrency,
+            makespan_ms=makespan_ms,
+            summed_duration_ms=summed_duration_ms,
+            divergent_cookie_names=tuple(sorted(divergent_cookie_names)),
+        )
+
+    def _fetch_detail_lane(
+        self,
+        *,
+        lane: _DetailLane,
+        position: int,
+        candidate: CatalogItemCandidate,
+        referer_url: str,
+        early_filter_terms: tuple[str, ...],
+    ) -> _LaneFetchResult:
+        event_start = len(lane.events)
+        started_at = time.perf_counter()
+        detail: CatalogItemDetail | None = None
+        error: Exception | None = None
+        exported_context: PreparedCatalogSession | None = None
+        try:
+            detail = lane.provider.fetch_detail(
+                candidate,
+                referer_url=referer_url,
+                early_filter_terms=early_filter_terms,
+            )
+        except Exception as exc:
+            error = exc
+        try:
+            exported_context = lane.provider.export_prepared_session(
+                proxy_session_id=lane.provider.prepared_session.proxy_session_id
+            )
+        except Exception:
+            exported_context = None
+        return _LaneFetchResult(
+            outcome=DetailFetchOutcome(
+                position=position,
+                candidate=candidate,
+                detail=detail,
+                error=error,
+                duration_ms=_elapsed_ms(started_at),
+            ),
+            context=exported_context,
+            events=tuple(lane.events[event_start:]),
+        )
+
+    def _create_detail_lane(self, context: PreparedCatalogSession) -> _DetailLane:
+        events: list[dict[str, Any]] = []
+        provider = CurlCffiVintedCatalogProvider(
+            settings=self.settings,
+            profile=self.profile,
+            proxy_url=self.proxy_url,
+            timeout_ms=self.timeout_ms,
+            catalog_per_page=self.catalog_per_page,
+            request_retries=0,
+            event_sink=lambda **event: events.append(event),
+            human_delay_min=self.human_delay_min,
+            human_delay_max=self.human_delay_max,
+            session_factory=self.session_factory,
+            proxy_session_marker=self.proxy_session_marker,
+            expected_country_code=self.expected_country_code,
+            locale=self.locale,
+            accept_language=self.accept_language,
+            screen=self.vinted_screen,
+            viewport_size=self.viewport_size,
+            prepared_session=context,
+            require_complete_session_context=self.require_complete_session_context,
+            require_datadome_cookie=self.require_datadome_cookie,
+        )
+        return _DetailLane(provider=provider, events=events)
+
+    def _close_detail_lanes(self, lanes: list[_DetailLane]) -> None:
+        for lane in lanes:
+            event_start = len(lane.events)
+            lane.provider.close()
+            for event in lane.events[event_start:]:
+                self._emit_event(**event)
+
+    def _adopt_prepared_session(self, prepared: PreparedCatalogSession) -> None:
+        self.close()
+        self.prepared_session = prepared
+        self._bootstrapped = True
+        self._catalog_session_context = CatalogSessionContext(
+            csrf_token=prepared.csrf_token,
+            anon_id=prepared.anon_id,
+            access_token_web=prepared.access_token_web,
+            datadome=prepared.datadome or (prepared.cookies or {}).get("datadome"),
+            cf_bm=prepared.cf_bm or (prepared.cookies or {}).get("__cf_bm"),
+            v_udt=prepared.v_udt or (prepared.cookies or {}).get("v_udt"),
+            user_iso_locale=prepared.user_iso_locale,
+            screen=prepared.vinted_screen,
+        )
+        self._egress_context = EgressContext(
+            ip=prepared.egress_ip,
+            country_code=_normalize_country_code(prepared.egress_country_code),
+        )
+        self._egress_validated_at = prepared.egress_validated_at
+        self.prepared_session_refreshed = True
+
     def _request_item_detail_response(
         self,
         detail_url: str,
         item_id: str,
         headers: Mapping[str, str],
-    ) -> tuple[Any, str, int]:
+        *,
+        early_filter_terms: tuple[str, ...] = (),
+    ) -> tuple[Any, str, int, str, list[str]]:
         assert self._session is not None
         current_url = detail_url
         for redirect_count in range(4):
             _validate_item_detail_url(current_url, expected_item_id=item_id)
-            response = self._session.get(
-                current_url,
-                headers=dict(headers),
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
-                allow_redirects=False,
-            )
+            collector: EarlyFilterBodyCollector | None = None
+            if early_filter_terms and self.settings.vinted_detail_early_filter_mode == "enforced":
+                collector = EarlyFilterBodyCollector(
+                    terms=early_filter_terms,
+                    max_bytes=self.settings.vinted_detail_head_max_bytes,
+                    canonical_validator=lambda canonical, base_url=current_url: _canonical_matches_item(
+                        canonical,
+                        base_url=base_url,
+                        item_id=item_id,
+                    ),
+                )
+            request_kwargs = {
+                "headers": dict(headers),
+                "timeout": self.timeout_ms / 1000,
+                "default_headers": False,
+                "allow_redirects": False,
+            }
+            if collector is not None:
+                request_kwargs["content_callback"] = collector
+            try:
+                response = self._session.get(current_url, **request_kwargs)
+            except RequestException as exc:
+                if (
+                    collector is None
+                    or not collector.early_discarded
+                    or exc.code != int(CurlECode.WRITE_ERROR)
+                    or exc.response is None
+                ):
+                    raise
+                response = exc.response
+            response_text = collector.decoded_body() if collector is not None else response.text
+            early_matched_terms = collector.matched_terms if collector is not None else []
             effective_url = str(getattr(response, "url", None) or current_url)
             _validate_item_detail_url(effective_url, expected_item_id=item_id)
             if response.status_code not in {301, 302, 303, 307, 308}:
-                return response, effective_url, redirect_count
+                return response, effective_url, redirect_count, response_text, early_matched_terms
             if is_cloudflare_challenge(response.status_code, dict(response.headers)) or is_datadome_challenge(
                 response.status_code,
                 dict(response.headers),
-                response.text[:3000],
+                response_text[:3000],
             ):
-                return response, effective_url, redirect_count
+                return response, effective_url, redirect_count, response_text, early_matched_terms
             location = _header_value(response.headers, "location")
             if not location:
                 raise VintedCatalogProviderError("Vinted item detail redirect omitted Location")
@@ -578,6 +932,41 @@ class CurlCffiVintedCatalogProvider:
             _validate_item_detail_url(next_url, expected_item_id=item_id)
             current_url = build_item_detail_navigation_url(next_url)
         raise VintedCatalogProviderError("Vinted item detail redirect limit exceeded")
+
+    def _emit_early_filter_shadow(
+        self,
+        candidate: CatalogItemCandidate,
+        response_text: str,
+        detail: CatalogItemDetail,
+        *,
+        early_filter_terms: tuple[str, ...],
+        detail_url: str,
+    ) -> None:
+        if not early_filter_terms or self.settings.vinted_detail_early_filter_mode != "shadow":
+            return
+        snapshot = inspect_item_head(response_text, max_bytes=self.settings.vinted_detail_head_max_bytes)
+        canonical_matches = _canonical_matches_item(
+            snapshot.canonical_url,
+            base_url=detail_url,
+            item_id=candidate.vinted_item_id,
+        )
+        head_matches = matched_exclusion_terms(snapshot.filter_text, early_filter_terms) if canonical_matches else []
+        final_text = " ".join(value for value in (detail.title, detail.description) if value)
+        final_matches = matched_exclusion_terms(final_text, head_matches)
+        self._emit_event(
+            phase="detail_early_filter_shadow",
+            method="GET",
+            url=detail_url,
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "head_complete": snapshot.complete,
+                "canonical_matches": canonical_matches,
+                "head_bytes_observed": snapshot.bytes_observed,
+                "would_discard": bool(head_matches),
+                "match_count": len(head_matches),
+                "equivalent_to_final_title_description": set(head_matches) == set(final_matches),
+            },
+        )
 
     def _request_vinted_response(
         self,
@@ -691,6 +1080,7 @@ class CurlCffiVintedCatalogProvider:
         self.close()
         self._catalog_session_context = CatalogSessionContext()
         self._egress_context = EgressContext()
+        self._egress_validated_at = None
         self._ensure_session()
 
     def _refresh_anonymous_session_in_place(
@@ -1699,6 +2089,24 @@ class CurlCffiVintedCatalogProvider:
     def _diagnose_egress(self, *, attempt: int) -> None:
         if self._egress_diagnosed or not self.settings.egress_diagnostic_url:
             return
+        if _egress_validation_is_fresh(
+            self.prepared_session,
+            ttl_seconds=self.settings.egress_diagnostic_reuse_ttl_seconds,
+        ):
+            self._emit_event(
+                phase="egress_diagnostic_reused",
+                details={
+                    "attempt": attempt,
+                    "proxy_session": self.proxy_session_marker,
+                    "egress_ip": self._egress_context.ip,
+                    "egress_country_code": self._egress_context.country_code,
+                    "validated_at": self._egress_validated_at.isoformat() if self._egress_validated_at else None,
+                    "reuse_ttl_seconds": self.settings.egress_diagnostic_reuse_ttl_seconds,
+                    "cookies_sent": False,
+                },
+            )
+            self._egress_diagnosed = True
+            return
         url = str(self.settings.egress_diagnostic_url)
         proxy_dict = {"https": self.proxy_url, "http": self.proxy_url} if self.proxy_url else None
         diagnostic_session = self.session_factory(
@@ -1731,6 +2139,16 @@ class CurlCffiVintedCatalogProvider:
             )
             payload = response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {}
             self._egress_context = _egress_context_from_payload(payload)
+            observed_country = _normalize_country_code(self._egress_context.country_code)
+            if (
+                response.status_code < 400
+                and self._egress_context.ip
+                and observed_country
+                and (self.expected_country_code is None or observed_country == self.expected_country_code)
+            ):
+                self._egress_validated_at = datetime.now(UTC)
+            else:
+                self._egress_validated_at = None
             details = {
                 "attempt": attempt,
                 "diagnostic_session": "isolated",
@@ -1755,6 +2173,7 @@ class CurlCffiVintedCatalogProvider:
                 details=details,
             )
         except Exception as exc:
+            self._egress_validated_at = None
             self._emit_event(
                 phase="egress_diagnostic_error",
                 method="GET",
@@ -2101,6 +2520,27 @@ def _elapsed_ms(started_at: float) -> int:
     return max(round((time.perf_counter() - started_at) * 1000), 0)
 
 
+def _egress_validation_is_fresh(
+    prepared: PreparedCatalogSession | None,
+    *,
+    ttl_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    if (
+        prepared is None
+        or ttl_seconds <= 0
+        or not prepared.egress_ip
+        or not prepared.egress_country_code
+        or prepared.egress_validated_at is None
+    ):
+        return False
+    validated_at = prepared.egress_validated_at
+    if validated_at.tzinfo is None:
+        validated_at = validated_at.replace(tzinfo=UTC)
+    age_seconds = ((now or datetime.now(UTC)) - validated_at).total_seconds()
+    return 0 <= age_seconds <= ttl_seconds
+
+
 def parse_catalog_api_payload(payload: Mapping[str, Any], base_url: str = "https://www.vinted.es") -> CatalogSearchResult:
     raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
     pagination = payload.get("pagination") if isinstance(payload.get("pagination"), Mapping) else {}
@@ -2184,10 +2624,28 @@ def _validate_item_detail_url(item_url: str, *, expected_item_id: str | None = N
     return parsed
 
 
+def _canonical_matches_item(canonical: str | None, *, base_url: str, item_id: str) -> bool:
+    if not canonical:
+        return False
+    try:
+        _validate_item_detail_url(urljoin(base_url, canonical), expected_item_id=item_id)
+    except ValueError:
+        return False
+    return True
+
+
 def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> CatalogItemDetail:
     product_data = extract_product_json_ld(html, item_id=candidate.vinted_item_id)
-    flight_records = parse_next_flight_records(decode_next_flight_payload(html))
+    flight_payload = decode_next_flight_payload(html)
+    flight_records, flight_record_count = parse_item_flight_records(
+        flight_payload,
+        candidate.vinted_item_id,
+    )
     flight = _extract_item_flight_parts(flight_records, candidate.vinted_item_id)
+    if flight_records and not flight["matched"]:
+        flight_records = parse_next_flight_records(flight_payload)
+        flight_record_count = len(flight_records)
+        flight = _extract_item_flight_parts(flight_records, candidate.vinted_item_id)
     if product_data and not _json_ld_identity_urls(product_data) and not flight["matched"]:
         product_data = {}
     if not product_data and not flight["matched"]:
@@ -2386,7 +2844,8 @@ def parse_item_detail_html(html: str, candidate: CatalogItemCandidate) -> Catalo
         "field_sources": dict(sorted(field_sources.items())),
         "observed_fields": sorted(observed_fields),
         "missing_fields": missing_fields,
-        "flight_record_count": len(flight_records),
+        "flight_record_count": flight_record_count,
+        "flight_decoded_record_count": len(flight_records),
         "flight_sections": flight["sections"],
         "json_ld_present": bool(product_data),
         "validation_warnings": validation_warnings,
@@ -2427,6 +2886,44 @@ def parse_next_flight_records(payload: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
     return records
+
+
+def parse_item_flight_records(payload: str, item_id: str) -> tuple[dict[str, Any], int]:
+    raw_records: dict[str, str] = {}
+    for line in payload.splitlines():
+        record_id, separator, raw_value = line.partition(":")
+        if separator and NEXT_FLIGHT_RECORD_ID_PATTERN.fullmatch(record_id):
+            raw_records[record_id] = raw_value
+    pending = [record_id for record_id, raw_value in raw_records.items() if item_id in raw_value]
+    decoded: dict[str, Any] = {}
+    while pending:
+        record_id = pending.pop()
+        if record_id in decoded or record_id not in raw_records:
+            continue
+        try:
+            value = json.loads(raw_records[record_id])
+        except json.JSONDecodeError:
+            continue
+        decoded[record_id] = value
+        for reference_id in _flight_reference_ids(value):
+            if reference_id not in decoded and reference_id in raw_records:
+                pending.append(reference_id)
+    return decoded, len(raw_records)
+
+
+def _flight_reference_ids(value: Any) -> set[str]:
+    references: set[str] = set()
+    if isinstance(value, str) and value.startswith("$") and value != "$undefined":
+        reference_id = value[1:].split(":", 1)[0]
+        if NEXT_FLIGHT_RECORD_ID_PATTERN.fullmatch(reference_id):
+            references.add(reference_id)
+    elif isinstance(value, Mapping):
+        for child in value.values():
+            references.update(_flight_reference_ids(child))
+    elif isinstance(value, list):
+        for child in value:
+            references.update(_flight_reference_ids(child))
+    return references
 
 
 def _extract_item_flight_parts(records: Mapping[str, Any], item_id: str) -> dict[str, Any]:

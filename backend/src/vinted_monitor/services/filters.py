@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
+from vinted_monitor.core.text import matched_exclusion_terms, normalize_search_text
 from vinted_monitor.db.models import Item
 
 MONITOR_FILTER_NAME = "Terminos excluyentes"
@@ -42,6 +42,13 @@ def filter_snapshot_term_count(filter_snapshot: list[dict[str, Any]]) -> int:
     return sum(len(rule.get("definition", {}).get("blacklist_terms", [])) for rule in filter_snapshot)
 
 
+def filter_snapshot_terms(filter_snapshot: list[dict[str, Any]]) -> tuple[str, ...]:
+    terms: list[str] = []
+    for rule in filter_snapshot:
+        terms.extend(str(term) for term in rule.get("definition", {}).get("blacklist_terms", []) if str(term))
+    return tuple(dict.fromkeys(terms))
+
+
 def filter_hash(filter_snapshot: list[dict[str, Any]]) -> str:
     serialized = json.dumps(filter_snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -52,12 +59,10 @@ def evaluate_exclusion_filters(item: Item, filter_snapshot: list[dict[str, Any]]
         return FilterDecision(status="passed_without_filters", matched_terms=[])
 
     text = _item_filter_text(item)
-    matched_terms: list[str] = []
+    terms: list[str] = []
     for rule in filter_snapshot:
-        for term in rule["definition"].get("blacklist_terms", []):
-            normalized_term = _normalize_text(term)
-            if normalized_term and normalized_term in text:
-                matched_terms.append(term)
+        terms.extend(rule["definition"].get("blacklist_terms", []))
+    matched_terms = matched_exclusion_terms(text, terms)
     if matched_terms:
         return FilterDecision(status="discarded", matched_terms=list(dict.fromkeys(matched_terms)))
     return FilterDecision(status="passed", matched_terms=[])
@@ -76,9 +81,4 @@ def _item_filter_text(item: Item) -> str:
         item.category,
         " ".join(item.seller_badges or []),
     ]
-    return _normalize_text(" ".join(value for value in values if value))
-
-
-def _normalize_text(value: str) -> str:
-    decomposed = unicodedata.normalize("NFD", value.casefold())
-    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+    return normalize_search_text(" ".join(value for value in values if value))

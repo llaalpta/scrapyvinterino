@@ -20,6 +20,9 @@ from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
+    CurlCffiVintedCatalogProvider,
+    DetailBatchResult,
+    DetailFetchOutcome,
     PreparedCatalogSession,
     VintedItemDetailHTTPError,
     extract_vinted_item_id,
@@ -310,6 +313,56 @@ class FakeDiscardingDetailProvider(FakeSuccessProvider):
         )
 
 
+class FakeConcurrentProvider(CurlCffiVintedCatalogProvider):
+    prepared_session_refreshed = False
+
+    def __init__(self) -> None:
+        self.settings = Settings(
+            _env_file=None,
+            vinted_detail_fetch_mode="parallel",
+            vinted_detail_concurrency=2,
+        )
+        self.event_sink = None
+        self.batch_calls: list[list[str]] = []
+
+    def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+        return FakeSuccessProvider(item_count=2, prefix="pytest-run-item-concurrent").search(source, page)
+
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
+        raise AssertionError("parallel run must consume prefetched detail outcomes")
+
+    def fetch_detail_batch(
+        self,
+        candidates: list[CatalogItemCandidate],
+        **_kwargs,
+    ) -> DetailBatchResult:
+        self.batch_calls.append([candidate.vinted_item_id for candidate in candidates])
+        outcomes = tuple(
+            DetailFetchOutcome(
+                position=position,
+                candidate=candidate,
+                detail=CatalogItemDetail(
+                    vinted_item_id=candidate.vinted_item_id,
+                    description=f"Detalle {candidate.vinted_item_id}",
+                    color="Azul",
+                    category="Polos",
+                    photos=[f"https://images.example.test/{candidate.vinted_item_id}-detail.webp"],
+                ),
+                error=None,
+                duration_ms=20,
+            )
+            for position, candidate in enumerate(candidates)
+        )
+        return DetailBatchResult(
+            outcomes=outcomes,
+            configured_concurrency=2,
+            effective_concurrency=2,
+            makespan_ms=25,
+            summed_duration_ms=40,
+            divergent_cookie_names=("_vinted_fr_session",),
+        )
+
+
 class FakeFailingDetailProvider(FakeSuccessProvider):
     settings = SimpleNamespace(vinted_detail_max_candidates_per_run=5, vinted_detail_concurrency=1)
 
@@ -516,6 +569,7 @@ def _create_ready_vinted_session(
             vinted_screen=proxy.vinted_screen,
             egress_ip="203.0.113.10",
             egress_country_code=proxy.country_code,
+            egress_validated_at=datetime.now(UTC),
         ),
         settings=Settings(),
     )
@@ -619,6 +673,37 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
         assert "redis_candidate_state_updated" in phases
         assert next(event for event in events if event.phase == "catalog_candidates_received").details["candidate_count"] == 2
         assert next(event for event in events if event.phase == "redis_candidate_state_updated").details["marked_seen_count"] == 2
+
+
+def test_monitor_run_parallel_mode_consumes_ordered_prefetched_details(source_id: int) -> None:
+    cache = FakeSeenCache()
+    provider = FakeConcurrentProvider()
+
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=provider,
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+        opportunity_count = db.scalar(
+            select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id)
+        )
+
+        assert run.status == SUCCESS
+        assert run.opportunities_created == 2
+        assert opportunity_count == 2
+        assert provider.batch_calls == [
+            ["pytest-run-item-concurrent-0", "pytest-run-item-concurrent-1"]
+        ]
+        assert run.runtime_metadata["detail_fetch_mode"] == "parallel"
+        assert run.runtime_metadata["detail_concurrency_effective"] == 2
+        assert run.runtime_metadata["detail_batch_makespan_ms"] == 25
+        assert sorted(cache.marked_seen) == [
+            "pytest-run-item-concurrent-0",
+            "pytest-run-item-concurrent-1",
+        ]
 
 
 def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
@@ -1052,6 +1137,7 @@ def test_archiving_monitor_invalidates_and_purges_prepared_sessions_when_queue_i
             assert persisted is not None
             assert persisted.status == "invalid"
             assert persisted.invalidated_at is not None
+            assert persisted.egress_validated_at is None
             assert persisted.failure_count == 1
             assert persisted.last_error == "Monitor archived"
             assert not any(prepared_context_flags(prepared_context_from_session(persisted, Settings())).values())

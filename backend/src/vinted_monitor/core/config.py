@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,9 @@ class Settings(BaseSettings):
     vinted_fast_catalog_per_page: int = 5
     vinted_detail_max_candidates_per_run: int = 5
     vinted_detail_concurrency: int = Field(default=1, ge=1)
+    vinted_detail_fetch_mode: Literal["serial", "canary", "parallel"] = "serial"
+    vinted_detail_early_filter_mode: Literal["off", "shadow", "enforced"] = "shadow"
+    vinted_detail_head_max_bytes: int = Field(default=131072, ge=16384, le=1048576)
     vinted_detail_required_fields: str = "title,description,brand,size,status,price_amount,currency,photos"
     vinted_detail_max_attempts: int = Field(default=3, ge=1, le=10)
     vinted_detail_retry_backoffs_seconds: tuple[int, ...] = (30, 120)
@@ -62,6 +66,7 @@ class Settings(BaseSettings):
     datadome_challenge_penalty_multiplier: int = 2
     proxy_sticky_username_template: str = "{username}-session-{session_id}"
     egress_diagnostic_url: str | None = "https://ipwho.is/"
+    egress_diagnostic_reuse_ttl_seconds: int = Field(default=300, ge=0, le=3600)
 
     scheduler_enabled: bool = False
     scheduler_max_concurrent_runs: int = 2

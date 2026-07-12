@@ -79,7 +79,9 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Redis seen state is marked only after a terminal outcome; pending retries retain their sanitized candidate even if the item leaves the catalog window.
 - A candidate rehydrated from the detail retry queue retains its public seller login and country for later item/opportunity persistence.
 - Processing locks have an owner token. Expiry allows retry, while a stale worker cannot release a lock reacquired by another worker.
-- Detail requests are sequential inside one Vinted session so response cookie rotation cannot race.
+- Detail requests remain sequential by default. Experimental concurrency is limited to two isolated persistent HTTP lanes cloned from the same prepared context and sticky proxy; PostgreSQL, Redis and persisted events stay on the caller thread.
+- Concurrent scheduling uses strict waves, preserves retry-first input order and does not persist a cookie branch until all results are joined. The selected context is the lane of the last logical successful request, never completion order, and canary mode validates it against the catalog before commit.
+- Blacklist head inspection is observational by default. It may only terminate a response when the canonical item id matches, title/description already prove exclusion, and the explicit enforced mode is enabled; a partial no-match never passes an item.
 - A run is reported successful only after its PostgreSQL effects and Redis candidate transitions are durable. Recovery paths must not leave contradictory terminal events.
 - Concurrent monitors may share one global `Item` row without either run failing; each monitor still owns its opportunity independently.
 
@@ -106,4 +108,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Confirm a failed source run does not stop API, PWA, worker, or other sources.
 - Confirm no cookies, tokens, checkout payloads, addresses, payment data, or pickup point data are persisted.
 - Confirm detail fetches are bounded by configurable limits and concurrency.
+- Confirm configured concurrency does not activate while detail fetch mode is `serial`, and that canary mode never exceeds two in-flight documents.
+- Confirm a five-item wave returns decisions in retry/catalog order even when HTTP completion order differs, and that SQL/Redis/event writes occur only on the caller thread.
+- Confirm early-filter shadow mode never changes persistence, while enforced early discard produces the same terminal Redis/filter result as a complete matching detail.
 - Confirm overlapping monitors cannot duplicate alerts within one monitor but can independently alert on the same catalog item.

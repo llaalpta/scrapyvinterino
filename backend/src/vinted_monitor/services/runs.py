@@ -19,10 +19,13 @@ from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDe
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
+    DetailFetchOutcome,
     VintedCatalogChallengeError,
     VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
+    VintedDetailDeferred,
+    VintedItemEarlyDiscard,
     build_item_detail_navigation_url,
     extract_vinted_item_id,
     parse_catalog_api_payload,
@@ -30,6 +33,7 @@ from vinted_monitor.providers.vinted_catalog import (
 from vinted_monitor.services.filters import (
     evaluate_exclusion_filters,
     filter_snapshot_term_count,
+    filter_snapshot_terms,
     filter_term_count,
     monitor_filter_snapshot,
 )
@@ -2521,6 +2525,8 @@ def _evaluate_monitor_candidates(
     opportunities_created = 0
     terminal_ids: list[str] = []
     retry_records: list[DetailRetryRecord] = []
+    filter_duration_total_ms = 0.0
+    persistence_duration_total_ms = 0.0
     resolved_detail_limit = (
         _detail_candidate_limit(run, provider) if max_detail_candidates is None else max(max_detail_candidates, 0)
     )
@@ -2533,6 +2539,37 @@ def _evaluate_monitor_candidates(
     required_fields = _detail_required_fields(provider_settings, settings)
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     detail_attempts = 0
+    early_filter_terms = filter_snapshot_terms(filters)
+    prefetched_outcomes: dict[str, DetailFetchOutcome] = {}
+    detail_fetch_mode = str(getattr(provider_settings, "vinted_detail_fetch_mode", "serial"))
+    if (
+        isinstance(provider, CurlCffiVintedCatalogProvider)
+        and detail_fetch_mode in {"canary", "parallel"}
+        and resolved_detail_limit > 0
+    ):
+        batch_candidates = [work_item.candidate for work_item in work_items[:resolved_detail_limit]]
+        batch_result = provider.fetch_detail_batch(
+            batch_candidates,
+            referer_url=source.url,
+            early_filter_terms=early_filter_terms,
+            concurrency=int(getattr(provider_settings, "vinted_detail_concurrency", 1)),
+            canary=detail_fetch_mode == "canary",
+        )
+        prefetched_outcomes = {
+            outcome.candidate.vinted_item_id: outcome for outcome in batch_result.outcomes
+        }
+        _merge_run_metadata(
+            run,
+            {
+                "detail_fetch_mode": detail_fetch_mode,
+                "detail_concurrency_configured": batch_result.configured_concurrency,
+                "detail_concurrency_effective": batch_result.effective_concurrency,
+                "detail_batch_makespan_ms": batch_result.makespan_ms,
+                "detail_batch_summed_duration_ms": batch_result.summed_duration_ms,
+                "detail_cookie_divergence_names": list(batch_result.divergent_cookie_names),
+            },
+        )
+        db.flush()
 
     for work_item in work_items:
         candidate = work_item.candidate
@@ -2564,6 +2601,7 @@ def _evaluate_monitor_candidates(
 
         if detail_attempts < resolved_detail_limit:
             detail_attempts += 1
+            prefetched_outcome = prefetched_outcomes.get(candidate.vinted_item_id)
             record_run_event(
                 db,
                 run_id=run.id,
@@ -2584,7 +2622,7 @@ def _evaluate_monitor_candidates(
                 db,
                 run_id=run.id,
                 source_id=source.id,
-                phase="detail_fetch_start",
+                phase="detail_fetch_joined" if prefetched_outcome is not None else "detail_fetch_start",
                 method="GET",
                 url=candidate.url,
                 proxy_profile_id=proxy_profile_id,
@@ -2595,11 +2633,26 @@ def _evaluate_monitor_candidates(
                     "attempt": attempt_number,
                     "referer_url": source.url,
                     "origin": work_item.origin,
+                    "prefetched": prefetched_outcome is not None,
                 },
             )
             detail_started_at = time.perf_counter()
+            detail_duration_ms = prefetched_outcome.duration_ms if prefetched_outcome is not None else None
             try:
-                detail = provider.fetch_detail(candidate, referer_url=source.url)
+                if prefetched_outcome is not None:
+                    if prefetched_outcome.error is not None:
+                        raise prefetched_outcome.error
+                    detail = prefetched_outcome.detail
+                    if detail is None:
+                        raise ValueError("Prefetched detail outcome omitted both detail and error")
+                elif isinstance(provider, CurlCffiVintedCatalogProvider):
+                    detail = provider.fetch_detail(
+                        candidate,
+                        referer_url=source.url,
+                        early_filter_terms=early_filter_terms,
+                    )
+                else:
+                    detail = provider.fetch_detail(candidate, referer_url=source.url)
                 if detail.vinted_item_id != candidate.vinted_item_id:
                     raise ValueError(
                         f"Detail item id {detail.vinted_item_id} does not match requested item {candidate.vinted_item_id}"
@@ -2613,7 +2666,9 @@ def _evaluate_monitor_candidates(
                     phase="detail_fetch_success",
                     method="GET",
                     url=candidate.url,
-                    duration_ms=_elapsed_ms(detail_started_at),
+                    duration_ms=(
+                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                    ),
                     proxy_profile_id=proxy_profile_id,
                     user_agent=None,
                     auth_mode="public_anonymous",
@@ -2649,6 +2704,55 @@ def _evaluate_monitor_candidates(
                             "terminal": True,
                         },
                     )
+            except VintedDetailDeferred as exc:
+                pending += 1
+                evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
+                detail_error = str(exc)
+                retry_records.append(
+                    DetailRetryRecord(
+                        candidate=candidate,
+                        attempt_count=work_item.attempt_count,
+                        next_attempt_at=datetime.now(UTC),
+                        failure_kind=str(exc),
+                    )
+                )
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_skipped",
+                    level="warning",
+                    url=candidate.url,
+                    proxy_profile_id=proxy_profile_id,
+                    message="Detail deferred because a concurrent wave was rate limited",
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt_count": work_item.attempt_count,
+                        "terminal": False,
+                        "reason": str(exc),
+                    },
+                )
+            except VintedItemEarlyDiscard as exc:
+                evaluation_status = SESSION_ITEM_DISCARDED
+                matched_terms = exc.matched_terms
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_early_discard",
+                    method="GET",
+                    url=candidate.url,
+                    duration_ms=(
+                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                    ),
+                    proxy_profile_id=proxy_profile_id,
+                    auth_mode="public_anonymous",
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt": attempt_number,
+                        "match_count": len(matched_terms),
+                    },
+                )
             except (DataDomeChallengeError, VintedCatalogChallengeError) as exc:
                 exc.detail_candidate_id = candidate.vinted_item_id
                 challenge_kind = (
@@ -2661,7 +2765,9 @@ def _evaluate_monitor_candidates(
                     phase="detail_fetch_error",
                     method="GET",
                     url=candidate.url,
-                    duration_ms=_elapsed_ms(detail_started_at),
+                    duration_ms=(
+                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                    ),
                     level="error",
                     proxy_profile_id=proxy_profile_id,
                     user_agent=None,
@@ -2702,7 +2808,9 @@ def _evaluate_monitor_candidates(
                     phase="detail_fetch_error",
                     method="GET",
                     url=candidate.url,
-                    duration_ms=_elapsed_ms(detail_started_at),
+                    duration_ms=(
+                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                    ),
                     level="error",
                     proxy_profile_id=proxy_profile_id,
                     user_agent=None,
@@ -2779,8 +2887,12 @@ def _evaluate_monitor_candidates(
                 },
             )
 
+        filter_duration_ms = 0.0
         if detail is not None and candidate.vinted_item_id not in terminal_ids and evaluation_status == SESSION_ITEM_PASSED:
+            filter_started_at = time.perf_counter_ns()
             decision = evaluate_exclusion_filters(transient_item, filters)
+            filter_duration_ms = round((time.perf_counter_ns() - filter_started_at) / 1_000_000, 3)
+            filter_duration_total_ms += filter_duration_ms
             evaluation_status = decision.status
             matched_terms = decision.matched_terms
 
@@ -2797,6 +2909,7 @@ def _evaluate_monitor_candidates(
                 "evaluation_status": evaluation_status,
                 "matched_terms": matched_terms,
                 "detail_error": detail_error,
+                "filter_duration_ms": filter_duration_ms,
             },
         )
 
@@ -2863,6 +2976,7 @@ def _evaluate_monitor_candidates(
             },
         )
 
+        persistence_started_at = time.perf_counter_ns()
         existing_item_id = db.scalar(select(Item.id).where(Item.vinted_item_id == candidate.vinted_item_id))
         item = get_or_persist_catalog_item(db, candidate)
         record_run_event(
@@ -2913,7 +3027,30 @@ def _evaluate_monitor_candidates(
         opportunities_created += 1 if created else 0
         passed += 1
         terminal_ids.append(candidate.vinted_item_id)
+        persistence_duration_ms = round((time.perf_counter_ns() - persistence_started_at) / 1_000_000, 3)
+        persistence_duration_total_ms += persistence_duration_ms
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="candidate_persistence_finished",
+            url=candidate.url,
+            proxy_profile_id=proxy_profile_id,
+            details={
+                "vinted_item_id": candidate.vinted_item_id,
+                "duration_ms": persistence_duration_ms,
+                "opportunity_created": created,
+            },
+        )
 
+    _merge_run_metadata(
+        run,
+        {
+            "detail_fetch_mode": detail_fetch_mode,
+            "filter_duration_total_ms": round(filter_duration_total_ms, 3),
+            "persistence_duration_total_ms": round(persistence_duration_total_ms, 3),
+        },
+    )
     return MonitorEvaluationResult(
         passed=passed,
         discarded=discarded,

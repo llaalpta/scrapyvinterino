@@ -164,6 +164,7 @@ class VintedSession(Base):
     vinted_screen: Mapped[str] = mapped_column(String(40), default="catalog")
     egress_ip: Mapped[str | None] = mapped_column(String(80))
     egress_country_code: Mapped[str | None] = mapped_column(String(2))
+    egress_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_encrypted: Mapped[str] = mapped_column(Text)
     context_fingerprint: Mapped[str] = mapped_column(String(40))
     request_count: Mapped[int] = mapped_column(Integer, default=0)

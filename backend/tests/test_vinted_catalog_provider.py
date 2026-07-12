@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -7,6 +9,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from curl_cffi.curl import CURL_WRITEFUNC_ERROR
+from curl_cffi.requests.exceptions import RequestException
 
 from vinted_monitor.core.config import Settings
 from vinted_monitor.providers import vinted_catalog as catalog_provider
@@ -26,10 +30,13 @@ from vinted_monitor.providers.datadome import (
 from vinted_monitor.providers.ephemeral_http import CHROME120_ACCEPT_ENCODING, CHROME120_SEC_CH_UA, CHROME120_UA
 from vinted_monitor.providers.vinted_catalog import (
     CurlCffiVintedCatalogProvider,
+    PreparedCatalogSession,
     VintedCatalogChallengeError,
     VintedCatalogProviderError,
     VintedCatalogRateLimitError,
+    VintedDetailDeferred,
     VintedItemDetailHTTPError,
+    VintedItemEarlyDiscard,
     build_catalog_api_params,
     build_item_detail_navigation_url,
     decode_next_flight_payload,
@@ -76,7 +83,17 @@ class FakeCurlSession:
         self.cookies: dict[str, str] = {}
         self.closed = False
 
-    def get(self, url, *, params=None, headers=None, timeout=None, default_headers=None, allow_redirects=None):
+    def get(
+        self,
+        url,
+        *,
+        params=None,
+        headers=None,
+        timeout=None,
+        default_headers=None,
+        allow_redirects=None,
+        content_callback=None,
+    ):
         call = {
             "method": "GET",
             "url": url,
@@ -93,6 +110,11 @@ class FakeCurlSession:
         response = self.handler(call)
         response.url = response.url or url
         self._store_response_cookies(response)
+        if content_callback is not None:
+            encoded = response.text.encode("utf-8")
+            for offset in range(0, len(encoded), 17):
+                if content_callback(encoded[offset : offset + 17]) == CURL_WRITEFUNC_ERROR:
+                    raise RequestException("expected callback abort", 23, response)
         return response
 
     def post(self, url, *, data=None, headers=None, timeout=None, default_headers=None):
@@ -1752,7 +1774,7 @@ def test_parse_item_detail_html_extracts_item_anchored_flight_detail() -> None:
     assert detail.field_sources["description"] == "flight.description"
     assert detail.field_sources["photos"] == "flight.rich_item"
     assert {"description", "photos", "shipping_price_amount"}.issubset(detail.observed_fields)
-    assert detail.raw["parser_version"] == "next_flight_v2"
+    assert detail.raw["parser_version"] == "next_flight_v3"
     assert detail.raw["flight_sections"] == ["plugins", "pricing", "rich_item", "shipping_details"]
     assert detail.raw["missing_fields"] == []
     assert detail.raw["validation_warnings"] == []
@@ -2171,6 +2193,268 @@ def test_parse_item_detail_html_uses_later_matching_json_ld_product() -> None:
     assert detail.description == "Descripcion objetivo"
     assert detail.price_amount == Decimal("2.50")
     assert detail.currency == "EUR"
+
+
+def _prepared_detail_context() -> PreparedCatalogSession:
+    now = datetime.now(UTC)
+    return PreparedCatalogSession(
+        session_id=77,
+        proxy_session_id="sticky-test",
+        cookies={
+            "datadome": "dd-test",
+            "__cf_bm": "cf-test",
+            "access_token_web": "access-test",
+            "v_udt": "udt-test",
+        },
+        csrf_token="csrf-test",
+        anon_id="anon-test",
+        access_token_web="access-test",
+        datadome="dd-test",
+        cf_bm="cf-test",
+        v_udt="udt-test",
+        user_iso_locale="es-ES",
+        vinted_screen="catalog",
+        egress_ip="198.51.100.20",
+        egress_country_code="ES",
+        egress_validated_at=now,
+    )
+
+
+def test_curl_provider_reuses_fresh_prepared_egress_without_http_probe() -> None:
+    calls: list[dict] = []
+    events: list[dict] = []
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        prepared_session=_prepared_detail_context(),
+        session_factory=fake_session_factory(lambda _call: FakeResponse(500), calls),
+        event_sink=lambda **event: events.append(event),
+    )
+
+    provider._ensure_session()
+    provider._diagnose_egress(attempt=1)
+
+    assert calls == []
+    assert [event["phase"] for event in events][-1] == "egress_diagnostic_reused"
+
+
+def test_curl_provider_enforced_head_filter_aborts_matching_body() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    body = (
+        "<html><head>"
+        f'<link rel="canonical" href="{candidate.url}">'
+        "<title>Articulo prohibido</title>"
+        '<meta name="description" content="Descripcion normal">'
+        "</head><body>" + ("x" * 2000) + "</body></html>"
+    )
+    calls: list[dict] = []
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(
+            egress_diagnostic_url=None,
+            vinted_detail_early_filter_mode="enforced",
+        ),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(200, text=body, headers={"content-type": "text/html"}),
+            calls,
+        ),
+    )
+
+    with pytest.raises(VintedItemEarlyDiscard) as captured:
+        provider.fetch_detail(candidate, early_filter_terms=("prohibido",))
+
+    assert captured.value.matched_terms == ["prohibido"]
+    assert len(calls) == 1
+
+
+def test_detail_batch_uses_two_lanes_but_replays_events_on_caller_thread() -> None:
+    base = map_catalog_item(load_fixture()["items"][0])
+    candidates = [
+        replace(
+            base,
+            vinted_item_id=str(1000000100 + offset),
+            title=f"Articulo {offset}",
+            url=f"https://www.vinted.es/items/{1000000100 + offset}-articulo-{offset}",
+        )
+        for offset in range(3)
+    ]
+    candidates_by_id = {candidate.vinted_item_id: candidate for candidate in candidates}
+    calls: list[dict] = []
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def handler(call: dict) -> FakeResponse:
+        nonlocal active, max_active
+        if urlparse(call["url"]).path == "/api/v2/catalog/items":
+            return FakeResponse(
+                200,
+                json_data={"items": [], "pagination": {}},
+                headers={"content-type": "application/json"},
+            )
+        item_id = extract_vinted_item_id(call["url"])
+        assert item_id is not None
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.04 if item_id == candidates[0].vinted_item_id else 0.01)
+        with lock:
+            active -= 1
+        candidate = candidates_by_id[item_id]
+        product = {
+            "@type": "Product",
+            "name": candidate.title,
+            "description": "Detalle concurrente",
+            "brand": {"name": candidate.brand},
+            "image": ["https://images1.vinted.net/t/detail/f800/concurrent.webp?s=signed"],
+            "offers": {
+                "url": candidate.url,
+                "price": str(candidate.price_amount),
+                "priceCurrency": candidate.currency,
+                "availability": "https://schema.org/InStock",
+            },
+        }
+        html = f'<script type="application/ld+json">{json.dumps(product)}</script>'
+        return FakeResponse(
+            200,
+            text=html,
+            headers={
+                "content-type": "text/html",
+                "set-cookie": f"_vinted_fr_session=branch-{item_id}; Path=/",
+            },
+        )
+
+    caller_thread = threading.get_ident()
+    event_threads: list[int] = []
+    event_phases: list[str] = []
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=_prepared_detail_context(),
+        session_factory=fake_session_factory(handler, calls),
+        event_sink=lambda **event: (
+            event_threads.append(threading.get_ident()),
+            event_phases.append(event["phase"]),
+        ),
+    )
+
+    result = provider.fetch_detail_batch(
+        candidates,
+        referer_url=source().url,
+        concurrency=2,
+        canary=True,
+    )
+
+    assert [outcome.candidate.vinted_item_id for outcome in result.outcomes] == [
+        candidate.vinted_item_id for candidate in candidates
+    ]
+    assert all(outcome.detail is not None and outcome.error is None for outcome in result.outcomes)
+    assert result.effective_concurrency == 2
+    assert max_active == 2
+    assert "_vinted_fr_session" in result.divergent_cookie_names
+    assert event_threads and set(event_threads) == {caller_thread}
+    assert "catalog_api_probe_success" in event_phases
+    assert "detail_batch_finished" in event_phases
+
+
+def test_detail_batch_aborts_all_lanes_on_challenge() -> None:
+    base = map_catalog_item(load_fixture()["items"][0])
+    candidates = [
+        replace(
+            base,
+            vinted_item_id=str(1000000200 + offset),
+            url=f"https://www.vinted.es/items/{1000000200 + offset}-challenge-{offset}",
+        )
+        for offset in range(2)
+    ]
+
+    def handler(call: dict) -> FakeResponse:
+        item_id = extract_vinted_item_id(call["url"])
+        if item_id == candidates[0].vinted_item_id:
+            return FakeResponse(
+                403,
+                text="challenge",
+                headers={"content-type": "text/html", "cf-mitigated": "challenge"},
+            )
+        candidate = candidates[1]
+        product = {
+            "@type": "Product",
+            "name": candidate.title,
+            "description": "Detalle",
+            "image": ["https://images1.vinted.net/t/detail/f800/challenge.webp?s=signed"],
+            "offers": {"url": candidate.url, "price": "2.50", "priceCurrency": "EUR"},
+        }
+        return FakeResponse(
+            200,
+            text=f'<script type="application/ld+json">{json.dumps(product)}</script>',
+            headers={"content-type": "text/html"},
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=_prepared_detail_context(),
+        session_factory=fake_session_factory(handler, []),
+    )
+
+    with pytest.raises(VintedCatalogChallengeError) as captured:
+        provider.fetch_detail_batch(candidates, referer_url=source().url, concurrency=2)
+
+    assert captured.value.detail_candidate_id == candidates[0].vinted_item_id
+
+
+def test_detail_batch_stops_new_waves_after_429_without_consuming_deferred_attempt() -> None:
+    base = map_catalog_item(load_fixture()["items"][0])
+    candidates = [
+        replace(
+            base,
+            vinted_item_id=str(1000000300 + offset),
+            url=f"https://www.vinted.es/items/{1000000300 + offset}-rate-{offset}",
+        )
+        for offset in range(3)
+    ]
+    requested_ids: list[str] = []
+
+    def handler(call: dict) -> FakeResponse:
+        item_id = extract_vinted_item_id(call["url"])
+        assert item_id is not None
+        requested_ids.append(item_id)
+        if item_id == candidates[0].vinted_item_id:
+            return FakeResponse(429, text="rate limited", headers={"content-type": "text/html"})
+        candidate = next(candidate for candidate in candidates if candidate.vinted_item_id == item_id)
+        product = {
+            "@type": "Product",
+            "name": candidate.title,
+            "description": "Detalle",
+            "image": ["https://images1.vinted.net/t/detail/f800/rate.webp?s=signed"],
+            "offers": {"url": candidate.url, "price": "2.50", "priceCurrency": "EUR"},
+        }
+        return FakeResponse(
+            200,
+            text=f'<script type="application/ld+json">{json.dumps(product)}</script>',
+            headers={"content-type": "text/html"},
+        )
+
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        prepared_session=_prepared_detail_context(),
+        session_factory=fake_session_factory(handler, []),
+    )
+
+    result = provider.fetch_detail_batch(candidates, referer_url=source().url, concurrency=2)
+
+    assert set(requested_ids) == {candidates[0].vinted_item_id, candidates[1].vinted_item_id}
+    assert isinstance(result.outcomes[0].error, VintedItemDetailHTTPError)
+    assert result.outcomes[1].detail is not None
+    assert isinstance(result.outcomes[2].error, VintedDetailDeferred)
+    assert result.outcomes[2].duration_ms == 0
+
+
+def test_item_flight_parser_skips_unrelated_large_record() -> None:
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    records = load_detail_fixture()["records"]
+    records["zz"] = ["$", "$Lunrelated", None, {"payload": "x" * 100_000, "itemId": 9999999999}]
+
+    detail = parse_item_detail_html(build_item_detail_flight_html(records=records), candidate)
+
+    assert detail.raw["flight_decoded_record_count"] < detail.raw["flight_record_count"]
+    assert detail.shipping_price_amount == Decimal("1.75")
 
 
 def test_parse_item_detail_html_rejects_document_without_detail_data() -> None:

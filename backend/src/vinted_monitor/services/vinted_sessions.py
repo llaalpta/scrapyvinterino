@@ -56,6 +56,7 @@ class VintedSessionSummary:
     vinted_screen: str
     egress_ip: str | None
     egress_country_code: str | None
+    egress_validated_at: datetime | None
     proxy_session: dict[str, Any] | None
     request_count: int
     max_requests: int
@@ -174,6 +175,7 @@ def save_prepared_vinted_session(
         vinted_screen=proxy_profile.vinted_screen,
         egress_ip=context.egress_ip,
         egress_country_code=context.egress_country_code,
+        egress_validated_at=context.egress_validated_at,
         context_encrypted=encrypt_text(json.dumps(context_payload, sort_keys=True, separators=(",", ":")), settings.app_secret_key),
         context_fingerprint=fingerprint_text(json.dumps(context_payload, sort_keys=True, separators=(",", ":"))),
         request_count=0,
@@ -210,6 +212,7 @@ def mark_vinted_session_invalid(
         session.failure_count = (session.failure_count or 0) + 1
     session.status = INVALID
     session.invalidated_at = datetime.now(UTC)
+    session.egress_validated_at = None
     session.last_error = redact_sensitive_text(reason)
     session.context_encrypted = encrypt_text("{}", (settings or get_settings()).app_secret_key)
     db.flush()
@@ -253,6 +256,7 @@ def update_vinted_session_context(
     session.context_fingerprint = fingerprint_text(context_json)
     session.egress_ip = context.egress_ip
     session.egress_country_code = context.egress_country_code
+    session.egress_validated_at = context.egress_validated_at
     session.status = READY if not missing else INCOMPLETE
     session.prepared_at = now
     session.expires_at = now + timedelta(minutes=settings.vinted_session_ttl_minutes)
@@ -300,6 +304,7 @@ def summarize_vinted_session(session: VintedSession, settings: Settings | None =
         vinted_screen=session.vinted_screen,
         egress_ip=session.egress_ip,
         egress_country_code=session.egress_country_code,
+        egress_validated_at=session.egress_validated_at,
         proxy_session=safe_secret_marker("proxy_sticky_session_id", session.proxy_session_id, kind="proxy_session"),
         request_count=session.request_count,
         max_requests=session.max_requests,
@@ -335,6 +340,7 @@ def prepared_context_from_session(session: VintedSession, settings: Settings) ->
         vinted_screen=_optional_payload_string(payload.get("vinted_screen")),
         egress_ip=session.egress_ip,
         egress_country_code=session.egress_country_code,
+        egress_validated_at=session.egress_validated_at,
     )
 
 
