@@ -42,14 +42,12 @@ export function DashboardApp() {
           monitorRunsBySource={dashboard.monitorRunsBySource}
           monitorStatsBySource={dashboard.monitorStatsBySource}
           monitorStatsRangeBySource={dashboard.monitorStatsRangeBySource}
-          onAppendMonitorEvent={dashboard.onAppendMonitorEvent}
           onCreateSource={dashboard.onCreateSource}
           onClearMonitorEventsView={dashboard.onClearMonitorEventsView}
           onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
           onLoadMonitorEvents={dashboard.loadMonitorEvents}
           onLoadMonitorStats={(sourceId, range) => void dashboard.loadMonitorStats(sourceId, range)}
           onLoadMonitorRuns={(sourceId) => void dashboard.loadMonitorRuns(sourceId)}
-          onRefreshRuntime={dashboard.refreshRuntime}
           onPrepareVintedSession={(source) => void dashboard.onPrepareVintedSession(source)}
           onProbeItemDetail={(source) => void dashboard.onProbeItemDetail(source)}
           onRecalibrateBaseline={(source) => void dashboard.onRecalibrateBaseline(source)}
@@ -62,6 +60,7 @@ export function DashboardApp() {
           sourceName={dashboard.sourceName}
           sources={dashboard.sources}
           sourceUrl={dashboard.sourceUrl}
+          streamStatus={dashboard.monitorStreamStatus}
           setSourceName={dashboard.setSourceName}
           setSourceUrl={dashboard.setSourceUrl}
           updateDetailProbeRef={dashboard.updateDetailProbeRef}

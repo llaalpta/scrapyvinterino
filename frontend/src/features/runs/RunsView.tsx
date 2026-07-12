@@ -885,14 +885,8 @@ function formatLogTimestamp(value: string): string {
   return `${hours}:${minutes}:${seconds}.${millis}`;
 }
 
-function streamLabel(status: 'connecting' | 'connected' | 'error'): string {
-  if (status === 'connected') {
-    return 'Logs en vivo';
-  }
-  if (status === 'error') {
-    return 'Stream no disponible; abre logs para recargar';
-  }
-  return 'Conectando stream';
+function streamLabel(status: 'historical'): string {
+  return status === 'historical' ? 'Historico cargado bajo demanda' : '';
 }
 
 function eventLabel(phase: string): string {

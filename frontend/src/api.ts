@@ -469,8 +469,10 @@ export function fetchMonitorEvents(sourceId: number): Promise<RunEvent[]> {
   return getJson<RunEvent[]>(`/api/monitors/${sourceId}/events`);
 }
 
-export function monitorEventsStreamUrl(lastEventId = 0): string {
-  return `${apiBaseUrl}/api/monitors/events/stream?last_event_id=${lastEventId}`;
+export function monitorEventsStreamUrl(lastEventId?: number): string {
+  return lastEventId === undefined
+    ? `${apiBaseUrl}/api/monitors/events/stream`
+    : `${apiBaseUrl}/api/monitors/events/stream?last_event_id=${lastEventId}`;
 }
 
 export function runSource(sourceId: number): Promise<Run> {

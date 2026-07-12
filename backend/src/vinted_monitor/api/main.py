@@ -1,10 +1,9 @@
-import asyncio
-import json
 from datetime import datetime
 from decimal import Decimal
+from typing import Annotated
 
 from curl_cffi.requests import Session as CurlSession
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -34,7 +33,7 @@ from vinted_monitor.api.schemas import (
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
 from vinted_monitor.db.models import RunEvent, SearchSource
-from vinted_monitor.db.session import SessionLocal, get_db
+from vinted_monitor.db.session import get_db
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
@@ -54,7 +53,8 @@ from vinted_monitor.services.proxies import (
     proxy_url_for_profile,
     update_proxy_profile,
 )
-from vinted_monitor.services.run_events import list_run_events, redact_run_event_details
+from vinted_monitor.services.run_event_stream import monitor_event_stream, resolve_monitor_event_cursor
+from vinted_monitor.services.run_events import list_run_events
 from vinted_monitor.services.runs import (
     BaselineRequiredError,
     ManualRunProvider,
@@ -397,43 +397,20 @@ def get_monitor_events(monitor_id: int, db: Session = Depends(get_db)) -> list:
 
 
 @app.get("/api/monitors/events/stream")
-def stream_monitor_events(last_event_id: int = Query(0, ge=0)):
-    async def event_stream():
-        current_id = last_event_id
-        while True:
-            with SessionLocal() as db:
-                events = list(
-                    db.scalars(
-                        select(RunEvent)
-                        .where(RunEvent.id > current_id, RunEvent.source_id.is_not(None))
-                        .order_by(RunEvent.id.asc())
-                        .limit(100)
-                    )
-                )
-            for event in events:
-                current_id = event.id
-                payload = {
-                    "id": event.id,
-                    "source_id": event.source_id,
-                    "run_id": event.run_id,
-                    "phase": event.phase,
-                    "level": event.level,
-                    "created_at": event.created_at.isoformat(),
-                    "method": event.method,
-                    "url": event.url,
-                    "status_code": event.status_code,
-                    "duration_ms": event.duration_ms,
-                    "proxy_profile_id": event.proxy_profile_id,
-                    "egress_ip": event.egress_ip,
-                    "user_agent": event.user_agent,
-                    "auth_mode": event.auth_mode,
-                    "message": event.message,
-                    "details": redact_run_event_details(event.details),
-                }
-                yield f"id: {event.id}\nevent: monitor_event\ndata: {json.dumps(payload)}\n\n"
-            await asyncio.sleep(2)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+async def stream_monitor_events(
+    request: Request,
+    last_event_id: Annotated[int | None, Query(ge=0)] = None,
+    last_event_id_header: Annotated[int | None, Header(alias="Last-Event-ID", ge=0)] = None,
+):
+    initial_cursor = resolve_monitor_event_cursor(last_event_id, last_event_id_header)
+    return StreamingResponse(
+        monitor_event_stream(initial_cursor, is_disconnected=request.is_disconnected),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/monitors/{monitor_id}/runs", response_model=RunRead, status_code=201)

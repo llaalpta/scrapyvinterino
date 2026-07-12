@@ -72,6 +72,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - exact event timestamp and one non-interactive operational checklist entry per event in the PWA console;
   - safe cookie, token, HTTP session, and proxy sticky-session markers with name, length, `first4****last4` masked preview for long values, and fingerprint, never the full value;
   - egress diagnostic data collected through the same HTTP session/proxy, including IP and country when the diagnostic endpoint returns them.
+  - accumulated history is loaded through REST; an SSE connection without a cursor starts at the current tail, while `last_event_id` query input takes precedence over the standard `Last-Event-ID` resume header;
+  - the SSE stream announces `stream_ready` with its initial cursor and a three-second reconnect delay, drains complete 100-event backlog batches without polling pauses, and emits a heartbeat every 15 seconds while idle;
+  - the SSE response disables intermediary caching/transformation and proxy buffering, and closes promptly after client disconnect while preserving the run-event redaction contract.
 - Database:
   - `app_settings`;
   - `search_sources.scheduler_config`;
@@ -124,6 +127,11 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, viewport, Vinted `x-screen`, egress country match, and any missing required key.
 - Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
+- The Monitors view owns exactly one SSE connection while it is open. Renders and statistics refreshes do not recreate it, leaving the view closes it, and returning resumes from the last received cursor.
+- REST history and live events are merged by event ID, including live events received while the historical request is still pending; each event appears at most once.
+- Only `run_succeeded` and `run_failed` schedule a debounced runtime refresh. A terminal batch refreshes current sources, the affected monitor run histories and statistics once; opportunities refresh only when a terminal reports a positive `opportunities_created` count or omits that count. It does not refresh the unused global run list.
+- The monitor log follows the newest event while the reader remains at the bottom. Scrolling upward suspends forced scrolling and exposes a new-event control that returns to the tail on desktop and mobile.
+- An SSE error is presented as a reconnecting state because browser `EventSource` retries automatically.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - Run configuration logs identify the evaluation contract, policy hash, description-only filter scope, detail mode, early-filter mode and head byte limit. Detail/filter logs expose received bytes, match counts and durations without response content.
 - Rejected HTTP responses use a safe body observation containing lengths and type flags; response body snippets are never persisted or returned.

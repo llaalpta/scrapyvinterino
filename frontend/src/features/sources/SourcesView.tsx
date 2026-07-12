@@ -1,6 +1,6 @@
-import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Search, Square, Trash2 } from 'lucide-react';
-import { monitorEventsStreamUrl, type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
+import { type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
 import { formatDate } from '../../utils/format';
 import { eventSearchText } from '../runs/runEventSearch';
 import { RunEventEntry } from '../runs/RunsView';
@@ -16,14 +16,12 @@ export function SourcesView({
   monitorRunsBySource,
   monitorStatsBySource,
   monitorStatsRangeBySource,
-  onAppendMonitorEvent,
   onClearMonitorEventsView,
   onCreateSource,
   onDeleteSource,
   onLoadMonitorEvents,
   onLoadMonitorRuns,
   onLoadMonitorStats,
-  onRefreshRuntime,
   onPrepareVintedSession,
   onProbeItemDetail,
   onRecalibrateBaseline,
@@ -36,6 +34,7 @@ export function SourcesView({
   sourceName,
   sources,
   sourceUrl,
+  streamStatus,
   setSourceName,
   setSourceUrl,
   updateDetailProbeRef,
@@ -48,14 +47,12 @@ export function SourcesView({
   monitorRunsBySource: Record<number, Run[]>;
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
-  onAppendMonitorEvent: (event: RunEvent) => void;
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorEvents: (sourceId: number) => Promise<void>;
   onLoadMonitorRuns: (sourceId: number) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
-  onRefreshRuntime: () => Promise<void>;
   onPrepareVintedSession: (source: SearchSource) => void;
   onProbeItemDetail: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
@@ -68,6 +65,7 @@ export function SourcesView({
   sourceName: string;
   sources: SearchSource[];
   sourceUrl: string;
+  streamStatus: 'connecting' | 'connected' | 'error';
   setSourceName: (value: string) => void;
   setSourceUrl: (value: string) => void;
   updateDetailProbeRef: (sourceId: number, value: string) => void;
@@ -76,8 +74,6 @@ export function SourcesView({
   const activeSources = useMemo(() => sources.filter((source) => source.is_active), [sources]);
   const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
   const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
-  const activeSourceIds = useMemo(() => new Set(activeSources.map((source) => source.id)), [activeSources]);
-  const activeSourceKey = useMemo(() => activeSources.map((source) => source.id).join(','), [activeSources]);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
   const [requestedSelectedMonitorId, setSelectedMonitorId] = useState<number | null>(null);
   const selectedMonitorId = sources.some((source) => source.id === requestedSelectedMonitorId)
@@ -87,57 +83,11 @@ export function SourcesView({
     () => sources.find((source) => source.id === selectedMonitorId) ?? null,
     [selectedMonitorId, sources]
   );
-  const refreshTimerRef = useRef<number | null>(null);
   const loadingStatsRef = useRef<Set<string>>(new Set());
   const loadingRunsRef = useRef<Set<number>>(new Set());
   const loadingEventsRef = useRef<Set<number>>(new Set());
   const detailRef = useRef<HTMLElement | null>(null);
   const [loadingMonitorEventsBySource, setLoadingMonitorEventsBySource] = useState<Record<number, boolean>>({});
-  const [streamState, setStreamState] = useState<{ sourceKey: string; status: 'connecting' | 'connected' | 'error' }>({
-    sourceKey: '',
-    status: 'connecting'
-  });
-  const streamStatus = activeSourceKey === '' || streamState.sourceKey !== activeSourceKey ? 'connecting' : streamState.status;
-  const handleRunEvent = useCallback(
-    (event: RunEvent) => {
-      onAppendMonitorEvent(event);
-      if (!event.source_id || !activeSourceIds.has(event.source_id) || !shouldRefreshRuns(event.phase)) {
-        return;
-      }
-      if (refreshTimerRef.current !== null) {
-        window.clearTimeout(refreshTimerRef.current);
-      }
-      refreshTimerRef.current = window.setTimeout(() => {
-        refreshTimerRef.current = null;
-        void onRefreshRuntime();
-      }, 400);
-    },
-    [activeSourceIds, onAppendMonitorEvent, onRefreshRuntime]
-  );
-
-  useEffect(() => {
-    if (activeSourceKey === '') {
-      return undefined;
-    }
-    const events = new EventSource(monitorEventsStreamUrl());
-    events.addEventListener('open', () => setStreamState({ sourceKey: activeSourceKey, status: 'connected' }));
-    events.addEventListener('error', () => setStreamState({ sourceKey: activeSourceKey, status: 'error' }));
-    events.addEventListener('monitor_event', (message) => {
-      const event = parseRunEvent(message);
-      if (event) {
-        handleRunEvent(event);
-      }
-    });
-    return () => events.close();
-  }, [activeSourceKey, handleRunEvent]);
-
-  useEffect(() => {
-    return () => {
-      if (refreshTimerRef.current !== null) {
-        window.clearTimeout(refreshTimerRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (!selectedSource) {
@@ -398,6 +348,10 @@ function MonitorEventTimeline({
   streamStatus: 'connecting' | 'connected' | 'error' | null;
   viewCleared: boolean;
 }) {
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const latestEventIdRef = useRef<number | null>(null);
+  const [followingTail, setFollowingTail] = useState(true);
+  const [newEventCount, setNewEventCount] = useState(0);
   const orderedEvents = useMemo(
     () => [...events].sort((left, right) => left.id - right.id),
     [events]
@@ -418,8 +372,50 @@ function MonitorEventTimeline({
   const filterHasMatches = visibleEvents.length > 0;
   const hasActiveFilter = levelFilter !== 'all' || normalizedSearch !== '';
 
+  useEffect(() => {
+    const latestEventId = orderedEvents.at(-1)?.id ?? null;
+    const previousEventId = latestEventIdRef.current;
+    latestEventIdRef.current = latestEventId;
+    if (latestEventId === null) {
+      return;
+    }
+    const appendedCount = previousEventId === null
+      ? 0
+      : orderedEvents.filter((event) => event.id > previousEventId).length;
+    if (!followingTail && appendedCount > 0) {
+      setNewEventCount((current) => current + appendedCount);
+      return;
+    }
+    if (followingTail) {
+      window.requestAnimationFrame(() => {
+        const timeline = timelineRef.current;
+        if (timeline) {
+          timeline.scrollTop = timeline.scrollHeight;
+        }
+      });
+    }
+  }, [followingTail, orderedEvents]);
+
+  function handleTimelineScroll() {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    const isAtTail = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 32;
+    setFollowingTail(isAtTail);
+    if (isAtTail) {
+      setNewEventCount(0);
+    }
+  }
+
+  function followNewestEvents() {
+    setFollowingTail(true);
+    setNewEventCount(0);
+    timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight, behavior: 'smooth' });
+  }
+
   return (
-    <div className="run-events monitor-event-timeline">
+    <div className="run-events monitor-event-timeline" onScroll={handleTimelineScroll} ref={timelineRef}>
       <div className="event-log-toolbar">
         <div className={`event-stream-status ${streamStatus ?? 'connected'}`}>
           <RefreshCw size={14} />
@@ -446,6 +442,11 @@ function MonitorEventTimeline({
           />
         </div>
       </div>
+      {newEventCount > 0 ? (
+        <button className="new-events-button" type="button" onClick={followNewestEvents}>
+          {newEventCount} {newEventCount === 1 ? 'evento nuevo' : 'eventos nuevos'}
+        </button>
+      ) : null}
       {loading ? <p className="event-empty">Cargando logs acumulados...</p> : null}
       {!loading && viewCleared ? <p className="event-empty">Vista limpia. Los nuevos eventos apareceran aqui.</p> : null}
       {!loading && !viewCleared && orderedEvents.length === 0 ? <p className="event-empty">Sin logs acumulados para este monitor.</p> : null}
@@ -464,7 +465,7 @@ function monitorStreamLabel(status: 'connecting' | 'connected' | 'error'): strin
     return 'Logs en vivo';
   }
   if (status === 'error') {
-    return 'Stream no disponible; historico cargado';
+    return 'Reconectando logs en vivo';
   }
   return 'Conectando stream';
 }
@@ -491,14 +492,6 @@ const rangeOptions: Array<{ label: string; value: MonitorStatsRange }> = [
   { label: 'Mes', value: 'month' },
   { label: 'Todo', value: 'all' }
 ];
-
-function parseRunEvent(message: MessageEvent): RunEvent | null {
-  try {
-    return JSON.parse(message.data) as RunEvent;
-  } catch {
-    return null;
-  }
-}
 
 function formatSeconds(seconds: number): string {
   if (seconds < 60) {
@@ -883,6 +876,7 @@ function MonitorDetail({
         </div>
         <p className="monitor-log-note">Solo oculta eventos en esta pantalla; el historico permanece guardado.</p>
         <MonitorEventTimeline
+          key={source.id}
           events={visibleMonitorEvents}
           loading={loadingMonitorEvents}
           streamStatus={source.is_active ? streamStatus : null}
@@ -1144,10 +1138,6 @@ function draftSummary(
     entries.push(`Ultima ${formatDate(source.last_run_at)}`);
   }
   return entries;
-}
-
-function shouldRefreshRuns(phase: string): boolean {
-  return phase === 'run_started' || phase === 'run_succeeded' || phase === 'run_failed';
 }
 
 function modeLabel(mode: SearchSource['monitor_mode']): string {
