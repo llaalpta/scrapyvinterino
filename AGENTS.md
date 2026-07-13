@@ -33,6 +33,20 @@ Work on one roadmap outcome at a time:
 
 Small mechanical fixes may skip a spec update when they do not change behavior or contradict current docs.
 
+## Multi-agent policy
+
+The primary agent owns objective interpretation, planning, architecture, prioritization, orchestration, integration, mandatory instruction reading, implementer self-review and final judgment. Preserve its context and reasoning budget for decisions that require the strongest reasoning.
+
+Delegate only concrete, bounded subtasks when they can run independently and the expected benefit exceeds coordination cost. When capability selection is available:
+
+- use the least expensive capable agent for narrow repository searches, inventories, routine commands, linting, builds and mechanical verification;
+- use a general implementation agent for scoped coding, debugging, refactoring, testing and focused review;
+- reserve the highest-reasoning agent for architecture, security, data integrity, cross-service races, ambiguous failures and final tradeoffs.
+
+Each subagent validates its own scope and reports changed files, commands and evidence, findings and unresolved risks. The primary agent reviews the resulting diff and key evidence, but does not repeat successful routine checks unless results conflict, are incomplete or affect security, data integrity or architecture.
+
+Do not delegate mandatory instruction reading, product decisions, roadmap priority, final integration or implementer self-review. Do not assign overlapping files or mutable runtime state to concurrent agents. Avoid delegation for micro work when coordination would cost more than direct execution. Independent audits remain read-only and follow the policy below.
+
 ## Task sizing and stop rules
 
 - **Micro:** no behavior/schema/process coordination; normally at most two files and about 50 changed lines. Focused check and self-review are enough.
