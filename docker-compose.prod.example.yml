@@ -64,10 +64,34 @@ services:
       APP_ENV: production
     networks:
       - internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "vinted_monitor.worker.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 35s
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  scheduler-watchdog:
+    build:
+      context: ./backend
+    command: python -m vinted_monitor.worker.watchdog
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+    networks:
+      - internal
+    restart: unless-stopped
+    depends_on:
+      postgres:
         condition: service_healthy
       api:
         condition: service_healthy

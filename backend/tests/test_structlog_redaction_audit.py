@@ -1,10 +1,18 @@
 import json
 
+import pytest
 import structlog
 
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.core.redaction import redact_sensitive_text, redact_sensitive_value
-from vinted_monitor.services.run_events import redact_run_event_details
+from vinted_monitor.core.redaction import (
+    SafeSecretMarker,
+    is_safe_secret_marker,
+    redact_sensitive_text,
+    redact_sensitive_value,
+    safe_headers,
+    safe_secret_marker,
+)
+from vinted_monitor.services.run_events import redact_persisted_run_event_details, redact_run_event_details
 
 
 def test_sensitive_text_redaction_handles_quoted_mapping_keys() -> None:
@@ -110,4 +118,55 @@ def test_marker_container_keys_reject_raw_or_shape_only_values() -> None:
         "cookies_after": "<redacted>",
         "http_session": "<redacted>",
         "request_headers": {"cookie": "<redacted>", "accept": "text/html"},
+    }
+
+
+def test_safe_marker_factory_canonicalizes_untrusted_name_kind_and_sensitive_header_key() -> None:
+    canary = "AUDIT-MARKER-METADATA-CANARY-7f31"
+
+    marker = safe_secret_marker(canary, "ordinary-secret-value", kind=canary)
+    headers = safe_headers({f"X-Token-{canary}": "ordinary-header-value"})
+    rendered = json.dumps(
+        {
+            "marker": marker,
+            "headers": headers,
+            "details": redact_run_event_details({"authorization": marker}),
+            "structlog": redact_sensitive_value({"authorization": marker}),
+        }
+    )
+
+    assert marker["kind"] == "secret"
+    assert marker["name"].startswith("<redacted-name:sha256:")
+    assert list(headers) == [next(iter(headers.values()))["name"]]
+    assert canary not in rendered
+
+
+def test_safe_marker_cannot_be_constructed_or_mutated_by_a_caller() -> None:
+    marker = safe_secret_marker("access_token_web", "immutable-marker-value", kind="cookie")
+
+    with pytest.raises(TypeError, match="must be created"):
+        SafeSecretMarker(dict(marker))
+    with pytest.raises(TypeError, match="immutable"):
+        marker["name"] = "forged-name"
+    with pytest.raises(TypeError, match="immutable"):
+        marker.update({"kind": "forged-kind"})
+    assert is_safe_secret_marker(marker)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"length": -1},
+        {"length": 5, "masked": "four****alue"},
+        {"kind": "caller-controlled-kind"},
+        {"name": "caller-controlled-name"},
+        {"domain": "metadata-must-not-survive"},
+    ],
+)
+def test_persisted_marker_rejects_invalid_or_incoherent_metadata(mutation: dict[str, object]) -> None:
+    marker = dict(safe_secret_marker("access_token_web", "valid-marker-value", kind="cookie"))
+    marker.update(mutation)
+
+    assert redact_persisted_run_event_details({"authorization": marker}) == {
+        "authorization": "<redacted>"
     }

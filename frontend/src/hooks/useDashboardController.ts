@@ -71,6 +71,7 @@ export function useDashboardController() {
   const [detailProbeRefs, setDetailProbeRefs] = useState<Record<number, string>>({});
   const [detailProbeMessages, setDetailProbeMessages] = useState<Record<number, string>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
+  const [schedulerAvailabilityError, setSchedulerAvailabilityError] = useState<string | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
@@ -140,25 +141,76 @@ export function useDashboardController() {
   );
 
   useEffect(() => {
+    let disposed = false;
     Promise.all([
       fetchSources(),
       fetchOpportunities(),
       fetchRuns(),
-      fetchScheduler(),
       fetchProxyProfiles()
     ])
-      .then(([sourceData, opportunityData, runData, schedulerData, proxyData]) => {
+      .then(([sourceData, opportunityData, runData, proxyData]) => {
+        if (disposed) {
+          return;
+        }
         setSources(sourceData);
         setOpportunityPage(opportunityData);
         setRuns(runData);
-        setScheduler(schedulerData);
         setProxyProfiles(proxyData);
         setSourceDrafts(buildSourceDrafts(sourceData));
       })
       .catch((caught: unknown) => {
-        setError(caught instanceof Error ? caught.message : 'Error cargando datos');
+        if (!disposed) {
+          setError(caught instanceof Error ? caught.message : 'Error cargando datos');
+        }
       });
+
+    void fetchScheduler()
+      .then((schedulerData) => {
+        if (!disposed) {
+          setScheduler(schedulerData);
+          setSchedulerAvailabilityError(null);
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setScheduler(null);
+          setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (activeSection !== 'settings') {
+      return undefined;
+    }
+
+    let disposed = false;
+    const refreshSchedulerAvailability = async () => {
+      try {
+        const schedulerData = await fetchScheduler();
+        if (!disposed) {
+          setScheduler(schedulerData);
+          setSchedulerAvailabilityError(null);
+        }
+      } catch {
+        if (!disposed) {
+          setScheduler(null);
+          setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
+        }
+      }
+    };
+
+    void refreshSchedulerAvailability();
+    const interval = window.setInterval(() => void refreshSchedulerAvailability(), 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [activeSection]);
 
   useEffect(() => {
     if (activeSection !== 'sources') {
@@ -264,15 +316,21 @@ export function useDashboardController() {
       setMonitorStreamStatus('connecting');
       setMonitorStreamReady(false);
       stream?.close();
-      stream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
-      stream.addEventListener('open', () => setMonitorStreamStatus('connected'));
-      stream.addEventListener('error', () => {
-        if (disposed) {
+      const nextStream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
+      stream = nextStream;
+      nextStream.addEventListener('open', () => {
+        if (!disposed && stream === nextStream) {
+          setMonitorStreamStatus('connected');
+        }
+      });
+      nextStream.addEventListener('error', () => {
+        if (disposed || stream !== nextStream) {
           return;
         }
         setMonitorStreamStatus('error');
         setMonitorStreamReady(false);
-        stream?.close();
+        nextStream.close();
+        stream = null;
         if (monitorStreamReconnectTimerRef.current === null) {
           monitorStreamReconnectTimerRef.current = window.setTimeout(() => {
             monitorStreamReconnectTimerRef.current = null;
@@ -280,14 +338,20 @@ export function useDashboardController() {
           }, 3000);
         }
       });
-      stream.addEventListener('stream_ready', (message) => {
+      nextStream.addEventListener('stream_ready', (message) => {
+        if (disposed || stream !== nextStream) {
+          return;
+        }
         const ready = parseStreamCursor(message) ?? parseStreamReady(message);
         if (ready !== null) {
           monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, ready);
           setMonitorStreamReady(true);
         }
       });
-      stream.addEventListener('monitor_event', (message) => {
+      nextStream.addEventListener('monitor_event', (message) => {
+        if (disposed || stream !== nextStream) {
+          return;
+        }
         const event = parseRunEvent(message);
         if (!event || monitorStreamSeenEventIdsRef.current.has(event.id)) {
           return;
@@ -415,6 +479,8 @@ export function useDashboardController() {
       setProxyProfiles((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
       setScheduler(await fetchScheduler());
     } catch (caught) {
+      setScheduler(null);
+      setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
       setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el proxy');
     }
   }
@@ -433,6 +499,27 @@ export function useDashboardController() {
     if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
       setError('Corrige los filtros de URL no soportados antes de ejecutar este monitor');
       return;
+    }
+    if (source.monitor_mode !== 'manual') {
+      let schedulerData: SchedulerState;
+      try {
+        schedulerData = await fetchScheduler();
+      } catch {
+        setScheduler(null);
+        setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
+        setError('No se pudo confirmar que el worker del scheduler este disponible.');
+        return;
+      }
+      setScheduler(schedulerData);
+      setSchedulerAvailabilityError(null);
+      if (!schedulerData.worker_available) {
+        setError('El worker del scheduler no esta disponible. Inicia el worker antes de lanzar una sesion periodica.');
+        return;
+      }
+      if (!schedulerData.effective_enabled) {
+        setError('El scheduler no esta operativo. Revisa los ajustes de interfaz, despliegue y capacidad.');
+        return;
+      }
     }
     setRunningSessionId(source.id);
     try {
@@ -455,6 +542,10 @@ export function useDashboardController() {
         await loadMonitorEvents(source.id);
       }
     } catch (caught) {
+      if (source.monitor_mode !== 'manual') {
+        setScheduler(null);
+        setSchedulerAvailabilityError('La disponibilidad del scheduler debe volver a comprobarse.');
+      }
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
       setRunningSessionId(null);
@@ -595,7 +686,10 @@ export function useDashboardController() {
     setSavingScheduler(true);
     try {
       setScheduler(await updateScheduler({ enabled: !scheduler.enabled }));
+      setSchedulerAvailabilityError(null);
     } catch (caught) {
+      setScheduler(null);
+      setSchedulerAvailabilityError('No se pudo confirmar el estado del scheduler.');
       setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el scheduler');
     } finally {
       setSavingScheduler(false);
@@ -607,7 +701,10 @@ export function useDashboardController() {
     setSavingScheduler(true);
     try {
       setScheduler(await updateScheduler(payload));
+      setSchedulerAvailabilityError(null);
     } catch (caught) {
+      setScheduler(null);
+      setSchedulerAvailabilityError('No se pudo confirmar el estado del scheduler.');
       setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el scheduler');
     } finally {
       setSavingScheduler(false);
@@ -842,6 +939,7 @@ export function useDashboardController() {
     savingScheduler,
     savingSourceId,
     scheduler,
+    schedulerAvailabilityError,
     selectSection,
     setNavCollapsed,
     setProxyDraft,

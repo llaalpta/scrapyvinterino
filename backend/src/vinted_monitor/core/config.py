@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     scheduler_max_concurrent_runs: int = 2
     scheduler_per_source_concurrency: int = 1
     scheduler_poll_interval_seconds: int = 5
+    scheduler_worker_heartbeat_interval_seconds: int = Field(default=5, ge=1, le=60)
+    scheduler_worker_heartbeat_timeout_seconds: int = Field(default=30, ge=5, le=600)
+    scheduler_watchdog_poll_interval_seconds: int = Field(default=5, ge=1, le=60)
+    scheduler_watchdog_startup_grace_seconds: int = Field(default=30, ge=1, le=600)
     scheduler_timezone: str = "Europe/Madrid"
     log_level: str = "INFO"
 
@@ -97,6 +101,16 @@ class Settings(BaseSettings):
             raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS must contain one delay per retry")
         if any(delay < 0 for delay in self.vinted_detail_retry_backoffs_seconds):
             raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS cannot contain negative delays")
+        return self
+
+    @model_validator(mode="after")
+    def validate_scheduler_liveness_config(self) -> "Settings":
+        if self.scheduler_worker_heartbeat_timeout_seconds < self.scheduler_worker_heartbeat_interval_seconds * 2:
+            raise ValueError("SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS must allow at least two heartbeats")
+        if self.scheduler_watchdog_startup_grace_seconds < self.scheduler_worker_heartbeat_interval_seconds:
+            raise ValueError("SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS must allow the first heartbeat")
+        if self.scheduler_watchdog_poll_interval_seconds > self.scheduler_worker_heartbeat_timeout_seconds:
+            raise ValueError("SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS cannot exceed the heartbeat timeout")
         return self
 
     @model_validator(mode="after")

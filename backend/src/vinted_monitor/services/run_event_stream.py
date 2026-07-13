@@ -6,11 +6,12 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session
 
-from vinted_monitor.db.models import RunEvent, RunEventPublication
-from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.db.models import RunEvent, RunEventOutbox, RunEventPublication
+from vinted_monitor.db.session import SessionLocal, engine
 from vinted_monitor.services.run_events import redact_persisted_run_event_details
 
 EVENT_BATCH_SIZE = 100
@@ -18,6 +19,7 @@ HEARTBEAT_INTERVAL_SECONDS = 15.0
 POLL_INTERVAL_SECONDS = 2.0
 RECONNECT_DELAY_MILLISECONDS = 3000
 RUN_EVENT_PUBLICATION_LOCK_ID = 814_208_008
+PUBLICATION_BATCH_SIZE = 1_000
 
 
 @dataclass(frozen=True)
@@ -40,30 +42,77 @@ def resolve_monitor_event_cursor(
 
 
 def latest_monitor_event_id() -> int:
-    publish_committed_monitor_events()
-    with SessionLocal() as db:
-        return int(db.scalar(select(func.coalesce(func.max(RunEventPublication.position), 0))) or 0)
+    # Acquire a session-level lock before opening the repeatable-read transaction.
+    # This makes the snapshot start after any publisher that was already running
+    # and keeps later publishers behind the cursor returned for this exact snapshot.
+    with engine.connect() as connection:
+        lock_acquired = False
+        try:
+            try:
+                connection.execute(select(func.pg_advisory_lock(RUN_EVENT_PUBLICATION_LOCK_ID)))
+            except Exception:
+                # The server could have granted a session lock before a connection
+                # failure became visible locally. Discard that physical connection
+                # so a possibly-held lock can never return to the pool.
+                connection.invalidate()
+                raise
+            lock_acquired = True
+            connection.commit()
+            connection = connection.execution_options(isolation_level="REPEATABLE READ")
+            with Session(bind=connection) as db:
+                while _publish_pending_batch(db) == PUBLICATION_BATCH_SIZE:
+                    pass
+                cursor = int(
+                    db.scalar(select(func.coalesce(func.max(RunEventPublication.position), 0))) or 0
+                )
+                db.commit()
+                return cursor
+        finally:
+            if lock_acquired:
+                try:
+                    if connection.in_transaction():
+                        connection.rollback()
+                    released = bool(
+                        connection.scalar(select(func.pg_advisory_unlock(RUN_EVENT_PUBLICATION_LOCK_ID)))
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.invalidate()
+                    raise
+                if not released:
+                    connection.invalidate()
+                    raise RuntimeError("run event publication advisory lock was not released")
 
 
-def publish_committed_monitor_events() -> None:
+def publish_committed_monitor_events(*, max_event_id: int | None = None) -> int:
     with SessionLocal() as db:
-        db.execute(select(func.pg_advisory_xact_lock(RUN_EVENT_PUBLICATION_LOCK_ID)))
-        candidate_ids = (
-            select(RunEvent.id)
-            .outerjoin(RunEventPublication, RunEventPublication.event_id == RunEvent.id)
-            .where(
-                RunEvent.source_id.is_not(None),
-                RunEventPublication.event_id.is_(None),
-            )
-            .order_by(RunEvent.id.asc())
+        lock_acquired = bool(
+            db.scalar(select(func.pg_try_advisory_xact_lock(RUN_EVENT_PUBLICATION_LOCK_ID)))
         )
-        statement = (
+        if not lock_acquired:
+            db.rollback()
+            return 0
+        published_count = _publish_pending_batch(db, max_event_id=max_event_id)
+        db.commit()
+        return published_count
+
+
+def _publish_pending_batch(db: Session, *, max_event_id: int | None = None) -> int:
+    pending_events = select(RunEventOutbox.event_id).order_by(
+        RunEventOutbox.created_at.asc(),
+        RunEventOutbox.event_id.asc(),
+    )
+    if max_event_id is not None:
+        pending_events = pending_events.where(RunEventOutbox.event_id <= max_event_id)
+    event_ids = list(db.scalars(pending_events.limit(PUBLICATION_BATCH_SIZE).with_for_update()))
+    if event_ids:
+        db.execute(
             insert(RunEventPublication)
-            .from_select(["event_id"], candidate_ids)
+            .values([{"event_id": event_id} for event_id in event_ids])
             .on_conflict_do_nothing(index_elements=[RunEventPublication.event_id])
         )
-        db.execute(statement)
-        db.commit()
+        db.execute(delete(RunEventOutbox).where(RunEventOutbox.event_id.in_(event_ids)))
+    return len(event_ids)
 
 
 def load_monitor_events_after(cursor: int) -> list[PublishedRunEvent]:

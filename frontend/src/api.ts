@@ -103,6 +103,8 @@ export type SchedulerState = {
   enabled: boolean;
   runtime_enabled: boolean;
   effective_enabled: boolean;
+  worker_available: boolean;
+  worker_last_seen_at: string | null;
   max_concurrent_runs: number;
   per_source_concurrency: number;
   poll_interval_seconds: number;

@@ -11,12 +11,11 @@ from sqlalchemy.orm import Session
 from vinted_monitor.core.redaction import (
     MARKER_ONLY_KEYS,
     SENSITIVE_HEADER_TOKENS,
-    SafeSecretMarker,
-    is_safe_secret_marker,
     redact_sensitive_text,
+    restore_persisted_safe_secret_marker,
     sensitive_value_requires_redaction,
 )
-from vinted_monitor.db.models import RunEvent
+from vinted_monitor.db.models import RunEvent, RunEventOutbox
 
 MAX_MESSAGE_LENGTH = 1200
 LOG_LEVELS = {"debug", "info", "warning", "error"}
@@ -61,6 +60,8 @@ def record_run_event(
     )
     db.add(event)
     db.flush()
+    if source_id is not None:
+        db.add(RunEventOutbox(event_id=event.id, created_at=event.created_at))
     return event
 
 
@@ -114,19 +115,23 @@ def _redacted_details(details: dict) -> dict:
 
 def _restore_persisted_markers(value: Any, *, key: str | None = None) -> Any:
     lowered_key = key.lower() if key is not None else None
-    if lowered_key in MARKER_ONLY_KEYS:
-        if isinstance(value, dict):
-            candidate = SafeSecretMarker(value)
-            return candidate if is_safe_secret_marker(candidate) else value
-        if isinstance(value, list):
-            candidates = [SafeSecretMarker(child) if isinstance(child, dict) else child for child in value]
-            if all(is_safe_secret_marker(candidate) for candidate in candidates):
-                return candidates
-            return value
+    if lowered_key in MARKER_ONLY_KEYS or (lowered_key is not None and _is_sensitive_key(lowered_key)):
+        return _restore_safe_marker(value)
     if isinstance(value, dict):
         return {child_key: _restore_persisted_markers(child_value, key=str(child_key)) for child_key, child_value in value.items()}
     if isinstance(value, list):
         return [_restore_persisted_markers(child_value) for child_value in value]
+    return value
+
+
+def _restore_safe_marker(value: Any) -> Any:
+    if isinstance(value, dict):
+        candidate = restore_persisted_safe_secret_marker(value)
+        return candidate if candidate is not None else value
+    if isinstance(value, list):
+        candidates = [restore_persisted_safe_secret_marker(child) for child in value]
+        if all(candidate is not None for candidate in candidates):
+            return candidates
     return value
 
 

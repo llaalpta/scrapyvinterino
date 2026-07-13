@@ -39,6 +39,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 
 - Worker:
   - scheduler loop;
+  - process supervisor that exits when producer progress expires;
+  - independent fail-stop watchdog for active recurring monitors;
   - bounded monitor run executor;
   - Redis seen cache client;
   - isolated provider/session factory.
@@ -51,6 +53,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Configuration:
   - ownership rule: `.env` owns deployment, secrets, worker and anti-bot defaults; UI `app_settings` owns daily operation only;
   - deployment scheduler enable flag in `.env` as an operational gate;
+  - deployment-owned producer heartbeat interval and timeout; the scheduler producer refreshes its own heartbeat while waiting between polls;
+  - deployment-owned watchdog poll interval and startup grace, both bounded against the producer heartbeat contract;
   - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
@@ -73,7 +77,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - safe cookie, token, HTTP session, and proxy sticky-session markers with name, length, `first4****last4` masked preview for long values, and fingerprint, never the full value;
   - egress diagnostic data collected through the same HTTP session/proxy, including IP and country when the diagnostic endpoint returns them.
   - accumulated history is loaded through REST; an SSE connection without a cursor starts at the current publication tail, while `last_event_id` query input takes precedence over the standard `Last-Event-ID` resume header;
-  - the stream cursor is a commit-ordered publication position independent from `run_events.id`, so transactions that commit out of ID order remain deliverable exactly once to the PWA;
+  - the stream cursor is a monotonic publication position independent from `run_events.id`; it represents observed publication order rather than exact database commit timing, so transactions that become visible out of ID order remain deliverable exactly once to the PWA;
+  - every persisted monitor event creates indexed outbox work in its own transaction; publication assigns the durable cursor and removes that work atomically without rescanning event history;
   - the SSE stream announces `stream_ready` with its initial cursor in both `id:` and JSON data plus a three-second reconnect delay, drains complete 100-event backlog batches without polling pauses, and emits a heartbeat every 15 seconds while idle;
   - the SSE response disables intermediary caching/transformation and proxy buffering, and closes promptly after client disconnect while preserving the run-event redaction contract.
 - Database:
@@ -85,7 +90,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - `runs.trigger` and optional `runs.monitor_session_id`;
   - `items` for opportunity items only;
   - `errors`.
-  - `run_event_publications`, with one commit-ordered stream position per persisted monitor event.
+  - `run_event_outbox`, with one pending row per committed monitor event until publication;
+  - `run_event_publications`, with one monotonic stream position per persisted monitor event.
 
 ## Acceptance Criteria
 
@@ -98,7 +104,8 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
 - Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
 - Before that immediate recurring run begins, activation persists `next_run_at` from the activation timestamp, interval, jitter and allowed window. The scheduler treats this PostgreSQL value as authoritative over any in-process due-time cache, so activation cannot also enqueue an immediately due scheduler run.
-- Activation reserves its initial egress before committing active state. A failure before creating the initial run compensates the activation, leaving no active source, deadline, or open monitor session.
+- Initial recurring admission is serialized with a PostgreSQL transaction-scoped advisory lock before capacity and egress selection. With capacity one, two concurrent starts produce exactly one `201` and one `409` without exceeding capacity.
+- Activation reserves its initial egress and persists active state, monitor session, `next_run_at`, and the initial running row in one transaction. A failure before creating that run rolls the transaction back, leaving no active source, deadline, run, or monitor session to compensate.
 - Starting an already active recurring monitor is rejected without changing its session, activation timestamp, deadline, or run history.
 - The scheduler rechecks the persisted deadline after locking a due source and persists window deferrals independently from later capacity failures.
 - With a 60-second interval and 10% jitter, the minimum interval floor makes the first post-activation due time 60 to 66 seconds after activation, plus scheduler tick latency.
@@ -109,6 +116,14 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Monitor active state is controlled only by `POST /api/monitors/{id}/start` and `POST /api/monitors/{id}/stop`; monitor configuration `PATCH` rejects legacy `is_active` payloads.
 - Active monitor configuration is read-only until the monitor is stopped; direct monitor configuration `PATCH` while active is rejected.
 - Launching a recurring monitor is rejected when the effective scheduler is disabled or no scheduler capacity is available.
+- Recurring activation requires a fresh heartbeat written by the scheduler producer itself. Missing, malformed, naive, implausibly future, or expired heartbeat state returns `503` and leaves the source, deadline, monitor session and runs unchanged.
+- `GET /api/scheduler` exposes `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is false unless UI/deployment gates, capacity and the live producer are all available.
+- The PWA treats scheduler refresh failure as unavailable/unknown, discards any previously usable scheduler state, and blocks recurring launch. It never labels missing producer availability as a degraded operating mode.
+- Invalid deployment scheduler configuration terminates worker startup. Once started, the worker supervisor terminates the process when its own producer heartbeat expires; Compose owns restart and reports heartbeat health.
+- The scheduler watchdog starts only after API health confirms API-owned migrations are complete. After its startup grace, an expired producer heartbeat locks active non-manual sources and rechecks liveness before changing them.
+- If liveness is still absent after the lock, the watchdog makes PostgreSQL authoritative first: it clears active/deadline/duration state, closes the active monitor session with `scheduler_worker_unavailable`, and persists one sanitized warning event per stopped source. Manual monitors remain unchanged.
+- Ready-task cleanup happens only after the PostgreSQL stop commits. Redis cleanup failure is logged visibly and never rolls back the inactive source; a later consumer must treat that inactive database state as authoritative.
+- An unexpected watchdog iteration error terminates the watchdog process so Compose restarts it; it is not converted into a silent polling loop.
 - Launching any monitor creates a monitor session; recurring sessions remain active until stopped/expired/failed, while punctual sessions close after the run.
 - A recurring monitor with `stop_after_vinted_session_uses=N` stops automatically after the Nth completed run in that active monitor session that used the same `vinted_session_id`, and records `vinted_session_use_limit_reached`.
 - The scheduler only considers active recurring monitors.
@@ -130,16 +145,22 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Run logs show operational progress with sanitized URLs, request headers after redaction/masking, response headers after redaction/masking, status codes, per-request durations in milliseconds, egress mode, proxy profile id when used, auth mode, IP/country from the egress diagnostic, filter snapshot, Redis/cache decisions, candidate decisions, persistence decisions, opportunity outcomes, and safe counts only.
 - Run logs show the translated fast API parameters and URL filter compatibility in safe structured details.
 - Run logs never expose raw cookie, token, authorization, proxy credential, HTML, or raw Vinted payload values. Cookie/token/session data is represented only as masked/fingerprinted markers; short values show no characters.
+- Persisted event details have one read contract for REST and SSE: strict safe markers survive their JSONB roundtrip under marker containers, sensitive fields and sanitized headers, while caller-forged marker shapes and raw secret canaries are redacted before persistence and cannot reappear on either transport.
 - Run logs show Redis availability, seen-cache hits/misses, seen-cache marks, detail fetch start/success/error/skipped, filter pass/discard, item persisted/reused, and opportunity created/skipped events.
 - Run logs show catalog session context checks before the API request: impersonate, CSRF, anon id, access token, DataDome cookie, `v_udt`, locale, viewport, Vinted `x-screen`, egress country match, and any missing required key.
 - Run logs show Vinted session lifecycle decisions: selected existing session, automatic preparation start/end, proxy sticky marker, probe outcome, use count, max requests, stop-after-use limit, session end reason, and recovery action.
 - Run log timestamps are assigned per event and must not reuse a transaction-wide database timestamp.
+- A rolled-back monitor event leaves neither an event nor outbox work. A committed event leaves exactly one pending outbox row until a serialized publisher atomically creates its unique publication cursor and removes the pending row.
+- Migration 0017 backfills only committed monitor events missing a publication. Runtime publication reads bounded indexed outbox batches; it does not perform a historical anti-join on every SSE poll.
+- Tail startup drains only the outbox rows visible in one repeatable PostgreSQL snapshot while holding the global publication lock, so a continuously active producer cannot prevent `stream_ready`. Events committed after that boundary, including a previously reserved lower event ID, receive later cursors and remain resumable.
+- Normal SSE polls try the publication lock without waiting. Contention yields an empty poll so heartbeat and disconnect checks continue; a later poll publishes the pending rows after the tail fence is released.
 - The Monitors view owns exactly one SSE connection while it is open. Renders and statistics refreshes do not recreate it, leaving the view closes it, and returning or reconnecting resumes from the last received publication cursor.
 - Historical REST loading starts only after `stream_ready`; explicit per-monitor history-loaded state is independent from live event presence. REST history and live events are merged by event ID, including live events received while the historical request is still pending; each event appears at most once.
 - Only `run_succeeded` and `run_failed` schedule a debounced runtime refresh. A terminal batch refreshes current sources, the affected monitor run histories and statistics once; opportunities refresh only when a terminal reports a positive `opportunities_created` count or omits that count. It does not refresh the unused global run list.
 - A terminal batch already received remains pending across navigation away from Monitors and is applied or retried without requiring another terminal event.
 - The monitor log follows the newest event while the reader remains at the bottom. Scrolling upward suspends forced scrolling and exposes a new-event control that returns to the tail on desktop and mobile.
-- An SSE error is presented as a reconnecting state; the dashboard closes the failed instance and creates one replacement after three seconds with the latest explicit publication cursor.
+- An SSE error is presented as a reconnecting state; the dashboard closes the failed instance and creates one replacement after three seconds with the latest explicit publication cursor. If that replacement also fails during a prolonged outage, it may schedule the next sequential attempt; only one timer and one current connection may exist at any instant.
+- Every `open`, `error`, `stream_ready` and `monitor_event` callback is scoped to the `EventSource` instance that registered it. Once replaced or closed, stale callbacks are inert: they cannot change status/readiness, advance the cursor, append events, close the current stream or schedule another reconnect.
 - Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
 - Run configuration logs identify the evaluation contract, policy hash, description-only filter scope, detail mode, early-filter mode and head byte limit. Detail/filter logs expose received bytes, match counts and durations without response content.
 - Rejected HTTP responses use a safe body observation containing lengths and type flags; response body snippets are never persisted or returned.
@@ -182,13 +203,18 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 
 - Unit tests for next-run calculation.
 - Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
+- PostgreSQL/API tests for missing, fresh, expired, malformed, naive and future producer heartbeat plus mutation-free recurring `503`; producer tests cover heartbeat during disabled/idle operation and scheduler polls longer than the heartbeat interval.
+- Supervisor/watchdog tests cover invalid startup configuration, producer expiry grace, recurring-only locked stop, heartbeat recovery during lock acquisition, session/event persistence, DB-first Redis cleanup failure, and unexpected-error process termination.
+- Real-container verification blocks producer progress without external traffic and observes worker exit plus Compose restart; a QA recurring source/session/task proves watchdog database stop and visible Redis-cleanup failure, followed by complete cleanup and service restoration.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
-- PostgreSQL tests for inverted event commit order, commit-ordered publication, JSONB marker roundtrip, activation compensation, repeated start rejection, locked-deadline revalidation, and durable window deferral.
+- Real PostgreSQL/API verification persists one legitimate marker event and one forged/raw-canary event through the production writer, then confirms identical safe `details` through monitor REST and SSE and complete cleanup of event, outbox, publication and source state.
+- PostgreSQL/outbox tests cover event commit and rollback, concurrent/inverted commits, serialized duplicate-free publication, atomic publication rollback, bounded batches, historical migration backfill and tail high-water behavior.
+- PostgreSQL tests for inverted event commit order, monotonic duplicate-free publication, JSONB marker roundtrip, atomic activation rollback, concurrent initial admission at capacity one, repeated start rejection, locked-deadline revalidation, and durable window deferral.
 - Unit tests for interval, jitter, allowed-window, and disabled-source validation.
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.
 - Unit tests confirming Redis cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
-- Manual check with short interval in local Docker.
+- Live Playwright check through PWA/API/worker/PostgreSQL/Redis with a 60-second interval and 10% jitter: one immediate run plus exactly two scheduler runs, initial persisted deadline in `60..66` seconds, no duplicate cadence, and bounded traffic/cleanup from the owning roadmap contract.
 - Confirm run records identify scheduler-triggered executions.
 - Confirm monitor sessions are created, closed, and associated to punctual runs, and created/associated/stopped for recurring runs.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
@@ -221,3 +247,4 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Confirm redaction tests cover nested details, URLs, bearer tokens, cookies, token-like assignments, masked values, and fingerprints.
 - Confirm PWA build succeeds after adding the log timeline and stream event fields.
 - Confirm Playwright observes one pending SSE request while Monitors remains open, no repeated REST traffic while idle, sub-two-second single delivery, one directed terminal refresh, cursor resume after navigation, and tail-follow/new-event behavior on desktop and mobile.
+- Confirm Playwright restarts the live API while Monitors is open, keeps at most one current replacement SSE with `last_event_id`, proves late callbacks from a closed request do not change cursor/events or create another stream, then navigates away/back and renders one backend-produced local event exactly once.

@@ -149,6 +149,7 @@ def start_source_monitor(
     *,
     now: datetime | None = None,
     rng: random.Random | None = None,
+    commit: bool = True,
 ) -> SearchSource:
     source = _get_live_source(db, source_id)
     _validate_monitor_runtime_config(source)
@@ -176,8 +177,11 @@ def start_source_monitor(
         start_monitor_session(db, source, started_at=started_at)
     else:
         source.next_run_at = None
-    db.commit()
-    db.refresh(source)
+    if commit:
+        db.commit()
+        db.refresh(source)
+    else:
+        db.flush()
     return source
 
 

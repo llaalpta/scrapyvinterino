@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,7 +15,18 @@ from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import ErrorLog, Item, MonitorSession, Opportunity, ProxyProfile, Run, RunEvent, SearchSource, VintedSession
+from vinted_monitor.db.models import (
+    AppSetting,
+    ErrorLog,
+    Item,
+    MonitorSession,
+    Opportunity,
+    ProxyProfile,
+    Run,
+    RunEvent,
+    SearchSource,
+    VintedSession,
+)
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
@@ -42,7 +54,8 @@ from vinted_monitor.services.runs import (
     execute_monitor_baseline,
     execute_monitor_run,
 )
-from vinted_monitor.services.scheduler import RunEgress, update_scheduler_config, update_scheduler_enabled
+from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, RunEgress, update_scheduler_config, update_scheduler_enabled
+from vinted_monitor.services.scheduler_liveness import SchedulerWorkerAvailability
 from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
@@ -581,6 +594,10 @@ def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
     settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
     monkeypatch.setattr("vinted_monitor.api.main.settings", settings)
     monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "vinted_monitor.services.scheduler.scheduler_worker_availability",
+        lambda *_args, **_kwargs: SchedulerWorkerAvailability(available=True, last_seen_at=datetime.now(UTC)),
+    )
     return settings
 
 
@@ -2018,6 +2035,126 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
         cleanup_source(source_id)
 
 
+def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    settings = _enable_direct_runtime(monkeypatch)
+    source_ids: list[int] = []
+    from vinted_monitor.api import main as api_main
+
+    first_activation_reached_run = Event()
+    release_first_activation = Event()
+    second_activation_reached_lock = Event()
+    second_activation_acquired_lock = Event()
+    second_activation_reached_run = Event()
+
+    with SessionLocal() as db:
+        scheduler_setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+        scheduler_setting_existed = scheduler_setting is not None
+        original_scheduler_value = deepcopy(scheduler_setting.value) if scheduler_setting is not None else None
+
+    try:
+        with SessionLocal() as db:
+            update_scheduler_config(
+                db,
+                {
+                    "enabled": True,
+                    "max_concurrent_runs": 1,
+                    "allow_direct_without_proxy": True,
+                    "direct_max_concurrent_runs": 1,
+                },
+                settings,
+            )
+            for index in range(2):
+                source = SearchSource(
+                    name=f"pytest concurrent initial capacity {index}",
+                    url=f"https://www.vinted.es/catalog?search_text=initial-capacity-{index}",
+                    normalized_query={"search_text": [f"initial-capacity-{index}"]},
+                    is_active=False,
+                    monitor_mode="continuous",
+                    scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+                )
+                db.add(source)
+                db.flush()
+                source_ids.append(source.id)
+            db.commit()
+
+        app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=0)
+        monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+        original_execute_monitor_run = api_main.execute_monitor_run
+        original_acquire_initial_run_admission_lock = api_main.acquire_initial_run_admission_lock
+
+        def observed_acquire_initial_run_admission_lock(db) -> None:
+            is_second_activation = first_activation_reached_run.is_set()
+            if is_second_activation:
+                second_activation_reached_lock.set()
+            original_acquire_initial_run_admission_lock(db)
+            if is_second_activation:
+                second_activation_acquired_lock.set()
+
+        def delayed_execute_monitor_run(db, source_id: int, *args, **kwargs):
+            if source_id == source_ids[0]:
+                first_activation_reached_run.set()
+                assert release_first_activation.wait(timeout=5)
+            else:
+                second_activation_reached_run.set()
+            return original_execute_monitor_run(db, source_id, *args, **kwargs)
+
+        monkeypatch.setattr(api_main, "acquire_initial_run_admission_lock", observed_acquire_initial_run_admission_lock)
+        monkeypatch.setattr(api_main, "execute_monitor_run", delayed_execute_monitor_run)
+
+        def activate(source_id: int) -> tuple[int, str | None]:
+            with TestClient(app) as client:
+                response = client.post(f"/api/monitors/{source_id}/start")
+                detail = response.json().get("detail") if response.status_code != 201 else None
+                return response.status_code, detail
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(activate, source_ids[0])
+            assert first_activation_reached_run.wait(timeout=5)
+            second_future = executor.submit(activate, source_ids[1])
+            assert second_activation_reached_lock.wait(timeout=5)
+            assert not second_activation_acquired_lock.wait(timeout=0.25)
+            assert not second_activation_reached_run.wait(timeout=0.25)
+            release_first_activation.set()
+            responses = [first_future.result(timeout=5), second_future.result(timeout=5)]
+
+        assert sorted(status for status, _detail in responses) == [201, 409]
+        assert [detail for status, detail in responses if status == 409] == ["Scheduler capacity limit reached"]
+        with SessionLocal() as db:
+            sources = list(db.scalars(select(SearchSource).where(SearchSource.id.in_(source_ids))))
+            runs = list(db.scalars(select(Run).where(Run.source_id.in_(source_ids))))
+            sessions = list(db.scalars(select(MonitorSession).where(MonitorSession.source_id.in_(source_ids))))
+            active_sources = [source for source in sources if source.is_active]
+            inactive_sources = [source for source in sources if not source.is_active]
+            assert len(active_sources) == 1
+            assert len(inactive_sources) == 1
+            assert active_sources[0].next_run_at is not None
+            assert inactive_sources[0].monitor_started_at is None
+            assert inactive_sources[0].next_run_at is None
+            assert len(runs) == 1
+            assert len(sessions) == 1
+            assert runs[0].source_id == active_sources[0].id
+            assert sessions[0].source_id == active_sources[0].id
+            assert runs[0].monitor_session_id == sessions[0].id
+    finally:
+        release_first_activation.set()
+        app.dependency_overrides.clear()
+        try:
+            for source_id in source_ids:
+                cleanup_source(source_id)
+        finally:
+            with SessionLocal() as db:
+                scheduler_setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+                if scheduler_setting_existed:
+                    if scheduler_setting is None:
+                        scheduler_setting = AppSetting(key=SCHEDULER_SETTING_KEY, value={})
+                        db.add(scheduler_setting)
+                    scheduler_setting.value = original_scheduler_value or {}
+                elif scheduler_setting is not None:
+                    db.delete(scheduler_setting)
+                db.commit()
+
+
 def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = TestClient(app)
@@ -2055,9 +2192,7 @@ def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(mon
             assert source.monitor_started_at is None
             assert source.monitor_until is None
             assert source.next_run_at is None
-            assert len(sessions) == 1
-            assert sessions[0].stopped_at is not None
-            assert sessions[0].stop_reason == "stopped"
+            assert sessions == []
             assert runs == []
     finally:
         cleanup_source(source_id)

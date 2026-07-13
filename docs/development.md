@@ -18,9 +18,19 @@ docker compose up --build
 
 ## Flujo de Ramas
 
-El flujo de desarrollo SDD esta documentado en `docs/sdd-process.md`. Para trabajo no trivial, usa una rama corta por spec o fix, creada desde `develop`, y prepara PR de vuelta a `develop`.
+El flujo SDD practico esta documentado en `docs/sdd-process.md`. Un plan amplio se divide primero en tareas con resultado propio y se registra como checklist ordenada en `docs/roadmap.md` mediante una rama documental `plan/<scope>` creada desde `develop`; esa rama se integra antes de abrir ramas de implementacion.
+
+Cada tarea usa una rama corta creada desde un `develop` que ya contiene sus dependencias, implementa solo su slice, demuestra el comportamiento real, pasa self-review y auditoria independiente automatica, y se commitea por separado. Tras integrar la tarea se espera confirmacion explicita antes de abrir la rama o empezar el desarrollo siguiente.
 
 Si `develop` no existe localmente, no sigas acumulando cambios en una rama larga por defecto. Confirma primero si hay que crear `develop`, traerlo de remoto o tratar el cambio como excepcion puntual.
+
+## Verificacion de Integracion
+
+La aceptacion prioriza el flujo real sobre el volumen de tests: contenedores y procesos reales, endpoint/API o accion PWA real, PostgreSQL, Redis/colas/cache, eventos/logs y estado visible. Los mocks, eventos sinteticos y suites unitarias cubren bordes deterministas, pero no sustituyen esa prueba de coordinacion.
+
+Cuando el resultado dependa realmente de Vinted o de un proxy, el contrato de la tarea debe fijar antes un numero acotado de requests/runs y el estado final esperado. La prueba termina deteniendo el monitor y limpiando filas, sesiones, claves Redis, tareas y procesos QA. Los fallos de dependencias requeridas se muestran y detienen el flujo; no se crean fallbacks implicitos para obtener un verde.
+
+La suite completa se ejecuta una vez cerca del cierre si el riesgo lo justifica. Durante desarrollo se usan checks focalizados para no convertir cada iteracion en una tarea enorme.
 
 ## Base de Datos Local
 
@@ -58,6 +68,8 @@ Invoke-WebRequest http://127.0.0.1:5176
 Abre Playwright contra `http://127.0.0.1:5176`. El script apaga el servicio Docker `frontend` de `5173`, levanta `postgres`, `redis`, `api` y `worker` con Docker Compose, arranca Vite local en `5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`.
 
 No uses `http://localhost:5173` para esta pasada. Ese puerto pertenece al frontend Docker y en Windows puede aparecer como publicado aunque el host no responda. `status` debe mostrar el Vite QA en `5176` y avisar si queda algo escuchando en `5173`.
+
+Cada callback SSE debe pertenecer a una instancia concreta de `EventSource`. Antes de cambiar estado, cursor, eventos o temporizadores, el callback comprueba que su instancia sigue siendo la conexion actual; un `error` obsoleto nunca puede cerrar ni degradar el reemplazo. La conexion fallida se cierra y deja de ser actual antes de programar como maximo un timer de reconexion. Si el reemplazo tambien falla durante una caida prolongada puede programar el siguiente intento, pero nunca existen dos timers o conexiones actuales a la vez. Salir de Monitores invalida la instancia, cierra el stream y cancela el timer; volver crea una sola conexion con el ultimo cursor explicito.
 
 ## Frontend Structure
 
