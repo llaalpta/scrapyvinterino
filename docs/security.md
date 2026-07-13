@@ -1,15 +1,15 @@
 # Seguridad
 
-- Secretos solo en `.env` o almacen local cifrado futuro.
+- Secretos de despliegue solo en `.env`; passwords de proxy y contexto anonimo Vinted se guardan cifrados en PostgreSQL con una clave derivada de `APP_SECRET_KEY`.
 - No commitear cookies, tokens, direcciones completas ni datos de pago.
-- Login local obligatorio para la web.
-- Cookies de sesion `HttpOnly`; `Secure` en produccion.
+- El producto requiere una PWA privada con login local, pero la implementacion actual no autentica ni autoriza REST, SSE o comandos. CORS no es control de acceso. Mientras 14.12.1 siga abierto, no exponer los puertos de desarrollo fuera de un host/red de confianza ni desplegar el ejemplo productivo como si ya fuera privado.
+- La futura sesion local de 14.12.1 usara cookie `HttpOnly`, `Secure` en produccion y proteccion CSRF para mutaciones; hoy esa cookie no existe.
 - Redaccion automatica de datos sensibles en logs.
 - Mensajes de error persistidos deben pasar por redaccion antes de guardarse en `runs`, `errors` o campos de error de entidades.
-- Proxies residenciales son opcionales; credenciales cifradas en `proxy_profiles` con clave local.
+- Proxies residenciales son opcionales. El password se cifra en `proxy_profiles`; el username sigue en texto claro y el read model API lo devuelve aunque la PWA solo usa su mascara. 14.12.8 elimina esa contradiccion antes de considerar cifradas/no retornables todas las credenciales.
 - El acceso directo al catalogo publico de Vinted esta bloqueado por defecto mediante `VINTED_DIRECT_CATALOG_ENABLED=false`; para trafico real se debe configurar un proxy compatible con el pais objetivo.
 - Cada proxy de Vinted debe declarar pais; locale, `Accept-Language`, viewport y Vinted `x-screen` se resuelven desde presets internos y no son editables desde la PWA/API. La planificacion solo usa proxys activos que coinciden con el pais objetivo.
-- No devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML, snippets de cuerpos HTTP ni payloads raw completos en logs o respuestas API. Las respuestas rechazadas conservan solo longitud, tipo aparente, status y headers saneados.
+- El contrato no debe devolver ni registrar cookies anonimas de Vinted, tokens, credenciales de proxy, HTML, snippets de cuerpos HTTP ni payloads raw completos en logs o respuestas API. La excepcion actual del username de proxy esta identificada arriba y bloqueada por 14.12.8. Las respuestas rechazadas conservan solo longitud, tipo aparente, status y headers saneados.
 - Los HAR de investigacion nunca se commitean. Los fixtures de detalle deben ser subconjuntos compactos, inventados y saneados sin cookies, tokens ni identificadores personales.
 - Los reintentos Redis guardan solo el candidato publico normalizado, contador, tipo de fallo y siguiente fecha; no guardan HTML/Flight, cookies, sesiones ni `raw` de origen.
 - Las fotos se persisten como URL HTTPS firmada y solo se aceptan hosts `images*.vinted.net`; se conserva la query de firma. El worker no descarga bytes ni envia cookies/proxy Vinted al CDN.
@@ -17,7 +17,7 @@
 - Tras cualquier redirect se vuelve a validar la URL final antes de leer o parsear la respuesta; se rechazan otros hosts, HTTP, credenciales, puertos alternativos y rutas ajenas a `/items/...`.
 - Los eventos de run pueden guardar metodo, fase, nivel, URL saneada, headers saneados, status, duracion en ms, timeout, intento/retry, proxy, IP de salida, pais, user-agent, fingerprints y errores de Vinted redacted/truncados.
 - La UI principal de logs debe mostrar una checklist operativa no interactiva con datos resumidos y seguros por evento. Los detalles JSON redacted quedan como evidencia tecnica disponible por API/base de datos, no como vista del timeline principal.
-- La API nunca devuelve passwords/tokens/cookies/proxy URLs completas con credenciales; solo valores masked o fingerprints.
+- La API actual no devuelve passwords, tokens, cookies ni URLs de proxy completas con credenciales; para esos campos usa presencia, mascara o fingerprint. El username crudo sigue siendo la excepcion pendiente de 14.12.8.
 - Los marcadores seguros de cookies, tokens, headers sensibles, sesion HTTP y sesion sticky de proxy pueden incluir nombre, longitud, mascara `first4****last4` y fingerprint corto. Si el valor es corto, la mascara no muestra ningun caracter.
 - La redaccion de logs debe aplicarse de forma recursiva a `details`, incluyendo listas y objetos anidados.
 - Las claves heredadas `body_snippet`, `html` y `response_body` se redactan tambien al leer; la migracion de saneamiento elimina los `body_snippet` ya persistidos y su downgrade nunca restaura contenido.
@@ -28,9 +28,14 @@
 - Las pruebas de redaccion deben colocar canarios tanto en valores como en metadatos y claves externas (`name`, `kind` y nombres de cabecera). Validar solo el valor secreto no demuestra que el contenedor completo sea seguro.
 - Implementar donde sea necesario bypass agresivo anti-bot.
 - `curl_cffi` con `impersonate` falsifica la huella TLS/JA3 y HTTP/2. Los perfiles de navegador (User-Agent, Sec-Ch-Ua) son datos publicos, no secretos.
-- Los identificadores sticky de proxy se guardan como parte de una sesion Vinted preparada y solo se registran como marcador seguro.
+- Los identificadores sticky de proxy se guardan completos solo en la fila de sesion preparada. Runtime metadata y eventos conservan como maximo el prefijo operativo y el marcador enmascarado/fingerprinted creado por el redactor.
 - Las cookies DataDome, tokens publicos y CSRF de sesiones preparadas se cifran en `vinted_sessions.context_encrypted`; la API y los logs nunca devuelven valores raw.
 - Invalidar una sesion sustituye su payload cifrado por un objeto vacio y conserva solo estado, fingerprint y diagnosticos saneados. Archivar un monitor invalida y purga todas sus sesiones preparadas.
+- El sticky ID, binding de monitor/proxy/perfil, estado, contadores, tiempos, fingerprint, IP/pais de egress y error saneado son metadata durable sin cifrar. Redis no almacena ninguna copia del contexto ni del jar.
+- `status=ready` es solo estado historico: la seleccion exige ademas compatibilidad, TTL, presupuesto y contexto descifrable/completo. La API/PWA muestra hoy la ultima fila por proxy sin calcular esa usabilidad, y puede rotular como `ready` una fila caducada o agotada; 14.12.5 corrige el read model.
+- Caducidad, agotamiento, `incomplete` y el limite de usos no vacian hoy `context_encrypted`. La retencion hasta archivo/invalidation es un riesgo aceptado solo de forma provisional; 14.12.11 define purga y limpieza verificable despues de que el intento `preparing` tenga ownership durable.
+- Una edicion del transporte o credenciales del proxy no invalida hoy las sesiones asociadas. No se debe asumir que `proxy_profile_id` prueba la misma identidad de egress; 14.12.2 introduce el fence durable antes de reutilizar cookies.
+- No existe hoy un sentinel de `APP_SECRET_KEY`: una clave global incoherente se descubre tarde al leer passwords o contextos. 14.12.6 la detecta antes de servir/consumir. Con el sentinel valido, un contexto o password cifrado aislado puede seguir fallando repetidamente; 14.12.7 detiene su owner sin destruir el ciphertext ni penalizar el proxy.
 - En `production`, el arranque exige una `APP_SECRET_KEY` propia de al menos 32 caracteres y rechaza los placeholders versionados.
 - La preparacion de sesion Vinted pertenece al monitor y se ejecuta automaticamente si el run no encuentra una sesion `ready` compatible con el proxy sticky seleccionado.
 - Antes de pedir `/api/v2/catalog/items` para scraping, el provider debe tener contexto anonimo completo en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, DataDome, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`.

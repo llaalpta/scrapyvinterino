@@ -3,7 +3,7 @@
 ## Servicios
 
 - `frontend`: PWA React/Vite para configuracion y operacion.
-- `api`: FastAPI para REST, login local, SSE y comandos sincronos de monitor: run manual, run inicial de una activacion, baseline, preparacion de sesion y detail probe.
+- `api`: FastAPI para REST, SSE y comandos sincronos de monitor: run manual, run inicial de una activacion, baseline, preparacion de sesion y detail probe. El control de acceso local aun no esta implementado y pertenece a 14.12.1.
 - `worker`: un proceso con el productor recurrente (scheduler) y consumidores de Redis para runs de monitor, scraping, deduplicacion y filtros.
 - `scheduler-watchdog`: proceso fail-stop separado que detiene en PostgreSQL solo monitores recurrentes cuando expira el heartbeat del productor y despues intenta retirar su tarea ready de Redis.
 - `postgres`: persistencia.
@@ -64,6 +64,44 @@ La propiedad de Alembic no pertenece al `backend/Dockerfile`: su `CMD` generico 
 El commit HTTP es el limite del comando, no el de las recargas posteriores de la PWA. Tras crear, un fallo al cargar estadisticas puede mostrar error aunque la fila ya exista; tras archivar, puede fallar la recarga de oportunidades/runs/estadisticas aunque el `DELETE` ya se haya aplicado. El formulario de alta tampoco tiene aun exclusion mutua frente a dos envios rapidos. La reconciliacion honesta, el envio unico y la limpieza local completa estan acotados en 14.27; la carga inicial independiente de monitores, oportunidades, runs y proxies, en 14.28.
 
 PostgreSQL decide si un monitor esta archivado. La implementacion actual no borra `monitor_started_at`, no cancela una tarea ya reservada o ejecutandose y no converge ambos sentidos del corte Redis/PostgreSQL al archivar; esos cierres pertenecen respectivamente a 14.30 y 14.31. La edicion PWA de nombre/URL pertenece a 14.26 y los invariantes de longitud, default SQL y `updated_at`, a 14.29.
+
+## Mapa de sesion publica anonima
+
+Una sesion Vinted preparada es contexto publico anonimo; no contiene un login de Vinted. No es la sesion de monitor de `monitor_sessions` ni una sesion de usuario de la PWA. El estado durable vive en PostgreSQL y las copias de jar activas viven solo en memoria durante un run.
+
+| Propietario | Estado y responsabilidad actuales |
+| --- | --- |
+| `search_sources` | El ID del monitor delimita la sesion. El row lock actual serializa seleccion/contador, creacion, refresh de contexto y archivo en sus callers normales. `mark_vinted_session_invalid()` no adquiere ese lock y un challenge puede hacer rollback antes de invocarlo; 14.12.4 cierra esa excepcion y el orden invalidacion-versus-refresh. Un helper que ya encontro la fuente archivada tampoco debe convertir ese estado en «falta sesion»; la carrera que aun puede preparar antes del segundo fence pertenece a 14.30. |
+| `proxy_profiles` | Posee transporte, pais, disponibilidad y preset de locale/idioma/viewport/`x-screen`. `vinted_sessions.proxy_profile_id` guarda la asociacion, pero hoy no fija la identidad efectiva de host/puerto/usuario/password/template: editar el proxy puede reutilizar un sticky antiguo con otro transporte. Una tarea Redis tampoco revalida `is_active`/`cooldown_until` al consumirla. 14.12.2 cierra ambos fences antes de proveedor. |
+| `vinted_sessions` | Una fila conserva monitor, proxy, sticky ID, perfil, contexto geografico, estado, contadores y tiempos. Cookies, CSRF y tokens se serializan en `context_encrypted`; fingerprint, IP/pais, errores saneados y lifecycle metadata quedan fuera del cifrado. Los flags de presencia se derivan al leer el payload y no duplican los valores. No hay una fila en Redis equivalente. |
+| `APP_SECRET_KEY` | Deriva la clave Fernet que cifra tanto contexto Vinted como passwords de proxy. Hoy no existe un sentinel que detecte una clave global incoherente al arrancar; 14.12.6 lo añade. Con una clave valida, un ciphertext/JSON aislado tampoco tiene estado fail-stop propio; 14.12.7 conserva la evidencia y detiene solo el owner afectado. |
+| `CurlCffiVintedCatalogProvider` | En modo serial, crea un provider/jar en memoria por run, carga el contexto descifrado, conserva el mismo sticky y comparte jar entre documento, API y detalles. Los modos explicitos canary/parallel clonan ese contexto en hasta dos providers de lane con el mismo proxy/sticky, adoptan el ultimo contexto exitoso y canary vuelve a validar catalogo. El diagnostico de egress usa otra sesion sin cookies. Al cerrar cada provider se descarta solo su copia en memoria. |
+| API/PWA/eventos | `Preparar sesion` crea un run de auditoria `session_prepare`; logs y respuestas exponen IDs, flags, contadores y marcadores saneados, nunca `context_encrypted`. Ajustes muestra la ultima fila creada para el proxy, no necesariamente la que seleccionaria el runtime. La API aun no aplica autenticacion; hasta 14.12.1 solo puede considerarse segura dentro de un host/red de confianza y el ejemplo productivo no es desplegable como PWA privada. |
+
+La seleccion efectiva no equivale a leer `status=ready`. Bajo el lock del monitor, `get_ready_vinted_session()` exige mismo monitor y proxy, perfil/impersonation, pais, locale, `Accept-Language` y `x-screen`, TTL vigente, `request_count < max_requests`, payload descifrable y contexto requerido completo. El predicado actual omite `viewport_size`; 14.12.5 lo alinea y hace visible el motivo efectivo de no reutilizacion. Entre varias candidatas se elige la usada hace mas tiempo y, como desempate, la preparada mas antigua y el menor ID; no se ordena por `request_count`. Al reutilizar, el contador sube dentro de la transaccion antes del trafico de negocio, pero solo queda durable con el commit terminal y una caida intermedia puede perderlo; 14.12.9 crea esa adquisicion durable. Al preparar, bootstrap y probe ocurren antes de crear la fila; solo una preparacion aceptada se guarda con uso uno y 14.12.10 introduce el intento durable previo. Por tanto, `request_count` cuenta adquisiciones/preparaciones aceptadas del contexto, no peticiones HTTP individuales.
+
+```text
+sin candidata efectiva
+  -> sticky nuevo -> bootstrap catalogo -> collector DataDome -> probe diagnostico
+       -> accepted_json + contexto completo -> ready (uso 1)
+       -> cualquier otro resultado          -> incomplete (uso 0)
+       -> excepcion antes de guardar         -> run failed, sin fila `vinted_sessions`
+
+ready -> seleccionar + incrementar uso -> cargar mismo jar/sticky -> catalogo/detalles
+      -> rotacion detectada en detalle -> actualizar la misma fila y renovar TTL
+      -> rotacion ordinaria en catalogo/probe -> puede no persistirse (14.12.4)
+      -> DataDome/challenge de detalle/rechazo terminal tras retry -> invalid + payload cifrado vacio
+      -> Cloudflare de catalogo -> puede entrar en refresh generico (14.12.3)
+      -> TTL o presupuesto agotado -> no seleccionable; hoy conserva status ready y payload cifrado
+
+archivar monitor -> invalidar todas sus filas + sustituir cada payload por un objeto vacio
+```
+
+La preparacion explicita siempre crea otra fila y no retira una `ready` anterior. Como no hay unicidad, el siguiente run puede seleccionar una fila antigua mientras Ajustes muestra la ultima creada. La politica canonica, el estado `usable_now` y el refresco del read model PWA pertenecen a 14.12.5.
+
+La recuperacion permitida es acotada y conserva la identidad: un `429` con espera aceptada hace bootstrap y un retry en el mismo jar/sticky; un rechazo anonimo tambien intenta hoy un refresh. DataDome falla inmediatamente. Cloudflare hereda del error de sesion generico y puede entrar por error en ese refresh; ademas la ausencia de `Retry-After` se convierte hoy en cinco segundos. 14.12.3 fija el arbol fail-stop sin normalizar esos comportamientos como contrato. Las cookies que rotan en detalle marcan el contexto para persistencia; las rotaciones ordinarias de catalogo/probe pueden perderse y se cierran en 14.12.4. Un refresh persistido reinicia `prepared_at` y `expires_at`, por lo que el TTL actual es deslizante.
+
+`incomplete`, caducidad, agotamiento y el limite de usos detienen o excluyen trabajo, pero no purgan por si mismos el contexto cifrado. Solo la invalidacion explicita y el archivo lo sustituyen por `{}`. La politica de retencion y limpieza queda en 14.12.11; mientras tanto `ready` es estado durable historico, no una afirmacion de usabilidad actual.
 
 ## Flujo MVP
 

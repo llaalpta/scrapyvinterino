@@ -17,7 +17,7 @@ Migrar todo el trafico HTTP a `curl_cffi` con `impersonate` para falsificar la h
 Adicionalmente:
 - Cada sesion usa un perfil de navegador coherente (impersonate + User-Agent + Sec-Ch-Ua alineados).
 - Se implementa deteccion de challenges de DataDome para descartar IPs comprometidas.
-- Los proxies residenciales usan sesiones sticky con UUID dinamico por intento y username configurable mediante `PROXY_STICKY_USERNAME_TEMPLATE`.
+- Los proxies residenciales usan un UUID sticky nuevo por preparacion de sesion y lo reutilizan entre runs mientras esa sesion siga elegible; el username se compone mediante `PROXY_STICKY_USERNAME_TEMPLATE`. El binding actual depende del ID mutable del perfil y 14.12.2 añade la identidad efectiva de transporte/credenciales/template antes de reutilizarlo.
 - Se aplica timing humano entre requests para evitar deteccion por cadencia.
 
 ## Consequences

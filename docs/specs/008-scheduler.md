@@ -140,7 +140,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
 - Manual and scheduler-triggered runs share the same URL-filter compatibility validation and fast API parameter translation.
 - Manual and scheduler-triggered runs never create the initial snapshot implicitly; recalibration is always an explicit PWA/API action.
-- Redis stores only safe IDs and timestamps: monitor id, policy hash, `vinted_item_id`, processing markers, and seen markers.
+- Redis stores safe task/cache/retry data: IDs, timestamps/due times, policy hash, counters/types, processing/seen markers and normalized public candidates needed for bounded detail retries.
 - Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data. Prepared Vinted cookies/tokens are stored only in the database encrypted with the local app secret.
 - Run logs show operational progress with sanitized URLs, request headers after redaction/masking, response headers after redaction/masking, status codes, per-request durations in milliseconds, egress mode, proxy profile id when used, auth mode, IP/country from the egress diagnostic, filter snapshot, Redis/cache decisions, candidate decisions, persistence decisions, opportunity outcomes, and safe counts only.
 - Run logs show the translated fast API parameters and URL filter compatibility in safe structured details.
@@ -193,7 +193,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, viewport and Vinted `x-screen` are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
 - Direct requests behave exactly as monitor runs only when global direct fallback is enabled in the UI, `VINTED_DIRECT_CATALOG_ENABLED=true`, and no matching proxy is available.
 - Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
-- Proxy credentials stored through the UI are encrypted at rest and never returned raw by API.
+- Proxy passwords stored through the UI are encrypted at rest. The username remains in plaintext and is returned raw by the current API even though the PWA renders its mask; 14.12.8 closes that credential-contract gap.
 - Proxy pool entries can be `own`, `datacenter`, or `residential`; target-specific/special proxy classes are not exposed for Vinted.
 - If a proxy request fails, only the affected run/source is failed and logged with redacted details.
 - Repeated items in the same monitor cannot generate duplicate opportunities.

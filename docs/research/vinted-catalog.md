@@ -105,7 +105,7 @@ Decision de rendimiento:
 
 - Bootstrap anonimo:
   - `GET` a la URL publica de catalogo guardada en el monitor con headers de navegador.
-  - Guardar solo cookies/tokens publicos y contexto anonimo en memoria de proceso inicialmente.
+  - Mantener la copia HTTP activa solo en memoria del provider; la copia reutilizable se serializa cifrada en PostgreSQL y nunca pasa a Redis, logs o respuestas API.
   - Extraer CSRF, anon id, `v_udt`, locale y screen cuando aparezcan en el documento, headers o cookies.
 - Catalogo rapido:
   - `GET /api/v2/catalog/items`.
@@ -195,13 +195,15 @@ Vinted usa DataDome como WAF. DataDome analiza multiples capas de la conexion:
 
 ### Bypass implementado
 
+El ciclo de vida mantenido y su contrato vigente estan en `docs/architecture.md` y `docs/specs/010-producer-consumer-bypass.md`; esta seccion conserva solo conclusiones tecnicas actuales y divergencias explicitamente asignadas.
+
 - `curl_cffi` con `impersonate` replica exactamente el ClientHello TLS, HTTP/2 SETTINGS, y orden de pseudo-headers de la version de Chrome especificada.
 - Pool de perfiles de navegador coherentes: cada sesion usa un perfil con `impersonate`, `User-Agent`, y `Sec-Ch-Ua*` alineados.
 - Delay humano con distribucion Beta entre bootstrap y catalogo.
 - Deteccion de challenge: si la respuesta contiene cabeceras `x-datadome*`, cookie `datadome` no vacia en una respuesta de error, `server` DataDome o marcadores HTML (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la sesion/proxy segun la politica de run. Una cookie `datadome` en `200` de bootstrap puede ser contexto valido y no basta por si sola para declarar challenge.
 - Un `429` sin firmas DataDome se considera rate limit de catalogo, no challenge; se registra `Retry-After`, backoff aplicado y presupuesto maximo antes de reintentar.
-- Proxies residenciales con UUID de sesion sticky por intento. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`.
-- Retry con escalada: nueva IP, nuevo perfil, delay creciente.
+- Proxies residenciales con UUID sticky nuevo por preparacion y reutilizado por runs elegibles del mismo monitor/perfil. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`. El binding efectivo de transporte/credenciales/template se cierra en 14.12.2.
+- No existe una escalada generica a otro perfil. El consumer actual puede reintentar un challenge dentro del presupuesto de intentos con el mismo `proxy_profile_id` y preparar otro sticky tras invalidar; es una divergencia, no el contrato objetivo. 14.12.3 hace terminal el primer challenge, ACK sin otra llamada al provider y exige autorizacion separada para cualquier retry, nueva IP/perfil o delay como fallback.
 
 ### Scripts de verificacion
 

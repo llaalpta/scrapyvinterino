@@ -7,7 +7,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Scheduler atomically enqueues `MonitorTask` payloads with `LPUSH`, one pending marker per monitor and a payload reverse marker, coalescing later ticks while work is queued or reserved and counting backlog against global/proxy capacity.
 - Consumers use a binary queue client and reserve FIFO work with `BLMOVE` into per-consumer processing lists; its socket timeout exceeds the blocking window. Terminal outcomes ACK the exact payload, unexpected failures requeue it, malformed/non-UTF-8 payloads go to dead-letter, and startup/thread recovery restores unacknowledged reservations. Maintenance transitions retry with backoff and are idempotent after ambiguous responses.
 - `CurlCffiVintedCatalogProvider` is the only Vinted catalog HTTP provider.
-- Runtime catalog traffic is monitor-owned: the run reuses a ready `vinted_sessions` row for that monitor/proxy sticky identity or prepares one automatically from the saved catalog document URL before scraping.
+- Runtime catalog traffic is monitor-owned: the run selects a `vinted_sessions` row by monitor, `proxy_profile_id` and logical browser/context fields, then uses the sticky ID stored in that selected row; otherwise it prepares one automatically from the saved catalog document URL. The current binding does not fingerprint the mutable proxy transport/credentials/template; 14.12.2 closes that identity gap.
 - Manual runs remain synchronous from the API, but use the same provider stack.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 - Item enrichment uses the public item document, structural Next/React Flight records and JSON-LD fallback. The production flow and visible detail probe no longer call the direct `/api/v2/items/{id}/details` matrix.
@@ -18,16 +18,16 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 
 - Use `PROXY_STICKY_USERNAME_TEMPLATE` for provider-specific sticky formats. Default: `{username}-session-{session_id}`.
 - For providers that require `sessid`, configure `{username}-sessid-{session_id}`.
-- Residential proxy sticky identities are tied to prepared Vinted sessions for a monitor, not to a one-off task attempt.
-- Do not call the Asocks refresh API from runtime scraping code; rotation is achieved by using a new session UUID per attempt.
+- Residential proxy sticky IDs are stored with prepared Vinted sessions for a monitor, not with one-off task attempts. Until 14.12.2, editing the associated proxy profile can nevertheless reuse that sticky/context through a different effective transport identity.
+- Do not call the Asocks refresh API from runtime scraping code; an authorized new preparation/rotation creates a new session UUID, which normal runs then reuse while eligible.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
 - Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
-- Store only `proxy_session_id_prefix` in runtime metadata and events; do not persist full proxy URLs, credentials, cookies or raw DataDome values.
-- Redis task payloads carry `proxy_profile_id` only; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
+- Runtime metadata and events may store `proxy_session_id_prefix` plus the redactor-created masked/fingerprinted `proxy_sticky_session` marker; they never persist the full sticky value, proxy URL, credentials, cookies or raw DataDome values.
+- Redis task payloads carry only `proxy_profile_id` as proxy-related data, alongside safe task/source/trigger identity and scheduling fields; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
 - Run rows persist indexed `task_id`. Redelivery acknowledges an existing terminal run without Vinted traffic, reconciles `finalizing`, and closes an orphan `running` row before retrying.
 - Development Redis uses a persisted AOF volume. The recovery contract assumes one worker service instance with multiple in-process consumers; horizontally scaled workers require distributed reservation ownership before deployment.
 - Classify DataDome and `cf-mitigated: challenge` explicitly; plain `429` remains rate limiting and detail `404/410` is terminal.
-- Keep retry escalation in `TaskConsumer`; `execute_monitor_run()` records the failed run and re-raises `DataDomeChallengeError`.
+- Keep retry escalation in `TaskConsumer`; the detail path records the failed run and re-raises both `DataDomeChallengeError` and `VintedCatalogChallengeError`. A first catalog Cloudflare challenge can still enter generic refresh and a later one can be absorbed as a failed run before the consumer sees it; 14.12.3 closes that gap.
 
 ## Pre-Integration Impersonation Plan
 
@@ -86,7 +86,7 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 - The provider no longer bootstraps against the base Vinted domain. Each run uses the monitor's saved `/catalog?...` URL as the document bootstrap, then calls `/api/v2/catalog/items` with the same session, cookies, proxy identity, referer, CSRF token and anon id when those markers are present.
 - Proxy profiles now accept only connection data and country as user input. Locale, `Accept-Language`, and screen are resolved from internal country presets, stored for diagnostics, and rejected if sent through legacy create/update payloads. The ES preset uses `locale=es-ES` with the observed Chrome 146 HAR `Accept-Language` value `en-GB,en;q=0.9`.
 - Empty `search_by_image_uuid` and `search_by_image_id` URL parameters are accepted and ignored; non-empty values remain unsupported because image-search filters are not translated to the fast API.
-- Run events record `bootstrap_origin=catalog_document`, CSRF/anon presence booleans, and safe markers only. Raw cookies, CSRF values, anon ids and Vinted session tokens remain memory-only.
+- Run events record `bootstrap_origin=catalog_document`, CSRF/anon presence booleans, and safe markers only. The active raw values live only in provider memory/the cookie jar, and a serialized copy is stored inside encrypted `vinted_sessions.context_encrypted`; events, runtime metadata and API responses never expose them.
 
 ## Chrome 146 Runtime Correction 2026-07-09
 
@@ -106,13 +106,13 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 
 - The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
 - Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That direct endpoint was an earlier research diagnostic and has been removed from runtime and PWA probes.
-- Business runs require the public `/items/...` HTML/Next detail document before creating opportunities. Recoverable failures stay pending in Redis; configured incompleteness, genuine `404/410`, blacklist decisions and exhausted retries are terminal. Anti-bot challenges fail the run, invalidate the prepared session and preserve the rolled-back batch.
+- Business runs require the public `/items/...` HTML/Next detail document before creating opportunities. Recoverable failures stay pending in Redis; configured incompleteness, genuine `404/410`, blacklist decisions and exhausted retries are terminal. DataDome and detail-document anti-bot challenges fail the run, invalidate the prepared session and preserve the rolled-back batch. A first catalog Cloudflare challenge can still enter the generic session-refresh branch; 14.12.3 closes that divergence and its consumer propagation.
 
 ## Prepared Session Hardening 2026-07-09
 
-- A monitor-owned Vinted session is reusable only after strict context is present: CSRF token, anon id, `access_token_web`, `v_udt`, `__cf_bm`, `datadome`, target country match, locale, `Accept-Language`, viewport and `x-screen=catalog`.
+- A monitor-owned Vinted session is reusable only after strict cookie/token context is present and country, locale, `Accept-Language` and `x-screen=catalog` match. The viewport is persisted but the current selector does not compare it; 14.12.5 adds that missing predicate and reconciles runtime/API/PWA eligibility.
 - Session preparation may still call the catalog API probe after a failed DataDome collector to collect diagnostics, but a successful JSON probe no longer overrides missing `datadome` or `__cf_bm`; the saved row remains `incomplete` and the run fails clearly.
-- Runtime provider selection, explicit `Preparar sesion`, silent context refreshes and item detail probes now all use the same strict prepared-session requirement.
+- Runtime provider selection, explicit `Preparar sesion` and item detail probes share the strict prepared-session requirement. Detail rotations mark context for persistence, but ordinary catalog/probe rotations and a successful refresh followed by a failed retry can still leave stale encrypted context; 14.12.4 owns that durability gap.
 - The provider receives the configured human pacing bounds from settings instead of hardcoded defaults.
 - Recalibrating the initial catalog snapshot reuses the accepted JSON payload from the preparation probe when the run had to prepare a new session, avoiding an immediate duplicate catalog API request. The explicit `Preparar sesion` action remains non-business: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
 

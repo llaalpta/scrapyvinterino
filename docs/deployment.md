@@ -14,6 +14,8 @@ El runtime local ejecutable vive en `docker-compose.yml`. `docker-compose.prod.e
 
 Desarrollo publica frontend, API, PostgreSQL y Redis en el host. El ejemplo de produccion mantiene PostgreSQL/Redis en la red `internal`, conecta API y frontend a la red externa `traefik`, enruta `/api` a FastAPI y el resto a Nginx. Requiere definir `APP_HOST` y crear antes la red externa `traefik`.
 
+Ninguno de los dos Compose aplica hoy autenticacion a REST, SSE o comandos, y la ruta Traefik del ejemplo tampoco añade un middleware de acceso. CORS no cierra esa frontera. Hasta completar 14.12.1, desarrollo debe limitarse a un host/red de confianza y el ejemplo no debe exponerse como si ya fuera una PWA privada.
+
 ## Configuracion Runtime
 
 La configuracion no debe tener dos fuentes de verdad activas:
@@ -135,7 +137,7 @@ Las señales superficiales, la ausencia de health del watchdog, el restart parci
 
 ## Outbound Vinted Proxy
 
-El monitor debe funcionar sin proxy de salida por defecto cuando el ajuste global de acceso directo lo permite. El uso de proxy residencial o de otro proveedor es optativo y se configura en el pool global de proxys gestionado por la PWA; las credenciales se almacenan cifradas en base de datos.
+El monitor debe funcionar sin proxy de salida por defecto cuando el ajuste global de acceso directo lo permite. El uso de proxy residencial o de otro proveedor es optativo y se configura en el pool global de proxys gestionado por la PWA. El password se almacena cifrado; el username permanece hoy en texto claro y 14.12.8 lo retira del contrato publico y lo cifra.
 
 La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`; la spec runtime vive en `docs/specs/008-scheduler.md`.
 
