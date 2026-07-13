@@ -41,7 +41,7 @@ from vinted_monitor.providers.vinted_catalog import (
 )
 from vinted_monitor.services.monitor_sessions import start_monitor_session
 from vinted_monitor.services.monitor_stats import get_monitor_stats
-from vinted_monitor.services.proxies import create_proxy_profile
+from vinted_monitor.services.proxies import create_proxy_profile, effective_proxy_identity_generation
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.runs import (
     DETAIL_PROBE_TRIGGER,
@@ -555,6 +555,7 @@ def _create_ready_vinted_session(
     proxy: ProxyProfile,
     *,
     proxy_session_id: str = "pytestsession",
+    settings: Settings | None = None,
 ) -> VintedSession:
     profile = profile_for_impersonate("chrome146")
     session = save_prepared_vinted_session(
@@ -584,7 +585,7 @@ def _create_ready_vinted_session(
             egress_country_code=proxy.country_code,
             egress_validated_at=datetime.now(UTC),
         ),
-        settings=Settings(),
+        settings=settings or Settings(),
     )
     db.flush()
     return session
@@ -763,9 +764,10 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
             self.closed = True
 
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeOwnedProvider)
+    runtime_settings = Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}")
     monkeypatch.setattr(
         "vinted_monitor.services.runs.get_settings",
-        lambda: Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}"),
+        lambda: runtime_settings,
     )
 
     with SessionLocal() as db:
@@ -778,10 +780,17 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
             port=8000,
             username="customer",
             password=None,
+            settings=runtime_settings,
         )
         source = db.get(SearchSource, source_id)
         assert source is not None
-        _create_ready_vinted_session(db, source, proxy, proxy_session_id="stickytest01")
+        _create_ready_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id="stickytest01",
+            settings=runtime_settings,
+        )
         run = execute_monitor_run(
             db,
             source_id,
@@ -790,6 +799,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
                 proxy_profile_id=proxy.id,
                 proxy_name=proxy.name,
                 proxy_kind=proxy.kind,
+                proxy_identity_generation=effective_proxy_identity_generation(proxy),
             ),
             seen_cache=FakeSeenCache(),
         )
@@ -1043,14 +1053,16 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
     client = authenticated_test_client()
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeDataDomeDetailProvider)
+    runtime_settings = Settings(
+        scheduler_enabled=True,
+        proxy_sticky_username_template="{username}-sessid-{session_id}",
+        vinted_prepared_session_required=True,
+    )
     monkeypatch.setattr(
         "vinted_monitor.services.runs.get_settings",
-        lambda: Settings(
-            scheduler_enabled=True,
-            proxy_sticky_username_template="{username}-sessid-{session_id}",
-            vinted_prepared_session_required=True,
-        ),
+        lambda: runtime_settings,
     )
+    monkeypatch.setattr("vinted_monitor.api.main.settings", runtime_settings)
     with SessionLocal() as db:
         proxy = create_proxy_profile(
             db,
@@ -1061,6 +1073,7 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
             port=8012,
             username="customer",
             password=None,
+            settings=runtime_settings,
         )
         source = SearchSource(
             name="pytest detail datadome monitor",
@@ -1072,7 +1085,13 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
         )
         db.add(source)
         db.flush()
-        _create_ready_vinted_session(db, source, proxy, proxy_session_id="detaildatadome01")
+        _create_ready_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id="detaildatadome01",
+            settings=runtime_settings,
+        )
         db.commit()
         source_id = source.id
         proxy_id = proxy.id
@@ -1617,13 +1636,14 @@ def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.M
     cleanup_source(None)
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
+    runtime_settings = Settings(
+        scheduler_enabled=True,
+        proxy_sticky_username_template="{username}-sessid-{session_id}",
+        vinted_prepared_session_required=True,
+    )
     monkeypatch.setattr(
         "vinted_monitor.services.runs.get_settings",
-        lambda: Settings(
-            scheduler_enabled=True,
-            proxy_sticky_username_template="{username}-sessid-{session_id}",
-            vinted_prepared_session_required=True,
-        ),
+        lambda: runtime_settings,
     )
     cache = FakeSeenCache(baseline_ready=False)
     with SessionLocal() as db:
@@ -1636,6 +1656,7 @@ def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.M
             port=8013,
             username="customer",
             password=None,
+            settings=runtime_settings,
         )
         source = SearchSource(
             name="pytest baseline prepare monitor",
@@ -1661,6 +1682,7 @@ def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.M
                     proxy_profile_id=proxy_id,
                     proxy_name="pytest baseline prepare proxy",
                     proxy_kind="residential",
+                    proxy_identity_generation=effective_proxy_identity_generation(db.get(ProxyProfile, proxy_id)),
                 ),
             )
             events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))

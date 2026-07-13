@@ -15,6 +15,7 @@ from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_mar
 from vinted_monitor.db.models import ProxyProfile, SearchSource, VintedSession
 from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
+from vinted_monitor.services.proxies import effective_proxy_identity_generation
 
 READY = "ready"
 INVALID = "invalid"
@@ -102,11 +103,32 @@ def get_ready_vinted_session(
     current_time = now or datetime.now(UTC)
     profile = profile_for_impersonate(settings.curl_impersonate_browser)
     _lock_live_source_for_session_write(db, source.id)
+    current_generation = effective_proxy_identity_generation(proxy_profile)
+    stale_sessions = list(
+        db.scalars(
+            select(VintedSession)
+            .where(
+                VintedSession.source_id == source.id,
+                VintedSession.proxy_profile_id == proxy_profile.id,
+                VintedSession.proxy_identity_generation != current_generation,
+                VintedSession.status != INVALID,
+            )
+            .with_for_update()
+        )
+    )
+    for stale_session in stale_sessions:
+        mark_vinted_session_invalid(
+            db,
+            stale_session.id,
+            reason="Prepared Vinted session proxy identity changed",
+            settings=settings,
+        )
     statement = (
         select(VintedSession)
         .where(
             VintedSession.source_id == source.id,
             VintedSession.proxy_profile_id == proxy_profile.id,
+            VintedSession.proxy_identity_generation == current_generation,
             VintedSession.status == READY,
             VintedSession.browser_profile == profile.name,
             VintedSession.impersonate == profile.impersonate,
@@ -156,6 +178,7 @@ def save_prepared_vinted_session(
     now = datetime.now(UTC)
     context_payload = context_to_encrypted_payload(context)
     missing = missing_prepared_context(context, require_datadome=require_datadome)
+    proxy_identity_generation = effective_proxy_identity_generation(proxy_profile)
     resolved_status = status
     resolved_error = last_error
     if missing and status == READY:
@@ -164,6 +187,7 @@ def save_prepared_vinted_session(
     session = VintedSession(
         source_id=locked_source.id,
         proxy_profile_id=proxy_profile.id,
+        proxy_identity_generation=proxy_identity_generation,
         proxy_session_id=proxy_session_id.strip(),
         status=resolved_status,
         browser_profile=profile.name,
@@ -226,6 +250,56 @@ def invalidate_vinted_sessions_for_source(
     settings: Settings | None = None,
 ) -> int:
     sessions = list(db.scalars(select(VintedSession).where(VintedSession.source_id == source_id)))
+    resolved_settings = settings or get_settings()
+    for session in sessions:
+        mark_vinted_session_invalid(db, session.id, reason=reason, settings=resolved_settings)
+    return len(sessions)
+
+
+def invalidate_vinted_sessions_for_proxy_identity(
+    db: Session,
+    proxy_profile_id: int,
+    *,
+    reason: str,
+    settings: Settings | None = None,
+) -> int:
+    """Purge all contexts for a proxy while locking affected monitors in stable order."""
+    source_ids = list(
+        db.scalars(
+            select(VintedSession.source_id)
+            .where(
+                VintedSession.proxy_profile_id == proxy_profile_id,
+                VintedSession.status != INVALID,
+            )
+            .distinct()
+            .order_by(VintedSession.source_id.asc())
+        )
+    )
+    if not source_ids:
+        return 0
+    list(
+        db.scalars(
+            select(SearchSource)
+            .where(SearchSource.id.in_(source_ids))
+            .order_by(SearchSource.id.asc())
+            # Session identity invalidation does not change the source key.
+            # NO KEY UPDATE still excludes session writers/archive while remaining
+            # compatible with FK key-share locks from pre-fence run events.
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    )
+    sessions = list(
+        db.scalars(
+            select(VintedSession)
+            .where(
+                VintedSession.proxy_profile_id == proxy_profile_id,
+                VintedSession.status != INVALID,
+            )
+            .order_by(VintedSession.source_id.asc(), VintedSession.id.asc())
+            .with_for_update()
+        )
+    )
     resolved_settings = settings or get_settings()
     for session in sessions:
         mark_vinted_session_invalid(db, session.id, reason=reason, settings=resolved_settings)

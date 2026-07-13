@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ class MonitorTask:
     trigger: str
     scheduler_config: dict = field(default_factory=dict)
     proxy_profile_id: int | None = None
+    proxy_identity_generation: str | None = None
     enqueued_at: str = ""
     task_id: str = ""
 
@@ -536,6 +538,17 @@ def _deserialize_task(raw_payload: str) -> MonitorTask:
                 not isinstance(task.proxy_profile_id, int)
                 or isinstance(task.proxy_profile_id, bool)
                 or task.proxy_profile_id <= 0
+            )
+        )
+        or (
+            task.proxy_profile_id is None
+            and task.proxy_identity_generation is not None
+        )
+        or (
+            task.proxy_profile_id is not None
+            and (
+                not isinstance(task.proxy_identity_generation, str)
+                or not re.fullmatch(r"v1:[1-9]\d*:[0-9a-f]{64}", task.proxy_identity_generation)
             )
         )
     ):

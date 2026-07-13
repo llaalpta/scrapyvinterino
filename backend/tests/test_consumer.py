@@ -64,6 +64,7 @@ def test_consumer_does_not_retry_when_prepared_vinted_session_is_missing(monkeyp
         monitor_mode="window",
         trigger="scheduler",
         proxy_profile_id=123,
+        proxy_identity_generation="v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
 
     consumer._process_with_escalation(task)

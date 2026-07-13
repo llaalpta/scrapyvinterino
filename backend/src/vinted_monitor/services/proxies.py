@@ -1,24 +1,33 @@
 from __future__ import annotations
 
+import hmac
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from urllib.parse import quote
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.core.config import Settings, get_settings
+from vinted_monitor.core.config import Settings, get_settings, validate_proxy_sticky_username_template
 from vinted_monitor.core.crypto import decrypt_text, encrypt_text, fingerprint_text, mask_text
 from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import ProxyProfile
 
 PROXY_KINDS = {"own", "datacenter", "residential"}
 DEFAULT_PROXY_COUNTRY_CODE = "ES"
+PROXY_IDENTITY_FINGERPRINT_VERSION = "v1"
+PROXY_IDENTITY_LOCK_NAMESPACE = 814_208_010
 SCREEN_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
 
 
 class ProxyProfileNotFoundError(ValueError):
+    pass
+
+
+class ProxyProfileEligibilityError(ValueError):
     pass
 
 
@@ -136,7 +145,9 @@ def create_proxy_profile(
         vinted_screen=context.vinted_screen,
         max_concurrent_runs=_validate_max_concurrent_runs(max_concurrent_runs),
         is_active=is_active,
+        identity_generation=1,
     )
+    profile.identity_fingerprint = effective_proxy_identity_fingerprint(profile, settings)
     db.add(profile)
     db.commit()
     db.refresh(profile)
@@ -161,9 +172,11 @@ def update_proxy_profile(
     settings: Settings | None = None,
 ) -> ProxyProfile:
     settings = settings or get_settings()
-    profile = db.get(ProxyProfile, profile_id)
+    _acquire_proxy_identity_lock(db, profile_id, exclusive=True)
+    profile = _lock_proxy_profile(db, profile_id)
     if profile is None:
         raise ProxyProfileNotFoundError(f"Proxy profile {profile_id} does not exist")
+    synchronize_proxy_identity(db, profile, settings)
     if name is not None:
         profile.name = _validate_name(name)
     if scheme is not None:
@@ -191,6 +204,7 @@ def update_proxy_profile(
         profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
         profile.is_active = is_active
+    synchronize_proxy_identity(db, profile, settings)
     db.commit()
     db.refresh(profile)
     return profile
@@ -314,7 +328,7 @@ def proxy_url_with_sticky_session(
     if not profile.username:
         return proxy_url_for_profile(profile, settings)
     password = _decrypt_password(profile, settings) if profile.password_encrypted else ""
-    template = username_template or settings.proxy_sticky_username_template
+    template = validate_proxy_sticky_username_template(username_template or settings.proxy_sticky_username_template)
     try:
         sticky_username = template.format(username=profile.username, session_id=session_id)
     except KeyError as exc:
@@ -323,6 +337,204 @@ def proxy_url_with_sticky_session(
         raise ValueError("Proxy sticky username template must include {username} and {session_id}")
     auth = f"{quote(sticky_username)}:{quote(password)}@"
     return f"{profile.scheme}://{auth}{profile.host}:{profile.port}"
+
+
+def effective_proxy_identity_fingerprint(profile: ProxyProfile, settings: Settings | None = None) -> str:
+    """Return a keyed, versioned digest of the effective proxy transport identity."""
+    settings = settings or get_settings()
+    sticky_username_template = validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
+    canonical_identity = json.dumps(
+        {
+            "accept_language": profile.accept_language,
+            "country_code": profile.country_code,
+            "host": profile.host,
+            "locale": profile.locale,
+            "password": _decrypt_password(profile, settings),
+            "port": profile.port,
+            "scheme": profile.scheme,
+            "screen": profile.screen,
+            "sticky_username_template": sticky_username_template,
+            "username": profile.username or "",
+            "vinted_screen": profile.vinted_screen,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    signing_key = hmac.new(
+        settings.app_secret_key.encode("utf-8"),
+        b"vinted-monitor:effective-proxy-identity:v1",
+        sha256,
+    ).digest()
+    digest = hmac.new(signing_key, canonical_identity, sha256).hexdigest()
+    return f"{PROXY_IDENTITY_FINGERPRINT_VERSION}:{digest}"
+
+
+def effective_proxy_identity_generation(profile: ProxyProfile) -> str:
+    fingerprint = str(profile.identity_fingerprint or "")
+    prefix = f"{PROXY_IDENTITY_FINGERPRINT_VERSION}:"
+    if not fingerprint.startswith(prefix) or len(fingerprint) != len(prefix) + 64:
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} has no effective identity fingerprint")
+    generation = int(profile.identity_generation or 0)
+    if generation <= 0:
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} has no effective identity generation")
+    return f"{PROXY_IDENTITY_FINGERPRINT_VERSION}:{generation}:{fingerprint.removeprefix(prefix)}"
+
+
+def synchronize_proxy_identity(db: Session, profile: ProxyProfile, settings: Settings | None = None) -> bool:
+    """Persist a new generation and purge old session context after identity drift."""
+    settings = settings or get_settings()
+    current_fingerprint = effective_proxy_identity_fingerprint(profile, settings)
+    stored_fingerprint = profile.identity_fingerprint
+    if stored_fingerprint and hmac.compare_digest(stored_fingerprint, current_fingerprint):
+        return False
+
+    if stored_fingerprint:
+        profile.identity_generation = max(int(profile.identity_generation or 0), 0) + 1
+    else:
+        profile.identity_generation = max(int(profile.identity_generation or 0), 1)
+    profile.identity_fingerprint = current_fingerprint
+    db.flush()
+
+    from vinted_monitor.services.vinted_sessions import invalidate_vinted_sessions_for_proxy_identity
+
+    invalidate_vinted_sessions_for_proxy_identity(
+        db,
+        profile.id,
+        reason="Prepared Vinted session proxy identity changed",
+        settings=settings,
+    )
+    db.flush()
+    return True
+
+
+def lock_proxy_profile_for_selection(
+    db: Session,
+    profile_id: int,
+    settings: Settings | None = None,
+    *,
+    now: datetime | None = None,
+) -> ProxyProfile:
+    """Lock, synchronize and revalidate one profile selected for new work."""
+    settings = settings or get_settings()
+    try:
+        validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
+    except ValueError as exc:
+        raise ProxyProfileEligibilityError("Proxy sticky username template is invalid") from exc
+    profile = _load_proxy_profile(db, profile_id)
+    if profile is None:
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile_id} no longer exists")
+    current_fingerprint = effective_proxy_identity_fingerprint(profile, settings)
+    stored_fingerprint = profile.identity_fingerprint
+    fingerprint_matches = bool(
+        stored_fingerprint and hmac.compare_digest(stored_fingerprint, current_fingerprint)
+    )
+    _acquire_proxy_identity_lock(db, profile_id, exclusive=not fingerprint_matches)
+    if fingerprint_matches:
+        profile = _load_proxy_profile(db, profile_id)
+        if profile is None:
+            raise ProxyProfileEligibilityError(f"Proxy profile {profile_id} no longer exists")
+        reloaded_fingerprint = effective_proxy_identity_fingerprint(profile, settings)
+        if not profile.identity_fingerprint or not hmac.compare_digest(
+            profile.identity_fingerprint,
+            reloaded_fingerprint,
+        ):
+            raise ProxyProfileEligibilityError(
+                f"Proxy profile {profile_id} identity changed while acquiring its execution fence"
+            )
+    else:
+        profile = _lock_proxy_profile(db, profile_id)
+        if profile is None:
+            raise ProxyProfileEligibilityError(f"Proxy profile {profile_id} no longer exists")
+        synchronize_proxy_identity(db, profile, settings)
+    _validate_proxy_profile_eligibility(profile, settings, now=now)
+    return profile
+
+
+def lock_and_revalidate_proxy_selection(
+    db: Session,
+    profile_id: int,
+    captured_identity_generation: str | None,
+    settings: Settings | None = None,
+    *,
+    now: datetime | None = None,
+) -> ProxyProfile:
+    """Fence captured work against the current locked profile immediately pre-provider."""
+    profile = lock_proxy_profile_for_selection(db, profile_id, settings, now=now)
+    current_generation = effective_proxy_identity_generation(profile)
+    if not isinstance(captured_identity_generation, str) or not hmac.compare_digest(
+        captured_identity_generation,
+        current_generation,
+    ):
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile_id} identity changed after egress selection")
+    return profile
+
+
+def _lock_proxy_profile(db: Session, profile_id: int) -> ProxyProfile | None:
+    return db.scalar(
+        select(ProxyProfile)
+        .where(ProxyProfile.id == profile_id)
+        # Identity writers never change the profile primary key. NO KEY UPDATE
+        # serializes those writers without conflicting with FK key-share locks
+        # held by auditable run events for an already admitted execution.
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+
+
+def _load_proxy_profile(db: Session, profile_id: int) -> ProxyProfile | None:
+    return db.scalar(
+        select(ProxyProfile)
+        .where(ProxyProfile.id == profile_id)
+        .execution_options(populate_existing=True)
+    )
+
+
+def _acquire_proxy_identity_lock(db: Session, profile_id: int, *, exclusive: bool) -> None:
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    lock_function = func.pg_advisory_xact_lock if exclusive else func.pg_advisory_xact_lock_shared
+    db.execute(select(lock_function(PROXY_IDENTITY_LOCK_NAMESPACE, profile_id)))
+
+
+def _validate_proxy_profile_eligibility(
+    profile: ProxyProfile,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> None:
+    current_time = now or datetime.now(UTC)
+    try:
+        validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
+    except ValueError as exc:
+        raise ProxyProfileEligibilityError("Proxy sticky username template is invalid") from exc
+    if not profile.is_active:
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} is inactive")
+    if profile.cooldown_until is not None and profile.cooldown_until > current_time:
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} is cooling down")
+    target_country_code = settings.vinted_target_country_code.strip().upper()
+    if profile.country_code != target_country_code:
+        raise ProxyProfileEligibilityError(
+            f"Proxy profile {profile.id} country does not match target country {target_country_code}"
+        )
+    expected_context = resolve_proxy_context(profile.country_code)
+    actual_context = (
+        profile.country_code,
+        profile.locale,
+        profile.accept_language,
+        profile.screen,
+        profile.vinted_screen,
+    )
+    canonical_context = (
+        expected_context.country_code,
+        expected_context.locale,
+        expected_context.accept_language,
+        expected_context.screen,
+        expected_context.vinted_screen,
+    )
+    if actual_context != canonical_context:
+        raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} has a non-canonical country context preset")
 
 
 def _encrypt_password(password: str, settings: Settings) -> str:

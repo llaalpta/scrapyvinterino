@@ -38,12 +38,13 @@ def test_proxy_url_with_sticky_session_uses_configured_username_template() -> No
 
 
 def test_proxy_url_with_sticky_session_rejects_template_without_session_id() -> None:
-    with pytest.raises(ValueError, match="must include"):
-        proxy_url_with_sticky_session(
-            proxy_profile(),
-            "session-123",
-            Settings(proxy_sticky_username_template="{username}"),
-        )
+    with pytest.raises(ValueError, match="must contain exactly"):
+        Settings(proxy_sticky_username_template="{username}")
+
+
+def test_proxy_url_with_sticky_session_rejects_duplicate_template_fields() -> None:
+    with pytest.raises(ValueError, match="must contain exactly"):
+        Settings(proxy_sticky_username_template="{username}-{username}-{session_id}")
 
 
 def test_proxy_url_with_sticky_session_keeps_plain_proxy_without_username() -> None:

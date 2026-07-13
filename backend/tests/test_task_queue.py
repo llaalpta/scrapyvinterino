@@ -48,6 +48,7 @@ def test_enqueue_task_serializes_current_payload_without_proxy_secrets() -> None
         trigger="scheduler",
         scheduler_config={"interval_seconds": 300},
         proxy_profile_id=7,
+        proxy_identity_generation="v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         task_id="pytest-task",
         enqueued_at="2026-07-05T12:00:00+00:00",
     )
@@ -59,6 +60,7 @@ def test_enqueue_task_serializes_current_payload_without_proxy_secrets() -> None
     payload = json.loads(raw_payload)
     assert queue_key == "pytest:queue"
     assert payload["proxy_profile_id"] == 7
+    assert payload["proxy_identity_generation"] == "v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert "proxy_url" not in payload
     assert "proxy_url_template" not in payload
 
@@ -94,6 +96,7 @@ def test_reserve_task_reads_current_payload() -> None:
                 "trigger": "scheduler",
                 "scheduler_config": {},
                 "proxy_profile_id": 7,
+                "proxy_identity_generation": "v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "task_id": "pytest-task",
                 "enqueued_at": "2026-07-05T12:00:00+00:00",
             }
@@ -103,6 +106,25 @@ def test_reserve_task_reads_current_payload() -> None:
     assert reservation is not None
     assert reservation.task.source_id == 123
     assert reservation.task.proxy_profile_id == 7
+    assert reservation.task.proxy_identity_generation == "v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+def test_reserve_task_rejects_proxy_payload_without_identity_generation() -> None:
+    with pytest.raises(InvalidTaskPayloadError, match="invalid field values"):
+        reserve_task(
+            FakeRedis(
+                {
+                    "source_id": 123,
+                    "source_url": "https://www.vinted.es/catalog?search_text=nike",
+                    "monitor_mode": "window",
+                    "trigger": "scheduler",
+                    "scheduler_config": {},
+                    "proxy_profile_id": 7,
+                    "task_id": "pytest-task-stale-contract",
+                    "enqueued_at": "2026-07-05T12:00:00+00:00",
+                }
+            )
+        )
 
 
 def test_worker_reservation_settings_reject_invalid_bounds() -> None:

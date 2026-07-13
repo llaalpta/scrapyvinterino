@@ -1,4 +1,5 @@
 from functools import lru_cache
+from string import Formatter
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -14,6 +15,23 @@ INSECURE_APP_SECRET_KEYS = frozenset(
         "replace-with-a-unique-random-secret-of-at-least-32-characters",
     }
 )
+
+
+def validate_proxy_sticky_username_template(value: str) -> str:
+    try:
+        parsed = list(Formatter().parse(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("PROXY_STICKY_USERNAME_TEMPLATE must be a valid format string") from exc
+    fields = [field_name for _literal, field_name, _format_spec, _conversion in parsed if field_name is not None]
+    has_unsupported_formatting = any(
+        field_name is not None and (format_spec or conversion)
+        for _literal, field_name, format_spec, conversion in parsed
+    )
+    if len(fields) != 2 or set(fields) != {"username", "session_id"} or has_unsupported_formatting:
+        raise ValueError(
+            "PROXY_STICKY_USERNAME_TEMPLATE must contain exactly plain {username} and {session_id} fields"
+        )
+    return value
 
 
 class Settings(BaseSettings):
@@ -86,6 +104,11 @@ class Settings(BaseSettings):
     vinted_auth_cookie: str | None = Field(default=None, repr=False)
     vinted_auth_csrf_token: str | None = Field(default=None, repr=False)
     action_requests_enabled: bool = False
+
+    @model_validator(mode="after")
+    def validate_proxy_sticky_template(self) -> "Settings":
+        validate_proxy_sticky_username_template(self.proxy_sticky_username_template)
+        return self
 
     @model_validator(mode="after")
     def validate_detail_retry_config(self) -> "Settings":
