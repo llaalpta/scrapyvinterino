@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
 import re
 import time
 import uuid
@@ -53,8 +52,6 @@ CSRF_TOKEN_PATTERNS = (
     re.compile(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
 )
 VIEWPORT_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
-DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 5.0
-MAX_RATE_LIMIT_RETRY_AFTER_SECONDS = 30.0
 SESSION_REFRESH_COOKIE_NAMES = {
     "__cf_bm",
     "_vinted_fr_session",
@@ -177,12 +174,10 @@ class VintedCatalogRateLimitError(VintedCatalogProviderError):
         *,
         retry_after_seconds: float | None,
         retry_after_source: str,
-        retryable: bool,
     ) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
         self.retry_after_source = retry_after_source
-        self.retryable = retryable
 
 
 class VintedCatalogSessionContextError(VintedCatalogProviderError):
@@ -292,28 +287,8 @@ class CurlCffiVintedCatalogProvider:
             try:
                 response = self._request_catalog_api(source, page, attempt=retry_index + 1)
                 return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
-            except VintedCatalogSessionContextError:
+            except (VintedCatalogSessionContextError, VintedCatalogRateLimitError, VintedCatalogSessionError):
                 raise
-            except VintedCatalogRateLimitError as exc:
-                if not exc.retryable:
-                    raise
-                self._refresh_anonymous_session_in_place(
-                    source.url,
-                    attempt=retry_index + 2,
-                    retry_reason="rate_limited",
-                    retry_after_seconds=exc.retry_after_seconds,
-                    retry_after_source=exc.retry_after_source,
-                )
-                response = self._request_catalog_api(source, page, attempt=retry_index + 2)
-                return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
-            except VintedCatalogSessionError:
-                self._refresh_anonymous_session_in_place(
-                    source.url,
-                    attempt=retry_index + 2,
-                    retry_reason="session_rejected",
-                )
-                response = self._request_catalog_api(source, page, attempt=retry_index + 2)
-                return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
             except VintedCatalogProviderError as exc:
                 last_error = exc
                 if retry_index >= self.request_retries:
@@ -1090,72 +1065,6 @@ class CurlCffiVintedCatalogProvider:
         self._egress_validated_at = None
         self._ensure_session()
 
-    def _refresh_anonymous_session_in_place(
-        self,
-        source_url: str,
-        *,
-        attempt: int,
-        retry_reason: str,
-        retry_after_seconds: float | None = None,
-        retry_after_source: str | None = None,
-    ) -> None:
-        assert self._session is not None
-        started_at = time.perf_counter()
-        if retry_after_seconds is not None:
-            backoff_seconds = retry_after_seconds + _rate_limit_jitter_seconds()
-            self._emit_event(
-                phase="catalog_api_rate_limit_backoff",
-                method="GET",
-                url=source_url,
-                level="warning",
-                message="Rate limit backoff applied before refreshing anonymous session",
-                details={
-                    "attempt": attempt,
-                    "retry_reason": retry_reason,
-                    "retry_after_seconds": retry_after_seconds,
-                    "retry_after_source": retry_after_source,
-                    "backoff_seconds": round(backoff_seconds, 3),
-                    "max_retry_after_seconds": MAX_RATE_LIMIT_RETRY_AFTER_SECONDS,
-                    "http_session": self._session_marker(),
-                },
-            )
-            time.sleep(backoff_seconds)
-
-        self._emit_event(
-            phase="anonymous_session_refresh_start",
-            method="GET",
-            url=source_url,
-            level="warning",
-            message="Refreshing anonymous public session with the current HTTP session",
-            details={
-                "attempt": attempt,
-                "retry_reason": retry_reason,
-                "retry_after_seconds": retry_after_seconds,
-                "retry_after_source": retry_after_source,
-                "http_session": self._session_marker(),
-                "proxy_session": self.proxy_session_marker,
-                "cookies_before": self._cookie_markers(),
-            },
-        )
-        self._bootstrap_anonymous_session(source_url, attempt=attempt)
-        self.prepared_session_refreshed = True
-        self._emit_event(
-            phase="anonymous_session_refresh_success",
-            method="GET",
-            url=source_url,
-            duration_ms=_elapsed_ms(started_at),
-            message="Anonymous public session refreshed with the current HTTP session",
-            details={
-                "attempt": attempt,
-                "retry_reason": retry_reason,
-                "refresh_duration_ms": _elapsed_ms(started_at),
-                "http_session": self._session_marker(),
-                "proxy_session": self.proxy_session_marker,
-                "context": self._session_context_report(),
-                "cookies_after": self._cookie_markers(),
-            },
-        )
-
     def _request_catalog_api(self, source: Any, page: int | None, *, attempt: int) -> dict[str, Any]:
         assert self._session is not None
         url = urljoin(str(self.settings.vinted_base_url), "/api/v2/catalog/items")
@@ -1288,7 +1197,6 @@ class CurlCffiVintedCatalogProvider:
 
         if response.status_code == 429:
             retry_after_seconds, retry_after_source = _retry_after_seconds(_header_value(response.headers, "Retry-After"))
-            retryable = retry_after_seconds is not None and retry_after_seconds <= MAX_RATE_LIMIT_RETRY_AFTER_SECONDS
             self._emit_event(
                 phase="catalog_api_rate_limited",
                 method="GET",
@@ -1299,24 +1207,17 @@ class CurlCffiVintedCatalogProvider:
                 message="Catalog API rate limited the request",
                 details={
                     "attempt": attempt,
-                    "retryable": retryable,
                     "retry_after_seconds": retry_after_seconds,
                     "retry_after_source": retry_after_source,
-                    "retry_after_too_long": retry_after_seconds is not None
-                    and retry_after_seconds > MAX_RATE_LIMIT_RETRY_AFTER_SECONDS,
-                    "max_retry_after_seconds": MAX_RATE_LIMIT_RETRY_AFTER_SECONDS,
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
                 },
             )
             raise VintedCatalogRateLimitError(
-                "Vinted catalog API rate limited the request"
-                if retryable
-                else "Vinted catalog API rate limited the request beyond the retry budget",
+                "Vinted catalog API rate limited the request",
                 retry_after_seconds=retry_after_seconds,
                 retry_after_source=retry_after_source,
-                retryable=retryable,
             )
 
         if response.status_code in {401, 403}:
@@ -1330,7 +1231,6 @@ class CurlCffiVintedCatalogProvider:
                 message=f"Catalog API rejected anonymous session with status {response.status_code}",
                 details={
                     "attempt": attempt,
-                    "retryable": attempt == 1,
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
@@ -2508,7 +2408,7 @@ def _secret_marker_or_none(name: str, value: str | None) -> dict[str, Any] | Non
 
 def _retry_after_seconds(value: str | None, *, now: datetime | None = None) -> tuple[float | None, str]:
     if value is None or not str(value).strip():
-        return DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS, "missing"
+        return None, "missing"
 
     text = str(value).strip()
     try:
@@ -2527,11 +2427,6 @@ def _retry_after_seconds(value: str | None, *, now: datetime | None = None) -> t
         retry_at = retry_at.replace(tzinfo=UTC)
     current = now or datetime.now(UTC)
     return max((retry_at - current).total_seconds(), 0.0), "http_date"
-
-
-def _rate_limit_jitter_seconds() -> float:
-    return random.uniform(0.25, 0.75)
-
 
 def _elapsed_ms(started_at: float) -> int:
     return max(round((time.perf_counter() - started_at) * 1000), 0)

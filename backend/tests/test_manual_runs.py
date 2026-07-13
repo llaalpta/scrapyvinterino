@@ -2886,8 +2886,8 @@ def test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate(source
 
     cache = FakeSeenCache()
     provider = MidBatchChallengeProvider(item_count=3)
-    with SessionLocal() as db, pytest.raises(DataDomeChallengeError):
-        execute_monitor_run(
+    with SessionLocal() as db:
+        run = execute_monitor_run(
             db,
             source_id,
             provider=provider,
@@ -2899,6 +2899,8 @@ def test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate(source
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
 
     assert opportunity_count == 0
+    assert run.status == FAILED
+    assert (run.runtime_metadata or {}).get("failure_kind") == "datadome_challenge"
     assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-1"]
     assert set(cache.detail_retries) == {"pytest-run-item-0", "pytest-run-item-1", "pytest-run-item-2"}
     assert cache.detail_retries["pytest-run-item-0"].attempt_count == 0

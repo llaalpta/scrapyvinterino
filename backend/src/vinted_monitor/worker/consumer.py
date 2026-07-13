@@ -10,8 +10,13 @@ from vinted_monitor.core.redis_client import redis_client_from_url
 from vinted_monitor.db.models import Run
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.datadome import DataDomeChallengeError
-from vinted_monitor.providers.vinted_catalog import VintedCatalogChallengeError
-from vinted_monitor.services.proxies import mark_proxy_challenge_detected, mark_proxy_run_failure
+from vinted_monitor.providers.vinted_catalog import (
+    VintedCatalogChallengeError,
+    VintedCatalogRateLimitError,
+    VintedCatalogSessionContextError,
+    VintedCatalogSessionError,
+)
+from vinted_monitor.services.proxies import mark_proxy_run_failure
 from vinted_monitor.services.runs import (
     FAILED,
     FINALIZING,
@@ -40,12 +45,12 @@ from vinted_monitor.services.vinted_sessions import VintedSessionRequiredError
 
 
 class TaskConsumer:
-    """Consumer worker: dequeues tasks from Redis and processes them with anti-bot evasion.
+    """Consumer worker: dequeues tasks from Redis and processes them fail-stop.
 
     Each consumed task delegates provider creation to ``execute_monitor_run``.
     The run factory resolves a prepared persistent Vinted session for the
-    selected proxy. If no ready session exists, the task fails before catalog
-    traffic is sent.
+    selected proxy. Classified response failures are terminal and acknowledged;
+    unexpected worker failures retain the bounded delivery-recovery path.
     """
 
     def __init__(self, settings: Settings, consumer_id: int = 0) -> None:
@@ -237,7 +242,7 @@ class TaskConsumer:
                 time.sleep(1)
 
     def _process_with_escalation(self, task: MonitorTask, *, first_attempt: int = 1) -> None:
-        """Process a task with retry escalation on DataDome challenges."""
+        """Process a task; only unexpected worker failures may use another attempt."""
         max_attempts = self.settings.worker_max_retry_attempts
         last_unexpected_error: Exception | None = None
 
@@ -268,22 +273,20 @@ class TaskConsumer:
                 # ``execute_monitor_run`` owns success/failure proxy bookkeeping for completed runs.
                 return
 
-            except (DataDomeChallengeError, VintedCatalogChallengeError):
+            except (
+                DataDomeChallengeError,
+                VintedCatalogChallengeError,
+                VintedCatalogRateLimitError,
+                VintedCatalogSessionContextError,
+                VintedCatalogSessionError,
+            ):
                 self.logger.warning(
-                    "consumer_antibot_challenge",
+                    "consumer_catalog_response_fail_stop",
                     source_id=task.source_id,
                     task_id=task.task_id,
                     attempt=attempt,
                 )
-                # Penalize proxy with DataDome-specific multiplier
-                if task.proxy_profile_id:
-                    with SessionLocal() as db:
-                        mark_proxy_challenge_detected(
-                            db,
-                            task.proxy_profile_id,
-                            penalty_multiplier=self.settings.datadome_challenge_penalty_multiplier,
-                        )
-                        db.commit()
+                return
             except TaskRunNotTerminalError:
                 raise
             except VintedSessionRequiredError as exc:
@@ -332,8 +335,6 @@ class TaskConsumer:
             return None
         metadata = previous_run.runtime_metadata or {}
         if metadata.get("failure_kind") not in {
-            "datadome_challenge",
-            "cloudflare_challenge",
             "worker_task_delivery_interrupted",
         }:
             return None

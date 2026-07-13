@@ -1,4 +1,7 @@
 param(
+    [ValidateSet("identity", "catalog-fail-stop")]
+    [string]$Scenario = "identity",
+
     [ValidateRange(1, 3)]
     [int]$Repeat = 2
 )
@@ -12,7 +15,18 @@ $Python = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $ComposeProject = (Split-Path -Leaf $RepoRoot).ToLowerInvariant()
 $RedisDatabase = 15
 $RedisLeaseKey = "qa:isolated-integration:lease"
-$TestTarget = "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
+$TestTargets = @{
+    "identity" = @(
+        "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
+    )
+    "catalog-fail-stop" = @(
+        "tests/test_catalog_failstop_integration.py::test_catalog_terminal_response_fails_once_invalidates_session_and_acks",
+        "tests/test_manual_runs.py::test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate",
+        "tests/test_item_detail_state_audit.py::test_transient_failure_while_preserving_challenge_keeps_terminal_run_and_retry",
+        "tests/test_item_detail_state_audit.py::test_challenge_attempt_counter_only_advances_for_failing_candidate"
+    )
+}
+$ScenarioTargets = @($TestTargets[$Scenario])
 
 function Get-RunningComposeContainers([string]$Service) {
     $Arguments = @(
@@ -260,8 +274,8 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
 
         Write-Host "Cycle $Cycle/${Repeat}: migrating an isolated PostgreSQL database"
         Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
-        Write-Host "Cycle $Cycle/${Repeat}: running $TestTarget"
-        Invoke-PythonChecked -Label "Selected integration test" -Arguments @("-m", "pytest", "-q", $TestTarget)
+        Write-Host "Cycle $Cycle/${Repeat}: running audited scenario '$Scenario'"
+        Invoke-PythonChecked -Label "Selected integration tests" -Arguments (@("-m", "pytest", "-q") + $ScenarioTargets)
     } catch {
         $PrimaryError = $_
     } finally {
@@ -327,10 +341,12 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
 if (Test-Path -LiteralPath (Join-Path $BackendDir ".env")) {
     throw "backend/.env exists; refusing to run because Settings would load it."
 }
-$TestFile = ($TestTarget -split "::", 2)[0]
-$ResolvedTestFile = [IO.Path]::GetFullPath((Join-Path $BackendDir $TestFile))
-if (-not $ResolvedTestFile.StartsWith($TestsRoot, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $ResolvedTestFile -PathType Leaf)) {
-    throw "TestTarget must resolve to an existing file below backend/tests."
+foreach ($TestTarget in $ScenarioTargets) {
+    $TestFile = ($TestTarget -split "::", 2)[0]
+    $ResolvedTestFile = [IO.Path]::GetFullPath((Join-Path $BackendDir $TestFile))
+    if (-not $ResolvedTestFile.StartsWith($TestsRoot, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $ResolvedTestFile -PathType Leaf)) {
+        throw "Every audited target for scenario '$Scenario' must resolve to an existing file below backend/tests."
+    }
 }
 
 $PostgresContainers = @(Get-RunningComposeContainers "postgres")
@@ -356,4 +372,4 @@ if ((Get-OperationalRedisDigest) -ne $InitialRedisDigest) {
     throw "Operational Redis database 0 changed during isolated QA; no automatic restoration was attempted."
 }
 Assert-ExecutorServicesStopped
-Write-Host "PASS: $Repeat isolated cycle(s); operational PostgreSQL/Redis fingerprints unchanged."
+Write-Host "PASS: scenario '$Scenario', $Repeat isolated cycle(s); operational PostgreSQL/Redis fingerprints unchanged."

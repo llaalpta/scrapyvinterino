@@ -42,7 +42,7 @@
 - La preparacion de sesion Vinted pertenece al monitor y se ejecuta automaticamente si el run no encuentra una sesion `ready` compatible con el proxy sticky seleccionado.
 - Antes de pedir `/api/v2/catalog/items` para scraping, el provider debe tener contexto anonimo completo en la misma sesion: impersonate Chrome, diagnostico de egress con pais esperado, CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, DataDome, locale, `Accept-Language`, viewport y Vinted `x-screen=catalog`.
 - Los eventos de run pueden incluir el nombre del perfil de navegador usado, el marcador seguro del UUID de sesion sticky del proxy, y si se detecto challenge de DataDome.
-- Los `429` del catalogo se registran como rate limit salvo que haya firmas DataDome en cabeceras/cookies/cuerpo. `Retry-After` puede registrarse y aplicarse como espera acotada, sin exponer cookies ni tokens.
+- Los `429` del catalogo se registran como rate limit salvo que haya firmas anti-bot en cabeceras, cookies o cuerpo. `Retry-After` se conserva solo como diagnostico saneado: la primera respuesta invalida el contexto y termina la tarea sin espera, refresh ni retry.
 - Acciones de compra futuras:
   - requeriran click explicito;
   - revalidaran precio, moneda, disponibilidad, envio, pago y destinatario en la sesion autenticada inmediatamente antes de ejecutar;
