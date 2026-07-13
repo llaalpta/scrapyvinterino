@@ -44,7 +44,13 @@ from vinted_monitor.services.items import (
     get_or_persist_catalog_item,
 )
 from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
-from vinted_monitor.services.proxies import mark_proxy_run_failure, mark_proxy_run_success, proxy_url_with_sticky_session
+from vinted_monitor.services.proxies import (
+    ProxyProfileEligibilityError,
+    lock_and_revalidate_proxy_selection,
+    mark_proxy_run_failure,
+    mark_proxy_run_success,
+    proxy_url_with_sticky_session,
+)
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.scheduler import RunEgress, SchedulerCapacityError, choose_run_egress, get_scheduler_runtime_config
 from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
@@ -250,6 +256,23 @@ def execute_monitor_baseline(
     db.refresh(run)
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
 
+    if run_provider is None and selected_egress.proxy_profile_id is not None:
+        try:
+            lock_and_revalidate_proxy_selection(
+                db,
+                selected_egress.proxy_profile_id,
+                selected_egress.proxy_identity_generation,
+                settings,
+            )
+        except Exception as exc:
+            return _record_failed_run(
+                db,
+                run,
+                source,
+                exc,
+                penalize_proxy=not isinstance(exc, ProxyProfileEligibilityError),
+            )
+
     record_run_event(
         db,
         run_id=run.id,
@@ -360,7 +383,13 @@ def execute_monitor_baseline(
             proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
             _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
         except Exception as exc:
-            failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
+            failed_run = _record_failed_run(
+                db,
+                run,
+                source,
+                exc,
+                penalize_proxy=not isinstance(exc, SeenCacheUnavailableError | ProxyProfileEligibilityError),
+            )
             if run_provider is not None:
                 _close_owned_provider(run_provider, owned_provider=owned_provider)
             return failed_run
@@ -456,7 +485,13 @@ def execute_monitor_baseline(
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return run
     except Exception as exc:
-        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
+        failed_run = _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            penalize_proxy=not isinstance(exc, SeenCacheUnavailableError | ProxyProfileEligibilityError),
+        )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
 
@@ -516,6 +551,23 @@ def execute_monitor_session_prepare(
         db.rollback()
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
+
+    try:
+        proxy_profile = lock_and_revalidate_proxy_selection(
+            db,
+            selected_egress.proxy_profile_id,
+            selected_egress.proxy_identity_generation,
+            settings,
+        )
+    except Exception as exc:
+        return _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            kind="vinted_session_prepare",
+            penalize_proxy=not isinstance(exc, ProxyProfileEligibilityError),
+        )
 
     proxy_profile_id = proxy_profile.id
     record_run_event(
@@ -584,6 +636,12 @@ def execute_monitor_session_prepare(
     )
 
     try:
+        proxy_profile = lock_and_revalidate_proxy_selection(
+            db,
+            selected_egress.proxy_profile_id,
+            selected_egress.proxy_identity_generation,
+            settings,
+        )
         event_sink = _build_provider_event_sink(db, run, source, proxy_profile_id)
         vinted_session, prepared_session, provider_metadata, _prepared_catalog_result = _prepare_vinted_session_for_run(
             db,
@@ -645,7 +703,7 @@ def execute_monitor_session_prepare(
             source,
             exc,
             kind="vinted_session_prepare",
-            penalize_proxy=not isinstance(exc, VintedSessionRequiredError),
+            penalize_proxy=not isinstance(exc, VintedSessionRequiredError | ProxyProfileEligibilityError),
         )
 
 
@@ -717,6 +775,30 @@ def execute_monitor_item_detail_probe(
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
 
+    result: dict[str, Any] = {
+        "outcome": "failed",
+        "item_id": item_id,
+        "error": None,
+    }
+    try:
+        proxy_profile = lock_and_revalidate_proxy_selection(
+            db,
+            selected_egress.proxy_profile_id,
+            selected_egress.proxy_identity_generation,
+            settings,
+        )
+    except Exception as exc:
+        failed_run = _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            kind="detail_probe",
+            penalize_proxy=False,
+        )
+        result["error"] = redact_sensitive_text(str(exc))
+        return failed_run, result
+
     proxy_profile_id = proxy_profile.id
     record_run_event(
         db,
@@ -784,11 +866,6 @@ def execute_monitor_item_detail_probe(
     )
 
     provider: CurlCffiVintedCatalogProvider | None = None
-    result: dict[str, Any] = {
-        "outcome": "failed",
-        "item_id": item_id,
-        "error": None,
-    }
     try:
         provider, provider_metadata, _prepared_catalog_result = _provider_for_egress(
             db,
@@ -944,6 +1021,22 @@ def execute_monitor_run(
             _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run") from exc
     db.refresh(run)
+    if run_provider is None and selected_egress.proxy_profile_id is not None:
+        try:
+            lock_and_revalidate_proxy_selection(
+                db,
+                selected_egress.proxy_profile_id,
+                selected_egress.proxy_identity_generation,
+                settings,
+            )
+        except Exception as exc:
+            return _record_failed_run(
+                db,
+                run,
+                source,
+                exc,
+                penalize_proxy=not isinstance(exc, ProxyProfileEligibilityError),
+            )
     record_run_event(
         db,
         run_id=run.id,
@@ -1140,7 +1233,13 @@ def execute_monitor_run(
         proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
         _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
     except Exception as exc:
-        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=not isinstance(exc, SeenCacheUnavailableError))
+        failed_run = _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            penalize_proxy=not isinstance(exc, SeenCacheUnavailableError | ProxyProfileEligibilityError),
+        )
         if run_provider is not None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
@@ -1569,9 +1668,12 @@ def _provider_for_egress(
     proxy_marker: dict[str, Any] | None = None
     event_sink = _build_provider_event_sink(db, run, source, egress.proxy_profile_id) if run is not None else None
     if egress.proxy_profile_id is not None:
-        profile = db.get(ProxyProfile, egress.proxy_profile_id)
-        if profile is None:
-            raise RuntimeError(f"Proxy profile {egress.proxy_profile_id} no longer exists")
+        profile = lock_and_revalidate_proxy_selection(
+            db,
+            egress.proxy_profile_id,
+            egress.proxy_identity_generation,
+            settings,
+        )
         try:
             vinted_session, prepared_session = get_ready_vinted_session(
                 db,
@@ -2185,6 +2287,12 @@ def _record_failed_run(
     failure_kind = kind or exc.__class__.__name__
     _merge_run_metadata(run, {"failure_kind": failure_kind})
     session_failure = _classify_session_failure(exc, kind=kind)
+    proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+    event_proxy_profile_id = proxy_profile_id
+    if isinstance(exc, ProxyProfileEligibilityError) and isinstance(proxy_profile_id, int):
+        existing_proxy_id = db.scalar(select(ProxyProfile.id).where(ProxyProfile.id == proxy_profile_id))
+        if existing_proxy_id is None:
+            event_proxy_profile_id = None
     record_run_event(
         db,
         run_id=run.id,
@@ -2192,7 +2300,7 @@ def _record_failed_run(
         phase="run_failed",
         level="error",
         message=message,
-        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        proxy_profile_id=event_proxy_profile_id,
         user_agent=None,
         auth_mode="public_anonymous",
         details={
@@ -2206,7 +2314,6 @@ def _record_failed_run(
     run.status = FAILED
     run.finished_at = datetime.now(UTC)
     run.error_message = message
-    proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
     if isinstance(exc, DataDomeChallengeError | VintedCatalogSessionError | VintedCatalogSessionContextError):
         mark_vinted_session_invalid(db, vinted_session_id, reason=message)
@@ -2222,7 +2329,7 @@ def _record_failed_run(
             source_id=source.id,
             phase="monitor_session_closed",
             level="warning",
-            proxy_profile_id=proxy_profile_id,
+            proxy_profile_id=event_proxy_profile_id,
             message="Monitor session closed after run failure",
             details={"monitor_session_id": run.monitor_session_id, "reason": "failed"},
         )
@@ -2339,6 +2446,11 @@ def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_sessio
 
 def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
     text = str(exc).lower()
+    if isinstance(exc, ProxyProfileEligibilityError):
+        return {
+            "session_end_reason": "proxy_selection_stale_or_ineligible",
+            "recovery_action": "issue_fresh_command_after_proxy_review",
+        }
     if isinstance(exc, VintedCatalogChallengeError) or kind == "cloudflare_challenge":
         return {
             "session_end_reason": "cloudflare_challenge",

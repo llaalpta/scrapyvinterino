@@ -352,6 +352,7 @@ class TaskConsumer:
         egress = RunEgress(
             mode="proxy" if task.proxy_profile_id else "direct",
             proxy_profile_id=task.proxy_profile_id,
+            proxy_identity_generation=task.proxy_identity_generation,
             proxy_url=None,
         )
 

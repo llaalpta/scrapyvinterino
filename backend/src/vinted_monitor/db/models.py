@@ -163,6 +163,8 @@ class ProxyProfile(Base):
     last_test_status: Mapped[str | None] = mapped_column(String(40))
     last_test_ip: Mapped[str | None] = mapped_column(String(80))
     last_test_error: Mapped[str | None] = mapped_column(Text)
+    identity_generation: Mapped[int] = mapped_column(BigInteger, default=1)
+    identity_fingerprint: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -173,6 +175,7 @@ class VintedSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("search_sources.id"))
     proxy_profile_id: Mapped[int] = mapped_column(ForeignKey("proxy_profiles.id"))
+    proxy_identity_generation: Mapped[str] = mapped_column(String(100))
     proxy_session_id: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(40), default="ready")
     browser_profile: Mapped[str] = mapped_column(String(80))

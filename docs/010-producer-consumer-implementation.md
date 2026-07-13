@@ -7,7 +7,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Scheduler atomically enqueues `MonitorTask` payloads with `LPUSH`, one pending marker per monitor and a payload reverse marker, coalescing later ticks while work is queued or reserved and counting backlog against global/proxy capacity.
 - Consumers use a binary queue client and reserve FIFO work with `BLMOVE` into per-consumer processing lists; its socket timeout exceeds the blocking window. Terminal outcomes ACK the exact payload, unexpected failures requeue it, malformed/non-UTF-8 payloads go to dead-letter, and startup/thread recovery restores unacknowledged reservations. Maintenance transitions retry with backoff and are idempotent after ambiguous responses.
 - `CurlCffiVintedCatalogProvider` is the only Vinted catalog HTTP provider.
-- Runtime catalog traffic is monitor-owned: the run selects a `vinted_sessions` row by monitor, `proxy_profile_id` and logical browser/context fields, then uses the sticky ID stored in that selected row; otherwise it prepares one automatically from the saved catalog document URL. The current binding does not fingerprint the mutable proxy transport/credentials/template; 14.12.2 closes that identity gap.
+- Runtime catalog traffic is monitor-owned: the run selects a `vinted_sessions` row by monitor, `proxy_profile_id`, effective identity token and logical browser/context fields, then uses the sticky ID stored in that selected row; otherwise it prepares one automatically from the saved catalog document URL. Stale-generation rows are invalidated and their encrypted context is replaced with `{}` before replacement.
 - Manual runs remain synchronous from the API, but use the same provider stack.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 - Item enrichment uses the public item document, structural Next/React Flight records and JSON-LD fallback. The production flow and visible detail probe no longer call the direct `/api/v2/items/{id}/details` matrix.
@@ -18,12 +18,13 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 
 - Use `PROXY_STICKY_USERNAME_TEMPLATE` for provider-specific sticky formats. Default: `{username}-session-{session_id}`.
 - For providers that require `sessid`, configure `{username}-sessid-{session_id}`.
-- Residential proxy sticky IDs are stored with prepared Vinted sessions for a monitor, not with one-off task attempts. Until 14.12.2, editing the associated proxy profile can nevertheless reuse that sticky/context through a different effective transport identity.
+- Residential proxy sticky IDs are stored with prepared Vinted sessions for a monitor, not with one-off task attempts. A monotonic generation plus keyed identity digest binds each row to transport, credentials, country preset and sticky template. Profile-field edits invalidate old context in their own transaction; global template drift is reconciled and invalidated transactionally by the first fenced selector after restart.
 - Do not call the Asocks refresh API from runtime scraping code; an authorized new preparation/rotation creates a new session UUID, which normal runs then reuse while eligible.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
 - Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
 - Runtime metadata and events may store `proxy_session_id_prefix` plus the redactor-created masked/fingerprinted `proxy_sticky_session` marker; they never persist the full sticky value, proxy URL, credentials, cookies or raw DataDome values.
-- Redis task payloads carry only `proxy_profile_id` as proxy-related data, alongside safe task/source/trigger identity and scheduling fields; the consumer/runtime resolves the profile and reuses or prepares the monitor-owned sticky session inside the attempt.
+- Redis task payloads carry only `proxy_profile_id` plus `proxy_identity_generation` as proxy-related data, alongside safe task/source/trigger identity and scheduling fields. A proxy payload without the versioned token is malformed rather than legacy-compatible. The consumer resolves PostgreSQL state and takes a shared advisory fence before run events/provider construction; profile edits take the exclusive side of the same fence. That ownership lasts through the first durable commit after the last provider call, not through the later provider-free `finalizing` reconciliation.
+- Egress selection removes candidates already saturated in its capacity snapshot before taking an identity fence and acquires ownership for at most one candidate per transaction. If that candidate's durable capacity decreases while the fence is acquired, selection fails for a later transaction instead of retaining one advisory lock while trying another; this preserves direct fallback when every proxy was already saturated and prevents opposite telemetry orders from creating a multiprofile deadlock during template reconciliation.
 - Run rows persist indexed `task_id`. Redelivery acknowledges an existing terminal run without Vinted traffic, reconciles `finalizing`, and closes an orphan `running` row before retrying.
 - Development Redis uses a persisted AOF volume. The recovery contract assumes one worker service instance with multiple in-process consumers; horizontally scaled workers require distributed reservation ownership before deployment.
 - Classify DataDome and `cf-mitigated: challenge` explicitly; plain `429` remains rate limiting and detail `404/410` is terminal.
@@ -43,7 +44,7 @@ Before connecting the new ephemeral HTTP client to Redis workers or sending live
 ## Verification Evidence
 
 - `ruff check backend/src backend/alembic`
-- `python -m pytest backend/tests/test_vinted_catalog_provider.py backend/tests/test_scheduler.py backend/tests/test_task_queue.py backend/tests/test_proxies.py backend/tests/test_consumer.py backend/tests/test_manual_runs.py backend/tests/test_ephemeral_http.py backend/tests/test_verify_impersonation_script.py`
+- `python -m pytest backend/tests/test_vinted_catalog_provider.py backend/tests/test_scheduler.py backend/tests/test_task_queue.py backend/tests/test_proxies.py backend/tests/test_consumer.py backend/tests/test_manual_runs.py backend/tests/test_proxy_identity_fence.py backend/tests/test_ephemeral_http.py backend/tests/test_verify_impersonation_script.py`
 - `docker compose up -d --build api worker`
 - `docker compose ps`
 - `GET http://localhost:8000/health`
@@ -51,6 +52,14 @@ Before connecting the new ephemeral HTTP client to Redis workers or sending live
 - `python scripts/verify_impersonation.py`
 
 The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queue, public-detail and PWA audit recorded below.
+
+## Proxy Identity Fence 2026-07-13
+
+- FastAPI route boundaries, PostgreSQL and Redis DB 14 exercised stale manual and queued work across scheme, host, port, username/password set and clear, country/preset, active state, cooldown and sticky-template drift. Every stale path remained terminal with zero local provider constructions/calls; password canaries were absent from queue payloads, run metadata/errors and persisted events/error rows. A fresh generation prepared and executed only through the expected loopback proxy host and new template.
+- The template case captured the old command in the pytest process and consumed it in a fresh Python worker process whose settings loaded the replacement template from environment. The child process contained a fail-fast provider trap; it ACKed the stale task without reaching that trap, while a subsequent fresh task succeeded through the local instrumented provider.
+- Real PostgreSQL advisory races proved shared fences coexist, identity edits wait through the final provider I/O, scheduler selection uses advisory-before-source order, saturated candidates receive no fence, and selection never accumulates ownership across proxy candidates. A two-profile opposite-order race and a capacity-drop/fallback matrix close both deadlock paths found during adversarial review.
+- Alembic passed zero-to-`0019`, `0018` with a legacy session to `0019`, generation-aware `0019` down to `0018`, and re-upgrade to head. Both directions deliberately purged incompatible sessions; columns, defaults, nullability and old/new indexes matched the contract.
+- Final verification passed `ruff check src alembic tests`, the complete backend suite (`491 passed, 1 skipped` opt-in live-API test), `pnpm lint`, `pnpm build` and `git diff --check`. Before cleanup the isolated graph had zero sources, profiles, prepared sessions, runs, events, errors or active monitor sessions and Redis DB 14 had zero keys. API/PostgreSQL/Redis remained the only running Compose services; worker/watchdog stayed stopped and no Vinted or proxy endpoint was called.
 
 ## Audit 2026-07-05
 

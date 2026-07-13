@@ -118,6 +118,7 @@ class RunEgress:
     proxy_name: str | None = None
     proxy_kind: str | None = None
     proxy_url: str | None = None
+    proxy_identity_generation: str | None = None
 
 
 def get_scheduler_state(
@@ -255,7 +256,14 @@ def choose_run_egress(
     active_proxy_counts: dict[int, int] | None = None,
     active_direct_count: int = 0,
 ) -> RunEgress:
-    from vinted_monitor.services.proxies import list_available_proxy_profiles, mark_proxy_used, proxy_url_for_profile
+    from vinted_monitor.services.proxies import (
+        ProxyProfileEligibilityError,
+        effective_proxy_identity_generation,
+        list_available_proxy_profiles,
+        lock_proxy_profile_for_selection,
+        mark_proxy_used,
+        proxy_url_for_profile,
+    )
 
     runtime = get_scheduler_runtime_config(db, settings)
     proxy_counts, direct_count = (
@@ -264,10 +272,25 @@ def choose_run_egress(
         else _active_run_egress_counts(db)
     )
     target_country_code = settings.vinted_target_country_code.strip().upper()
-    for proxy in list_available_proxy_profiles(db, country_code=target_country_code):
+    available_proxies = [
+        proxy
+        for proxy in list_available_proxy_profiles(db, country_code=target_country_code)
+        if proxy_counts.get(proxy.id, 0) < max(proxy.max_concurrent_runs, 1)
+    ]
+    if available_proxies:
+        # Acquire at most one candidate fence per transaction. Retaining an
+        # advisory lock for a saturated candidate while trying another can
+        # deadlock two selectors when mutable telemetry gives them opposite
+        # preference orders, especially while template drift needs exclusive
+        # identity reconciliation.
+        available_proxy = available_proxies[0]
+        try:
+            proxy = lock_proxy_profile_for_selection(db, available_proxy.id, settings)
+        except ProxyProfileEligibilityError as exc:
+            raise SchedulerCapacityError(str(exc)) from exc
         proxy_limit = max(proxy.max_concurrent_runs, 1)
         if proxy_counts.get(proxy.id, 0) >= proxy_limit:
-            continue
+            raise SchedulerCapacityError(f"Proxy profile {proxy.id} capacity changed during egress selection")
         mark_proxy_used(db, proxy.id)
         db.flush()
         return RunEgress(
@@ -276,6 +299,7 @@ def choose_run_egress(
             proxy_name=proxy.name,
             proxy_kind=proxy.kind,
             proxy_url=proxy_url_for_profile(proxy, settings),
+            proxy_identity_generation=effective_proxy_identity_generation(proxy),
         )
     if runtime.allow_direct_without_proxy and runtime.direct_runtime_enabled and direct_count < runtime.direct_max_concurrent_runs:
         return RunEgress(mode="direct")

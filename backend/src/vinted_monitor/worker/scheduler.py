@@ -169,6 +169,13 @@ class SchedulerRunner:
                 if sum(active_proxy_counts.values()) + active_direct_count >= state.max_concurrent_runs:
                     db.commit()
                     break
+
+                # Proxy identity ownership must always precede the source row
+                # lock. Profile edits take the advisory lock first and then
+                # lock affected sources while purging sessions; retaining this
+                # source lock through choose_run_egress would invert that order
+                # and deadlock a concurrent identity edit.
+                db.commit()
                 try:
                     egress = choose_run_egress(
                         db,
@@ -180,6 +187,37 @@ class SchedulerRunner:
                     db.rollback()
                     break
 
+                # The source may have changed while its first row lock was
+                # released. Revalidate every scheduling predicate under the
+                # final source lock while the proxy advisory fence is held.
+                source = db.scalar(
+                    select(SearchSource)
+                    .where(
+                        SearchSource.id == source_id,
+                        SearchSource.is_active.is_(True),
+                        SearchSource.archived_at.is_(None),
+                        SearchSource.monitor_mode != "manual",
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if source is None:
+                    db.commit()
+                    self.next_due_by_source_id.pop(source_id, None)
+                    continue
+                config = source_config(source)
+                locked_due_at = source.next_run_at or current_time
+                self.next_due_by_source_id[source_id] = locked_due_at
+                if locked_due_at > current_time:
+                    db.commit()
+                    continue
+                if not is_within_allowed_windows(current_time, config.allowed_windows, self.timezone):
+                    next_due = next_run_after(current_time, config, self.rng, self.timezone)
+                    self.next_due_by_source_id[source_id] = next_due
+                    source.next_run_at = next_due
+                    db.commit()
+                    continue
+
                 task = MonitorTask(
                     source_id=source_id,
                     source_url=source.url,
@@ -190,6 +228,7 @@ class SchedulerRunner:
                         "jitter_percent": config.jitter_percent,
                     },
                     proxy_profile_id=egress.proxy_profile_id,
+                    proxy_identity_generation=egress.proxy_identity_generation,
                 )
                 try:
                     redis_client = cache.client

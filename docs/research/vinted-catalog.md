@@ -155,8 +155,8 @@ Decision de rendimiento:
 
 ## Sanitizacion
 
-- No guardar cookies, tokens, cabeceras de sesion, IDs de usuario reales, direcciones ni datos de pago.
-- Las cookies/tokens publicos anonimos pueden existir en memoria de proceso para ejecutar peticiones, pero no deben persistirse en fixtures, logs ni respuestas API.
+- No guardar en claro ni fuera del contexto cifrado cookies, tokens o cabeceras de sesion; no guardar IDs de usuario reales, direcciones ni datos de pago.
+- Las cookies/tokens publicos anonimos pueden existir en memoria de proceso y cifrados en `vinted_sessions.context_encrypted`; nunca deben persistirse en claro, fixtures, logs ni respuestas API.
 - Los fixtures deben usar valores sinteticos o sanitizados.
 - No guardar parametros de tracking completos, `search_tracking_params`, URLs de perfil ni payloads de usuario completos.
 - Guardar solo el subconjunto necesario para probar mapeo.
@@ -202,7 +202,7 @@ El ciclo de vida mantenido y su contrato vigente estan en `docs/architecture.md`
 - Delay humano con distribucion Beta entre bootstrap y catalogo.
 - Deteccion de challenge: si la respuesta contiene cabeceras `x-datadome*`, cookie `datadome` no vacia en una respuesta de error, `server` DataDome o marcadores HTML (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la sesion/proxy segun la politica de run. Una cookie `datadome` en `200` de bootstrap puede ser contexto valido y no basta por si sola para declarar challenge.
 - Un `429` sin firmas DataDome se considera rate limit de catalogo, no challenge; se registra `Retry-After`, backoff aplicado y presupuesto maximo antes de reintentar.
-- Proxies residenciales con UUID sticky nuevo por preparacion y reutilizado por runs elegibles del mismo monitor/perfil. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`. El binding efectivo de transporte/credenciales/template se cierra en 14.12.2.
+- Proxies residenciales con UUID sticky nuevo por preparacion y reutilizado por runs elegibles del mismo monitor/perfil. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`. El binding efectivo combina un contador monotono con un HMAC versionado de transporte, credenciales, preset y template. El run lo revalida bajo advisory ownership compartido antes de construir proveedor; una edicion usa ownership exclusivo, avanza el contador e invalida el contexto anterior sin exponer el preimage.
 - No existe una escalada generica a otro perfil. El consumer actual puede reintentar un challenge dentro del presupuesto de intentos con el mismo `proxy_profile_id` y preparar otro sticky tras invalidar; es una divergencia, no el contrato objetivo. 14.12.3 hace terminal el primer challenge, ACK sin otra llamada al provider y exige autorizacion separada para cualquier retry, nueva IP/perfil o delay como fallback.
 
 ### Scripts de verificacion
