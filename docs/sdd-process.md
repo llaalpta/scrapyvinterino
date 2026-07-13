@@ -24,14 +24,14 @@ Give a concise progress checkpoint after about 60-90 minutes of active work. If 
 2. Confirm the task class, desired outcome, exclusions and actual dependencies.
 3. For a program only, persist the decomposition on a product-code-free planning branch and integrate it first.
 4. Define no more than three acceptance criteria, one real representative scenario, one relevant negative variation, cleanup and external-traffic allowance.
-5. Obtain one confirmation for the task. It covers the complete branch lifecycle through automatic PR publication after a positive independent audit. Merging that PR and starting the next task each remain separately user-gated; no intermediate confirmation is needed inside the agreed contract.
+5. Obtain one confirmation for the task. It covers the complete branch lifecycle through automatic non-destructive merge to `develop` after a positive independent audit and a green remote gate. Starting the next task remains separately user-gated; no intermediate confirmation is needed inside the agreed contract.
 6. Branch from updated `develop`. Update the owning behavior/decision docs before or with code.
 7. Implement the smallest complete vertical slice and run focused checks during development.
-8. Exercise the real boundary promised by the task, inspect durable/runtime evidence and clean all QA state.
+8. Exercise the real boundary promised by the task, inspect durable/runtime evidence, clean all QA state and bring owning docs plus roadmap status/evidence to their intended final state.
 9. Run the implementer self-review, then the proportional independent audit automatically.
 10. Fix only in-scope findings, rerun only affected evidence, update owning docs and roadmap status/evidence as needed, and request finding-specific re-audit until the verdict is positive or the loop ceiling blocks and splits the task.
-11. After a positive verdict, commit the coherent task, push normally and open its PR to `develop` automatically. A dependent task waits for review/merge.
-12. Do not merge that PR or start the next task without separate explicit user authorization.
+11. After a positive verdict, commit the coherent task, push normally and open its PR to `develop` automatically. When the PR is mergeable and every configured required check passes, merge it with a merge commit and preserve the source branch.
+12. Do not start the next task without separate explicit user authorization. If normal merge is blocked, report the exact blocker and stop without rewriting history or deleting refs.
 
 ## Task contract
 
@@ -102,14 +102,14 @@ Classify findings:
 - **B — contained:** improves the same outcome and adds no more than modest scope. Fix only if it remains inside the task.
 - **C — adjacent:** a new outcome, speculative race or production hardening. Record as accepted/conditional risk; do not expand the branch automatically.
 
-One clean pass produces the positive verdict. After a fix, request only a finding-specific recheck. Two loops are normal; three total is the ceiling. If no suitable reviewer is available or no positive verdict is reached, the task is blocked or split and no closure commit, push or PR is published. A second self-review cannot replace the independent audit.
+One clean pass produces the positive verdict. After a fix, request only a finding-specific recheck. Two loops are normal; three total is the ceiling. If no suitable reviewer is available or no positive verdict is reached, the task is blocked or split and no closure commit, push, PR or merge is published. A second self-review cannot replace the independent audit.
 
 ## Branches, confirmations and PRs
 
 - Use one implementation branch per coherent task, based on current `develop`.
-- A user instruction such as "continua con 14.x" authorizes the complete lifecycle of that one task through automatic PR publication after a positive independent audit.
-- Do not request additional confirmation for in-scope docs, tests, audit fixes, the closure commit, normal push or opening the PR.
-- Merging the PR and starting the next task each require separate explicit user authorization. Merge a true prerequisite before dependent work; independent roadmap items are ordered by value, not a synthetic `After previous` chain.
+- A user instruction such as "continua con 14.x" authorizes the complete lifecycle of that one task through automatic non-destructive merge to `develop` after a positive independent audit and green remote gate.
+- Do not request additional confirmation for in-scope docs, tests, audit fixes, the closure commit, normal push, opening the PR or its normal merge.
+- Starting the next task requires separate explicit user authorization. Merge a true prerequisite before dependent work; independent roadmap items are ordered by value, not a synthetic `After previous` chain.
 - Never delete local/remote branches or rewrite published history. Full Git safety rules live in `AGENTS.md`.
 
 ## Documentation maintenance
@@ -142,5 +142,5 @@ For changed UI behavior, select either the existing Docker frontend or the isola
 - QA rows, Redis keys, sessions and temporary processes were cleaned; initial services were restored.
 - Implementer self-review completed.
 - Proportional independent audit completed; A findings closed and C findings did not expand scope.
-- Roadmap status/evidence updated; after a positive audit, the coherent commit, normal push and PR to `develop` were completed automatically.
+- Roadmap status/evidence updated; after a positive audit, the coherent commit, normal push, PR and merge commit to `develop` were completed automatically without deleting the source branch.
 - Work stopped before the next task pending confirmation.
