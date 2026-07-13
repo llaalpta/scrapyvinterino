@@ -24,12 +24,12 @@ Work on one roadmap outcome at a time:
 2. Classify the work as micro, standard or program using `docs/sdd-process.md`.
 3. Use `plan/<scope>` only for a program or a priority/dependency redesign. A standard task already defined by the roadmap starts on its implementation branch; an authorized bounded external request does not change its class by itself.
 4. Define at most three acceptance criteria, one representative real scenario, one relevant negative path, cleanup and any external-traffic allowance.
-5. Obtain one user confirmation for the task. That confirmation authorizes its local branch, docs, implementation, verification, self-review, bounded audit and commit. Push/PR/merge require either task-specific permission or an explicit standing publication authorization; do not request redundant confirmation when that authorization already exists.
+5. Obtain one user confirmation for the task. That confirmation authorizes its branch, docs, implementation, verification, self-review, bounded audit, audit fixes and, after a positive audit verdict, the coherent commit, normal push and automatic PR to `develop`. Merging that PR and starting the next task each require separate explicit user authorization.
 6. Branch from an updated `develop`, update the owning behavior/decision documentation and implement only that outcome.
 7. Run focused checks, then the smallest real integration path that proves the affected boundaries. Do not manufacture unrelated container work.
 8. Run the implementer self-review directly, followed by the proportional independent read-only audit below.
-9. Fix in-scope findings, recheck only the affected evidence, update roadmap status and commit the coherent change.
-10. Review/merge a prerequisite before dependent work. Stop for confirmation before opening the next task branch.
+9. Fix in-scope findings, recheck only the affected evidence, update owning docs and roadmap as needed, and request finding-specific re-audit until the verdict is positive or the loop ceiling blocks and splits the task. After a positive verdict, commit, push normally and open the PR to `develop` automatically.
+10. Do not merge the PR or open the next task branch without separate explicit user authorization. A true prerequisite must be reviewed and merged before dependent work begins.
 
 Small mechanical fixes may skip a spec update when they do not change behavior or contradict current docs.
 
@@ -49,7 +49,7 @@ Do not delegate mandatory instruction reading, product decisions, roadmap priori
 
 ## Task sizing and stop rules
 
-- **Micro:** no behavior/schema/process coordination; normally at most two files and about 50 changed lines. Focused check and self-review are enough.
+- **Micro:** no behavior/schema/process coordination; normally at most two files and about 50 changed lines. Use a focused check, self-review and a minimal diff-only independent audit; do not create an integration environment solely for that audit.
 - **Standard:** one observable invariant or user outcome, no more than three runtime boundaries, one migration at most and one QA setup with a negative variation.
 - **Program:** multiple outcomes, multiple QA setups, or a schema + worker + PWA redesign. Plan and split it before product code.
 
@@ -77,7 +77,7 @@ Classify findings:
 - **B:** hardening of the same outcome that adds little scope; fix only when it stays contained.
 - **C:** adjacent/new outcome or theoretical platform hardening; record as accepted/conditional risk and do not expand the branch.
 
-One clean pass closes the audit. After a fix, recheck only that finding. Two loops are the default; a third is the absolute ceiling before splitting. Micro mechanical work does not require an independent audit.
+One clean pass closes the audit. After a fix, recheck only that finding. Two loops are the default; a third is the absolute ceiling before splitting. Keep a micro audit to its final diff, instructions and focused-check evidence. A missing reviewer or a verdict that is not positive at the loop ceiling blocks closure and commit/push/PR publication.
 
 ## Frontend and integration QA
 
@@ -124,10 +124,10 @@ Document any check that cannot run and why.
 
 ## Git safety and branch discipline
 
-- Use one short-lived branch per coherent task, based on `develop`, and propose it back through a PR.
+- Use one short-lived branch per coherent task, based on `develop`; after its positive gate, push it normally and open its PR to `develop` automatically.
 - Keep commits small and descriptive. Merge prerequisites before dependent work.
 - Treat every published/local/remote branch, tag and commit as durable history.
-- Authorized operations include new commits, normal pushes, PRs, reviews and non-destructive merges. Prefer merge commits for reviewed work.
+- Commits, normal pushes, PRs and reviews after the positive gate need no additional confirmation. A non-destructive merge requires explicit user authorization for that specific PR; prefer a merge commit.
 - Never delete branches/tags/refs, use automatic post-merge deletion, force-push, rebase/squash published history, reset shared branches or run pruning that can make work unreachable.
 - If deletion or rewriting appears necessary, stop and request explicit authorization for exact refs and recovery.
 - Do not commit caches, `.env`, dependencies or generated local artifacts. Do not revert user changes without explicit instruction.

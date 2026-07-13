@@ -26,7 +26,7 @@ No hay perfiles Compose. `docker compose up` sin lista arranca tambien worker y 
 
 El flujo SDD practico esta documentado en `docs/sdd-process.md`. Solo un programa, un cambio amplio de prioridad/dependencias o un plan de trafico externo necesita una rama documental `plan/<scope>`; una tarea estandar ya definida en el roadmap abre directamente su rama de implementacion desde `develop`.
 
-Cada tarea usa una rama corta creada desde un `develop` que ya contiene sus dependencias, implementa solo su slice, demuestra el comportamiento real, pasa self-review y auditoria independiente automatica, y se commitea por separado. Tras integrar la tarea se espera confirmacion explicita antes de abrir la rama o empezar el desarrollo siguiente.
+Cada tarea usa una rama corta creada desde un `develop` que ya contiene sus dependencias, implementa solo su slice y demuestra el comportamiento real. Despues pasa self-review y auditoria independiente automatica; los hallazgos se corrigen y re-auditan hasta obtener veredicto positivo o bloquear/dividir la tarea. Solo tras el veredicto positivo se hace el commit de cierre, push normal y apertura automatica de la PR a `develop`. El merge y el inicio de la tarea siguiente requieren cada uno confirmacion explicita.
 
 Si `develop` no existe localmente, no sigas acumulando cambios en una rama larga por defecto. Confirma primero si hay que crear `develop`, traerlo de remoto o tratar el cambio como excepcion puntual.
 
