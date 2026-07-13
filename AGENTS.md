@@ -196,6 +196,11 @@ If a check cannot run, document the reason in the final response.
 ## Git
 
 - Keep commits small and descriptive.
+- Treat published repository history and every local or remote branch/tag as durable. Prefer append-only, reversible operations with the lowest practical risk of losing code.
+- Authorized repository mutations are new commits, normal fast-forward pushes, pull requests, reviews, and non-destructive merges. Prefer a merge commit when integrating reviewed work so the development commits remain reachable.
+- Do not delete local or remote branches, tags, commits, releases, repositories, or refs. Do not use `git push --delete`, `git branch -d/-D`, `gh pr merge --delete-branch`, automatic post-merge branch deletion, or equivalent API/connector actions.
+- Do not force-push, rewrite published commits, rebase or squash published development history, reset a shared branch, expire reflogs, or run pruning/cleanup that can make development history unreachable. `--force-with-lease` is still a force-push and is not authorized.
+- If a requested workflow appears to require deletion, history rewriting, or a non-fast-forward remote update, stop before the mutation and ask for explicit authorization for the exact refs and recovery plan. Never infer deletion permission from permission to create PRs, commit, push, or merge.
 - Use one short-lived branch per spec or coherent fix. Branch from `develop` and open a PR back to `develop` for review before merge. If `develop` does not exist locally, stop and ask before continuing or create it intentionally as part of a repository workflow change.
 - Name branches by scope, for example `spec/010-session-prepare`, `feature/010-proxy-session-pool`, or `fix/010-rate-limit-refresh`.
 - Do not keep stacking unrelated specs on a long-lived feature branch. If the current branch scope does not match the requested work, switch or create the correct branch before editing files.
