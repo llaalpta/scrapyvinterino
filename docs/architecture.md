@@ -3,7 +3,7 @@
 ## Servicios
 
 - `frontend`: PWA React/Vite para configuracion y operacion.
-- `api`: FastAPI para REST, SSE y comandos sincronos de monitor: run manual, run inicial de una activacion, baseline, preparacion de sesion y detail probe. El control de acceso local aun no esta implementado y pertenece a 14.12.1.
+- `api`: FastAPI para auth local, REST, SSE y comandos sincronos de monitor: run manual, run inicial de una activacion, baseline, preparacion de sesion y detail probe. PostgreSQL autentica cada admision `/api` de negocio; bootstrap/login son la frontera publica previa y no existe bypass por entorno.
 - `worker`: un proceso con el productor recurrente (scheduler) y consumidores de Redis para runs de monitor, scraping, deduplicacion y filtros.
 - `scheduler-watchdog`: proceso fail-stop separado que detiene en PostgreSQL solo monitores recurrentes cuando expira el heartbeat del productor y despues intenta retirar su tarea ready de Redis.
 - `postgres`: persistencia.
@@ -49,6 +49,31 @@ La propiedad de Alembic no pertenece al `backend/Dockerfile`: su `CMD` generico 
 - `providers`: proveedor Vinted con `curl_cffi`, perfiles de navegador y deteccion DataDome.
 - `worker`: scheduler recurrente, consumidores de tareas y watchdog; las ejecuciones sincronas enumeradas arriba pertenecen al proceso API.
 
+## Mapa de acceso local
+
+La sesion de usuario PWA es distinta de `monitor_sessions` y `vinted_sessions`. Su contrato propietario es `docs/specs/011-local-pwa-access-control.md`.
+
+```text
+PWA cerrada -> GET /api/auth/session
+  -> cookie ausente/invalida -> user_sessions pre-auth corta + CSRF en memoria -> Login
+  -> cookie auth valida      -> usuario + CSRF en memoria -> montar Dashboard
+
+Login + Origin + CSRF + password Argon2
+  -> lock/validar pre-auth -> revocar token A -> crear token B auth -> cookie B
+
+request de negocio
+  -> hash cookie -> PostgreSQL session vigente/no revocada + users.is_active
+  -> mutacion: ademas Origin exacto + CSRF ligado a B
+  -> fallo DB/auth/CSRF: detener antes de la logica de negocio
+
+Logout -> desmontar Dashboard/SSE -> revocar B -> borrar cookie
+SSE -> revalidar hash/usuario durante poll; comentario + stream_heartbeat cada 15 s idle
+    -> watchdog PWA 22,5 s cubre CONNECTING/silencio; cierre -> auth acotada -> reconexion unica
+    -> revocacion/expiry corta el stream <= 15 s
+```
+
+PostgreSQL conserva solo el hash del token opaco. El raw existe solo en cookie host-only `HttpOnly`; el CSRF derivado existe solo en memoria de la PWA. El dashboard no se monta durante bootstrap incierto, por lo que una shell PWA cacheada/offline no muestra datos anteriores. El aprovisionamiento de usuario es CLI interactivo y no hay registro HTTP.
+
 ## Mapa de comandos de monitor
 
 `search_sources.id` es la identidad estable del monitor. Crear, editar y archivar son comandos sincronos del proceso API; no arrancan el worker, no crean runs ni llaman a Vinted o a un proxy. Preparar una sesion, recalibrar, lanzar y detener pertenecen a otros ciclos de vida.
@@ -76,7 +101,7 @@ Una sesion Vinted preparada es contexto publico anonimo; no contiene un login de
 | `vinted_sessions` | Una fila conserva monitor, proxy, sticky ID, perfil, contexto geografico, estado, contadores y tiempos. Cookies, CSRF y tokens se serializan en `context_encrypted`; fingerprint, IP/pais, errores saneados y lifecycle metadata quedan fuera del cifrado. Los flags de presencia se derivan al leer el payload y no duplican los valores. No hay una fila en Redis equivalente. |
 | `APP_SECRET_KEY` | Deriva la clave Fernet que cifra tanto contexto Vinted como passwords de proxy. Hoy no existe un sentinel que detecte una clave global incoherente al arrancar; 14.12.6 lo añade. Con una clave valida, un ciphertext/JSON aislado tampoco tiene estado fail-stop propio; 14.12.7 conserva la evidencia y detiene solo el owner afectado. |
 | `CurlCffiVintedCatalogProvider` | En modo serial, crea un provider/jar en memoria por run, carga el contexto descifrado, conserva el mismo sticky y comparte jar entre documento, API y detalles. Los modos explicitos canary/parallel clonan ese contexto en hasta dos providers de lane con el mismo proxy/sticky, adoptan el ultimo contexto exitoso y canary vuelve a validar catalogo. El diagnostico de egress usa otra sesion sin cookies. Al cerrar cada provider se descarta solo su copia en memoria. |
-| API/PWA/eventos | `Preparar sesion` crea un run de auditoria `session_prepare`; logs y respuestas exponen IDs, flags, contadores y marcadores saneados, nunca `context_encrypted`. Ajustes muestra la ultima fila creada para el proxy, no necesariamente la que seleccionaria el runtime. La API aun no aplica autenticacion; hasta 14.12.1 solo puede considerarse segura dentro de un host/red de confianza y el ejemplo productivo no es desplegable como PWA privada. |
+| API/PWA/eventos | `Preparar sesion` crea un run de auditoria `session_prepare`; logs y respuestas exponen IDs, flags, contadores y marcadores saneados, nunca `context_encrypted`. Ajustes muestra la ultima fila creada para el proxy, no necesariamente la que seleccionaria el runtime. La sesion local de usuario protege esta lectura/comando, pero es independiente del contexto Vinted anonimo. |
 
 La seleccion efectiva no equivale a leer `status=ready`. Bajo el lock del monitor, `get_ready_vinted_session()` exige mismo monitor y proxy, perfil/impersonation, pais, locale, `Accept-Language` y `x-screen`, TTL vigente, `request_count < max_requests`, payload descifrable y contexto requerido completo. El predicado actual omite `viewport_size`; 14.12.5 lo alinea y hace visible el motivo efectivo de no reutilizacion. Entre varias candidatas se elige la usada hace mas tiempo y, como desempate, la preparada mas antigua y el menor ID; no se ordena por `request_count`. Al reutilizar, el contador sube dentro de la transaccion antes del trafico de negocio, pero solo queda durable con el commit terminal y una caida intermedia puede perderlo; 14.12.9 crea esa adquisicion durable. Al preparar, bootstrap y probe ocurren antes de crear la fila; solo una preparacion aceptada se guarda con uso uno y 14.12.10 introduce el intento durable previo. Por tanto, `request_count` cuenta adquisiciones/preparaciones aceptadas del contexto, no peticiones HTTP individuales.
 

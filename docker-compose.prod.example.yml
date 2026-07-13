@@ -33,6 +33,7 @@ services:
       - .env
     environment:
       APP_ENV: production
+      BACKEND_CORS_ORIGINS: https://${APP_HOST}
     command: sh -c "alembic upgrade head && uvicorn vinted_monitor.api.main:app --host 0.0.0.0 --port 8000"
     networks:
       - internal
@@ -62,6 +63,7 @@ services:
       - .env
     environment:
       APP_ENV: production
+      BACKEND_CORS_ORIGINS: https://${APP_HOST}
     networks:
       - internal
     restart: unless-stopped
@@ -87,6 +89,7 @@ services:
       - .env
     environment:
       APP_ENV: production
+      BACKEND_CORS_ORIGINS: https://${APP_HOST}
     networks:
       - internal
     restart: unless-stopped

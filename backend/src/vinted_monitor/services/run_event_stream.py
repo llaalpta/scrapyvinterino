@@ -140,12 +140,18 @@ async def monitor_event_stream(
 ) -> AsyncIterator[str]:
     current_id = initial_cursor
     last_heartbeat_at = monotonic()
+    if await is_disconnected():
+        return
     yield _stream_ready_message(current_id)
 
-    while not await is_disconnected():
+    while True:
+        if await is_disconnected():
+            return
         events = await asyncio.to_thread(load_events, current_id)
         if events:
             for published in events:
+                if await is_disconnected():
+                    return
                 current_id = published.cursor
                 yield _monitor_event_message(published)
             # Query again immediately after every non-empty batch. This drains a
@@ -155,7 +161,12 @@ async def monitor_event_stream(
         now = monotonic()
         heartbeat_due_in = heartbeat_interval_seconds - (now - last_heartbeat_at)
         if heartbeat_due_in <= 0:
+            if await is_disconnected():
+                return
             yield ": heartbeat\n\n"
+            if await is_disconnected():
+                return
+            yield "event: stream_heartbeat\ndata: {}\n\n"
             last_heartbeat_at = now
             heartbeat_due_in = heartbeat_interval_seconds
         await sleep(max(min(poll_interval_seconds, heartbeat_due_in), 0))

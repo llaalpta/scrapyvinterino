@@ -4,11 +4,33 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from vinted_monitor.services.run_events import redact_persisted_run_event_details
 from vinted_monitor.services.scheduler import SchedulerConfigError, normalize_scheduler_config
 from vinted_monitor.services.search_sources import validate_search_source_name, validate_vinted_catalog_url
+
+
+class LocalAuthLogin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Credential validity is deliberately evaluated by the authentication
+    # service. Pydantic validation errors include the rejected ``input`` and
+    # must never reflect a raw password in a 422 response.
+    email: str
+    password: SecretStr
+
+
+class LocalAuthUserRead(BaseModel):
+    id: int
+    email: str
+
+
+class LocalAuthSessionRead(BaseModel):
+    authenticated: bool
+    user: LocalAuthUserRead | None
+    csrf_token: str
+    expires_at: datetime
 
 
 class SearchSourceCreate(BaseModel):

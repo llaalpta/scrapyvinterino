@@ -133,6 +133,7 @@ async def test_stream_emits_idle_heartbeat() -> None:
 
     assert "event: stream_ready" in await anext(stream)
     assert await anext(stream) == ": heartbeat\n\n"
+    assert await anext(stream) == "event: stream_heartbeat\ndata: {}\n\n"
     await stream.aclose()
 
 
@@ -155,6 +156,7 @@ async def test_stream_emits_default_heartbeat_after_fifteen_idle_seconds() -> No
 
     await anext(stream)
     assert await anext(stream) == ": heartbeat\n\n"
+    assert await anext(stream) == "event: stream_heartbeat\ndata: {}\n\n"
     assert sum(sleeps) == 15
     await stream.aclose()
 
@@ -166,7 +168,27 @@ async def test_stream_stops_after_disconnect() -> None:
 
     stream = monitor_event_stream(0, is_disconnected=disconnected, load_events=lambda _cursor: [])
 
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_stream_revalidates_before_each_event_in_a_loaded_batch() -> None:
+    checks = 0
+
+    async def revoked_before_second_event() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    stream = monitor_event_stream(
+        0,
+        is_disconnected=revoked_before_second_event,
+        load_events=lambda _cursor: [make_published(1), make_published(2)],
+    )
+
     assert "event: stream_ready" in await anext(stream)
+    assert event_data(await anext(stream))["id"] == 1
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
 

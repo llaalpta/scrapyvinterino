@@ -1,10 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from fastapi.testclient import TestClient
+from api_client import authenticated_test_client
 from sqlalchemy import select
 
-from vinted_monitor.api.main import app
 from vinted_monitor.db.models import Item, Opportunity, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
 
@@ -115,7 +114,7 @@ def build_item(suffix: str, title: str, price: Decimal, *, view_count: int | Non
 
 
 def test_items_api_is_removed() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
 
     response = client.get("/api/items")
 
@@ -124,7 +123,7 @@ def test_items_api_is_removed() -> None:
 
 def test_opportunities_api_returns_paginated_opportunities() -> None:
     ids = seed_browser_data()
-    client = TestClient(app)
+    client = authenticated_test_client()
     try:
         response = client.get("/api/opportunities?page=1&page_size=25", params={"source_id": ids["source_b"]})
 
@@ -153,7 +152,7 @@ def test_opportunities_api_returns_paginated_opportunities() -> None:
 
 def test_opportunities_api_filters_by_date_price_and_status() -> None:
     seed_browser_data()
-    client = TestClient(app)
+    client = authenticated_test_client()
     try:
         response = client.get(
             "/api/opportunities",
@@ -174,7 +173,7 @@ def test_opportunities_api_filters_by_date_price_and_status() -> None:
 
 
 def test_opportunities_api_rejects_invalid_ranges() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
 
     response = client.get("/api/opportunities?price_min=10&price_max=1")
 

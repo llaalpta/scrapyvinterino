@@ -2,8 +2,10 @@
 
 - Secretos de despliegue solo en `.env`; passwords de proxy y contexto anonimo Vinted se guardan cifrados en PostgreSQL con una clave derivada de `APP_SECRET_KEY`.
 - No commitear cookies, tokens, direcciones completas ni datos de pago.
-- El producto requiere una PWA privada con login local, pero la implementacion actual no autentica ni autoriza REST, SSE o comandos. CORS no es control de acceso. Mientras 14.12.1 siga abierto, no exponer los puertos de desarrollo fuera de un host/red de confianza ni desplegar el ejemplo productivo como si ya fuera privado.
-- La futura sesion local de 14.12.1 usara cookie `HttpOnly`, `Secure` en produccion y proteccion CSRF para mutaciones; hoy esa cookie no existe.
+- La frontera privada pertenece a `docs/specs/011-local-pwa-access-control.md`: una sesion local opaca y durable autentica todas las rutas `/api` de negocio, incluido SSE. Solo salud, bootstrap/login y preflight valido son publicos en runtime; `/docs`, `/redoc` y `/openapi.json` son diagnosticos publicos exclusivos de development/test. CORS nunca sustituye autenticacion ni CSRF.
+- La cookie local es host-only `HttpOnly`, `SameSite=Strict`, `Path=/api`, sin `Domain`, y usa `Secure` fuera de development/test. PostgreSQL guarda solo el hash SHA-256 del token; el CSRF ligado a sesion vive solo en memoria PWA. Token, password y CSRF no se registran ni se guardan en storage web.
+- Toda mutacion exige un `Origin` exacto permitido y CSRF, incluido login/logout. Login rota la identidad preautenticada; logout revoca estado servidor. Usuario inactivo, expiracion, revocacion o fallo PostgreSQL detienen acceso y un SSE abierto se revalida dentro de 15 segundos.
+- Los passwords locales se aprovisionan interactivamente y se guardan con Argon2. No hay registro publico, password por argumento/env versionado ni flag que desactive auth. El control de abuso de login y CSP se mantienen acotados en 14.32 y 14.33 antes de considerar endurecida una exposicion directa a Internet.
 - Redaccion automatica de datos sensibles en logs.
 - Mensajes de error persistidos deben pasar por redaccion antes de guardarse en `runs`, `errors` o campos de error de entidades.
 - Proxies residenciales son opcionales. El password se cifra en `proxy_profiles`; el username sigue en texto claro y el read model API lo devuelve aunque la PWA solo usa su mascara. 14.12.8 elimina esa contradiccion antes de considerar cifradas/no retornables todas las credenciales.

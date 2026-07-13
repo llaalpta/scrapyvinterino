@@ -2,11 +2,10 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fastapi.testclient import TestClient
+from api_client import authenticated_test_client
 from pydantic import ValidationError
 from sqlalchemy import delete, select
 
-from vinted_monitor.api.main import app
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import AppSetting, MonitorSession, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
@@ -182,7 +181,7 @@ def test_recurring_start_returns_503_without_producer_heartbeat(monkeypatch: pyt
         db.commit()
         source_id = source.id
 
-    response = TestClient(app).post(f"/api/monitors/{source_id}/start")
+    response = authenticated_test_client().post(f"/api/monitors/{source_id}/start")
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Scheduler worker is unavailable"

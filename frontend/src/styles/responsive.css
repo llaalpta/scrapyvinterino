@@ -84,6 +84,15 @@
     flex-direction: column;
   }
 
+  .topbar-account {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .topbar-account span {
+    max-width: calc(100vw - 150px);
+  }
+
   .results-controls {
     align-items: stretch;
     flex-direction: column;

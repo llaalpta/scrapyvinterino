@@ -129,6 +129,23 @@ nav button:hover {
   color: #697586;
 }
 
+.topbar-account {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.topbar-account span {
+  max-width: min(32vw, 320px);
+  overflow: hidden;
+  color: #52636f;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .notice {
   margin-bottom: 20px;
   border: 1px solid #f5c2c7;

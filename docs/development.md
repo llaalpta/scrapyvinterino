@@ -15,9 +15,10 @@ El entorno local no depende de Traefik ni del servidor remoto.
 copy .env.example .env
 docker compose up -d --build postgres redis api
 docker compose ps
+docker compose exec api python -m vinted_monitor.cli.create_user --email admin@example.local
 ```
 
-Este es el arranque local seguro de infraestructura/API: no inicia ningun ejecutor. Para usar el frontend Docker, si `5173` esta libre, ejecuta `docker compose up -d frontend`.
+Este es el arranque local seguro de infraestructura/API: no inicia ningun ejecutor. El comando de usuario solicita password y confirmacion sin mostrarlas ni pasarlas por argumentos. Para usar el frontend Docker, si `5173` esta libre, ejecuta `docker compose up -d frontend` y autentica en la PWA.
 
 No hay perfiles Compose. `docker compose up` sin lista arranca tambien worker y `scheduler-watchdog`; el worker recupera reservas Redis y crea consumidores incluso si el scheduler esta deshabilitado, por lo que puede reanudar trafico persistido. Antes de habilitar ejecucion operativa comprueba monitores activos, runs, ready/processing y presupuesto de trafico. Arranca primero `worker`, verifica heartbeat/colas y despues `scheduler-watchdog`.
 
@@ -57,10 +58,12 @@ Las migraciones Alembic pueden compactarse o romper compatibilidad con datos loc
 
 ## Puertos
 
-- `5173`: frontend Vite.
-- `8000`: API FastAPI.
-- `5432`: Postgres local.
-- `6379`: Redis local.
+- `127.0.0.1:5173`: frontend Vite.
+- `127.0.0.1:8000`: API FastAPI.
+- `127.0.0.1:5432`: Postgres local.
+- `127.0.0.1:6379`: Redis local.
+
+Los binds loopback son parte de la frontera: exponer PostgreSQL/Redis en LAN permitiria saltarse el login de la API. `BACKEND_CORS_ORIGINS` enumera origenes exactos; el ejemplo incluye `http://localhost:5173` y el QA aislado `http://127.0.0.1:5176`.
 
 ## PWA QA estable
 
@@ -117,11 +120,13 @@ Invoke-WebRequest http://127.0.0.1:5176
 
 Abre Playwright contra `http://127.0.0.1:5176`. El script apaga el servicio Docker `frontend` de `5173`, levanta `postgres`, `redis`, `api` y `worker` con Docker Compose, no levanta el watchdog, arranca Vite local en `5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`.
 
+Para QA de auth no uses el helper con worker. `scripts/qa_local_auth_pwa.py` crea su usuario efimero por el servicio local, exige URLs loopback explicitas, bloquea service workers y todo host no local, y verifica antes/despues que worker/watchdog siguen detenidos. El runner recibe credenciales generadas solo en variables temporales del proceso: no hagas eco ni imprimas `Set-Cookie`, token hash, cookie, CSRF o password. Su `finally`/handler de salida elimina por ID/hash exactos el usuario y todas sus sesiones, incluida la preauth creada tras logout; confirma despues los contadores en PostgreSQL. Un fallo de auth/API debe mantener el dashboard desmontado; no uses un bypass de test en la aplicacion viva.
+
 En la pasada creada por el helper no uses `http://localhost:5173`. Ese puerto pertenece normalmente al frontend Docker y en Windows puede aparecer como publicado aunque el host no responda. `status` debe mostrar el Vite QA en `5176` y avisar si queda algo escuchando en `5173`.
 
 El helper no es simetrico: `stop` cierra solo su Vite local; no detiene worker/API ni restaura el frontend Docker. Restaura manualmente cada servicio al snapshot inicial. Nunca dejes dos Vite sobre el mismo puerto.
 
-Cada callback SSE debe pertenecer a una instancia concreta de `EventSource`. Antes de cambiar estado, cursor, eventos o temporizadores, el callback comprueba que su instancia sigue siendo la conexion actual; un `error` obsoleto nunca puede cerrar ni degradar el reemplazo. La conexion fallida se cierra y deja de ser actual antes de programar como maximo un timer de reconexion. Si el reemplazo tambien falla durante una caida prolongada puede programar el siguiente intento, pero nunca existen dos timers o conexiones actuales a la vez. Salir de Monitores invalida la instancia, cierra el stream y cancela el timer; volver crea una sola conexion con el ultimo cursor explicito.
+Cada callback SSE debe pertenecer a una instancia concreta de `EventSource`. Antes de cambiar estado, cursor, eventos o temporizadores, el callback comprueba que su instancia sigue siendo la conexion actual; un `error` obsoleto nunca puede cerrar ni degradar el reemplazo. `stream_heartbeat` es una señal JS sin cursor que rearma el watchdog PWA de 22,5 segundos; este se arma al construir la instancia para cubrir tambien `CONNECTING`. Error o silencio cierran la conexion antes de una revalidacion auth cancelable/acotada y de como maximo un timer de reconexion. Si el reemplazo tambien falla durante una caida prolongada puede programar el siguiente intento, pero nunca existen dos timers o conexiones actuales a la vez. Salir de Monitores invalida la instancia, cierra el stream y cancela los timers/fetch; volver crea una sola conexion con el ultimo cursor explicito.
 
 ## Frontend Structure
 

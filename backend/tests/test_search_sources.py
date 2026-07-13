@@ -4,10 +4,9 @@ from datetime import UTC, datetime, timedelta
 from threading import Event
 
 import pytest
-from fastapi.testclient import TestClient
+from api_client import authenticated_test_client
 from pydantic import ValidationError
 
-from vinted_monitor.api.main import app
 from vinted_monitor.api.schemas import SearchSourceCreate
 from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
 from vinted_monitor.db.session import SessionLocal
@@ -195,7 +194,7 @@ def test_search_source_create_schema_rejects_invalid_url() -> None:
 
 
 def test_create_source_api_persists_normalized_query() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/monitors",
         json={
@@ -234,7 +233,7 @@ def test_create_source_api_persists_normalized_query() -> None:
 
 
 def test_create_source_api_rejects_invalid_url() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/monitors",
         json={"name": "bad source", "url": "https://example.com/catalog"},
@@ -244,7 +243,7 @@ def test_create_source_api_rejects_invalid_url() -> None:
 
 
 def test_create_source_api_rejects_unsupported_catalog_filter_without_persisting() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/monitors",
         json={"name": "bad filter source", "url": "https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12"},
@@ -256,7 +255,7 @@ def test_create_source_api_rejects_unsupported_catalog_filter_without_persisting
 
 
 def test_update_source_api_persists_scheduler_config() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest scheduler source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -302,7 +301,7 @@ def test_update_source_api_persists_scheduler_config() -> None:
 
 
 def test_update_source_api_persists_monitor_filter_definition() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest filter source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -331,7 +330,7 @@ def test_update_source_api_persists_monitor_filter_definition() -> None:
 
 
 def test_update_source_api_rejects_legacy_filter_rule_ids_field() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest legacy filter source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -352,7 +351,7 @@ def test_update_source_api_rejects_legacy_filter_rule_ids_field() -> None:
 
 
 def test_update_source_api_rejects_legacy_is_active_field() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest no legacy active patch", "url": "https://www.vinted.es/catalog?search_text="},
@@ -377,7 +376,7 @@ def test_update_source_api_rejects_legacy_is_active_field() -> None:
 
 
 def test_update_source_api_rejects_active_monitor_configuration_change() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest active edit source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -408,7 +407,7 @@ def test_update_source_api_rejects_active_monitor_configuration_change() -> None
 
 
 def test_update_source_api_rejects_monitor_level_proxy_field() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest no monitor proxy", "url": "https://www.vinted.es/catalog?search_text="},
@@ -429,7 +428,7 @@ def test_update_source_api_rejects_monitor_level_proxy_field() -> None:
 
 
 def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest invalid scheduler source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -457,7 +456,7 @@ def test_update_source_api_rejects_invalid_scheduler_config_without_mutation() -
 
 
 def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest duration cleanup source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -498,7 +497,7 @@ def test_update_source_api_clears_duration_when_payload_sets_null() -> None:
 
 
 def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest archived source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -534,7 +533,7 @@ def test_delete_source_api_archives_and_hides_source_idempotently() -> None:
 
 
 def test_delete_source_api_stops_active_monitor() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/monitors",
         json={"name": "pytest archived monitor source", "url": "https://www.vinted.es/catalog?search_text="},
@@ -683,7 +682,7 @@ def test_source_mutation_waits_for_archive_and_rejects_stale_state(
 
 
 def test_scheduler_api_updates_persisted_ui_gate() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
 
     try:
         response = client.patch("/api/scheduler", json={"enabled": True})

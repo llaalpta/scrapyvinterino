@@ -1,4 +1,4 @@
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { LogOut, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { navItems } from '../../app/navigation';
 
@@ -9,8 +9,10 @@ export function DashboardShell({
   children,
   error,
   navCollapsed,
+  onLogout,
   onSelectSection,
-  onToggleNav
+  onToggleNav,
+  userEmail
 }: {
   activeSection: string;
   activeSubtitle: string;
@@ -18,8 +20,10 @@ export function DashboardShell({
   children: ReactNode;
   error: string | null;
   navCollapsed: boolean;
+  onLogout: () => void;
   onSelectSection: (section: string) => void;
   onToggleNav: () => void;
+  userEmail: string;
 }) {
   return (
     <main className={navCollapsed ? 'shell nav-collapsed' : 'shell'}>
@@ -64,6 +68,13 @@ export function DashboardShell({
           <div>
             <h2>{activeTitle}</h2>
             <p>{activeSubtitle}</p>
+          </div>
+          <div className="topbar-account">
+            <span title={userEmail}>{userEmail}</span>
+            <button type="button" onClick={onLogout}>
+              <LogOut size={17} />
+              Salir
+            </button>
           </div>
         </header>
 

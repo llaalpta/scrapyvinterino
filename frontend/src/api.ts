@@ -1,5 +1,39 @@
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '';
 
+export const AUTHENTICATION_REQUIRED_EVENT = 'vinted-monitor:authentication-required';
+
+export type LocalAuthUser = {
+  id: number;
+  email: string;
+};
+
+export type LocalAuthSession = {
+  authenticated: boolean;
+  user: LocalAuthUser | null;
+  csrf_token: string;
+  expires_at: string;
+};
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+let localCsrfToken: string | null = null;
+
+export function setLocalCsrfToken(token: string | null) {
+  localCsrfToken = token;
+}
+
+export function announceAuthenticationRequired() {
+  window.dispatchEvent(new window.CustomEvent(AUTHENTICATION_REQUIRED_EVENT));
+}
+
 export type SearchSource = {
   id: number;
   name: string;
@@ -282,40 +316,66 @@ export type RunEvent = {
   created_at: string;
 };
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`);
+type ApiRequestOptions = {
+  body?: unknown;
+  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  notifyUnauthorized?: boolean;
+  signal?: AbortSignal;
+};
+
+function resolveApiUrl(path: string): string {
+  const configuredBase = new window.URL(apiBaseUrl || '/', window.location.origin);
+  if (configuredBase.origin !== window.location.origin) {
+    throw new ApiError(0, 'La API privada debe compartir origen con la PWA');
+  }
+  return new window.URL(path, configuredBase).toString();
+}
+
+async function requestJson<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  const method = options.method ?? 'GET';
+  const headers: Record<string, string> = {};
+  const unsafe = method !== 'GET';
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (unsafe) {
+    if (!localCsrfToken) {
+      throw new ApiError(403, 'No hay un token CSRF valido; vuelve a comprobar la sesion');
+    }
+    headers['X-CSRF-Token'] = localCsrfToken;
+  }
+
+  const response = await fetch(resolveApiUrl(path), {
+    method,
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    cache: 'no-store',
+    credentials: 'same-origin',
+    signal: options.signal
+  });
   if (!response.ok) {
-    throw new Error(await getErrorMessage(response));
+    const error = new ApiError(response.status, await getErrorMessage(response));
+    if (response.status === 401 && options.notifyUnauthorized !== false) {
+      announceAuthenticationRequired();
+    }
+    throw error;
+  }
+  if (response.status === 204) {
+    return undefined as T;
   }
   return response.json() as Promise<T>;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  return requestJson<T>(path);
 }
 
 async function postJson<T>(path: string, payload?: unknown): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: payload === undefined ? undefined : JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    throw new Error(await getErrorMessage(response));
-  }
-  return response.json() as Promise<T>;
+  return requestJson<T>(path, { method: 'POST', body: payload });
 }
 
 async function patchJson<T>(path: string, payload: unknown): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    throw new Error(await getErrorMessage(response));
-  }
-  return response.json() as Promise<T>;
+  return requestJson<T>(path, { method: 'PATCH', body: payload });
 }
 
 async function getErrorMessage(response: Response): Promise<string> {
@@ -348,6 +408,34 @@ async function getErrorMessage(response: Response): Promise<string> {
   return fallback;
 }
 
+export async function fetchLocalAuthSession(signal?: AbortSignal): Promise<LocalAuthSession> {
+  const session = await requestJson<LocalAuthSession>('/api/auth/session', {
+    notifyUnauthorized: false,
+    signal
+  });
+  setLocalCsrfToken(session.csrf_token);
+  return session;
+}
+
+export async function loginLocalUser(email: string, password: string): Promise<LocalAuthSession> {
+  const session = await requestJson<LocalAuthSession>('/api/auth/login', {
+    method: 'POST',
+    body: { email, password },
+    notifyUnauthorized: false
+  });
+  setLocalCsrfToken(session.csrf_token);
+  return session;
+}
+
+export async function logoutLocalUser(): Promise<void> {
+  await requestJson<void>('/api/auth/logout', { method: 'POST', notifyUnauthorized: false });
+}
+
+export async function revalidateLocalAuthentication(signal?: AbortSignal): Promise<boolean> {
+  const session = await fetchLocalAuthSession(signal);
+  return session.authenticated && session.user !== null;
+}
+
 export function fetchSources(): Promise<SearchSource[]> {
   return getJson<SearchSource[]>('/api/monitors');
 }
@@ -371,10 +459,7 @@ export function updateSource(
 }
 
 export async function deleteSource(sourceId: number): Promise<void> {
-  const response = await fetch(`${apiBaseUrl}/api/monitors/${sourceId}`, { method: 'DELETE' });
-  if (!response.ok) {
-    throw new Error(await getErrorMessage(response));
-  }
+  await requestJson<void>(`/api/monitors/${sourceId}`, { method: 'DELETE' });
 }
 
 export function fetchScheduler(): Promise<SchedulerState> {
@@ -472,9 +557,10 @@ export function fetchMonitorEvents(sourceId: number): Promise<RunEvent[]> {
 }
 
 export function monitorEventsStreamUrl(lastEventId?: number): string {
-  return lastEventId === undefined
-    ? `${apiBaseUrl}/api/monitors/events/stream`
-    : `${apiBaseUrl}/api/monitors/events/stream?last_event_id=${lastEventId}`;
+  const path = lastEventId === undefined
+    ? '/api/monitors/events/stream'
+    : `/api/monitors/events/stream?last_event_id=${lastEventId}`;
+  return resolveApiUrl(path);
 }
 
 export function runSource(sourceId: number): Promise<Run> {
