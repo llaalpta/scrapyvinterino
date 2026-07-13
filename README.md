@@ -16,15 +16,16 @@ El objetivo inicial es monitorizar URLs publicas de catalogo, detectar articulos
 ```powershell
 copy .env.example .env
 docker compose up -d --build postgres redis api
+docker compose exec api python -m vinted_monitor.cli.create_user --email admin@example.local
 docker compose up -d frontend
 ```
 
-Ese arranque no inicia ejecutores. Un `docker compose up` sin lista incluye tambien worker y watchdog; puede recuperar tareas Redis y generar trafico real. Consulta `docs/development.md` antes de arrancarlos o resetear volumenes.
+Ese arranque no inicia ejecutores. El aprovisionamiento solicita la password de forma interactiva y la PWA permanece cerrada hasta crear un usuario local. Un `docker compose up` sin lista incluye tambien worker y watchdog; puede recuperar tareas Redis y generar trafico real. Consulta `docs/development.md` antes de arrancarlos o resetear volumenes.
 
 Servicios actuales:
 
-- Frontend: http://localhost:5173
-- API: http://localhost:8000
+- Frontend: http://localhost:5173 (login local obligatorio)
+- API: http://localhost:8000 (negocio autenticado; `/health` publico)
 - API docs: http://localhost:8000/docs
 - Postgres: localhost:5432
 - Redis: localhost:6379

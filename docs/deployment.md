@@ -14,7 +14,17 @@ El runtime local ejecutable vive en `docker-compose.yml`. `docker-compose.prod.e
 
 Desarrollo publica frontend, API, PostgreSQL y Redis en el host. El ejemplo de produccion mantiene PostgreSQL/Redis en la red `internal`, conecta API y frontend a la red externa `traefik`, enruta `/api` a FastAPI y el resto a Nginx. Requiere definir `APP_HOST` y crear antes la red externa `traefik`.
 
-Ninguno de los dos Compose aplica hoy autenticacion a REST, SSE o comandos, y la ruta Traefik del ejemplo tampoco añade un middleware de acceso. CORS no cierra esa frontera. Hasta completar 14.12.1, desarrollo debe limitarse a un host/red de confianza y el ejemplo no debe exponerse como si ya fuera una PWA privada.
+El backend aplica la frontera local descrita en `docs/specs/011-local-pwa-access-control.md` a todas las rutas `/api` de negocio; Traefik no sustituye esa comprobacion. Desarrollo publica PostgreSQL, Redis, API y Vite solo en `127.0.0.1`. Produccion no publica puertos de contenedor: enruta frontend y `/api` bajo el mismo `APP_HOST`, mantiene `/health` interno y desactiva OpenAPI/Swagger/ReDoc.
+
+Produccion fija `BACKEND_CORS_ORIGINS=https://${APP_HOST}` desde Compose. La configuracion fuera de development/test rechaza origenes vacios, wildcard, no HTTPS o con path. La cookie host-only usa `Path=/api`, `SameSite=Strict`, `HttpOnly` y `Secure`; no se comparte por subdominios ni se admite un modo cross-origin alternativo.
+
+Las migraciones no siembran credenciales. Tras aplicar Alembic, crea el primer usuario con entrada interactiva dentro de la red del despliegue:
+
+```powershell
+docker compose exec api python -m vinted_monitor.cli.create_user --email admin@example.local
+```
+
+Para un despliegue nuevo cuyo API aun no este iniciado, ejecuta el mismo modulo mediante un `docker compose run --rm` despues de migrar. La password nunca se pasa como argumento o variable versionada. Sin usuario activo, salud puede responder pero login y toda operacion permanecen cerrados.
 
 ## Configuracion Runtime
 
@@ -22,7 +32,7 @@ La configuracion no debe tener dos fuentes de verdad activas:
 
 | Dueño | Uso |
 | --- | --- |
-| `.env` | Infraestructura, secretos, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS, `APP_SECRET_KEY`, `SCHEDULER_ENABLED`, heartbeat del productor, intervalo/gracia del watchdog, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
+| `.env` | Infraestructura, secretos, auth local, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS exacto, `APP_SECRET_KEY`, TTL absoluto de pre-auth/auth, `SCHEDULER_ENABLED`, heartbeat del productor, intervalo/gracia del watchdog, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
 | PWA | Operacion diaria: habilitar scheduler en app, runs simultaneos, salida directa, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. |
 | Backend | Limites duros de validacion y defaults seguros cuando no hay override operativo. |
 
@@ -126,9 +136,9 @@ Para una actualizacion con migracion, evita escritores mezclados:
 
 ## Evidencia local 2026-07-13
 
-- Ambos Compose renderizaron sin ejecutar trafico externo. Un arranque solicitado desde worker/watchdog espero PostgreSQL y Redis sanos, arranco API, ejecuto Alembic `0017 (head)`, espero `/health` y solo despues inicio ambos procesos.
+- Ambos Compose renderizaron sin ejecutar trafico externo. La pasada de lifecycle anterior a 14.12.1 arranco API con el entonces vigente `0017 (head)` antes de worker/watchdog. La comprobacion actual aplico `0018 (head)` con worker/watchdog detenidos; tambien paso cero-a-head y 0017-a-head en una base aislada eliminada despues.
 - Con Redis detenido, API siguio `healthy` y `worker_available=true`; worker tambien permanecio `healthy` mientras sus dos consumidores registraban errores de reserva/recuperacion. Al restaurar Redis, todas las colas seguian a cero.
-- Con PostgreSQL detenido, `/health` siguio `200` pero `/api/monitors` devolvio `500`. Worker hizo tres restarts y watchdog dos; ambos se recuperaron al volver PostgreSQL. API nunca reinicio y recupero su pool al primer acceso valido.
+- En la pasada de lifecycle previa a auth, PostgreSQL detenido hacia que `/api/monitors` devolviese `500` y reiniciaba worker/watchdog. Con 14.12.1 y ambos ejecutores detenidos, la prueba real actual mantuvo `/health=200`, devolvio `503` en la ruta privada y, al restaurar PostgreSQL sin reiniciar API, recupero el pool y devolvio el `401` esperado para la cookie invalida de prueba.
 - Una API terminada manualmente quedo `exited` porque no tiene restart. Worker y watchdog continuaron sin restart, confirmando que `depends_on` no propaga la caida. `docker compose start api` volvio a ejecutar Alembic antes de Uvicorn.
 - Una parada controlada `docker compose stop -t 5 api` agoto los cinco segundos, termino con codigo `137` y no produjo el shutdown de Uvicorn. El `sh -c` vigente no ofrece propagacion graceful demostrada; el `start` posterior volvio a aplicar Alembic y recupero `/health`.
 - El estado final restauro API/PostgreSQL/Redis sanos, frontend Docker/worker/watchdog detenidos, heartbeat original, cero monitores activos, cero runs en curso y cero colas o claves de tarea; el Vite host preexistente quedo intacto. No se llamo a Vinted ni a proxies.

@@ -10,7 +10,7 @@ from threading import Event
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
+from api_client import authenticated_test_client
 from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
@@ -812,7 +812,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
 
 def test_monitor_session_prepare_api_creates_ready_session_without_business_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
     monkeypatch.setattr(
@@ -891,7 +891,7 @@ def test_monitor_session_prepare_api_creates_ready_session_without_business_effe
 
 def test_monitor_session_prepare_api_rejects_session_without_datadome(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProviderWithoutDataDome)
     monkeypatch.setattr(
@@ -954,7 +954,7 @@ def test_monitor_session_prepare_api_rejects_session_without_datadome(monkeypatc
 
 def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
     monkeypatch.setattr(
@@ -1040,7 +1040,7 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
 
 def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeDataDomeDetailProvider)
     monkeypatch.setattr(
@@ -1110,7 +1110,7 @@ def test_archiving_monitor_invalidates_and_purges_prepared_sessions_when_queue_i
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
 
     def fail_ready_task_cancellation(*args, **kwargs) -> None:
         raise TaskQueueError("pytest queue unavailable")
@@ -1728,7 +1728,7 @@ def test_monitor_run_skips_existing_opportunity_before_filters(source_id: int) -
 
 def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest api baseline required monitor",
@@ -1755,7 +1755,7 @@ def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     cache = FakeSeenCache(baseline_ready=False)
     with SessionLocal() as db:
         source = SearchSource(
@@ -1793,7 +1793,7 @@ def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPa
 
 def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest unsupported legacy monitor",
@@ -1832,7 +1832,7 @@ def test_monitor_traffic_actions_reject_unsupported_url_filter_before_creating_r
     payload: dict | None,
 ) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name=f"pytest unsupported {endpoint}",
@@ -1862,7 +1862,7 @@ def test_monitor_traffic_actions_reject_unsupported_url_filter_before_creating_r
 
 def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest api manual monitor",
@@ -1905,7 +1905,7 @@ def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.Mo
 
 def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
         if active_proxy_ids:
@@ -1946,7 +1946,7 @@ def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: p
 
 def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest api manual start monitor",
@@ -1990,7 +1990,7 @@ def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypat
 
 def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest api recurring start monitor",
@@ -2051,9 +2051,15 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
         scheduler_setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
         scheduler_setting_existed = scheduler_setting is not None
         original_scheduler_value = deepcopy(scheduler_setting.value) if scheduler_setting is not None else None
+        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
 
     try:
         with SessionLocal() as db:
+            if active_proxy_ids:
+                db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                    {ProxyProfile.is_active: False},
+                    synchronize_session=False,
+                )
             update_scheduler_config(
                 db,
                 {
@@ -2102,15 +2108,23 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
         monkeypatch.setattr(api_main, "acquire_initial_run_admission_lock", observed_acquire_initial_run_admission_lock)
         monkeypatch.setattr(api_main, "execute_monitor_run", delayed_execute_monitor_run)
 
+        # Keep password hashing and session bootstrap outside the scheduler
+        # concurrency window. The assertion below is about admission locking,
+        # not first-use authentication latency or test ordering.
+        with authenticated_test_client() as client:
+            assert client.get("/api/monitors").status_code == 200
+
         def activate(source_id: int) -> tuple[int, str | None]:
-            with TestClient(app) as client:
+            with authenticated_test_client() as client:
                 response = client.post(f"/api/monitors/{source_id}/start")
                 detail = response.json().get("detail") if response.status_code != 201 else None
                 return response.status_code, detail
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             first_future = executor.submit(activate, source_ids[0])
-            assert first_activation_reached_run.wait(timeout=5)
+            if not first_activation_reached_run.wait(timeout=5):
+                assert first_future.done(), "first activation did not return or reach run execution"
+                pytest.fail(f"first activation returned before run execution: {first_future.result()}")
             second_future = executor.submit(activate, source_ids[1])
             assert second_activation_reached_lock.wait(timeout=5)
             assert not second_activation_acquired_lock.wait(timeout=0.25)
@@ -2152,12 +2166,17 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
                     scheduler_setting.value = original_scheduler_value or {}
                 elif scheduler_setting is not None:
                     db.delete(scheduler_setting)
+                if active_proxy_ids:
+                    db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
+                        {ProxyProfile.is_active: True},
+                        synchronize_session=False,
+                    )
                 db.commit()
 
 
 def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest activation compensation",
@@ -2200,7 +2219,7 @@ def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(mon
 
 def test_monitor_stop_closes_active_session() -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest stop session monitor",
@@ -2232,7 +2251,7 @@ def test_monitor_stop_closes_active_session() -> None:
 
 def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest recurring failure stops session",
@@ -2345,7 +2364,7 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
 
 def test_runs_endpoint_filters_by_source_id() -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source_a = SearchSource(
             name="pytest runs filter a",
@@ -2390,7 +2409,7 @@ def test_runs_endpoint_filters_by_source_id() -> None:
 def test_monitor_stats_range_bucket_granularity() -> None:
     cleanup_source(None)
     now = datetime(2026, 7, 4, 12, 34, 56, tzinfo=UTC)
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/monitors",
         json={"name": "pytest bucket monitor", "url": "https://www.vinted.es/catalog?search_text=bucket"},
@@ -2457,7 +2476,7 @@ def test_monitor_stats_all_range_chooses_automatic_bucket(
 ) -> None:
     cleanup_source(None)
     now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/monitors",
         json={"name": "pytest all bucket monitor", "url": f"https://www.vinted.es/catalog?search_text=all-{age.total_seconds()}"},
@@ -2502,7 +2521,7 @@ def test_monitor_stats_all_range_chooses_automatic_bucket(
 
 def test_monitor_stats_uses_latest_closed_session_when_inactive() -> None:
     cleanup_source(None)
-    client = TestClient(app)
+    client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest latest session monitor",

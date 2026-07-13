@@ -30,6 +30,7 @@ Specs MVP iniciales:
 - `docs/specs/004-item-persistence.md`
 - `docs/specs/005-deduplication-and-opportunities.md`
 - `docs/specs/008-scheduler.md`
+- `docs/specs/011-local-pwa-access-control.md`
 - `docs/specs/006-local-filters.md`
 - `docs/specs/007-opportunities-table.md`
 
@@ -42,7 +43,7 @@ Specs MVP iniciales:
 
 ## Limites
 
-- El contrato del MVP exige login local para la PWA, pendiente de 14.12.1 porque REST/SSE/comandos aun no autentican. El scraping usa una sesion publica anonima preparada con contexto publico; no inicia sesion en una cuenta de Vinted.
+- El contrato del MVP exige el login local definido en `docs/specs/011-local-pwa-access-control.md`: la PWA no monta datos antes de autenticar y REST/SSE/comandos fallan cerrados con una sesion opaca PostgreSQL. El scraping usa otra sesion publica anonima preparada con contexto publico; no inicia sesion en una cuenta de Vinted.
 - La autenticacion de una cuenta de Vinted y cualquier accion asociada permanecen fuera del MVP.
 - Las compras futuras requeriran accion explicita del usuario.
 - No se guardaran secretos en el repositorio.

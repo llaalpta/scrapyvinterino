@@ -1,9 +1,8 @@
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
+from api_client import authenticated_test_client
 
-from vinted_monitor.api.main import app
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import ProxyProfile, VintedSession
 from vinted_monitor.db.session import SessionLocal
@@ -139,7 +138,7 @@ def test_create_proxy_profile_rejects_unsupported_country() -> None:
 
 
 def test_proxy_profile_api_rejects_manual_context_fields() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/proxy-profiles",
         json={
@@ -159,7 +158,7 @@ def test_proxy_profile_api_rejects_manual_context_fields() -> None:
 
 
 def test_proxy_profile_api_rejects_manual_context_update_fields() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/proxy-profiles",
         json={
@@ -198,7 +197,7 @@ def test_proxy_profile_api_rejects_manual_context_update_fields() -> None:
 
 
 def test_proxy_profile_api_resolves_context_from_country_only() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/proxy-profiles",
         json={
@@ -228,7 +227,7 @@ def test_proxy_profile_api_resolves_context_from_country_only() -> None:
 
 
 def test_proxy_profile_api_imports_vinted_session_without_returning_raw_secrets() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/proxy-profiles",
         json={
@@ -295,7 +294,7 @@ def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
             return FakeResponse()
 
     monkeypatch.setattr("vinted_monitor.api.main.CurlSession", FakeCurlSession)
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/proxy-profiles",
         json={
@@ -347,7 +346,7 @@ def test_proxy_profile_test_endpoint_records_failure(monkeypatch) -> None:
             raise RuntimeError("proxy connection refused")
 
     monkeypatch.setattr("vinted_monitor.api.main.CurlSession", FakeCurlSession)
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/proxy-profiles",
         json={
@@ -379,7 +378,7 @@ def test_proxy_profile_test_endpoint_records_failure(monkeypatch) -> None:
 
 
 def test_proxy_profile_catalog_api_probe_endpoint_is_removed() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     create_response = client.post(
         "/api/proxy-profiles",
         json={

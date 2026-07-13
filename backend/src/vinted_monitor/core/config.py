@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,7 +22,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_secret_key: str = "change-me"
     database_url: str = "postgresql+psycopg://vinted:vinted@postgres:5432/vinted_monitor"
-    backend_cors_origins: str = "http://localhost:5173"
+    backend_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5176"
+    local_auth_preauth_ttl_minutes: int = Field(default=10, ge=1, le=60)
+    local_auth_session_ttl_hours: int = Field(default=168, ge=1, le=720)
     redis_url: str = "redis://redis:6379/0"
     seen_cache_ttl_seconds: int = 86400
     seen_processing_ttl_seconds: int = 120
@@ -120,6 +123,31 @@ class Settings(BaseSettings):
         secret_key = self.app_secret_key.strip()
         if len(secret_key) < 32 or secret_key.lower() in INSECURE_APP_SECRET_KEYS:
             raise ValueError("APP_SECRET_KEY must be a unique random value of at least 32 characters outside development")
+        return self
+
+    @model_validator(mode="after")
+    def validate_cors_origin_boundary(self) -> "Settings":
+        origins = self.cors_origins
+        if not origins:
+            raise ValueError("BACKEND_CORS_ORIGINS must contain at least one exact origin")
+        production_like = self.app_env.strip().lower() not in {"development", "test"}
+        if production_like and len(origins) != 1:
+            raise ValueError("BACKEND_CORS_ORIGINS must contain exactly one origin outside development/test")
+        for origin in origins:
+            parsed = urlsplit(origin)
+            if (
+                origin == "*"
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("BACKEND_CORS_ORIGINS must contain exact HTTP(S) origins without wildcard, credentials or path")
+            if production_like and parsed.scheme != "https":
+                raise ValueError("BACKEND_CORS_ORIGINS must use HTTPS outside development/test")
         return self
 
     @property

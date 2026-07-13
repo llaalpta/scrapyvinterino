@@ -4,12 +4,17 @@ from decimal import Decimal
 from typing import Annotated
 
 from curl_cffi.requests import Session as CurlSession
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from vinted_monitor.api.local_auth import (
+    auth_router,
+    local_session_hash_is_active_in_database,
+    require_api_access,
+)
 from vinted_monitor.api.schemas import (
     ActionRequestCreate,
     ActionRequestRead,
@@ -103,15 +108,32 @@ from vinted_monitor.services.vinted_sessions import (
 settings = get_settings()
 configure_logging(settings.log_level)
 
-app = FastAPI(title="Vinted Monitor API", version="0.1.0")
+development_like = settings.app_env.strip().lower() in {"development", "test"}
+app = FastAPI(
+    title="Vinted Monitor API",
+    version="0.1.0",
+    docs_url="/docs" if development_like else None,
+    redoc_url="/redoc" if development_like else None,
+    openapi_url="/openapi.json" if development_like else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Last-Event-ID", "X-CSRF-Token"],
 )
+app.include_router(auth_router)
+business_router = APIRouter(prefix="/api", dependencies=[Depends(require_api_access)])
+
+
+@app.middleware("http")
+async def prevent_api_response_caching(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/health")
@@ -146,17 +168,17 @@ def _proxy_profile_read(profile, db: Session) -> ProxyProfileRead:
     return ProxyProfileRead(**public)
 
 
-@app.get("/api/monitors", response_model=list[SearchSourceRead])
+@business_router.get("/monitors", response_model=list[SearchSourceRead])
 def get_monitors(db: Session = Depends(get_db)) -> list[SearchSourceRead]:
     return [_source_read(source) for source in list_sources(db)]
 
 
-@app.post("/api/monitors", response_model=SearchSourceRead, status_code=201)
+@business_router.post("/monitors", response_model=SearchSourceRead, status_code=201)
 def post_monitor(payload: SearchSourceCreate, db: Session = Depends(get_db)):
     return _source_read(create_source(db, payload.name, payload.url))
 
 
-@app.patch("/api/monitors/{monitor_id}", response_model=SearchSourceRead)
+@business_router.patch("/monitors/{monitor_id}", response_model=SearchSourceRead)
 def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
     try:
         return _source_read(update_source(
@@ -180,7 +202,7 @@ def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = De
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.delete("/api/monitors/{monitor_id}", status_code=204)
+@business_router.delete("/monitors/{monitor_id}", status_code=204)
 def delete_monitor(monitor_id: int, db: Session = Depends(get_db)) -> Response:
     try:
         archive_source(db, monitor_id)
@@ -189,7 +211,7 @@ def delete_monitor(monitor_id: int, db: Session = Depends(get_db)) -> Response:
     return Response(status_code=204)
 
 
-@app.post("/api/monitors/{monitor_id}/start", response_model=RunRead, status_code=201)
+@business_router.post("/monitors/{monitor_id}/start", response_model=RunRead, status_code=201)
 def post_monitor_start(
     monitor_id: int,
     db: Session = Depends(get_db),
@@ -235,7 +257,7 @@ def post_monitor_start(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/api/monitors/{monitor_id}/stop", response_model=SearchSourceRead)
+@business_router.post("/monitors/{monitor_id}/stop", response_model=SearchSourceRead)
 def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
     try:
         return _source_read(stop_source_monitor(db, monitor_id))
@@ -243,7 +265,7 @@ def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/api/scheduler", response_model=SchedulerStateRead)
+@business_router.get("/scheduler", response_model=SchedulerStateRead)
 def get_scheduler(db: Session = Depends(get_db)):
     try:
         return get_scheduler_state(db, settings)
@@ -251,7 +273,7 @@ def get_scheduler(db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.patch("/api/scheduler", response_model=SchedulerStateRead)
+@business_router.patch("/scheduler", response_model=SchedulerStateRead)
 def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
     try:
         return update_scheduler_config(db, payload.model_dump(exclude_unset=True), settings)
@@ -259,12 +281,12 @@ def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.get("/api/proxy-profiles", response_model=list[ProxyProfileRead])
+@business_router.get("/proxy-profiles", response_model=list[ProxyProfileRead])
 def get_proxy_profiles(db: Session = Depends(get_db)) -> list[ProxyProfileRead]:
     return [_proxy_profile_read(profile, db) for profile in list_proxy_profiles(db)]
 
 
-@app.post("/api/proxy-profiles", response_model=ProxyProfileRead, status_code=201)
+@business_router.post("/proxy-profiles", response_model=ProxyProfileRead, status_code=201)
 def post_proxy_profile(payload: ProxyProfileCreate, db: Session = Depends(get_db)) -> ProxyProfileRead:
     try:
         profile = create_proxy_profile(
@@ -286,7 +308,7 @@ def post_proxy_profile(payload: ProxyProfileCreate, db: Session = Depends(get_db
     return _proxy_profile_read(profile, db)
 
 
-@app.patch("/api/proxy-profiles/{profile_id}", response_model=ProxyProfileRead)
+@business_router.patch("/proxy-profiles/{profile_id}", response_model=ProxyProfileRead)
 def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Session = Depends(get_db)) -> ProxyProfileRead:
     try:
         profile = update_proxy_profile(
@@ -312,7 +334,7 @@ def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Sessio
     return _proxy_profile_read(profile, db)
 
 
-@app.post("/api/proxy-profiles/{profile_id}/test", response_model=ProxyProfileRead)
+@business_router.post("/proxy-profiles/{profile_id}/test", response_model=ProxyProfileRead)
 def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> ProxyProfileRead:
     profile = next((entry for entry in list_proxy_profiles(db) if entry.id == profile_id), None)
     if profile is None:
@@ -332,7 +354,7 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
     return _proxy_profile_read(updated, db)
 
 
-@app.post("/api/proxy-profiles/{profile_id}/vinted-session/preflight", status_code=410)
+@business_router.post("/proxy-profiles/{profile_id}/vinted-session/preflight", status_code=410)
 def post_proxy_profile_vinted_session_preflight(profile_id: int) -> None:
     del profile_id
     raise HTTPException(
@@ -341,7 +363,7 @@ def post_proxy_profile_vinted_session_preflight(profile_id: int) -> None:
     )
 
 
-@app.post("/api/proxy-profiles/{profile_id}/catalog-api/probe", status_code=410)
+@business_router.post("/proxy-profiles/{profile_id}/catalog-api/probe", status_code=410)
 def post_proxy_profile_catalog_api_probe(profile_id: int) -> None:
     del profile_id
     raise HTTPException(
@@ -350,7 +372,7 @@ def post_proxy_profile_catalog_api_probe(profile_id: int) -> None:
     )
 
 
-@app.post("/api/proxy-profiles/{profile_id}/vinted-session/import", status_code=410)
+@business_router.post("/proxy-profiles/{profile_id}/vinted-session/import", status_code=410)
 def post_proxy_profile_vinted_session_import(profile_id: int) -> None:
     del profile_id
     raise HTTPException(
@@ -359,7 +381,7 @@ def post_proxy_profile_vinted_session_import(profile_id: int) -> None:
     )
 
 
-@app.get("/api/opportunities", response_model=OpportunityResultPageRead)
+@business_router.get("/opportunities", response_model=OpportunityResultPageRead)
 def get_opportunities(
     page: int = Query(DEFAULT_PAGE, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
@@ -394,12 +416,12 @@ def get_opportunities(
     )
 
 
-@app.get("/api/runs", response_model=list[RunRead])
+@business_router.get("/runs", response_model=list[RunRead])
 def get_runs(limit: int = 50, source_id: int | None = None, db: Session = Depends(get_db)) -> list:
     return list_runs(db, limit=limit, source_id=source_id)
 
 
-@app.get("/api/monitors/{monitor_id}/stats", response_model=MonitorStatsRead)
+@business_router.get("/monitors/{monitor_id}/stats", response_model=MonitorStatsRead)
 def get_monitor_stats_endpoint(monitor_id: int, range: str = "hours", db: Session = Depends(get_db)):  # noqa: A002
     try:
         return get_monitor_stats(db, monitor_id, range_name=range)
@@ -409,25 +431,36 @@ def get_monitor_stats_endpoint(monitor_id: int, range: str = "hours", db: Sessio
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.get("/api/runs/{run_id}/events", response_model=list[RunEventRead])
+@business_router.get("/runs/{run_id}/events", response_model=list[RunEventRead])
 def get_run_events(run_id: int, db: Session = Depends(get_db)) -> list:
     return list_run_events(db, run_id)
 
 
-@app.get("/api/monitors/{monitor_id}/events", response_model=list[RunEventRead])
+@business_router.get("/monitors/{monitor_id}/events", response_model=list[RunEventRead])
 def get_monitor_events(monitor_id: int, db: Session = Depends(get_db)) -> list:
     return list(db.scalars(select(RunEvent).where(RunEvent.source_id == monitor_id).order_by(RunEvent.created_at.asc(), RunEvent.id.asc())))
 
 
-@app.get("/api/monitors/events/stream")
+@business_router.get("/monitors/events/stream")
 async def stream_monitor_events(
     request: Request,
     last_event_id: Annotated[int | None, Query(ge=0)] = None,
     last_event_id_header: Annotated[int | None, Header(alias="Last-Event-ID", ge=0)] = None,
 ):
     initial_cursor = await asyncio.to_thread(resolve_monitor_event_cursor, last_event_id, last_event_id_header)
+    session_token_hash = getattr(getattr(request, "state", None), "local_session_token_hash", None)
+
+    async def stream_should_close() -> bool:
+        if await request.is_disconnected():
+            return True
+        if session_token_hash is None:
+            # Direct unit calls do not run FastAPI dependencies. Every routed
+            # request receives this state from require_api_access.
+            return False
+        return not await asyncio.to_thread(local_session_hash_is_active_in_database, session_token_hash)
+
     return StreamingResponse(
-        monitor_event_stream(initial_cursor, is_disconnected=request.is_disconnected),
+        monitor_event_stream(initial_cursor, is_disconnected=stream_should_close),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -436,7 +469,7 @@ async def stream_monitor_events(
     )
 
 
-@app.post("/api/monitors/{monitor_id}/runs", response_model=RunRead, status_code=201)
+@business_router.post("/monitors/{monitor_id}/runs", response_model=RunRead, status_code=201)
 def post_monitor_run(
     monitor_id: int,
     db: Session = Depends(get_db),
@@ -457,7 +490,7 @@ def post_monitor_run(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.post("/api/monitors/{monitor_id}/baseline", response_model=RunRead, status_code=201)
+@business_router.post("/monitors/{monitor_id}/baseline", response_model=RunRead, status_code=201)
 def post_monitor_baseline(
     monitor_id: int,
     db: Session = Depends(get_db),
@@ -477,7 +510,7 @@ def post_monitor_baseline(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/api/monitors/{monitor_id}/vinted-session/prepare", response_model=RunRead, status_code=201)
+@business_router.post("/monitors/{monitor_id}/vinted-session/prepare", response_model=RunRead, status_code=201)
 def post_monitor_vinted_session_prepare(
     monitor_id: int,
     db: Session = Depends(get_db),
@@ -496,7 +529,7 @@ def post_monitor_vinted_session_prepare(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/api/monitors/{monitor_id}/items/detail-probe", response_model=ItemDetailProbeRead, status_code=201)
+@business_router.post("/monitors/{monitor_id}/items/detail-probe", response_model=ItemDetailProbeRead, status_code=201)
 def post_monitor_item_detail_probe(
     monitor_id: int,
     payload: ItemDetailProbeCreate,
@@ -517,7 +550,7 @@ def post_monitor_item_detail_probe(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/api/actions", response_model=ActionRequestRead, status_code=201)
+@business_router.post("/actions", response_model=ActionRequestRead, status_code=201)
 def post_action(payload: ActionRequestCreate, db: Session = Depends(get_db)):
     if not settings.action_requests_enabled:
         raise HTTPException(status_code=404, detail="Action requests are disabled")
@@ -542,3 +575,16 @@ def _opportunity_result_read(result: OpportunityResult) -> OpportunityResultRead
         last_scraped_at=result.last_scraped_at or result.opportunity.created_at,
         last_run_id=result.last_run_id,
     )
+
+
+@business_router.api_route(
+    "/{unmatched_path:path}",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
+)
+def reject_unknown_api_route(unmatched_path: str) -> None:
+    del unmatched_path
+    raise HTTPException(status_code=404, detail="Not found")
+
+
+app.include_router(business_router)

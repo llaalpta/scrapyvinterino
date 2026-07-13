@@ -3,8 +3,9 @@ import { OpportunitiesView } from '../features/opportunities/OpportunitiesView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { SourcesView } from '../features/sources/SourcesView';
 import { useDashboardController } from '../hooks/useDashboardController';
+import type { LocalAuthUser } from '../api';
 
-export function DashboardApp() {
+export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: LocalAuthUser }) {
   const dashboard = useDashboardController();
 
   return (
@@ -14,8 +15,10 @@ export function DashboardApp() {
       activeTitle={dashboard.activeTitle}
       error={dashboard.error}
       navCollapsed={dashboard.navCollapsed}
+      onLogout={onLogout}
       onSelectSection={dashboard.selectSection}
       onToggleNav={() => dashboard.setNavCollapsed((current) => !current)}
+      userEmail={user.email}
     >
       {dashboard.activeSection === 'opportunities' ? (
         <OpportunitiesView

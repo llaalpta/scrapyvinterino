@@ -1,5 +1,5 @@
-import { DashboardApp } from './app/DashboardApp';
+import { AuthenticatedApp } from './app/AuthenticatedApp';
 
 export function App() {
-  return <DashboardApp />;
+  return <AuthenticatedApp />;
 }

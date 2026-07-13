@@ -8,7 +8,7 @@ dependencies = [
   "cryptography>=46.0.0",
   "curl-cffi>=0.15.0",
   "fastapi>=0.124.0",
-  "passlib[bcrypt]>=1.7.4",
+  "pwdlib[argon2]>=0.3.0",
   "psycopg[binary]>=3.3.0",
   "pydantic-settings>=2.12.0",
   "python-multipart>=0.0.20",
@@ -34,6 +34,12 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["B008"]
+
+[tool.pytest.ini_options]
+markers = [
+  "real_auth: exercises the production local-auth dependency without test overrides",
+  "live_stack: exercises the running Docker stack over real HTTP and is opt-in",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vinted_monitor"]

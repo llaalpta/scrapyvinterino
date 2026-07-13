@@ -6,10 +6,9 @@ from threading import Event
 from zoneinfo import ZoneInfo
 
 import pytest
-from fastapi.testclient import TestClient
+from api_client import authenticated_test_client
 from sqlalchemy import select
 
-from vinted_monitor.api.main import app
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import AppSetting, MonitorSession, ProxyProfile, SearchSource
 from vinted_monitor.db.session import SessionLocal
@@ -115,7 +114,7 @@ def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
 
 
 def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
 
     response = client.get("/api/scheduler")
 
@@ -128,7 +127,7 @@ def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:
 
 
 def test_scheduler_api_rejects_removed_runtime_fields() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
 
     response = client.patch("/api/scheduler", json={"max_runs_per_proxy": 2, "request_retries": 2})
 

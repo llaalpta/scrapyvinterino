@@ -1,10 +1,8 @@
-from fastapi.testclient import TestClient
-
-from vinted_monitor.api.main import app
+from api_client import authenticated_test_client
 
 
 def test_action_requests_are_disabled_by_default() -> None:
-    client = TestClient(app)
+    client = authenticated_test_client()
     response = client.post(
         "/api/actions",
         json={"item_id": 1, "action_type": "purchase", "payload": {}},

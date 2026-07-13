@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  announceAuthenticationRequired,
   calibrateMonitorBaseline,
   createProxyProfile,
   createSource,
@@ -15,6 +16,7 @@ import {
   monitorEventsStreamUrl,
   prepareMonitorVintedSession,
   probeMonitorItemDetail,
+  revalidateLocalAuthentication,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -56,6 +58,8 @@ const emptyProxyDraft: ProxyDraft = {
 };
 const DEFAULT_MONITOR_STATS_RANGE: MonitorStatsRange = 'all';
 const MONITOR_RUN_HISTORY_LIMIT = 1000;
+const MONITOR_STREAM_LIVENESS_TIMEOUT_MS = 22_500;
+const MONITOR_STREAM_AUTH_TIMEOUT_MS = 10_000;
 
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
@@ -220,6 +224,9 @@ export function useDashboardController() {
     let disposed = false;
     const pendingTerminalEvents = pendingTerminalEventsRef.current;
     let stream: EventSource | null = null;
+    let streamLivenessTimer: number | null = null;
+    let authRevalidationController: AbortController | null = null;
+    let authRevalidationTimer: number | null = null;
 
     const refreshTerminalBatch = async () => {
       const pending = new Map(pendingTerminalEvents);
@@ -309,18 +316,99 @@ export function useDashboardController() {
       }
     };
 
-    const connect = () => {
+    function scheduleReconnect() {
+      if (disposed || monitorStreamReconnectTimerRef.current !== null) {
+        return;
+      }
+      monitorStreamReconnectTimerRef.current = window.setTimeout(() => {
+        monitorStreamReconnectTimerRef.current = null;
+        void reconnectIfAuthenticated();
+      }, 3000);
+    }
+
+    function clearStreamLivenessTimer() {
+      if (streamLivenessTimer !== null) {
+        window.clearTimeout(streamLivenessTimer);
+        streamLivenessTimer = null;
+      }
+    }
+
+    function armStreamLivenessTimer(currentStream: EventSource) {
+      clearStreamLivenessTimer();
+      streamLivenessTimer = window.setTimeout(() => {
+        streamLivenessTimer = null;
+        if (disposed || stream !== currentStream) {
+          return;
+        }
+        setMonitorStreamStatus('error');
+        setMonitorStreamReady(false);
+        currentStream.close();
+        stream = null;
+        scheduleReconnect();
+      }, MONITOR_STREAM_LIVENESS_TIMEOUT_MS);
+    }
+
+    function cancelAuthRevalidation() {
+      if (authRevalidationTimer !== null) {
+        window.clearTimeout(authRevalidationTimer);
+        authRevalidationTimer = null;
+      }
+      authRevalidationController?.abort();
+      authRevalidationController = null;
+    }
+
+    async function reconnectIfAuthenticated() {
+      if (disposed) {
+        return;
+      }
+      cancelAuthRevalidation();
+      const controller = new AbortController();
+      authRevalidationController = controller;
+      authRevalidationTimer = window.setTimeout(() => controller.abort(), MONITOR_STREAM_AUTH_TIMEOUT_MS);
+      try {
+        const authenticated = await revalidateLocalAuthentication(controller.signal);
+        if (disposed) {
+          return;
+        }
+        if (!authenticated) {
+          announceAuthenticationRequired();
+          return;
+        }
+        connect();
+      } catch {
+        if (!disposed) {
+          setMonitorStreamStatus('error');
+          scheduleReconnect();
+        }
+      } finally {
+        if (authRevalidationController === controller) {
+          if (authRevalidationTimer !== null) {
+            window.clearTimeout(authRevalidationTimer);
+            authRevalidationTimer = null;
+          }
+          authRevalidationController = null;
+        }
+      }
+    }
+
+    function connect() {
       if (disposed) {
         return;
       }
       setMonitorStreamStatus('connecting');
       setMonitorStreamReady(false);
+      clearStreamLivenessTimer();
       stream?.close();
-      const nextStream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
+      const nextStream = new EventSource(
+        monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined),
+        { withCredentials: true }
+      );
       stream = nextStream;
+      armStreamLivenessTimer(nextStream);
       nextStream.addEventListener('open', () => {
         if (!disposed && stream === nextStream) {
           setMonitorStreamStatus('connected');
+          armStreamLivenessTimer(nextStream);
         }
       });
       nextStream.addEventListener('error', () => {
@@ -329,14 +417,10 @@ export function useDashboardController() {
         }
         setMonitorStreamStatus('error');
         setMonitorStreamReady(false);
+        clearStreamLivenessTimer();
         nextStream.close();
         stream = null;
-        if (monitorStreamReconnectTimerRef.current === null) {
-          monitorStreamReconnectTimerRef.current = window.setTimeout(() => {
-            monitorStreamReconnectTimerRef.current = null;
-            connect();
-          }, 3000);
-        }
+        scheduleReconnect();
       });
       nextStream.addEventListener('stream_ready', (message) => {
         if (disposed || stream !== nextStream) {
@@ -346,6 +430,12 @@ export function useDashboardController() {
         if (ready !== null) {
           monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, ready);
           setMonitorStreamReady(true);
+          armStreamLivenessTimer(nextStream);
+        }
+      });
+      nextStream.addEventListener('stream_heartbeat', () => {
+        if (!disposed && stream === nextStream) {
+          armStreamLivenessTimer(nextStream);
         }
       });
       nextStream.addEventListener('monitor_event', (message) => {
@@ -356,6 +446,7 @@ export function useDashboardController() {
         if (!event || monitorStreamSeenEventIdsRef.current.has(event.id)) {
           return;
         }
+        armStreamLivenessTimer(nextStream);
         monitorStreamSeenEventIdsRef.current.add(event.id);
         const cursor = parseStreamCursor(message);
         if (cursor !== null) {
@@ -364,7 +455,7 @@ export function useDashboardController() {
         setMonitorEventsBySource((current) => mergeMonitorEventRecords(current, event));
         scheduleTerminalRefresh(event);
       });
-    };
+    }
 
     connect();
     if (pendingTerminalEvents.size > 0 && terminalRefreshTimerRef.current === null) {
@@ -373,6 +464,8 @@ export function useDashboardController() {
 
     return () => {
       disposed = true;
+      clearStreamLivenessTimer();
+      cancelAuthRevalidation();
       stream?.close();
       stream = null;
       setMonitorStreamReady(false);

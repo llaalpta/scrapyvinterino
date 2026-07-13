@@ -42,6 +42,31 @@ def test_production_rejects_insecure_app_secret_key(secret_key: str) -> None:
 
 
 def test_production_accepts_non_placeholder_app_secret_key() -> None:
-    settings = Settings(_env_file=None, app_env="production", app_secret_key="x" * 32)
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        app_secret_key="x" * 32,
+        backend_cors_origins="https://monitor.example.test",
+    )
 
     assert settings.app_env == "production"
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        "*",
+        "https://monitor.example.test/path",
+        "http://monitor.example.test",
+        "https://one.example.test,https://two.example.test",
+        "https://monitor.example.test.evil.invalid,https://monitor.example.test/",
+    ],
+)
+def test_production_rejects_non_exact_secure_cors_origins(origins: str) -> None:
+    with pytest.raises(ValidationError, match="BACKEND_CORS_ORIGINS"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            app_secret_key="x" * 32,
+            backend_cors_origins=origins,
+        )

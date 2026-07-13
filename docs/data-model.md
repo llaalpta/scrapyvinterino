@@ -2,7 +2,8 @@
 
 Tablas principales:
 
-- `users`: tabla ya presente con email, hash de password y estado, pero ninguna ruta o middleware la usa hoy para autenticar; el contrato de acceso y sesion local pertenece a 14.12.1.
+- `users`: identidades locales aprovisionadas fuera de HTTP y estado activo. El nuevo CLI normaliza el email y genera un hash Argon2 antes de insertar; la tabla 0018 no transforma ni promete compatibilidad para filas de desarrollo creadas por mecanismos anteriores. No representa cuentas Vinted ni roles de acciones futuras.
+- `user_sessions`: sesiones preautenticadas/autenticadas locales. Conserva solo hash SHA-256 unico del token opaco, usuario nullable, creacion, expiracion absoluta, autenticacion y revocacion. La cookie raw y el CSRF derivado nunca se persisten; Redis no participa en auth.
 - `search_sources`: monitores de oportunidad reutilizables; guardan URL, modo, cadencia, `filter_definition` con terminos excluyentes propios del monitor y estado runtime. `archived_at` oculta un monitor sin borrar historico.
 - `app_settings`: estado global con ownership por clave. `scheduler` contiene la configuracion operativa mutable desde la PWA; `scheduler_worker_heartbeat` contiene exclusivamente la ultima señal UTC escrita por el productor, cuya caducidad se configura en `.env`.
 - `monitor_sessions`: periodos historicos de lanzamiento de un monitor; los puntuales se cierran al terminar y los recurrentes quedan abiertos hasta parada, expiracion o fallo.
