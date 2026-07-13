@@ -736,7 +736,7 @@ def test_persistent_finalize_failure_converges_before_next_catalog_run(
     assert cache.processing == set()
 
 
-def test_transient_failure_while_preserving_challenge_keeps_primary_error_and_retry(
+def test_transient_failure_while_preserving_challenge_keeps_terminal_run_and_retry(
     source_id: int,
     audit_session_factory,
 ) -> None:
@@ -744,8 +744,8 @@ def test_transient_failure_while_preserving_challenge_keeps_primary_error_and_re
     cache = AuditSeenCache(finalize_failures=1)
     provider = AuditProvider(challenge_on=item_id)
 
-    with audit_session_factory() as db, pytest.raises(DataDomeChallengeError, match="audit DataDome challenge"):
-        execute_monitor_run(
+    with audit_session_factory() as db:
+        returned_run = execute_monitor_run(
             db,
             source_id,
             provider=provider,
@@ -758,6 +758,8 @@ def test_transient_failure_while_preserving_challenge_keeps_primary_error_and_re
         phases = list(db.scalars(select(RunEvent.phase).where(RunEvent.run_id == run.id))) if run else []
 
     assert run is not None
+    assert returned_run.id == run.id
+    assert returned_run.status == FAILED
     assert run.status == FAILED
     assert phases.count("run_failed") == 1
     assert item_id in cache.detail_retries
@@ -846,8 +848,8 @@ def test_challenge_attempt_counter_only_advances_for_failing_candidate(source_id
     )
     provider = AuditProvider(item_count=0, challenge_on=failing.vinted_item_id)
 
-    with audit_session_factory() as db, pytest.raises(DataDomeChallengeError, match="audit DataDome challenge"):
-        execute_monitor_run(
+    with audit_session_factory() as db:
+        run = execute_monitor_run(
             db,
             source_id,
             provider=provider,
@@ -855,6 +857,7 @@ def test_challenge_attempt_counter_only_advances_for_failing_candidate(source_id
             egress=_direct_egress(),
         )
 
+    assert run.status == FAILED
     assert provider.detail_calls == [first.vinted_item_id, failing.vinted_item_id]
     assert cache.detail_retries[first.vinted_item_id].attempt_count == 1
     assert cache.detail_retries[first.vinted_item_id].failure_kind == "detail_run_aborted_before_commit"

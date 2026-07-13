@@ -47,6 +47,7 @@ from vinted_monitor.services.monitor_sessions import get_active_monitor_session,
 from vinted_monitor.services.proxies import (
     ProxyProfileEligibilityError,
     lock_and_revalidate_proxy_selection,
+    mark_proxy_challenge_detected,
     mark_proxy_run_failure,
     mark_proxy_run_success,
     proxy_url_with_sticky_session,
@@ -1270,14 +1271,21 @@ def execute_monitor_run(
             auth_mode="public_anonymous",
             details={"provider": result.provider_metadata},
         )
-    except DataDomeChallengeError as exc:
-        try:
-            _record_failed_run(db, run, source, exc, kind="datadome_challenge", penalize_proxy=False)
-        finally:
-            _close_owned_provider(run_provider, owned_provider=owned_provider)
-        raise
-    except VintedCatalogRateLimitError as exc:
-        failed_run = _record_failed_run(db, run, source, exc, kind="catalog_rate_limited", penalize_proxy=False)
+    except (
+        DataDomeChallengeError,
+        VintedCatalogChallengeError,
+        VintedCatalogRateLimitError,
+        VintedCatalogSessionContextError,
+        VintedCatalogSessionError,
+    ) as exc:
+        failed_run = _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            kind=_catalog_terminal_failure_kind(exc),
+            penalize_proxy=False,
+        )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
     except Exception as exc:
@@ -1566,7 +1574,7 @@ def execute_monitor_run(
             raise
         try:
             challenge_kind = "cloudflare_challenge" if isinstance(exc, VintedCatalogChallengeError) else "datadome_challenge"
-            _record_failed_run(db, run, source, exc, kind=challenge_kind, penalize_proxy=False)
+            failed_run = _record_failed_run(db, run, source, exc, kind=challenge_kind, penalize_proxy=False)
             aborted_states = _aborted_detail_candidate_states(
                 claimed_work_items,
                 failing_item_id=getattr(exc, "detail_candidate_id", None),
@@ -1599,9 +1607,10 @@ def execute_monitor_run(
                 },
             )
             db.commit()
+            db.refresh(failed_run)
         finally:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
-        raise
+        return failed_run
     except Exception as exc:
         db.rollback()
         run = db.get(Run, run.id)
@@ -2273,6 +2282,18 @@ def _complete_finalizing_run(
     )
 
 
+def _catalog_terminal_failure_kind(exc: Exception) -> str:
+    if isinstance(exc, VintedCatalogChallengeError):
+        return "cloudflare_challenge"
+    if isinstance(exc, DataDomeChallengeError):
+        return "datadome_challenge"
+    if isinstance(exc, VintedCatalogRateLimitError):
+        return "catalog_rate_limited"
+    if isinstance(exc, VintedCatalogSessionContextError):
+        return "catalog_session_context_invalid"
+    return "catalog_session_rejected"
+
+
 def _record_failed_run(
     db: Session,
     run: Run,
@@ -2315,10 +2336,20 @@ def _record_failed_run(
     run.finished_at = datetime.now(UTC)
     run.error_message = message
     vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
-    if isinstance(exc, DataDomeChallengeError | VintedCatalogSessionError | VintedCatalogSessionContextError):
+    if isinstance(
+        exc,
+        (DataDomeChallengeError, VintedCatalogRateLimitError, VintedCatalogSessionError, VintedCatalogSessionContextError),
+    ):
         mark_vinted_session_invalid(db, vinted_session_id, reason=message)
     cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
-    if penalize_proxy:
+    if isinstance(exc, (DataDomeChallengeError, VintedCatalogChallengeError)):
+        mark_proxy_challenge_detected(
+            db,
+            proxy_profile_id,
+            penalty_multiplier=get_settings().datadome_challenge_penalty_multiplier,
+            cooldown_minutes=cooldown_minutes,
+        )
+    elif penalize_proxy:
         mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
     should_stop_monitor = _should_stop_monitor_after_failure(db, run, source, force_stop_monitor=force_stop_monitor)
     if run.monitor_session_id is not None and should_stop_monitor:
@@ -2351,8 +2382,7 @@ def _record_failed_run(
     )
     db.commit()
     if session_failure["recovery_action"] in {
-        "invalidate_session_and_rotate_sticky",
-        "invalidate_session_and_prepare_new",
+        "invalidate_session_and_end_attempt",
     } and isinstance(vinted_session_id, int):
         persisted_session = db.get(VintedSession, vinted_session_id)
         if persisted_session is not None and persisted_session.status != "invalid":
@@ -2454,27 +2484,27 @@ def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dic
     if isinstance(exc, VintedCatalogChallengeError) or kind == "cloudflare_challenge":
         return {
             "session_end_reason": "cloudflare_challenge",
-            "recovery_action": "invalidate_session_and_rotate_sticky",
+            "recovery_action": "invalidate_session_and_end_attempt",
         }
     if isinstance(exc, DataDomeChallengeError) or kind == "datadome_challenge":
         return {
             "session_end_reason": "datadome_challenge",
-            "recovery_action": "invalidate_session_and_rotate_sticky",
+            "recovery_action": "invalidate_session_and_end_attempt",
         }
     if isinstance(exc, VintedCatalogSessionContextError):
         return {
             "session_end_reason": "catalog_context_incomplete",
-            "recovery_action": "invalidate_session_and_prepare_new",
+            "recovery_action": "invalidate_session_and_end_attempt",
         }
     if isinstance(exc, VintedCatalogSessionError):
         return {
             "session_end_reason": "catalog_session_rejected",
-            "recovery_action": "invalidate_session_and_prepare_new",
+            "recovery_action": "invalidate_session_and_end_attempt",
         }
     if isinstance(exc, VintedCatalogRateLimitError) or kind == "catalog_rate_limited":
         return {
             "session_end_reason": "catalog_rate_limited",
-            "recovery_action": "respect_retry_after_and_reduce_rate",
+            "recovery_action": "invalidate_session_and_end_attempt",
         }
     if isinstance(exc, VintedSessionRequiredError):
         return {

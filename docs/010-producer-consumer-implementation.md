@@ -11,7 +11,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Manual runs remain synchronous from the API, but use the same provider stack.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 - Item enrichment uses the public item document, structural Next/React Flight records and JSON-LD fallback. The production flow and visible detail probe no longer call the direct `/api/v2/items/{id}/details` matrix.
-- Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. Recoverable candidates survive outside the top-five window in Redis for three total attempts (`30s`, `120s`); only terminal outcomes become seen.
+- Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. Ordinary recoverable candidates survive outside the top-five window in Redis for three total attempts (`30s`, `120s`); an anti-bot challenge ends the task while preserving its claimed candidates for a future new task.
 - The PWA persists no image bytes: it renders every signed `images*.vinted.net` URL directly and exposes an accessible gallery plus public availability/price breakdown while purchase remains disabled.
 
 ## Decisions
@@ -27,8 +27,8 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Egress selection removes candidates already saturated in its capacity snapshot before taking an identity fence and acquires ownership for at most one candidate per transaction. If that candidate's durable capacity decreases while the fence is acquired, selection fails for a later transaction instead of retaining one advisory lock while trying another; this preserves direct fallback when every proxy was already saturated and prevents opposite telemetry orders from creating a multiprofile deadlock during template reconciliation.
 - Run rows persist indexed `task_id`. Redelivery acknowledges an existing terminal run without Vinted traffic, reconciles `finalizing`, and closes an orphan `running` row before retrying.
 - Development Redis uses a persisted AOF volume. The recovery contract assumes one worker service instance with multiple in-process consumers; horizontally scaled workers require distributed reservation ownership before deployment.
-- Classify DataDome and `cf-mitigated: challenge` explicitly; plain `429` remains rate limiting and detail `404/410` is terminal.
-- Keep retry escalation in `TaskConsumer`; the detail path records the failed run and re-raises both `DataDomeChallengeError` and `VintedCatalogChallengeError`. A first catalog Cloudflare challenge can still enter generic refresh and a later one can be absorbed as a failed run before the consumer sees it; 14.12.3 closes that gap.
+- Classify DataDome and `cf-mitigated: challenge` explicitly; plain catalog `429` remains rate limiting rather than a challenge, but is equally terminal for the task. Detail `404/410` remains terminal for its candidate.
+- `TaskConsumer` never escalates a classified challenge, session rejection, contradictory context or catalog `429`. The run service records the terminal result, invalidates/purges the acquired context and returns `failed`; the consumer ACKs without another provider call or requeue. Bounded worker attempts remain only for unexpected worker failures.
 
 ## Pre-Integration Impersonation Plan
 
@@ -60,6 +60,12 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 - Real PostgreSQL advisory races proved shared fences coexist, identity edits wait through the final provider I/O, scheduler selection uses advisory-before-source order, saturated candidates receive no fence, and selection never accumulates ownership across proxy candidates. A two-profile opposite-order race and a capacity-drop/fallback matrix close both deadlock paths found during adversarial review.
 - Alembic passed zero-to-`0019`, `0018` with a legacy session to `0019`, generation-aware `0019` down to `0018`, and re-upgrade to head. Both directions deliberately purged incompatible sessions; columns, defaults, nullability and old/new indexes matched the contract.
 - Final verification passed `ruff check src alembic tests`, the complete backend suite (`491 passed, 1 skipped` opt-in live-API test), `pnpm lint`, `pnpm build` and `git diff --check`. Before cleanup the isolated graph had zero sources, profiles, prepared sessions, runs, events, errors or active monitor sessions and Redis DB 14 had zero keys. API/PostgreSQL/Redis remained the only running Compose services; worker/watchdog stayed stopped and no Vinted or proxy endpoint was called.
+
+## Catalog Response Fail-Stop 2026-07-13
+
+- The provider no longer sleeps, bootstraps or issues a second catalog request after Cloudflare, DataDome, anonymous-session rejection or catalog `429`; missing `Retry-After` is recorded as missing instead of becoming an implicit five-second wait. Generic non-classified request retry remains the explicit negative boundary.
+- Catalog and detail challenge paths return one failed run, invalidate and purge the acquired Vinted session, apply one challenge penalty, and preserve claimed detail candidates for a future task. The consumer ACKs the terminal reservation and only `worker_task_delivery_interrupted` may resume a prior attempt.
+- Verification passed Ruff, `129` focused provider/consumer tests, the fixed isolated PostgreSQL/Redis fail-stop scenario and the unchanged identity scenario. The runner removed each temporary role/database, left Redis 15 empty, preserved operational PostgreSQL/Redis fingerprints and made no Vinted, proxy or notification request.
 
 ## Audit 2026-07-05
 
@@ -115,13 +121,13 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 
 - The mitmproxy spike showed Chrome loads `static-assets.vinted.com/datadome/5.7.0/tags.js`, posts to `dd.vinted.lt/js`, and receives a `.vinted.es` `datadome` cookie. The DataDome client key is exposed in Vinted HTML as `DATADOME_CLIENT_SIDE_KEY`, so the collector now extracts that marker before falling back to script diagnostics.
 - Live headful Chrome plus sticky residential proxy obtained `datadome`, `__cf_bm`, `v_sid`, `_vinted_fr_session`, CSRF, anon id and Vinted tokens, but `/api/v2/items/{id}/details` still returned `403`. That direct endpoint was an earlier research diagnostic and has been removed from runtime and PWA probes.
-- Business runs require the public `/items/...` HTML/Next detail document before creating opportunities. Recoverable failures stay pending in Redis; configured incompleteness, genuine `404/410`, blacklist decisions and exhausted retries are terminal. DataDome and detail-document anti-bot challenges fail the run, invalidate the prepared session and preserve the rolled-back batch. A first catalog Cloudflare challenge can still enter the generic session-refresh branch; 14.12.3 closes that divergence and its consumer propagation.
+- Business runs require the public `/items/...` HTML/Next detail document before creating opportunities. Recoverable ordinary failures stay pending in Redis; configured incompleteness, genuine `404/410`, blacklist decisions and exhausted retries are terminal. The first DataDome/Cloudflare challenge from catalog or detail, session rejection or catalog `429` fails the run, invalidates the prepared session and is ACKed without another provider call; a rolled-back detail batch remains available to a future new task.
 
 ## Prepared Session Hardening 2026-07-09
 
 - A monitor-owned Vinted session is reusable only after strict cookie/token context is present and country, locale, `Accept-Language` and `x-screen=catalog` match. The viewport is persisted but the current selector does not compare it; 14.12.5 adds that missing predicate and reconciles runtime/API/PWA eligibility.
 - Session preparation may still call the catalog API probe after a failed DataDome collector to collect diagnostics, but a successful JSON probe no longer overrides missing `datadome` or `__cf_bm`; the saved row remains `incomplete` and the run fails clearly.
-- Runtime provider selection, explicit `Preparar sesion` and item detail probes share the strict prepared-session requirement. Detail rotations mark context for persistence, but ordinary catalog/probe rotations and a successful refresh followed by a failed retry can still leave stale encrypted context; 14.12.4 owns that durability gap.
+- Runtime provider selection, explicit `Preparar sesion` and item detail probes share the strict prepared-session requirement. Detail rotations mark context for persistence, but ordinary catalog/probe rotations can still leave stale encrypted context; 14.12.4 owns that durability gap.
 - The provider receives the configured human pacing bounds from settings instead of hardcoded defaults.
 - Recalibrating the initial catalog snapshot reuses the accepted JSON payload from the preparation probe when the run had to prepare a new session, avoiding an immediate duplicate catalog API request. The explicit `Preparar sesion` action remains non-business: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
 

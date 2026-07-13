@@ -115,8 +115,8 @@ sin candidata efectiva
 ready -> seleccionar + incrementar uso -> cargar mismo jar/sticky -> catalogo/detalles
       -> rotacion detectada en detalle -> actualizar la misma fila y renovar TTL
       -> rotacion ordinaria en catalogo/probe -> puede no persistirse (14.12.4)
-      -> DataDome/challenge de detalle/rechazo terminal tras retry -> invalid + payload cifrado vacio
-      -> Cloudflare de catalogo -> puede entrar en refresh generico (14.12.3)
+      -> primer challenge/rechazo/429 de catalogo -> run failed + invalid + payload cifrado vacio
+      -> challenge de detalle -> mismo fail-stop; candidatos reclamados quedan para una tarea futura
       -> TTL o presupuesto agotado -> no seleccionable; hoy conserva status ready y payload cifrado
 
 archivar monitor -> invalidar todas sus filas + sustituir cada payload por un objeto vacio
@@ -124,7 +124,7 @@ archivar monitor -> invalidar todas sus filas + sustituir cada payload por un ob
 
 La preparacion explicita siempre crea otra fila y no retira una `ready` anterior. Como no hay unicidad, el siguiente run puede seleccionar una fila antigua mientras Ajustes muestra la ultima creada. La politica canonica, el estado `usable_now` y el refresco del read model PWA pertenecen a 14.12.5.
 
-La recuperacion permitida hoy conserva la identidad: un `429` puede hacer bootstrap/retry y un rechazo anonimo intenta refresh. DataDome falla inmediatamente; Cloudflare puede entrar por error en el refresh generico y la ausencia de `Retry-After` inventa cinco segundos. 14.12.3 sustituye esa divergencia por fail-stop sin segunda llamada. Las cookies que rotan en detalle marcan el contexto para persistencia; catalogo/probe pueden perder una rotacion. Esa durabilidad 14.12.4 queda condicional a evidencia de fallos repetidos. Un refresh persistido reinicia `prepared_at` y `expires_at`, por lo que el TTL actual es deslizante.
+No hay recuperacion provocada por una respuesta anti-bot: el primer Cloudflare, DataDome, rechazo de sesion o `429` de catalogo registra el fallo, invalida el contexto y termina la entrega. El consumer confirma la reserva sin segunda llamada, espera, refresh, escalada ni requeue. Los candidatos de detalle ya reclamados se conservan para una tarea futura, no para repetir la actual. Las cookies que rotan en una respuesta ordinaria de detalle marcan el contexto para persistencia; catalogo/probe pueden perder una rotacion. Esa durabilidad 14.12.4 queda condicional a evidencia de fallos repetidos.
 
 `incomplete`, caducidad, agotamiento y el limite de usos detienen o excluyen trabajo, pero no purgan por si mismos el contexto cifrado. Solo la invalidacion explicita y el archivo lo sustituyen por `{}`. En el MVP local se acepta esa retencion mientras el crecimiento sea pequeno; 14.12.11 solo se promueve si las filas muestran crecimiento relevante. `ready` es estado durable historico, no una afirmacion de usabilidad actual.
 

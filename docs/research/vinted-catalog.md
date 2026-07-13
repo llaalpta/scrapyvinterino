@@ -49,12 +49,12 @@ La investigacion se hizo sin login, sin cuenta personal y sin tokens personales.
 - Cargar una pagina publica de Vinted emite cookies anonimas publicas, incluyendo `access_token_web` con scope publico.
 - Con esa sesion anonima publica, `GET /api/v2/catalog/items` devolvio `200 application/json`.
 - La sesion observada no usa cuenta personal, login ni token personal.
-- El documento publico de catalogo se usa como bootstrap/renovacion de sesion anonima, pero no debe ser el camino normal de extraccion del catalogo rapido.
+- El documento publico de catalogo se usa como bootstrap de sesion anonima, pero no debe ser el camino normal de extraccion del catalogo rapido ni un refresh provocado por una respuesta fallida.
 - En HAR de catalogo con Chrome 146 se observo CSRF en el documento/bundle y `x-anon-id` en peticiones posteriores; el proveedor debe extraerlos cuando existan y reenviarlos al API con la misma sesion HTTP.
 - En el HAR valido `www.vinted1462.es.har`, el documento de catalogo usa `User-Agent` Chrome 146 y `sec-ch-ua` Chrome 146 con `Accept-Language: en-GB,en;q=0.9`, mientras la respuesta mantiene `x-user-iso-locale: es-ES` y `x-screen: catalog`. Por tanto, `Accept-Language` no se valida como prefijo obligatorio del locale; se trata como parte del perfil observado.
-- Si el API JSON falla por autenticacion o sesion, el proveedor debe refrescar la sesion anonima en la misma sesion HTTP/cookie jar y reintentar una vez.
-- Si el API JSON devuelve `429`, no se asume DataDome solo por el status: se respeta `Retry-After` cuando existe y esta dentro del presupuesto operativo antes de refrescar/reintentar.
-- Si el reintento falla, debe fallar solo la ejecucion/fuente correspondiente y registrar error; no debe detener API, PWA, worker ni otras fuentes.
+- Si el API JSON falla por autenticacion o sesion, la primera respuesta invalida el contexto y termina esa ejecucion sin refresh ni reintento.
+- Si el API JSON devuelve `429`, no se asume DataDome solo por el status: `Retry-After` se registra como diagnostico, pero no autoriza espera, refresh ni reintento.
+- El fallo terminal afecta a esa ejecucion y queda visible; no detiene API, PWA, worker ni otras fuentes.
 
 Benchmarks locales observados para la misma busqueda:
 
@@ -122,9 +122,9 @@ Decision de rendimiento:
     - `Accept-Language`;
     - `Referer` con la URL publica de busqueda.
     - `X-CSRF-Token` y `X-Anon-Id` cuando el bootstrap los haya obtenido.
-  - Si devuelve `401`, `403`, HTML inesperado o JSON sin `items`, refrescar sesion anonima en la misma sesion HTTP y reintentar una vez cuando no haya firma DataDome.
-  - Si devuelve `429`, parsear `Retry-After` en segundos o HTTP-date; esperar solo si el valor es valido y no supera el presupuesto operativo, y no clasificarlo como DataDome sin senales adicionales.
-  - Si el reintento falla, registrar error y marcar la ejecucion como fallida.
+  - Si devuelve `401`, `403` o HTML inesperado, invalidar la sesion y marcar la ejecucion fallida en la primera respuesta, sin refresh ni retry.
+  - Si devuelve `429`, parsear `Retry-After` en segundos o HTTP-date solo para diagnostico y no clasificarlo como DataDome sin senales adicionales; terminar sin espera ni segunda llamada.
+  - Un JSON sin `items` sigue siendo un error generico de contrato, no una autorizacion para HTML fallback.
 
 ## Mapeo a `items`
 
@@ -201,9 +201,9 @@ El ciclo de vida mantenido y su contrato vigente estan en `docs/architecture.md`
 - Pool de perfiles de navegador coherentes: cada sesion usa un perfil con `impersonate`, `User-Agent`, y `Sec-Ch-Ua*` alineados.
 - Delay humano con distribucion Beta entre bootstrap y catalogo.
 - Deteccion de challenge: si la respuesta contiene cabeceras `x-datadome*`, cookie `datadome` no vacia en una respuesta de error, `server` DataDome o marcadores HTML (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la sesion/proxy segun la politica de run. Una cookie `datadome` en `200` de bootstrap puede ser contexto valido y no basta por si sola para declarar challenge.
-- Un `429` sin firmas DataDome se considera rate limit de catalogo, no challenge; se registra `Retry-After`, backoff aplicado y presupuesto maximo antes de reintentar.
+- Un `429` sin firmas DataDome se considera rate limit de catalogo, no challenge; se registra `Retry-After` de forma saneada y se termina la ejecucion sin backoff ni reintento.
 - Proxies residenciales con UUID sticky nuevo por preparacion y reutilizado por runs elegibles del mismo monitor/perfil. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`. El binding efectivo combina un contador monotono con un HMAC versionado de transporte, credenciales, preset y template. El run lo revalida bajo advisory ownership compartido antes de construir proveedor; una edicion usa ownership exclusivo, avanza el contador e invalida el contexto anterior sin exponer el preimage.
-- No existe una escalada generica a otro perfil. El consumer actual puede reintentar un challenge dentro del presupuesto de intentos con el mismo `proxy_profile_id` y preparar otro sticky tras invalidar; es una divergencia, no el contrato objetivo. 14.12.3 hace terminal el primer challenge, ACK sin otra llamada al provider y exige autorizacion separada para cualquier retry, nueva IP/perfil o delay como fallback.
+- No existe una escalada generica a otro perfil. El primer challenge es terminal, el consumer hace ACK sin otra llamada al provider y cualquier retry, nueva IP/perfil o delay como fallback requiere una decision de producto separada.
 
 ### Scripts de verificacion
 

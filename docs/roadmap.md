@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | not-started | 14.12.3 Catalog anti-bot fail-stop | `docs/specs/010-producer-consumer-bypass.md` | `fix/catalog-response-fail-stop` | The first Cloudflare, DataDome, rejected-session or `429` response terminates the attempt, invalidates the context and ACKs without refresh, retry or requeue. |
+| 1 | done | 14.12.3 Catalog anti-bot fail-stop | `docs/specs/010-producer-consumer-bypass.md` | `fix/catalog-response-fail-stop` | The first Cloudflare, DataDome, rejected-session or catalog `429` response terminates the attempt, invalidates the context and ACKs without refresh, retry or requeue. |
 | 2 | not-started | 14.12.5 Honest prepared-session state | `docs/specs/010-producer-consumer-bypass.md` | `fix/prepared-session-read-model` | Runtime, API and PWA use the same eligibility decision and expose `usable_now` plus a safe unusable reason instead of trusting the latest `ready` label. |
 | 3 | not-started | 14.19 Worker Redis availability | `docs/specs/008-scheduler.md`, `docs/deployment.md` | `fix/worker-redis-availability` | Redis loss makes the worker stop advertising availability and exit for Compose restart; existing scheduler/PWA state converges to unavailable without a general readiness platform. |
 | 4 | not-started | 15.1 Telegram opportunity alert | `docs/spec.md` | `feature/telegram-opportunity-alert` | An optional, correctly configured worker sends one concise Telegram message for a newly committed opportunity; failure is visible and does not delete the opportunity. |

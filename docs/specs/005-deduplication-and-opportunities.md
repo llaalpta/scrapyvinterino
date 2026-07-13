@@ -58,8 +58,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 ## Acceptance Criteria
 
 - Catalog fetch uses the JSON API in the fast path.
-- If the JSON API fails with auth/session errors, the provider refreshes anonymous public session state and retries once.
-- If the retry fails, the run is marked failed and the app/worker keeps running.
+- If the JSON API returns a challenge, rejects the anonymous session or rate-limits the request, the first response marks the run failed and invalidates the prepared context without refresh or retry.
+- The app/worker keeps running after that terminal task result, and the consumer ACKs it instead of requeueing it.
 - HTML catalog parsing is not used as a fallback for a failed fast run.
 - Redis availability is checked before candidate processing; unavailable Redis marks the run failed and no detail/opportunity work happens.
 - Item catalog identity is checked idempotently against Redis seen state before detail/filter work.
@@ -72,7 +72,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Changing the monitor URL or monitor-owned filter definition also requires a new explicit initial snapshot for the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
 - Details are fetched for monitor-new candidates before opportunity creation and are bounded by the configured per-run limit.
-- Detail transport, challenge, response, or parser failures do not create opportunities and remain retryable for three total attempts; candidates skipped by the per-run detail budget are queued without consuming an attempt.
+- Ordinary detail transport, response or parser failures do not create opportunities and remain retryable for three total attempts. A Cloudflare/DataDome detail challenge instead terminates the whole task on its first response while preserving claimed candidates for a future new task; candidates skipped by the per-run detail budget are queued without consuming an attempt.
 - Valid detail that lacks a configured required field is a terminal `detail_incomplete` outcome, names the missing fields, creates no opportunity, and is marked seen.
 - Optional fields absent from a valid document remain null and do not block an opportunity. An observed empty description is valid and contributes no blacklist text.
 - Money amount and currency are selected from the same source and must be finite, non-negative, and internally consistent. Invalid optional prices remain null with a validation warning.

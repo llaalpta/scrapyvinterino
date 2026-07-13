@@ -42,17 +42,18 @@ La suite completa se ejecuta una vez cerca del cierre si el riesgo lo justifica.
 
 La tarea 14.18 acepta un runner focalizado con estos criterios:
 
-- ejecuta el test seleccionado desde `backend/`, donde no existe `.env`, con configuracion de test explicita, un rol y una base PostgreSQL nuevos y el indice Redis 15 reservado;
-- no arranca servicios, exige worker y watchdog detenidos y usa un escenario real local de scheduler, cola y consumidor cuya trampa impide construir el proveedor HTTP;
+- ejecuta el escenario seleccionado desde `backend/`, donde no existe `.env`, con configuracion de test explicita, un rol y una base PostgreSQL nuevos y el indice Redis 15 reservado;
+- no arranca servicios, exige worker y watchdog detenidos y solo admite escenarios locales auditados: el canary de identidad recorre scheduler, cola y consumidor con una trampa que impide construir el proveedor HTTP; el de fail-stop recorre PostgreSQL, Redis y consumidor con respuestas locales DataDome y `429`, sin trafico externo;
 - dos ciclos consecutivos terminan sin la base ni el rol temporales y con Redis 15 vacio; si ese indice ya contiene datos, el runner se niega a ejecutar y no los elimina.
 
 Con PostgreSQL y Redis ya levantados y los ejecutores detenidos:
 
 ```powershell
 .\scripts\qa-backend-integration.ps1
+.\scripts\qa-backend-integration.ps1 -Scenario catalog-fail-stop
 ```
 
-El comando predeterminado migra dos bases nuevas y ejecuta dos veces el canary real de identidad entre scheduler y consumidor; el target queda fijado a ese escenario auditado y `-Repeat` se limita a `1..3`. El runner localiza los contenedores con `docker ps`, no invoca Compose ni carga la `.env` raiz, sanea el entorno heredado y apunta cualquier destino HTTP configurable a loopback. Una lease reserva Redis 15; el cleanup solo hace `FLUSHDB` si conserva esa lease y elimina exclusivamente el rol/base generados. Antes y despues compara fingerprints sin valores visibles de PostgreSQL operativo y Redis 0; una diferencia falla de forma visible y nunca intenta restaurar datos automaticamente.
+El comando predeterminado migra dos bases nuevas y ejecuta dos veces el canary real de identidad entre scheduler y consumidor. `-Scenario` solo acepta `identity` y `catalog-fail-stop`; cada valor se traduce internamente a una lista cerrada de nodeids auditados y nunca admite un target arbitrario. El segundo escenario demuestra para DataDome y `429` locales que cada tarea construye y consulta el proveedor una sola vez, deja un unico run fallido, invalida y purga la sesion y hace ACK sin requeue; tambien conserva en Redis los candidatos reclamados por un challenge de detalle sin repetir la tarea. `-Repeat` se limita a `1..3`. El runner localiza los contenedores con `docker ps`, no invoca Compose ni carga la `.env` raiz, sanea el entorno heredado y apunta cualquier destino HTTP configurable a loopback. Una lease reserva Redis 15; el cleanup solo hace `FLUSHDB` si conserva esa lease y elimina exclusivamente el rol/base generados. Antes y despues compara fingerprints sin valores visibles de PostgreSQL operativo y Redis 0; una diferencia falla de forma visible y nunca intenta restaurar datos automaticamente.
 
 ## Estado local y volumenes
 
