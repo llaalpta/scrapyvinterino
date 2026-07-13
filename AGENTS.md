@@ -1,212 +1,120 @@
 # Agent Instructions
 
-This repository follows Spec Driven Development. Keep the documentation current, compact, and non-overlapping.
+This repository uses practical Spec Driven Development. Keep documentation current, compact and non-overlapping.
 
-## Current Priority
+## Product and operating model
 
-The current product priority is the public Vinted catalog monitoring MVP:
+The current target is a personal, private, single-user Vinted catalog monitor:
 
-- configure Vinted catalog URLs from the private PWA;
-- prepare and reuse public anonymous Vinted sessions without an authenticated Vinted account;
-- execute manual and recurring monitors through the real API, worker, PostgreSQL, Redis, events, and PWA path;
-- stabilize scheduler cadence, service liveness, SSE publication, persistence, filters, and opportunity display;
-- keep the operational flows and failure ownership current in the maintained documentation.
+- configure public catalog URLs from the PWA;
+- prepare public anonymous sessions without a Vinted account login;
+- run manual and recurring monitors through the real API/worker/PostgreSQL/Redis/PWA path;
+- persist and filter opportunities, then deliver one useful Telegram alert;
+- run locally with Docker Compose, with manual maintenance and relaunch accepted.
 
-Authenticated Vinted actions are future work. Do not implement favorites, checkout discovery, pre-purchase, or purchase flows until the public catalog flow is stable and the relevant spec/research docs are updated.
+This is not yet an unattended 24/7 production service. One worker instance, best-effort queue recovery and a rare duplicate around abrupt process death are acceptable when visible. Do not build exactly-once ledgers, distributed recovery or production hardening unless the roadmap/user explicitly promotes them.
 
-## Required Workflow
+Authenticated Vinted actions remain future work. Do not implement favorites, checkout, pre-purchase or purchase flows until public monitoring and alerts are stable.
 
-Work proceeds one roadmap task at a time. A task must have one meaningful outcome, one short-lived branch, bounded acceptance criteria, and independent acceptance evidence. Operational behavior requires a real integration proof; documentation-only governance work requires proportional semantic and consistency checks instead.
+## Required workflow
 
-Before implementing a non-trivial change:
+Work on one roadmap outcome at a time:
 
-1. Check `git status --short --branch`, read the owning docs, and check `docs/roadmap.md`.
-2. If the request needs planning, split it into independently valuable tasks; do not hide a multi-task project inside one checklist item.
-3. From a clean `develop`, use a short-lived `plan/<scope>` branch to persist the ordered checklist in `docs/roadmap.md` plus any task contracts in their owning docs. A planning branch changes no product code and must be reviewed/integrated before implementation branches are created.
-4. Define the active task's scope, out-of-scope items, acceptance criteria, real integration scenario when behavior is operational, external traffic budget when relevant, and likely branch name.
-5. Obtain explicit user confirmation before starting the first planned implementation task and again before starting every subsequent task. Persisting an explicitly requested plan does not authorize implementation.
-6. From a clean worktree, create a short-lived branch from the updated `develop` for that task. Never edit the roadmap on an unrelated branch or stack the next roadmap task on the current branch.
-7. Before changing implementation code, update the existing spec, ADR, research note, architecture document, or product decision that owns the behavior.
-8. Implement the smallest useful vertical slice that satisfies only the active task.
-9. Run focused checks while developing, then verify the real operational path across the actual services and state stores involved. For documentation-only governance, verify links, internal consistency, and an executable dry run of the documented process.
-10. Run the implementer self-review.
-11. Run the automatic independent read-only audit described below.
-12. Fix valid findings and repeat the affected verification plus audit. Use at most three implementation-audit loops; if scope grows, create another roadmap task instead.
-13. Update the task's roadmap status/evidence, commit the coherent task, and report the branch and commit.
-14. Before a dependent task can start, get the completed task reviewed and merged into `develop`, or obtain explicit user authorization for an equivalent local integration. Never branch dependent work from a `develop` that lacks its prerequisite.
-15. Stop. Ask for confirmation before opening the branch or beginning development for the next task.
+1. Run `git status --short --branch`, inspect `docs/roadmap.md` and read the owning docs.
+2. Classify the work as micro, standard or program using `docs/sdd-process.md`.
+3. Use `plan/<scope>` only for a program or a priority/dependency redesign. A standard task already defined by the roadmap starts on its implementation branch; an authorized bounded external request does not change its class by itself.
+4. Define at most three acceptance criteria, one representative real scenario, one relevant negative path, cleanup and any external-traffic allowance.
+5. Obtain one user confirmation for the task. That confirmation authorizes its local branch, docs, implementation, verification, self-review, bounded audit and commit. Push/PR/merge require either task-specific permission or an explicit standing publication authorization; do not request redundant confirmation when that authorization already exists.
+6. Branch from an updated `develop`, update the owning behavior/decision documentation and implement only that outcome.
+7. Run focused checks, then the smallest real integration path that proves the affected boundaries. Do not manufacture unrelated container work.
+8. Run the implementer self-review directly, followed by the proportional independent read-only audit below.
+9. Fix in-scope findings, recheck only the affected evidence, update roadmap status and commit the coherent change.
+10. Review/merge a prerequisite before dependent work. Stop for confirmation before opening the next task branch.
 
-Small mechanical fixes can skip a formal spec update, but they must not contradict existing docs.
+Small mechanical fixes may skip a spec update when they do not change behavior or contradict current docs.
 
-## Plan Mode and Task Sizing
+## Task sizing and stop rules
 
-Plans are executable task lists, not broad phases such as "backend", "frontend", or "testing". Each task should normally fit one branch and one primary commit and must be demonstrable without unfinished later tasks. Plan mode persists the ordered checklist on a dedicated planning branch; implementation still waits for explicit user confirmation and a separate task branch.
+- **Micro:** no behavior/schema/process coordination; normally at most two files and about 50 changed lines. Focused check and self-review are enough.
+- **Standard:** one observable invariant or user outcome, no more than three runtime boundaries, one migration at most and one QA setup with a negative variation.
+- **Program:** multiple outcomes, multiple QA setups, or a schema + worker + PWA redesign. Plan and split it before product code.
 
-For each task record:
+For a standard task, roughly eight product files, 400 product lines and 500 new test lines are warning thresholds, not targets. Pause and split when the work crosses about ten product files/500 product lines, introduces a second outcome or migration, or requires a second QA environment. Give a status checkpoint after roughly 60-90 minutes of active work; do not silently turn one task into a multi-hour program.
 
-- user-visible or operational outcome;
-- owning documentation;
-- affected services and persistent state;
-- acceptance and failure criteria;
-- real integration test and cleanup plan;
-- whether bounded Vinted/proxy traffic is required;
-- dependencies on earlier tasks;
-- explicit exclusions that become later roadmap items.
+Use one representative real integration case. Put field matrices, malformed inputs, redaction and deterministic races in focused unit tests. Run the full backend suite at most once near closure and only when schema, security, shared concurrency or core runtime risk warrants it.
 
-If implementation reveals a second concern, stop expanding the branch. Add or refine a roadmap task and request confirmation before continuing. Prefer several small vertical slices over a large cross-system rewrite. Do not consume time and context by loading unrelated code or running the full suite after every small edit.
+## Failure and compatibility policy
 
-## Compatibility Policy
+Before the first production release, remove obsolete development-only contracts rather than adding compatibility adapters. Explicitly inventoried tombstones may remain temporarily as accepted legacy until the next route-focused microtask; do not create new ones.
 
-Until the first production release, do not preserve backward compatibility with previous development-only contracts, data, endpoints, or UI flows. When a pre-production model changes, update the owning docs/tests and remove obsolete legacy adapters instead of maintaining parallel behavior.
+Required failures are visible and fail-stop. Do not add degraded modes, fallback providers, hidden refreshes, silent retry loops or automatic recovery merely to obtain a green test. Manual restart and PWA relaunch are valid for the current operating model.
 
-Do not add fallback behavior by default. When a required service, session, queue, cache, contract, or invariant is unavailable, expose a clear operational error and stop the affected operation or service. A degraded mode, fallback, new retry policy, compatibility adapter, or alternate flow requires explicit product value, documented acceptance criteria, and user authorization.
+Existing Redis reservation recovery is best-effort implementation, not a product guarantee. Do not expand it into exactly-once crash recovery without a new explicit product decision.
 
-## Post-Implementation Self-Review Gate
+## Self-review and independent audit
 
-Non-trivial changes must receive an explicit implementer self-review before a spec is marked `done` or a final implementation response is given.
+The implementing agent must personally review every non-trivial change for spec alignment, honest UX, end-to-end behavior, negative paths, documentation and verification evidence.
 
-Do not delegate this review. If the user explicitly asks for an audit later, follow that request separately. The implementing agent owns the second-pass review and must run concrete checks directly.
+Then run one tightly scoped independent read-only audit using the least expensive suitable reviewer available. It reviews only the diff, owning contract, real evidence and the two main declared risks. It must not edit, commit, call external services or reopen unrelated architecture.
 
-The self-review must check:
+Classify findings:
 
-- Spec alignment: implemented behavior matches the active spec and acceptance criteria.
-- UX honesty: visible controls, navigation, labels, and actions do not imply unavailable behavior.
-- End-to-end path: the user can exercise the promised flow through UI, API, and database where applicable.
-- Negative paths: invalid input and unavailable actions are handled clearly.
-- Documentation state: roadmap/spec/docs reflect the actual implementation state.
-- Verification evidence: tests, build, smoke checks, or manual checks cover the changed surface.
+- **A:** violates acceptance, security or data integrity; reproduce and fix before closure.
+- **B:** hardening of the same outcome that adds little scope; fix only when it stays contained.
+- **C:** adjacent/new outcome or theoretical platform hardening; record as accepted/conditional risk and do not expand the branch.
 
-Do not mark a roadmap item `done` until self-review findings are fixed, downgraded with a clear reason, or moved into the owning spec/roadmap item.
+One clean pass closes the audit. After a fix, recheck only that finding. Two loops are the default; a third is the absolute ceiling before splitting. Micro mechanical work does not require an independent audit.
 
-For frontend work, unavailable future behavior must be absent, visibly disabled, or represented as an empty state. Do not leave clickable placeholders that look complete.
+## Frontend and integration QA
 
-## Automatic Independent Audit Loop
+Frontend behavior must be checked against the running app with Playwright when UI, navigation, forms or visible state change. Verify one success, one relevant rejection and API/database consistency when persistence is involved.
 
-Every non-trivial task receives an independent read-only audit automatically before its task commit is considered closed. Do not merely offer the audit at the end.
+Before starting/restarting frontend QA, inspect existing Docker/Vite ownership and ports. Use `scripts/qa-pwa.ps1` only when its worker/external-traffic behavior is authorized; otherwise follow the worker-stopped procedure in `docs/development.md`. Do not start competing Vite instances or rebuild unrelated services.
 
-- Prefer the least expensive/lower-reasoning independent reviewer available for a bounded rubber-duck pass. If model selection is unavailable, use the simplest independent read-only reviewer available and keep its prompt strictly scoped.
-- The auditor must not edit files, commit, call Vinted/proxies, or broaden the task. It reviews the diff, owning docs, acceptance criteria, real verification evidence, failure paths, and stale/legacy residue.
-- The implementer owns the response: reproduce findings, reject false positives with evidence, or fix valid findings.
-- One clean audit pass is sufficient. After a fix, rerun the affected real integration path and ask the auditor to recheck only the changed finding; three total passes is the maximum before the task is split or reported blocked.
-- The implementer self-review remains mandatory and cannot be delegated.
-- If no independent reviewer is available, report that verification gap and leave the task open; do not silently replace independence with a second implementer pass.
+Keep `frontend/src/App.tsx` thin; composition belongs in `frontend/src/app/`, cross-feature hooks in `frontend/src/hooks/`, views in `frontend/src/features/`, shared UI in `frontend/src/components/`, helpers in `frontend/src/utils/` and CSS in `frontend/src/styles/`.
 
-## Frontend QA Standard
+Operational acceptance should use the real boundary that matters: live API for API contracts, PostgreSQL for persistence, Redis/consumer for queue behavior, Playwright for PWA behavior and real process/container restart only when lifecycle is the task. Synthetic providers are appropriate at the external boundary when Vinted/proxy behavior is not under test.
 
-Frontend changes must be tested against the running app, not only against source code or a production build.
+Never call Vinted, a proxy or Telegram without an explicit bounded allowance. Clean QA rows, Redis state and temporary processes, and restore the initial service state.
 
-Use Playwright MCP for browser-driven QA when the change affects UI, navigation, forms, visible data, or user actions. The QA pass must verify:
+## Documentation ownership
 
-- routes and sidebar/top navigation land on real sections;
-- enabled buttons perform their visible action;
-- future actions are disabled, absent, or represented as honest empty states;
-- required inputs can be filled and submitted;
-- invalid input shows a clear error and does not mutate persisted data;
-- successful input updates the UI and is observable through API and database when persistence is part of the feature.
+- `docs/roadmap.md`: short priority/status queue and real dependencies only.
+- Feature specs: behavior, interfaces and acceptance.
+- `docs/architecture.md`: current cross-service ownership.
+- `docs/deployment.md`: service lifecycle and operator recovery.
+- `docs/data-model.md`: durable/transient state and transactions.
+- `docs/development.md`: local workflows and QA commands.
+- `docs/security.md`: secrets, redaction and trust boundaries.
+- `docs/sdd-process.md`: detailed task classification, gates and verification.
+- ADRs/research: durable decisions and dated observations.
 
-If the live app does not match the source code, restart the relevant dev service before claiming the feature works. A passing build does not prove the running PWA is current.
+Update existing owners instead of creating overlapping documents. Remove superseded current-state prose. Add a generalized process rule only for a safety-critical problem or a failure pattern observed more than once; an isolated audit finding does not automatically grow `AGENTS.md` or the roadmap.
 
-Before restarting or recreating containers for frontend QA, make sure the previous frontend/Vite process is intentionally closed or owned by Docker Compose. Use `.\scripts\qa-pwa.ps1 start` only when the acceptance contract authorizes starting the worker and any resulting external traffic; its `stop` command closes only the isolated Vite process and does not restore Compose services. If the worker must remain stopped, follow the isolated-Vite procedure in `docs/development.md`. Do not start competing Vite servers on the same port, and do not rebuild unrelated services just to refresh the UI.
+## Safety
 
-Frontend structure is part of frontend quality. For non-trivial PWA work, keep `frontend/src/App.tsx` as a thin root, put dashboard-level composition in `frontend/src/app/`, cross-feature state hooks in `frontend/src/hooks/`, feature views in `frontend/src/features/`, shared UI in `frontend/src/components/`, generic helpers in `frontend/src/utils/`, and CSS under `frontend/src/styles/`. Split mixed-responsibility files before adding new behavior to them.
+- Never commit or print secrets, raw cookies, tokens, addresses, payment data or personal Vinted session details.
+- MVP scraping uses local PWA login plus public anonymous Vinted context, not an authenticated Vinted account.
+- Future authenticated actions must be feature-flagged and audited; purchases require explicit confirmation and validation.
+- Do not broaden anti-bot/captcha behavior beyond the active spec and authorized task.
 
-## Integration-First Verification
+## Focused verification
 
-Large unit suites are regression support, not proof that the application works. Acceptance must prioritize the real deployed path for the active task:
+- Backend lint: `ruff check backend/src backend/alembic`.
+- Frontend build: `pnpm build` from `frontend/`; run lint when frontend source changes.
+- Compose/API: inspect `docker compose ps`; start only required services; `GET http://localhost:8000/health` is process liveness only.
+- Worker/watchdog: start only when accepted by the task after inspecting active monitors and queue state.
+- PWA: Playwright against the live selected frontend, plus API/database checks.
 
-- use the actual Docker services and process boundaries involved;
-- exercise the real API/PWA/worker entrypoint rather than calling an internal helper when the feature is exposed externally;
-- verify PostgreSQL, Redis/queues/cache, emitted events/logs, and visible UI state where applicable;
-- test service startup, health, shutdown, restart, and failure coordination when runtime behavior changes;
-- use bounded real Vinted/proxy traffic when the feature specifically depends on that integration and the task plan authorizes the traffic envelope;
-- clean all QA rows, queue entries, cache keys, sessions, and temporary processes afterwards;
-- record timestamps, IDs, and counts sufficient to prove cadence and ordering without exposing secrets.
+Document any check that cannot run and why.
 
-Synthetic events, mocks, and unit tests remain useful for deterministic edge cases, redaction, malformed inputs, and hard-to-force races. They must not be the only acceptance evidence for behavior that promises container, network, queue, database, scheduler, SSE, or PWA coordination. Run the full regression suite once near task closure when risk warrants it, rather than repeatedly using it as a substitute for integration evidence.
+## Git safety and branch discipline
 
-Documentation-only process or governance tasks do not start irrelevant containers merely to claim integration coverage. Their acceptance evidence is a clean documentation diff, valid references, cross-document consistency, and a dry run showing that branch, confirmation, audit, integration, and cleanup gates are executable in order.
-
-## Vertical Slice Standard
-
-Each completed spec must be functional by itself for the behavior it claims to deliver. Do not mark a vertical `done` when only the backend, only the UI shell, or only the documentation is complete.
-
-When a feature touches persistence, verify the full chain:
-
-- user action or API request;
-- backend response;
-- database row or absence of row for rejected input;
-- UI refresh or visible state.
-
-After a feature exposes a quality gap, update the existing process or agent instructions with a generalized prevention rule. Do not add session-specific notes or duplicate documents.
-
-## Documentation Hygiene
-
-Documentation is maintained, not accumulated.
-
-- Update existing documents before creating new ones.
-- Do not create overlapping files such as `spec-v2.md`, `architecture-new.md`, `final-notes.md`, or session-specific docs.
-- If a topic already belongs in `docs/spec.md`, `docs/roadmap.md`, `docs/specs/`, `docs/architecture.md`, `docs/development.md`, `docs/deployment.md`, `docs/security.md`, `docs/risks.md`, `docs/data-model.md`, or `docs/research/`, update that file.
-- Create a new document only when it has a clear, durable responsibility.
-- If an architecture decision changes, add or update an ADR and mark superseded decisions clearly.
-- Keep README as the entry point. Do not duplicate long docs inside it.
-
-The operational decision tree must stay recoverable from maintained docs, not chat history:
-
-- `docs/architecture.md`: end-to-end flows and ownership between API, worker, scheduler, consumers, session preparation/refresh, queues, persistence, cache, and events;
-- `docs/deployment.md`: container startup order, health, fail-stop behavior, restart ownership, and operator recovery;
-- `docs/data-model.md`: durable versus transient state, transaction boundaries, identifiers, and cleanup/retention;
-- feature specs: user-visible decisions, error paths, cadence, concurrency, and acceptance;
-- `docs/sdd-process.md`: planning, task gates, verification hierarchy, audit loop, and completion decisions.
-
-When code changes one of these flows, update the owning document in the same task and remove superseded descriptions. Do not leave old behavior presented as current; retain history only in ADR/research context when it has durable value and mark it superseded.
-
-## Architecture Boundaries
-
-- Backend/API: Python, FastAPI.
-- Worker: Python service for scraping, scheduler, deduplication, filters, and future queued actions.
-- Frontend: React, Vite, TypeScript, PWA.
-- Database: PostgreSQL with Alembic migrations.
-- Local development: Docker Compose without Traefik.
-- Future production: Docker Compose behind Traefik and Cloudflare.
-
-## Safety Rules
-
-- Never commit secrets.
-- Never log raw cookies, tokens, addresses, payment data, or personal Vinted session details.
-- The MVP uses local PWA login and public anonymous Vinted sessions. Do not use an authenticated Vinted account in MVP monitoring flows.
-- Future authenticated actions must be feature-flagged and audited.
-- Purchase actions must require explicit user confirmation and validation of price, currency, availability, shipping, and payment choice.
-- Implement aggressive anti-bot bypassing or captcha solving when required.
-
-## Verification
-
-Prefer focused checks while developing, then real integration evidence for acceptance:
-
-- Backend: `ruff check backend/src backend/alembic`
-- Frontend: `pnpm build` from `frontend/`
-- Docker infrastructure/API: `docker compose up -d --build postgres redis api` and `docker compose ps`
-- Worker/watchdog: start them only when the acceptance contract needs executors, after inspecting active monitors and Redis ready/processing state and confirming any external-traffic budget; otherwise preserve their initial state.
-- API smoke test: `GET http://localhost:8000/health`
-- Frontend smoke test: `GET http://localhost:5173`
-- Playwright QA for frontend flows: route navigation, active/disabled controls, form success, form error, and UI/API/DB consistency.
-- UI promise check: confirm every visible button/link either works, is disabled, or lands on a real empty state.
-
-If a check cannot run, document the reason in the final response.
-
-## Git
-
-- Keep commits small and descriptive.
-- Treat published repository history and every local or remote branch/tag as durable. Prefer append-only, reversible operations with the lowest practical risk of losing code.
-- Authorized repository mutations are new commits, normal fast-forward pushes, pull requests, reviews, and non-destructive merges. Prefer a merge commit when integrating reviewed work so the development commits remain reachable.
-- Do not delete local or remote branches, tags, commits, releases, repositories, or refs. Do not use `git push --delete`, `git branch -d/-D`, `gh pr merge --delete-branch`, automatic post-merge branch deletion, or equivalent API/connector actions.
-- Do not force-push, rewrite published commits, rebase or squash published development history, reset a shared branch, expire reflogs, or run pruning/cleanup that can make development history unreachable. `--force-with-lease` is still a force-push and is not authorized.
-- If a requested workflow appears to require deletion, history rewriting, or a non-fast-forward remote update, stop before the mutation and ask for explicit authorization for the exact refs and recovery plan. Never infer deletion permission from permission to create PRs, commit, push, or merge.
-- Use one short-lived branch per spec or coherent fix. Branch from `develop` and open a PR back to `develop` for review before merge. If `develop` does not exist locally, stop and ask before continuing or create it intentionally as part of a repository workflow change.
-- Name branches by scope, for example `spec/010-session-prepare`, `feature/010-proxy-session-pool`, or `fix/010-rate-limit-refresh`.
-- Do not keep stacking unrelated specs on a long-lived feature branch. If the current branch scope does not match the requested work, switch or create the correct branch before editing files.
-- At the end of non-trivial work, report the branch, commit hash, verification evidence, and whether a PR should be opened.
-- A dependent task starts only after its prerequisite is reviewed and integrated into `develop` through the agreed repository workflow.
-- After committing a task, do not begin the next roadmap task without explicit user confirmation.
-- Do not commit generated caches, secrets, local `.env`, or dependency folders.
-- Do not revert user changes unless explicitly requested.
-- Check `git status --short --branch` before and after work.
+- Use one short-lived branch per coherent task, based on `develop`, and propose it back through a PR.
+- Keep commits small and descriptive. Merge prerequisites before dependent work.
+- Treat every published/local/remote branch, tag and commit as durable history.
+- Authorized operations include new commits, normal pushes, PRs, reviews and non-destructive merges. Prefer merge commits for reviewed work.
+- Never delete branches/tags/refs, use automatic post-merge deletion, force-push, rebase/squash published history, reset shared branches or run pruning that can make work unreachable.
+- If deletion or rewriting appears necessary, stop and request explicit authorization for exact refs and recovery.
+- Do not commit caches, `.env`, dependencies or generated local artifacts. Do not revert user changes without explicit instruction.
+- Check `git status --short --branch` before and after work, and report branch, commit and verification evidence.

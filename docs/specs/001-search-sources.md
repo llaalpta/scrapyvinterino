@@ -55,12 +55,12 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 ## Current Command Boundaries
 
 - `POST /api/monitors` validates locally, commits one inactive/manual row, and only then derives baseline fields from Redis for the response. Redis unavailability is represented as `baseline_ready=false`.
-- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. This gate does not exclude a simultaneous manual run; that race belongs to roadmap item 14.25. The PWA currently sends execution/filter configuration; name/URL editing is API-only until 14.26.
-- Payloads rejected with `422`, active updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row and are tracked in 14.29.
+- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. This gate does not exclude a simultaneous manual run. The normal-use restriction, name/URL PWA editing and storage validation are grouped in 14.26; adversarial cross-process edit/run serialization is not a separate MVP task.
+- Payloads rejected with `422`, active updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row; 14.26 must turn that into mutation-free validation as part of the edit flow.
 - URL and blacklist participate in the baseline policy hash. Changing either keeps the monitor identity and may require calibration unless a baseline for the resulting hash still exists; Redis read failure is not distinguishable from baseline absence in the current response.
 - `DELETE /api/monitors/{monitor_id}` is a soft archive. The first successful call returns `204`; repeating it is idempotent and also returns `204`. Default listing omits the row.
 - Archiving makes PostgreSQL inactive, removes future deadlines, closes the open monitor session and purges encrypted context from owned Vinted sessions. It may inspect/cancel Redis queue state, so the no-Redis-residue assertion applies to a newly created QA monitor, not to every archive.
-- A task already reserved/executing, stale `monitor_started_at`, and both directions of Redis/SQL split-brain during archive are known open ownership gaps tracked in roadmap items 14.30 and 14.31.
+- A task already reserved/executing and stale `monitor_started_at` remain known archive gaps. The local operator rule is stop, wait for a terminal run and then archive. 14.30 is conditional on a normal-use reproduction; the former 14.31 exactly-once Redis/SQL convergence project is not part of the personal MVP.
 
 ## Acceptance Criteria
 

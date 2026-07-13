@@ -1,35 +1,43 @@
-# ADR 0002: Spec Driven Development Workflow
+# ADR 0002: Practical Spec Driven Development Workflow
 
 ## Status
 
-Accepted
+Accepted; revised 2026-07-13 to replace the universally serialized planning/audit workflow.
 
 ## Context
 
-The project has multiple moving parts: scraping research, backend services, PWA workflows, persistence, Docker, and future authenticated actions. Untracked decisions would make the project hard to maintain.
+The project spans scraping, API, worker, PostgreSQL, Redis, Docker and a private PWA. SDD and real integration checks corrected genuine scheduler, SSE, authentication and concurrency defects.
+
+The first workflow revision then treated every audit finding as another mandatory, linearly dependent roadmap task. Two nominally granular changes reached 53 files/+2,942 lines and 24 files/+2,209 lines; the latter added a 1,518-line race suite. Thirty-two pending `Now` items placed documentation maps, exactly-once crash recovery and production security ahead of user-visible alerts.
+
+The actual product target remains a personal, single-user local scraper. Manual maintenance and relaunch are acceptable; unattended 24/7 and exactly-once recovery are not current requirements.
 
 ## Decision
 
-Use practical Spec Driven Development for non-trivial changes, with granular roadmap tasks, branch traceability, integration-first acceptance, and an automatic audit loop.
+Keep SDD, one-outcome branches, current documentation, integration-first acceptance, implementer self-review and an independent audit, but apply them proportionally.
 
-Implementation must be preceded or accompanied by updates to the relevant spec, research note, ADR, or product decision record. Documentation should be maintained in place rather than duplicated.
+Classify work as:
 
-Broad plans are decomposed into independently demonstrable tasks and persisted on a product-code-free `plan/<scope>` branch before implementation authorization. Each task then lives on a short-lived branch created from an updated `develop`, has bounded acceptance criteria and a real integration scenario for operational behavior, and is proposed back to `develop` separately. Dependent work starts only after its prerequisite is reviewed and integrated through the agreed repository workflow. After its commit-ready implementation, the agent pauses for explicit confirmation before beginning the next task.
+- micro: mechanical, no behavior/schema/coordination;
+- standard: one observable outcome, up to three boundaries/criteria and one representative QA setup;
+- program: multiple outcomes or QA setups, planned and split before product code.
 
-Real tests through the involved containers, entrypoints, PostgreSQL, Redis, events and PWA are the primary acceptance evidence for operational behavior. Unit suites and synthetic events support deterministic edge cases but do not prove service coordination. Documentation-only governance uses semantic consistency and workflow dry runs instead of irrelevant services. Bounded Vinted/proxy traffic is declared in the task contract when external behavior is part of the outcome.
+Only programs require a separate `plan/<scope>` branch. One task confirmation authorizes its local branch-to-commit lifecycle; existing task-specific or standing permission controls remote publication. Real dependencies must be merged first; unrelated tasks are ordered by product value rather than a global serial chain.
 
-The implementer runs a mandatory self-review followed by an automatic independent read-only rubber-duck audit using the lowest-cost suitable reviewer available. Valid findings enter at most three focused implementation-test-audit loops. New outcomes are moved to later roadmap tasks instead of expanding the current branch.
+Use one representative real integration scenario plus focused unit matrices. Full regression runs occur at most once and only when shared risk warrants them. Approximate file/line/time thresholds trigger a scope checkpoint, not additional ceremony.
 
-Required dependency failures are fail-stop and visible by default. Degraded modes, fallbacks, compatibility adapters, alternate providers and new silent retry policies require explicit product value, acceptance criteria and user authorization.
+The independent audit is limited to the diff, owning contract, real evidence and two declared risks. It blocks reproducible acceptance/security/data failures, may accept small same-outcome hardening and must not expand the branch for adjacent or speculative findings.
+
+For the current local operating model, process restart and best-effort queue recovery are sufficient. Ambiguous failures may require visible manual relaunch. Durable exactly-once ledgers, coordinated drain, AOF recovery, production restart policy, CSP and durable login abuse controls require a later explicit product decision.
+
+`AGENTS.md` is the concise non-negotiable index, `docs/sdd-process.md` owns workflow detail, feature specs own acceptance and `docs/roadmap.md` remains a short priority queue.
 
 ## Consequences
 
-- Features have explicit acceptance criteria before implementation.
-- Future sessions can recover intent from the repository, not from chat history.
-- Documentation maintenance is part of the definition of done.
-- Branch and PR scope make it easier to inspect what changed for each spec.
-- Smaller tasks reduce debugging cost, context consumption, and the chance that a passing suite hides broken runtime coordination.
-- Multi-layer changes finish with real integration evidence, implementer self-review, and an automatic bounded audit covering only the active task.
-- Work pauses between tasks, so priority and scope remain user-controlled.
-- Required-service failures surface clearly instead of silently changing execution paths.
-- Small fixes can remain lightweight, but they must not contradict existing docs.
+- Real integration evidence and fail-stop behavior remain mandatory when the task promises service coordination.
+- Small changes avoid planning branches, irrelevant containers, whole-repository audits and repeated full suites.
+- A task that grows beyond one outcome is split instead of being made "atomic" only by name.
+- Audit findings do not automatically create `Now` work; normal-use value, secret/data safety or a selected deployment target must justify promotion.
+- The roadmap can move to Telegram value after a small local-reliability gate instead of completing production/distributed hardening first.
+- Manual restart/relaunch, rare crash duplicates and best-effort recovery are explicit accepted risks for the personal local MVP.
+- Published Git history and branches remain preserved while the process and backlog are simplified.

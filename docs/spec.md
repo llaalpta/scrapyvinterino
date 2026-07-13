@@ -14,6 +14,7 @@ Construir una aplicacion personal para monitorizar catalogos publicos de Vinted,
 - Scheduler concurrente acotado con cache runtime para velocidad de alertas.
 - Terminos excluyentes propios por monitor.
 - Tabla de oportunidades en la web.
+- Primer aviso opcional por Telegram para una oportunidad nueva, despues del gate local de fiabilidad vigente.
 - Docker Compose local sin Traefik.
 
 ## Roadmap y specs de feature
@@ -39,7 +40,7 @@ Specs MVP iniciales:
 - Favoritos autenticados.
 - Descubrimiento de checkout: envio, pago, domicilio y puntos pickup.
 - Precompra y compra explicita desde UI.
-- Notificaciones PWA, Telegram, webhook, Discord o email.
+- Canales de notificacion adicionales: PWA push, webhook, Discord o email.
 
 ## Limites
 

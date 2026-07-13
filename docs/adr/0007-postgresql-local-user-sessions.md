@@ -20,8 +20,8 @@ La PWA privada necesita revocacion inmediata, supervivencia a reinicios de API y
 ## Consecuencias
 
 - Logout, desactivacion y expiracion son observables por todos los procesos y sobreviven reinicios.
-- La base de datos participa en cada admision y en polls SSE; la tarea 14.19 podra mejorar readiness, pero nunca introducir un cache autenticado como fallback.
-- `APP_SECRET_KEY` liga CSRF y ya protege otros secretos. Su sentinel global sigue perteneciendo a 14.12.6.
+- La base de datos participa en cada admision y en polls SSE. La 14.19 reducida solo hace honesta la perdida Redis del worker; nunca introduce un cache autenticado como fallback ni una plataforma general de readiness.
+- `APP_SECRET_KEY` liga CSRF y ya protege otros secretos. Un sentinel global queda como hardening condicional 14.12.6 para rotacion/despliegue, no como bloqueo del MVP local.
 - No hay autenticacion si PostgreSQL no esta disponible, aunque `/health` de liveness pueda seguir respondiendo.
 
 ## Alternativas descartadas
