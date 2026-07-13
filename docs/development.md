@@ -38,6 +38,22 @@ Cuando el resultado dependa realmente de Vinted o de un proxy, el contrato de la
 
 La suite completa se ejecuta una vez cerca del cierre si el riesgo lo justifica. Durante desarrollo se usan checks focalizados para no convertir cada iteracion en una tarea enorme.
 
+### Backend aislado
+
+La tarea 14.18 acepta un runner focalizado con estos criterios:
+
+- ejecuta el test seleccionado desde `backend/`, donde no existe `.env`, con configuracion de test explicita, un rol y una base PostgreSQL nuevos y el indice Redis 15 reservado;
+- no arranca servicios, exige worker y watchdog detenidos y usa un escenario real local de scheduler, cola y consumidor cuya trampa impide construir el proveedor HTTP;
+- dos ciclos consecutivos terminan sin la base ni el rol temporales y con Redis 15 vacio; si ese indice ya contiene datos, el runner se niega a ejecutar y no los elimina.
+
+Con PostgreSQL y Redis ya levantados y los ejecutores detenidos:
+
+```powershell
+.\scripts\qa-backend-integration.ps1
+```
+
+El comando predeterminado migra dos bases nuevas y ejecuta dos veces el canary real de identidad entre scheduler y consumidor; el target queda fijado a ese escenario auditado y `-Repeat` se limita a `1..3`. El runner localiza los contenedores con `docker ps`, no invoca Compose ni carga la `.env` raiz, sanea el entorno heredado y apunta cualquier destino HTTP configurable a loopback. Una lease reserva Redis 15; el cleanup solo hace `FLUSHDB` si conserva esa lease y elimina exclusivamente el rol/base generados. Antes y despues compara fingerprints sin valores visibles de PostgreSQL operativo y Redis 0; una diferencia falla de forma visible y nunca intenta restaurar datos automaticamente.
+
 ## Estado local y volumenes
 
 El entorno sigue siendo preproduccion y no conserva compatibilidad con contratos de desarrollo obsoletos, pero sus volumenes ya contienen estado operativo valioso: monitores, oportunidades, historico, proxys, sesiones cifradas, app settings y Redis AOF con cola/cache. Se preservan por defecto.

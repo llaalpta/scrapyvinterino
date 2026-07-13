@@ -16,11 +16,10 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | not-started | 14.18 Isolated integration baseline | `docs/development.md` | `test/isolated-integration-runner` | Run selected backend integration tests without loading the user's `.env` or mutating the operational PostgreSQL/Redis state; prove cleanup with two consecutive runs. |
-| 2 | not-started | 14.12.3 Catalog anti-bot fail-stop | `docs/specs/010-producer-consumer-bypass.md` | `fix/catalog-response-fail-stop` | The first Cloudflare, DataDome, rejected-session or `429` response terminates the attempt, invalidates the context and ACKs without refresh, retry or requeue. |
-| 3 | not-started | 14.12.5 Honest prepared-session state | `docs/specs/010-producer-consumer-bypass.md` | `fix/prepared-session-read-model` | Runtime, API and PWA use the same eligibility decision and expose `usable_now` plus a safe unusable reason instead of trusting the latest `ready` label. |
-| 4 | not-started | 14.19 Worker Redis availability | `docs/specs/008-scheduler.md`, `docs/deployment.md` | `fix/worker-redis-availability` | Redis loss makes the worker stop advertising availability and exit for Compose restart; existing scheduler/PWA state converges to unavailable without a general readiness platform. |
-| 5 | not-started | 15.1 Telegram opportunity alert | `docs/spec.md` | `feature/telegram-opportunity-alert` | An optional, correctly configured worker sends one concise Telegram message for a newly committed opportunity; failure is visible and does not delete the opportunity. |
+| 1 | not-started | 14.12.3 Catalog anti-bot fail-stop | `docs/specs/010-producer-consumer-bypass.md` | `fix/catalog-response-fail-stop` | The first Cloudflare, DataDome, rejected-session or `429` response terminates the attempt, invalidates the context and ACKs without refresh, retry or requeue. |
+| 2 | not-started | 14.12.5 Honest prepared-session state | `docs/specs/010-producer-consumer-bypass.md` | `fix/prepared-session-read-model` | Runtime, API and PWA use the same eligibility decision and expose `usable_now` plus a safe unusable reason instead of trusting the latest `ready` label. |
+| 3 | not-started | 14.19 Worker Redis availability | `docs/specs/008-scheduler.md`, `docs/deployment.md` | `fix/worker-redis-availability` | Redis loss makes the worker stop advertising availability and exit for Compose restart; existing scheduler/PWA state converges to unavailable without a general readiness platform. |
+| 4 | not-started | 15.1 Telegram opportunity alert | `docs/spec.md` | `feature/telegram-opportunity-alert` | An optional, correctly configured worker sends one concise Telegram message for a newly committed opportunity; failure is visible and does not delete the opportunity. |
 
 ## Next
 
@@ -79,6 +78,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.10-14.12 | done | Current service, monitor-command and public-session maps. |
 | 14.12.1 | done | Private local PWA/API access control. |
 | 14.12.2 | done | Proxy/session identity generation and pre-provider fencing, merged through PR #8 at `e9eed13`; Alembic `0019` deliberately removes incompatible prepared sessions. |
+| 14.18 | done | The fixed scheduler/consumer identity canary passed twice in fresh PostgreSQL databases and Redis 15; occupied-Redis rejection and failed-test cleanup preserved operational PostgreSQL/Redis fingerprints, with no worker, provider or proxy traffic. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 
