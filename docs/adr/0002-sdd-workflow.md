@@ -22,11 +22,11 @@ Classify work as:
 - standard: one observable outcome, up to three boundaries/criteria and one representative QA setup;
 - program: multiple outcomes or QA setups, planned and split before product code.
 
-Only programs require a separate `plan/<scope>` branch. One task confirmation authorizes its local branch-to-commit lifecycle; existing task-specific or standing permission controls remote publication. Real dependencies must be merged first; unrelated tasks are ordered by product value rather than a global serial chain.
+Only programs require a separate `plan/<scope>` branch. One task confirmation authorizes its complete lifecycle through automatic non-destructive merge to `develop` after a positive independent audit and a green remote gate. Starting the next task remains separately user-gated. Real dependencies must be merged first; unrelated tasks are ordered by product value rather than a global serial chain.
 
 Use one representative real integration scenario plus focused unit matrices. Full regression runs occur at most once and only when shared risk warrants them. Approximate file/line/time thresholds trigger a scope checkpoint, not additional ceremony.
 
-The independent audit is limited to the diff, owning contract, real evidence and two declared risks. It blocks reproducible acceptance/security/data failures, may accept small same-outcome hardening and must not expand the branch for adjacent or speculative findings.
+The independent audit runs automatically after implementer self-review and is limited to the diff, owning contract, real evidence and two declared risks. A positive verdict gates the closure commit, normal push and PR creation; normal merge follows automatically once the PR is mergeable and its configured required checks pass. An unavailable reviewer or unresolved verdict blocks publication. The audit blocks reproducible acceptance/security/data failures, may accept small same-outcome hardening and must not expand the branch for adjacent or speculative findings.
 
 For the current local operating model, process restart and best-effort queue recovery are sufficient. Ambiguous failures may require visible manual relaunch. Durable exactly-once ledgers, coordinated drain, AOF recovery, production restart policy, CSP and durable login abuse controls require a later explicit product decision.
 

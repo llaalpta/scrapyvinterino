@@ -10,7 +10,7 @@ The current product is a personal local scraper, not an unattended distributed p
 
 | Class | Use when | Planning and review |
 | --- | --- | --- |
-| Micro | Mechanical change with no behavior, schema or process coordination; normally <=2 files/about 50 lines. | Implementation branch, focused check and self-review. No planning branch or independent audit. |
+| Micro | Mechanical change with no behavior, schema or process coordination; normally <=2 files/about 50 lines. | Implementation branch, focused check, self-review and a minimal diff-only audit. No planning branch or dedicated integration environment. |
 | Standard | One observable outcome, <=3 runtime boundaries, <=3 acceptance criteria, <=1 migration and one QA setup. | One implementation branch, representative integration, self-review and one scoped independent audit. |
 | Program | More than one outcome, multiple QA setups, or a schema + worker + PWA redesign. | `plan/<scope>` branch first; split into standard tasks before product code. |
 
@@ -24,14 +24,14 @@ Give a concise progress checkpoint after about 60-90 minutes of active work. If 
 2. Confirm the task class, desired outcome, exclusions and actual dependencies.
 3. For a program only, persist the decomposition on a product-code-free planning branch and integrate it first.
 4. Define no more than three acceptance criteria, one real representative scenario, one relevant negative variation, cleanup and external-traffic allowance.
-5. Obtain one confirmation for the task. It covers the local branch through commit; push/PR/merge are included only when the task or a standing authorization permits publication. No intermediate confirmation is needed inside the agreed contract.
+5. Obtain one confirmation for the task. It covers the complete branch lifecycle through automatic non-destructive merge to `develop` after a positive independent audit and a green remote gate. Starting the next task remains separately user-gated; no intermediate confirmation is needed inside the agreed contract.
 6. Branch from updated `develop`. Update the owning behavior/decision docs before or with code.
 7. Implement the smallest complete vertical slice and run focused checks during development.
-8. Exercise the real boundary promised by the task, inspect durable/runtime evidence and clean all QA state.
-9. Run the implementer self-review, then the proportional independent audit.
-10. Fix only in-scope findings, rerun affected evidence once and update roadmap status.
-11. Commit the coherent task. Push/open the PR only when task-specific or standing publication authorization exists. A dependent task waits for review/merge.
-12. Stop before the next task and request confirmation.
+8. Exercise the real boundary promised by the task, inspect durable/runtime evidence, clean all QA state and bring owning docs plus roadmap status/evidence to their intended final state.
+9. Run the implementer self-review, then the proportional independent audit automatically.
+10. Fix only in-scope findings, rerun only affected evidence, update owning docs and roadmap status/evidence as needed, and request finding-specific re-audit until the verdict is positive or the loop ceiling blocks and splits the task.
+11. After a positive verdict, commit the coherent task, push normally and open its PR to `develop` automatically. When the PR is mergeable and every configured required check passes, merge it with a merge commit and preserve the source branch.
+12. Do not start the next task without separate explicit user authorization. If normal merge is blocked, report the exact blocker and stop without rewriting history or deleting refs.
 
 ## Task contract
 
@@ -89,7 +89,7 @@ Do not delegate this decision.
 
 ## Independent audit
 
-Every standard/non-trivial task receives one read-only rubber-duck audit by the least expensive suitable independent reviewer. Limit the prompt to:
+Every completed task receives one read-only rubber-duck audit by the least expensive suitable independent reviewer. A micro audit stays limited to the final diff, instructions and focused-check evidence; it does not justify a dedicated integration environment. For standard work, limit the prompt to:
 
 - the task diff and owning contract;
 - the representative real evidence;
@@ -102,14 +102,14 @@ Classify findings:
 - **B — contained:** improves the same outcome and adds no more than modest scope. Fix only if it remains inside the task.
 - **C — adjacent:** a new outcome, speculative race or production hardening. Record as accepted/conditional risk; do not expand the branch automatically.
 
-One clean pass closes the audit. After a fix, request only a finding-specific recheck. Two loops are normal; three total is the ceiling. If the same outcome cannot close inside that bound, split and stop. Absence of an independent reviewer is reported as a verification gap, not replaced by a second self-review.
+One clean pass produces the positive verdict. After a fix, request only a finding-specific recheck. Two loops are normal; three total is the ceiling. If no suitable reviewer is available or no positive verdict is reached, the task is blocked or split and no closure commit, push, PR or merge is published. A second self-review cannot replace the independent audit.
 
 ## Branches, confirmations and PRs
 
 - Use one implementation branch per coherent task, based on current `develop`.
-- A user instruction such as "continua con 14.x" authorizes the local lifecycle of that one task through commit. Publication is included only with task-specific or standing remote authorization.
-- Do not request confirmation for ordinary in-scope docs, tests, audit fixes or commit. Do not reconfirm push/PR when a task-specific or standing publication authorization is already active.
-- Merge a true prerequisite before dependent work. Independent roadmap items are ordered by value, not a synthetic `After previous` chain.
+- A user instruction such as "continua con 14.x" authorizes the complete lifecycle of that one task through automatic non-destructive merge to `develop` after a positive independent audit and green remote gate.
+- Do not request additional confirmation for in-scope docs, tests, audit fixes, the closure commit, normal push, opening the PR or its normal merge.
+- Starting the next task requires separate explicit user authorization. Merge a true prerequisite before dependent work; independent roadmap items are ordered by value, not a synthetic `After previous` chain.
 - Never delete local/remote branches or rewrite published history. Full Git safety rules live in `AGENTS.md`.
 
 ## Documentation maintenance
@@ -141,6 +141,6 @@ For changed UI behavior, select either the existing Docker frontend or the isola
 - Negative behavior is visible and mutation-free where required.
 - QA rows, Redis keys, sessions and temporary processes were cleaned; initial services were restored.
 - Implementer self-review completed.
-- Independent audit completed for standard work; A findings closed and C findings did not expand scope.
-- Roadmap status/evidence updated and a coherent commit created; push/PR completed when remote publication was authorized.
+- Proportional independent audit completed; A findings closed and C findings did not expand scope.
+- Roadmap status/evidence updated; after a positive audit, the coherent commit, normal push, PR and merge commit to `develop` were completed automatically without deleting the source branch.
 - Work stopped before the next task pending confirmation.
