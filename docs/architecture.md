@@ -49,6 +49,22 @@ La propiedad de Alembic no pertenece al `backend/Dockerfile`: su `CMD` generico 
 - `providers`: proveedor Vinted con `curl_cffi`, perfiles de navegador y deteccion DataDome.
 - `worker`: scheduler recurrente, consumidores de tareas y watchdog; las ejecuciones sincronas enumeradas arriba pertenecen al proceso API.
 
+## Mapa de comandos de monitor
+
+`search_sources.id` es la identidad estable del monitor. Crear, editar y archivar son comandos sincronos del proceso API; no arrancan el worker, no crean runs ni llaman a Vinted o a un proxy. Preparar una sesion, recalibrar, lanzar y detener pertenecen a otros ciclos de vida.
+
+| Comando | PWA | API y limite PostgreSQL | Redis y lecturas derivadas | Resultado observable |
+| --- | --- | --- | --- | --- |
+| Crear | El formulario envia nombre y URL a `POST /api/monitors`. | La API recorta ambos valores, valida localmente HTTPS/host/ruta/filtros e inserta un monitor `manual`, inactivo y con blacklist vacia. El `201` se construye despues del commit. Un `422` de validacion no abre ninguna identidad. | La respuesta consulta, sin crear claves, si existe baseline para el nuevo ID/politica. Si Redis no esta disponible expone `baseline_ready=false` en vez de fallar. La PWA incorpora el monitor y despues solicita sus estadisticas. | La fila aparece en el listado con el mismo ID y sin run, sesion, evento u oportunidad derivados. |
+| Editar | Con `is_active=false`, el detalle edita modo, cadencia, ventana, duracion y blacklist. La PWA aun no expone nombre o URL; la API si los admite. | `PATCH /api/monitors/{id}` bloquea la fila viva, conserva el ID, normaliza el payload y hace un commit. Devuelve `409` si `is_active=true`, `404` si falta o esta archivado y `422` si la configuracion es invalida; esos rechazos no persisten cambios. No comprueba si existe un run manual en curso. | La representacion vuelve a consultar el baseline y degrada una indisponibilidad Redis a `false`. Editar no encola ni crea trabajo. URL y blacklist forman parte del hash de politica: el hash resultante puede requerir calibracion salvo que su baseline aun exista en Redis. | La PWA sustituye la representacion del mismo monitor. Cambiar la URL recalcula tambien `normalized_query`. |
+| Archivar | Un dialogo interno confirma `DELETE /api/monitors/{id}`. Solo tras el `204` la PWA retira fuente, draft, estadisticas/runs/eventos cargados e IDs ocultos; otros estados por monitor permanecen hoy en memoria. | La API bloquea la fila, marca `is_active=false`, borra `next_run_at`/`monitor_until`, fija `archived_at`, cierra la sesion de monitor e invalida las sesiones Vinted, purgando su contexto cifrado, antes del commit. Un ID inexistente da `404`; repetir el DELETE de uno ya archivado da `204`. | Antes del commit intenta cancelar una tarea `ready`, pero Redis no participa en la transaccion y el error se ignora actualmente. Si Redis cancela y el commit SQL falla, el monitor queda vivo sin esa tarea. No se crea ningun evento. | `GET /api/monitors` oculta la fila; un PATCH posterior da `404`, mientras PostgreSQL conserva historial y metadatos seguros. |
+
+`is_active=false` solo significa que el scheduler no posee una sesion recurrente; no prueba que no haya un run manual ejecutandose. PATCH y el boton Guardar no excluyen hoy esa carrera, que pertenece a 14.25.
+
+El commit HTTP es el limite del comando, no el de las recargas posteriores de la PWA. Tras crear, un fallo al cargar estadisticas puede mostrar error aunque la fila ya exista; tras archivar, puede fallar la recarga de oportunidades/runs/estadisticas aunque el `DELETE` ya se haya aplicado. El formulario de alta tampoco tiene aun exclusion mutua frente a dos envios rapidos. La reconciliacion honesta, el envio unico y la limpieza local completa estan acotados en 14.27; la carga inicial independiente de monitores, oportunidades, runs y proxies, en 14.28.
+
+PostgreSQL decide si un monitor esta archivado. La implementacion actual no borra `monitor_started_at`, no cancela una tarea ya reservada o ejecutandose y no converge ambos sentidos del corte Redis/PostgreSQL al archivar; esos cierres pertenecen respectivamente a 14.30 y 14.31. La edicion PWA de nombre/URL pertenece a 14.26 y los invariantes de longitud, default SQL y `updated_at`, a 14.29.
+
 ## Flujo MVP
 
 1. El usuario crea un monitor con una URL de Vinted.
