@@ -18,6 +18,7 @@ Keep local and production deployment concerns separate.
 
 ## Consequences
 
-- Local development remains simple: `docker compose up -d --build`.
+- The safe local default starts only infrastructure/API: `docker compose up -d --build postgres redis api`; frontend is added explicitly after checking its port.
+- A full Compose start also starts worker and watchdog. It is operational execution, not a harmless smoke check: inspect active monitors and Redis ready/processing state and confirm any external-traffic budget first.
 - Production routing can evolve independently.
-- The frontend, API, worker, and database stay as separate services.
+- Frontend, API, worker, watchdog, PostgreSQL and Redis stay as separate services.

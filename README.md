@@ -15,19 +15,27 @@ El objetivo inicial es monitorizar URLs publicas de catalogo, detectar articulos
 
 ```powershell
 copy .env.example .env
-docker compose up --build
+docker compose up -d --build postgres redis api
+docker compose up -d frontend
 ```
 
-Servicios previstos:
+Ese arranque no inicia ejecutores. Un `docker compose up` sin lista incluye tambien worker y watchdog; puede recuperar tareas Redis y generar trafico real. Consulta `docs/development.md` antes de arrancarlos o resetear volumenes.
+
+Servicios actuales:
 
 - Frontend: http://localhost:5173
 - API: http://localhost:8000
 - API docs: http://localhost:8000/docs
 - Postgres: localhost:5432
+- Redis: localhost:6379
+- Worker: productor recurrente y consumidores, sin puerto HTTP.
+- Scheduler watchdog: fail-stop de monitores recurrentes, sin puerto HTTP.
 
 Docker Desktop debe instalarse aparte con permisos de administrador si no esta disponible en la maquina.
 
-## Comandos sin Docker
+## Desarrollo de componentes sin Docker
+
+Estos comandos no forman un stack completo: requieren PostgreSQL/Redis accesibles, una `.env` apta para el host y migraciones aplicadas. Tampoco arrancan worker ni watchdog.
 
 ```powershell
 cd backend
@@ -45,7 +53,7 @@ pnpm dev
 
 ## Estado
 
-Proyecto en fase inicial SDD. Ver `docs/` para especificacion, arquitectura y riesgos.
+MVP privado en preproduccion con desarrollo SDD. Ver `docs/` para especificacion, arquitectura, despliegue y riesgos vigentes.
 
 ## Trabajo con SDD y agentes
 

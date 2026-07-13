@@ -115,7 +115,7 @@ Documentation-only process or governance tasks use proportional acceptance evide
 
 When a spec changes the PWA, run a browser-driven QA pass against the live development app.
 
-Use `.\scripts\qa-pwa.ps1 start` as the default PWA QA entrypoint. It keeps backend services in Docker and runs an isolated local Vite server on `127.0.0.1:5176` with a localhost API proxy, avoiding conflicts with the Docker frontend service and stale browser sessions.
+Use `.\scripts\qa-pwa.ps1 start` for isolated PWA QA only when starting the worker is part of the accepted test contract. It keeps backend services in Docker, starts the worker and runs an isolated local Vite server on `127.0.0.1:5176` with a localhost API proxy. Its `stop` command closes only that Vite process, so capture and restore the initial Compose state. If the worker must remain stopped, follow the isolated-Vite procedure in `docs/development.md` instead.
 
 Before restarting or recreating containers for frontend QA:
 
