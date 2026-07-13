@@ -2342,13 +2342,15 @@ def _record_failed_run(
     ):
         mark_vinted_session_invalid(db, vinted_session_id, reason=message)
     cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
-    if isinstance(exc, (DataDomeChallengeError, VintedCatalogChallengeError)):
+    if isinstance(exc, DataDomeChallengeError):
         mark_proxy_challenge_detected(
             db,
             proxy_profile_id,
             penalty_multiplier=get_settings().datadome_challenge_penalty_multiplier,
             cooldown_minutes=cooldown_minutes,
         )
+    elif isinstance(exc, VintedCatalogChallengeError):
+        mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
     elif penalize_proxy:
         mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
     should_stop_monitor = _should_stop_monitor_after_failure(db, run, source, force_stop_monitor=force_stop_monitor)

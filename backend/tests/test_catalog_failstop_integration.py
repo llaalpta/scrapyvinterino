@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -26,7 +26,11 @@ from vinted_monitor.db.models import (
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.datadome import DataDomeChallengeError
-from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession, VintedCatalogRateLimitError
+from vinted_monitor.providers.vinted_catalog import (
+    PreparedCatalogSession,
+    VintedCatalogChallengeError,
+    VintedCatalogRateLimitError,
+)
 from vinted_monitor.services.proxies import create_proxy_profile, effective_proxy_identity_generation
 from vinted_monitor.services.runs import FAILED, monitor_policy_hash
 from vinted_monitor.services.seen_cache import get_seen_cache
@@ -199,13 +203,21 @@ def _complete_context(proxy_session_id: str) -> PreparedCatalogSession:
 
 
 @pytest.mark.parametrize(
-    ("failure_factory", "expected_failure_kind", "expected_proxy_failure_count"),
+    ("failure_factory", "expected_failure_kind", "expected_proxy_failure_count", "expected_cooldown_minutes"),
     [
         pytest.param(
             lambda: DataDomeChallengeError("local DataDome challenge canary"),
             "datadome_challenge",
             2,
+            20,
             id="datadome",
+        ),
+        pytest.param(
+            lambda: VintedCatalogChallengeError("local Cloudflare challenge canary"),
+            "cloudflare_challenge",
+            1,
+            10,
+            id="cloudflare",
         ),
         pytest.param(
             lambda: VintedCatalogRateLimitError(
@@ -215,6 +227,7 @@ def _complete_context(proxy_session_id: str) -> PreparedCatalogSession:
             ),
             "catalog_rate_limited",
             0,
+            None,
             id="rate-limit",
         ),
     ],
@@ -224,6 +237,7 @@ def test_catalog_terminal_response_fails_once_invalidates_session_and_acks(
     failure_factory: Callable[[], Exception],
     expected_failure_kind: str,
     expected_proxy_failure_count: int,
+    expected_cooldown_minutes: int | None,
 ) -> None:
     LocalTerminalResponseProvider.reset(failure_factory)
     monkeypatch.setattr(
@@ -254,6 +268,7 @@ def test_catalog_terminal_response_fails_once_invalidates_session_and_acks(
             assert enqueue_task(queue_client, task, queue_key=queue_key) is True
             reservation = reserve_task(queue_client, timeout=1, queue_key=queue_key, consumer_id=0)
             assert reservation is not None
+            failure_started_at = datetime.now(UTC)
 
             TaskConsumer(settings, consumer_id=0)._consume_reservation(
                 get_seen_cache(settings),
@@ -277,6 +292,12 @@ def test_catalog_terminal_response_fails_once_invalidates_session_and_acks(
                 proxy = db.get(ProxyProfile, graph.proxy_id)
                 assert proxy is not None
                 assert proxy.failure_count == expected_proxy_failure_count
+                if expected_cooldown_minutes is None:
+                    assert proxy.cooldown_until is None
+                else:
+                    assert proxy.cooldown_until is not None
+                    assert failure_started_at + timedelta(minutes=expected_cooldown_minutes) <= proxy.cooldown_until
+                    assert proxy.cooldown_until <= datetime.now(UTC) + timedelta(minutes=expected_cooldown_minutes)
                 session = db.get(VintedSession, graph.session_id)
                 assert session is not None
                 assert session.status == "invalid"
