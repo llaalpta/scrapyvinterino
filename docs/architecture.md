@@ -3,10 +3,42 @@
 ## Servicios
 
 - `frontend`: PWA React/Vite para configuracion y operacion.
-- `api`: FastAPI para REST, login local y eventos.
-- `worker`: productor (scheduler), consumidores (task workers), scraping, deduplicacion, filtros y acciones pendientes.
+- `api`: FastAPI para REST, login local, SSE y comandos sincronos de monitor: run manual, run inicial de una activacion, baseline, preparacion de sesion y detail probe.
+- `worker`: un proceso con el productor recurrente (scheduler) y consumidores de Redis para runs de monitor, scraping, deduplicacion y filtros.
+- `scheduler-watchdog`: proceso fail-stop separado que detiene en PostgreSQL solo monitores recurrentes cuando expira el heartbeat del productor y despues intenta retirar su tarea ready de Redis.
 - `postgres`: persistencia.
 - `redis`: cola fiable de tareas con reserva/ACK, cache de vistos/procesamiento y reintentos de detalle por monitor/politica.
+
+## Mapa de ciclo de vida de servicios
+
+No hay perfiles Compose: un `docker compose up` sin lista de servicios intenta arrancar los seis. El grafo de arranque vigente es:
+
+```text
+postgres healthy + redis healthy
+              -> api: alembic upgrade head -> uvicorn -> /health
+
+postgres healthy + redis healthy + api healthy
+              -> worker: productor + consumidores
+
+postgres healthy + api healthy
+              -> scheduler-watchdog (Redis no bloquea su arranque)
+
+api service_started -> frontend Vite (desarrollo)
+api healthy         -> frontend Nginx (ejemplo de produccion)
+```
+
+| Servicio | Entrypoint y estado que posee | Gate de arranque | Health y supervision actuales |
+| --- | --- | --- | --- |
+| `postgres` | Imagen oficial; volumen `postgres-data` con todo el estado SQL. | Ninguno. | `pg_isready`; sin politica `restart`. |
+| `redis` | Redis con AOF `appendfsync=always`; volumen `redis-data` con cola/cache. | Ninguno. | `PING`; sin politica `restart`. |
+| `api` | Solo el comando Compose ejecuta Alembic antes de Uvicorn. Los comandos sincronos de monitor y la publicacion SSE viven aqui. | PostgreSQL y Redis `healthy`. | `/health` solo demuestra que Uvicorn responde despues del comando Alembic; no vuelve a consultar DB, Redis ni revision. Sin `restart`. |
+| `worker` | Valida configuracion, exige Redis, recupera reservas, inicia un productor y `WORKER_CONSUMER_COUNT` consumidores. El productor escribe el heartbeat PostgreSQL. | PostgreSQL, Redis y API `healthy`. | Health = heartbeat reciente en PostgreSQL, no salud de Redis ni de cada consumidor. `restart: unless-stopped`; un consumidor caido se recrea en proceso y la perdida del productor termina el contenedor. |
+| `scheduler-watchdog` | Tras una gracia, relee heartbeat y detiene recurrentes primero en PostgreSQL; Redis es cleanup posterior y best-effort. | PostgreSQL y API `healthy`; no depende de Redis. | Sin healthcheck; un error no controlado termina el proceso y `unless-stopped` lo repone, pero un hang no se detecta. |
+| `frontend` | Vite en desarrollo; build estatico Nginx en produccion. No posee estado de negocio. | API iniciada en desarrollo, `healthy` en produccion. | Sin healthcheck ni `restart`. |
+
+`depends_on` solo ordena el arranque. Una dependencia que cae despues no detiene ni reinicia sus consumidores. Los comandos `docker compose stop` o `kill` son acciones manuales y dejan el servicio detenido; `unless-stopped` actua cuando el proceso sale por un fallo no solicitado.
+
+La propiedad de Alembic no pertenece al `backend/Dockerfile`: su `CMD` generico arranca Uvicorn sin migrar. Solo los comandos de ambos archivos Compose establecen `alembic upgrade head && uvicorn`; un reload de codigo en desarrollo tampoco repite migraciones.
 
 ## Modulos backend
 
@@ -15,7 +47,7 @@
 - `db`: modelos, sesiones y migraciones.
 - `services`: logica de fuentes, items, filtros, cola de tareas y acciones.
 - `providers`: proveedor Vinted con `curl_cffi`, perfiles de navegador y deteccion DataDome.
-- `worker`: scheduler (productor), consumidores de tareas y ejecuciones manuales.
+- `worker`: scheduler recurrente, consumidores de tareas y watchdog; las ejecuciones sincronas enumeradas arriba pertenecen al proceso API.
 
 ## Flujo MVP
 

@@ -106,7 +106,7 @@ Use Playwright MCP for browser-driven QA when the change affects UI, navigation,
 
 If the live app does not match the source code, restart the relevant dev service before claiming the feature works. A passing build does not prove the running PWA is current.
 
-Before restarting or recreating containers for frontend QA, make sure the previous frontend/Vite process is intentionally closed or owned by Docker Compose. Prefer `.\scripts\qa-pwa.ps1 start` for isolated PWA QA and `.\scripts\qa-pwa.ps1 stop` before changing QA mode. Do not start competing Vite servers on the same port, and do not rebuild unrelated services just to refresh the UI.
+Before restarting or recreating containers for frontend QA, make sure the previous frontend/Vite process is intentionally closed or owned by Docker Compose. Use `.\scripts\qa-pwa.ps1 start` only when the acceptance contract authorizes starting the worker and any resulting external traffic; its `stop` command closes only the isolated Vite process and does not restore Compose services. If the worker must remain stopped, follow the isolated-Vite procedure in `docs/development.md`. Do not start competing Vite servers on the same port, and do not rebuild unrelated services just to refresh the UI.
 
 Frontend structure is part of frontend quality. For non-trivial PWA work, keep `frontend/src/App.tsx` as a thin root, put dashboard-level composition in `frontend/src/app/`, cross-feature state hooks in `frontend/src/hooks/`, feature views in `frontend/src/features/`, shared UI in `frontend/src/components/`, generic helpers in `frontend/src/utils/`, and CSS under `frontend/src/styles/`. Split mixed-responsibility files before adding new behavior to them.
 
@@ -184,7 +184,8 @@ Prefer focused checks while developing, then real integration evidence for accep
 
 - Backend: `ruff check backend/src backend/alembic`
 - Frontend: `pnpm build` from `frontend/`
-- Docker: `docker compose up -d --build` and `docker compose ps`
+- Docker infrastructure/API: `docker compose up -d --build postgres redis api` and `docker compose ps`
+- Worker/watchdog: start them only when the acceptance contract needs executors, after inspecting active monitors and Redis ready/processing state and confirming any external-traffic budget; otherwise preserve their initial state.
 - API smoke test: `GET http://localhost:8000/health`
 - Frontend smoke test: `GET http://localhost:5173`
 - Playwright QA for frontend flows: route navigation, active/disabled controls, form success, form error, and UI/API/DB consistency.

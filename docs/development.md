@@ -13,8 +13,13 @@ El entorno local no depende de Traefik ni del servidor remoto.
 
 ```powershell
 copy .env.example .env
-docker compose up --build
+docker compose up -d --build postgres redis api
+docker compose ps
 ```
+
+Este es el arranque local seguro de infraestructura/API: no inicia ningun ejecutor. Para usar el frontend Docker, si `5173` esta libre, ejecuta `docker compose up -d frontend`.
+
+No hay perfiles Compose. `docker compose up` sin lista arranca tambien worker y `scheduler-watchdog`; el worker recupera reservas Redis y crea consumidores incluso si el scheduler esta deshabilitado, por lo que puede reanudar trafico persistido. Antes de habilitar ejecucion operativa comprueba monitores activos, runs, ready/processing y presupuesto de trafico. Arranca primero `worker`, verifica heartbeat/colas y despues `scheduler-watchdog`.
 
 ## Flujo de Ramas
 
@@ -32,17 +37,20 @@ Cuando el resultado dependa realmente de Vinted o de un proxy, el contrato de la
 
 La suite completa se ejecuta una vez cerca del cierre si el riesgo lo justifica. Durante desarrollo se usan checks focalizados para no convertir cada iteracion en una tarea enorme.
 
-## Base de Datos Local
+## Estado local y volumenes
 
-La base de datos local es descartable mientras el producto siga en desarrollo puro. No hay datos reales que conservar.
+El entorno sigue siendo preproduccion y no conserva compatibilidad con contratos de desarrollo obsoletos, pero sus volumenes ya contienen estado operativo valioso: monitores, oportunidades, historico, proxys, sesiones cifradas, app settings y Redis AOF con cola/cache. Se preservan por defecto.
 
 Hasta la primera version de produccion no se mantiene compatibilidad hacia atras con desarrollos previos. Si un modelo, endpoint, payload, migracion o flujo de UI queda obsoleto, se elimina en vez de mantener adaptadores legacy.
 
-Para regenerar el esquema desde cero:
+`docker compose down` elimina contenedores/red y conserva los volumenes. `docker compose down -v` borra PostgreSQL y Redis de forma irreversible; solo se usa como reset deliberado despues de inspeccionar/respaldar el estado y obtener confirmacion explicita. No lo ejecutes como solucion automatica a un fallo de migracion.
+
+Para un reset destructivo autorizado:
 
 ```powershell
+docker compose ps -a
 docker compose down -v
-docker compose up -d --build
+docker compose up -d --build postgres redis api
 ```
 
 Las migraciones Alembic pueden compactarse o romper compatibilidad con datos locales anteriores cuando el cambio simplifique el modelo.
@@ -52,10 +60,52 @@ Las migraciones Alembic pueden compactarse o romper compatibilidad con datos loc
 - `5173`: frontend Vite.
 - `8000`: API FastAPI.
 - `5432`: Postgres local.
+- `6379`: Redis local.
 
 ## PWA QA estable
 
-Para QA de la PWA con Playwright, usa la ruta aislada en `5176`:
+Antes de elegir ruta, captura `docker compose ps -a`, los listeners `5173/5176`, monitores activos y Redis ready/processing. El estado inicial manda sobre el cleanup.
+
+### Vite aislado con worker detenido
+
+Usa esta ruta cuando la aceptacion no autoriza ejecutores ni trafico externo. Si worker/watchdog estaban activos, no los interrumpas sin que el contrato lo permita; detente o acuerda primero esa parada.
+
+```powershell
+.\scripts\qa-pwa.ps1 stop
+if (docker compose ps --status running -q worker scheduler-watchdog) {
+    throw "Worker/watchdog siguen activos; no los detengas sin un contrato autorizado"
+}
+docker compose up -d postgres redis api
+docker compose ps -a
+$deadline = (Get-Date).AddSeconds(60)
+$apiReady = $false
+do {
+    try {
+        $apiReady = (Invoke-WebRequest http://localhost:8000/health -TimeoutSec 2).StatusCode -eq 200
+    } catch {
+        $apiReady = $false
+    }
+    if (-not $apiReady) { Start-Sleep -Seconds 1 }
+} while (-not $apiReady -and (Get-Date) -lt $deadline)
+if (-not $apiReady) { throw "La API no estuvo lista en 60 segundos" }
+if (Get-NetTCPConnection -LocalPort 5176 -State Listen -ErrorAction SilentlyContinue) {
+    throw "El puerto QA 5176 ya esta ocupado"
+}
+Push-Location frontend
+$env:VITE_DEV_API_PROXY_TARGET = "http://localhost:8000"
+try {
+    pnpm exec vite --host 127.0.0.1 --port 5176 --strictPort
+} finally {
+    Remove-Item Env:VITE_DEV_API_PROXY_TARGET -ErrorAction SilentlyContinue
+    Pop-Location
+}
+```
+
+El Vite corre en foreground; abre Playwright contra `http://127.0.0.1:5176` y termina con `Ctrl+C`. Confirma despues que `5176` quedo libre y restaura API/PostgreSQL/Redis/worker/watchdog/frontend exactamente al snapshot inicial. No uses `http://localhost:5173` para esa pasada ni detengas un proceso preexistente que no pertenezca a la QA.
+
+### Helper con worker autorizado
+
+Usa el helper solo si el contrato incluye el worker, ya comprobaste monitores/colas y existe presupuesto para cualquier trafico externo que pudiera reanudarse:
 
 ```powershell
 .\scripts\qa-pwa.ps1 stop
@@ -65,9 +115,11 @@ Invoke-WebRequest http://localhost:8000/health
 Invoke-WebRequest http://127.0.0.1:5176
 ```
 
-Abre Playwright contra `http://127.0.0.1:5176`. El script apaga el servicio Docker `frontend` de `5173`, levanta `postgres`, `redis`, `api` y `worker` con Docker Compose, arranca Vite local en `5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`.
+Abre Playwright contra `http://127.0.0.1:5176`. El script apaga el servicio Docker `frontend` de `5173`, levanta `postgres`, `redis`, `api` y `worker` con Docker Compose, no levanta el watchdog, arranca Vite local en `5176`, configura `VITE_DEV_API_PROXY_TARGET=http://localhost:8000` y guarda PID/logs en `%TEMP%\scrapyvinterino-qa`.
 
-No uses `http://localhost:5173` para esta pasada. Ese puerto pertenece al frontend Docker y en Windows puede aparecer como publicado aunque el host no responda. `status` debe mostrar el Vite QA en `5176` y avisar si queda algo escuchando en `5173`.
+En la pasada creada por el helper no uses `http://localhost:5173`. Ese puerto pertenece normalmente al frontend Docker y en Windows puede aparecer como publicado aunque el host no responda. `status` debe mostrar el Vite QA en `5176` y avisar si queda algo escuchando en `5173`.
+
+El helper no es simetrico: `stop` cierra solo su Vite local; no detiene worker/API ni restaura el frontend Docker. Restaura manualmente cada servicio al snapshot inicial. Nunca dejes dos Vite sobre el mismo puerto.
 
 Cada callback SSE debe pertenecer a una instancia concreta de `EventSource`. Antes de cambiar estado, cursor, eventos o temporizadores, el callback comprueba que su instancia sigue siendo la conexion actual; un `error` obsoleto nunca puede cerrar ni degradar el reemplazo. La conexion fallida se cierra y deja de ser actual antes de programar como maximo un timer de reconexion. Si el reemplazo tambien falla durante una caida prolongada puede programar el siguiente intento, pero nunca existen dos timers o conexiones actuales a la vez. Salir de Monitores invalida la instancia, cierra el stream y cancela el timer; volver crea una sola conexion con el ultimo cursor explicito.
 
