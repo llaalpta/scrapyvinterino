@@ -42,7 +42,7 @@ Specs MVP iniciales:
 
 ## Limites
 
-- El login del MVP es local para la PWA. El scraping usa una sesion publica anonima preparada con contexto publico; no inicia sesion en una cuenta de Vinted.
+- El contrato del MVP exige login local para la PWA, pendiente de 14.12.1 porque REST/SSE/comandos aun no autentican. El scraping usa una sesion publica anonima preparada con contexto publico; no inicia sesion en una cuenta de Vinted.
 - La autenticacion de una cuenta de Vinted y cualquier accion asociada permanecen fuera del MVP.
 - Las compras futuras requeriran accion explicita del usuario.
 - No se guardaran secretos en el repositorio.
