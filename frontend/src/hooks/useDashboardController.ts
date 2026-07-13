@@ -316,15 +316,21 @@ export function useDashboardController() {
       setMonitorStreamStatus('connecting');
       setMonitorStreamReady(false);
       stream?.close();
-      stream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
-      stream.addEventListener('open', () => setMonitorStreamStatus('connected'));
-      stream.addEventListener('error', () => {
-        if (disposed) {
+      const nextStream = new EventSource(monitorEventsStreamUrl(monitorStreamCursorRef.current ?? undefined));
+      stream = nextStream;
+      nextStream.addEventListener('open', () => {
+        if (!disposed && stream === nextStream) {
+          setMonitorStreamStatus('connected');
+        }
+      });
+      nextStream.addEventListener('error', () => {
+        if (disposed || stream !== nextStream) {
           return;
         }
         setMonitorStreamStatus('error');
         setMonitorStreamReady(false);
-        stream?.close();
+        nextStream.close();
+        stream = null;
         if (monitorStreamReconnectTimerRef.current === null) {
           monitorStreamReconnectTimerRef.current = window.setTimeout(() => {
             monitorStreamReconnectTimerRef.current = null;
@@ -332,14 +338,20 @@ export function useDashboardController() {
           }, 3000);
         }
       });
-      stream.addEventListener('stream_ready', (message) => {
+      nextStream.addEventListener('stream_ready', (message) => {
+        if (disposed || stream !== nextStream) {
+          return;
+        }
         const ready = parseStreamCursor(message) ?? parseStreamReady(message);
         if (ready !== null) {
           monitorStreamCursorRef.current = Math.max(monitorStreamCursorRef.current ?? 0, ready);
           setMonitorStreamReady(true);
         }
       });
-      stream.addEventListener('monitor_event', (message) => {
+      nextStream.addEventListener('monitor_event', (message) => {
+        if (disposed || stream !== nextStream) {
+          return;
+        }
         const event = parseRunEvent(message);
         if (!event || monitorStreamSeenEventIdsRef.current.has(event.id)) {
           return;

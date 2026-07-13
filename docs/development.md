@@ -69,6 +69,8 @@ Abre Playwright contra `http://127.0.0.1:5176`. El script apaga el servicio Dock
 
 No uses `http://localhost:5173` para esta pasada. Ese puerto pertenece al frontend Docker y en Windows puede aparecer como publicado aunque el host no responda. `status` debe mostrar el Vite QA en `5176` y avisar si queda algo escuchando en `5173`.
 
+Cada callback SSE debe pertenecer a una instancia concreta de `EventSource`. Antes de cambiar estado, cursor, eventos o temporizadores, el callback comprueba que su instancia sigue siendo la conexion actual; un `error` obsoleto nunca puede cerrar ni degradar el reemplazo. La conexion fallida se cierra y deja de ser actual antes de programar como maximo un timer de reconexion. Si el reemplazo tambien falla durante una caida prolongada puede programar el siguiente intento, pero nunca existen dos timers o conexiones actuales a la vez. Salir de Monitores invalida la instancia, cierra el stream y cancela el timer; volver crea una sola conexion con el ultimo cursor explicito.
+
 ## Frontend Structure
 
 The PWA should stay modular before new product flows are added. `frontend/src/App.tsx` is only the React root wrapper and should not own feature UI, API orchestration, or reusable components.
