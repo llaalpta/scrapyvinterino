@@ -77,4 +77,4 @@ La cookie se llama `vinted_monitor_session`, es host-only, `HttpOnly`, `SameSite
 - Login/rate limiting adaptativo y bloqueo por abuso: tarea 14.32.
 - CSP y cabeceras de endurecimiento del documento PWA: tarea 14.33.
 - Recuperacion de password, registro publico, multirol y autenticacion Vinted no forman parte del MVP actual.
-- Identidad proxy, elegibilidad de sesiones Vinted y su retencion pertenecen a 14.12.2-14.12.11.
+- La identidad proxy 14.12.2 esta cerrada; la elegibilidad honesta 14.12.5 permanece en `Now`. Sentinel, corrupcion, credenciales y retencion son hardening condicional, y los ledgers de crash 14.12.9/14.12.10 no forman parte del MVP local.
