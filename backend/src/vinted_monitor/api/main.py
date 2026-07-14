@@ -38,7 +38,7 @@ from vinted_monitor.api.schemas import (
 )
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
-from vinted_monitor.db.models import Run, RunEvent, SearchSource
+from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import get_db
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.services.actions import create_action_request
@@ -67,14 +67,11 @@ from vinted_monitor.services.runs import (
     RunAlreadyActiveError,
     SearchSourceInactiveError,
     SearchSourceNotFoundError,
-    ensure_monitor_baseline_ready,
     execute_manual_run,
     execute_monitor_baseline,
     execute_monitor_item_detail_probe,
-    execute_monitor_run,
     execute_monitor_session_prepare,
     list_runs,
-    monitor_baseline_ready,
 )
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
@@ -94,9 +91,9 @@ from vinted_monitor.services.search_sources import (
     catalog_filter_compatibility,
     create_source,
     list_sources,
-    start_source_monitor,
     stop_source_monitor,
     update_source,
+    validate_vinted_catalog_url,
 )
 from vinted_monitor.services.search_sources import (
     SearchSourceNotFoundError as SourceUpdateNotFoundError,
@@ -148,11 +145,8 @@ def get_manual_run_provider() -> ManualRunProvider | None:
 
 
 def _source_read(source: SearchSource, db: Session) -> SearchSourceRead:
-    baseline_ready, policy_hash = monitor_baseline_ready(source)
     return SearchSourceRead.model_validate(source).model_copy(
         update={
-            "baseline_ready": baseline_ready,
-            "baseline_policy_hash": policy_hash,
             "catalog_filter_compatibility": catalog_filter_compatibility(source.url),
             "prepared_sessions": [
                 VintedSessionRead(**summary.__dict__)
@@ -220,32 +214,28 @@ def post_monitor_start(
 ):
     try:
         source = db.get(SearchSource, monitor_id)
-        if source is not None and source.monitor_mode == "manual":
+        if source is None or source.archived_at is not None:
+            raise SearchSourceNotFoundError(f"Search source {monitor_id} does not exist")
+        validate_vinted_catalog_url(source.url)
+        if source.monitor_mode == "manual":
             return execute_monitor_baseline(
                 db,
                 monitor_id,
                 provider=provider,
-                activate_manual_session=True,
+                activate_session=True,
             )
+        if source.is_active:
+            raise SearchSourceActiveError(f"Search source {monitor_id} is already active")
         acquire_initial_run_admission_lock(db)
         ensure_scheduler_can_activate(db, settings, source_id=monitor_id)
-        ensure_monitor_baseline_ready(db, monitor_id)
         egress = choose_run_egress(db, settings)
-        activated = start_source_monitor(db, monitor_id, commit=False)
-        activated_at = activated.monitor_started_at
-        try:
-            return execute_monitor_run(db, monitor_id, provider=provider, egress=egress)
-        except Exception:
-            db.rollback()
-            initial_run_id = db.scalar(
-                select(Run.id).where(
-                    Run.source_id == monitor_id,
-                    Run.started_at >= activated_at,
-                )
-            )
-            if initial_run_id is None:
-                stop_source_monitor(db, monitor_id)
-            raise
+        return execute_monitor_baseline(
+            db,
+            monitor_id,
+            provider=provider,
+            egress=egress,
+            activate_session=True,
+        )
     except (SearchSourceNotFoundError, SourceUpdateNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
@@ -366,7 +356,7 @@ def post_proxy_profile_vinted_session_preflight(profile_id: int) -> None:
     del profile_id
     raise HTTPException(
         status_code=410,
-        detail="Las sesiones Vinted son propiedad del monitor; usa Preparar sesion, lanza o recalibra un monitor para prepararlas",
+        detail="Las sesiones Vinted son propiedad del monitor; usa Preparar sesion o inicia un monitor para prepararlas",
     )
 
 
@@ -496,32 +486,6 @@ def post_monitor_run(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (BaselineRequiredError, SeenCacheUnavailableError, VintedSessionRequiredError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@business_router.post("/monitors/{monitor_id}/baseline", response_model=RunRead, status_code=201)
-def post_monitor_baseline(
-    monitor_id: int,
-    db: Session = Depends(get_db),
-    provider: ManualRunProvider | None = Depends(get_manual_run_provider),
-):
-    try:
-        source = db.get(SearchSource, monitor_id)
-        if source is not None and source.monitor_mode == "manual":
-            raise HTTPException(
-                status_code=409,
-                detail="El listado inicial del modo manual se calibra al iniciar la sesion",
-            )
-        return execute_monitor_baseline(db, monitor_id, provider=provider)
-    except SearchSourceNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RunAlreadyActiveError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except SchedulerCapacityError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except VintedSessionRequiredError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except SearchSourceConfigError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @business_router.post("/monitors/{monitor_id}/vinted-session/prepare", response_model=RunRead, status_code=201)

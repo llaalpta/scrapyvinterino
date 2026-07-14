@@ -425,7 +425,6 @@ def test_manual_api_stale_proxy_selection_never_constructs_provider(
 @pytest.mark.parametrize(
     ("endpoint", "payload", "nested_run"),
     (
-        ("baseline", None, False),
         ("vinted-session/prepare", None, False),
         ("items/detail-probe", {"item_ref": "9356705635"}, True),
     ),
@@ -442,7 +441,7 @@ def test_auxiliary_api_traffic_actions_share_the_proxy_identity_fence(
     command_client = authenticated_test_client()
     mutation_client = authenticated_test_client()
 
-    with _identity_graph(recurring_inactive=endpoint == "baseline") as graph, ThreadPoolExecutor(max_workers=1) as pool:
+    with _identity_graph() as graph, ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
             command_client.post,
             f"/api/monitors/{graph.source_id}/{endpoint}",

@@ -118,8 +118,6 @@ class SearchSourceRead(BaseModel):
     last_run_at: datetime | None
     next_run_at: datetime | None
     archived_at: datetime | None
-    baseline_ready: bool = False
-    baseline_policy_hash: str | None = None
     catalog_filter_compatibility: dict[str, Any] = Field(default_factory=dict)
     prepared_sessions: list[VintedSessionRead] = Field(default_factory=list)
 

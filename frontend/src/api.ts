@@ -51,8 +51,6 @@ export type SearchSource = {
   last_run_at: string | null;
   next_run_at: string | null;
   archived_at: string | null;
-  baseline_ready: boolean;
-  baseline_policy_hash: string | null;
   catalog_filter_compatibility: CatalogFilterCompatibility;
   prepared_sessions: VintedSession[];
 };
@@ -537,10 +535,6 @@ export function stopMonitor(sourceId: number): Promise<SearchSource> {
 
 export function runMonitor(sourceId: number): Promise<Run> {
   return postJson<Run>(`/api/monitors/${sourceId}/runs`);
-}
-
-export function calibrateMonitorBaseline(sourceId: number): Promise<Run> {
-  return postJson<Run>(`/api/monitors/${sourceId}/baseline`);
 }
 
 export function prepareMonitorVintedSession(sourceId: number): Promise<Run> {

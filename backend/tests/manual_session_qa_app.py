@@ -16,15 +16,15 @@ from vinted_monitor.providers.catalog import (
     CatalogSource,
 )
 
-_QA_ITEM_ID = re.compile(r"^qa-manual-[0-9a-f]{32}-[A-E]$")
+_QA_ITEM_ID = re.compile(r"^qa-(?:manual|recurring)-[0-9a-f]{32}-[A-F]$")
 
 
 def _provider_state_path() -> Path:
     if os.getenv("APP_ENV", "").strip().lower() != "test":
         raise RuntimeError("The controlled manual-session provider is test-only")
-    raw_path = os.getenv("MANUAL_SESSION_QA_PROVIDER_STATE")
+    raw_path = os.getenv("SESSION_QA_PROVIDER_STATE") or os.getenv("MANUAL_SESSION_QA_PROVIDER_STATE")
     if not raw_path or not Path(raw_path).is_absolute():
-        raise RuntimeError("MANUAL_SESSION_QA_PROVIDER_STATE must be an absolute path")
+        raise RuntimeError("SESSION_QA_PROVIDER_STATE must be an absolute path")
     return Path(raw_path).resolve()
 
 
@@ -32,6 +32,12 @@ _STATE_PATH = _provider_state_path()
 
 
 class ControlledManualSessionProvider:
+    def __init__(self, **kwargs: Any) -> None:
+        self.settings = kwargs.get("settings")
+        self.event_sink = kwargs.get("event_sink")
+        self.prepared_session = kwargs.get("prepared_session")
+        self.prepared_session_refreshed = False
+
     def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
         state = _load_state()
         delay_ms = state["delay_ms"]
@@ -56,8 +62,9 @@ class ControlledManualSessionProvider:
         candidate: CatalogItemCandidate,
         *,
         referer_url: str | None = None,
+        early_filter_terms: tuple[str, ...] = (),
     ) -> CatalogItemDetail:
-        del referer_url
+        del referer_url, early_filter_terms
         return CatalogItemDetail(
             vinted_item_id=candidate.vinted_item_id,
             title=candidate.title,
@@ -86,6 +93,9 @@ class ControlledManualSessionProvider:
             field_sources={"description": "controlled_manual_session_qa"},
         )
 
+    def close(self) -> None:
+        return None
+
 
 def _load_state() -> dict[str, Any]:
     try:
@@ -98,7 +108,7 @@ def _load_state() -> dict[str, Any]:
     delay_ms = payload.get("delay_ms", 0)
     if (
         not isinstance(ids, list)
-        or len(ids) > 5
+        or len(ids) > 6
         or len(ids) != len(set(ids))
         or any(not isinstance(item_id, str) or _QA_ITEM_ID.fullmatch(item_id) is None for item_id in ids)
     ):
