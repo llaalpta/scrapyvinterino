@@ -40,7 +40,7 @@ Algunos valores `.env` tambien sirven como defaults cuando aun no existe overrid
 
 Redis conserva AOF en un volumen Docker tanto en desarrollo como en el ejemplo de produccion. El worker se despliega como una unica instancia con varios consumidores internos: recupera las listas `vinted:task_queue:processing*` antes de iniciar scheduler y consumidores, y no se deben arrancar replicas independientes hasta incorporar ownership/visibility timeout distribuido.
 
-La disponibilidad periodica no se infiere de la configuracion ni de la capacidad: el productor del scheduler persiste su heartbeat UTC en `app_settings.scheduler_worker_heartbeat`. La API y la PWA consideran el scheduler no disponible cuando la señal falta, es invalida o supera el timeout. Esa señal prueba progreso del productor contra PostgreSQL; no prueba que Redis o cada consumidor funcionen.
+La disponibilidad periodica no se infiere de la configuracion ni de la capacidad: el productor del scheduler persiste su heartbeat UTC en `app_settings.scheduler_worker_heartbeat`. La API y la PWA consideran el scheduler no disponible cuando la señal falta, es invalida o supera el timeout. Esa señal prueba progreso reciente del productor contra PostgreSQL. El supervisor del mismo proceso sondea Redis y sale ante perdida, por lo que deja de renovar la señal; aun existe una ventana obsoleta hasta que vence el timeout y la señal no prueba cada consumidor.
 
 En Compose, la API es el unico servicio propietario de `alembic upgrade head`. Postgres y Redis deben estar sanos antes de iniciar la API; worker y `scheduler-watchdog` esperan despues a que `/health` confirme que la API termino su arranque y migraciones. Ninguno de esos dos servicios ejecuta Alembic.
 
@@ -48,7 +48,7 @@ Las migraciones que introducen trabajo transaccional nuevo para escritores exist
 
 `0019_proxy_session_identity` es una migracion destructiva de contrato preproduccion: tanto upgrade como downgrade eliminan todas las filas de `vinted_sessions`, porque una fila sin el binding efectivo de identidad no se puede reutilizar de forma segura. Antes de aplicarla hay que detener API antigua, worker y watchdog, revisar y drenar o retirar de forma controlada las listas ready/processing y no conservar payloads anteriores sin `proxy_identity_generation`; el consumidor nuevo los considera malformados y los envia a dead-letter, sin adaptador legacy. Tras confirmar `0019` y arrancar solo procesos nuevos, las sesiones necesarias se preparan de nuevo mediante un comando explicito; no hay backfill ni fallback automatico.
 
-El worker valida la configuracion antes de crear sus hilos y termina con error si es invalida. Durante la ejecucion, el proceso principal vigila el heartbeat escrito exclusivamente por el productor; si caduca tras la gracia de arranque, el proceso termina para que `restart: unless-stopped` lo reemplace. Su healthcheck consulta esa misma señal y no sustituye el self-exit: Docker no reinicia un contenedor solo por marcarlo `unhealthy`.
+El worker valida la configuracion y Redis antes de crear sus hilos y termina con error si fallan. Durante la ejecucion, el proceso principal sondea Redis en cada ciclo de supervision y vigila el heartbeat escrito exclusivamente por el productor. Un fallo Redis o un heartbeat caducado termina el proceso con error para que `restart: unless-stopped` lo reemplace; no hay reconnect interno ni fallback. Su healthcheck consulta solo el heartbeat y no sustituye el self-exit: Docker no reinicia un contenedor solo por marcarlo `unhealthy`.
 
 El `scheduler-watchdog` es un proceso separado con `restart: unless-stopped`. Tras su gracia inicial, bloquea solo monitores recurrentes activos, relee el heartbeat y, si sigue ausente, confirma primero en PostgreSQL la parada, el cierre de sesion y el evento `scheduler_worker_unavailable`. Despues intenta retirar tareas aun preparadas en Redis. Un fallo Redis queda registrado pero no revierte la parada; un error inesperado termina el proceso para que Compose lo reinicie.
 
@@ -61,7 +61,7 @@ Fuera de `development` y `test`, el backend rechaza al arrancar una `APP_SECRET_
 | PostgreSQL | `pg_isready` | Esquema actual o consultas de negocio. | No. |
 | Redis | `redis-cli ping` | Integridad de las colas, reservas o AOF. | No. |
 | API | HTTP `GET /health` incondicional. | PostgreSQL, Redis y revision Alembic actual una vez iniciado Uvicorn. | No. |
-| Worker | Heartbeat reciente del productor en PostgreSQL. | Redis, consumidores individuales o capacidad real de encolar. | `unless-stopped`, solo si el proceso sale de forma no solicitada. |
+| Worker | Heartbeat reciente del productor en PostgreSQL. | Estado Redis instantaneo, consumidores individuales o capacidad real de encolar. El supervisor Redis es interno y la señal tarda hasta su timeout en caducar. | `unless-stopped`, solo si el proceso sale de forma no solicitada. |
 | `scheduler-watchdog` | Ninguno. | Un hang puede quedar invisible. | `unless-stopped` si el proceso sale. |
 | Frontend | Ninguno. | Disponibilidad real de API o rutas Traefik. | No. |
 
@@ -101,8 +101,8 @@ El `200` de `/health` solo confirma el proceso API. Confirma tambien una ruta qu
 |      y esperar su fail-stop; una reactivacion posterior siempre es explicita
 |
 |-- Redis no esta healthy
-|   -> no confiar en /health ni worker_available
-|   -> en un incidente, detener worker y dejar watchdog para persistir el fail-stop DB-first
+|   -> el worker sale y Compose reintenta; /health API sigue sin probar Redis
+|   -> esperar que worker_available caduque y dejar watchdog para persistir el fail-stop DB-first
 |   -> en mantenimiento que deba conservar recurrentes, detener ambos de forma planificada
 |   -> recuperar Redis/AOF, revisar ready/processing y confirmar el estado PostgreSQL
 |   -> arrancar worker y comprobar recovery; arrancar watchdog si se habia detenido
@@ -140,13 +140,13 @@ Para una actualizacion con migracion, evita escritores mezclados:
 
 - Ambos Compose renderizaron sin ejecutar trafico externo. La pasada de lifecycle anterior a 14.12.1 arranco API con el entonces vigente `0017 (head)` antes de worker/watchdog. La comprobacion de 14.12.1 aplico el entonces vigente `0018 (head)` con worker/watchdog detenidos; tambien paso cero-a-head y 0017-a-head en una base aislada eliminada despues.
 - Para 14.12.2, una base PostgreSQL aislada paso de cero a `0019 (head)`. Otra pasada creo el esquema `0018`, sembro una sesion legacy y comprobo que el upgrade a `0019` la elimino, creo las tres columnas con sus restricciones/default y sustituyo el indice por `ix_vinted_sessions_source_proxy_identity_status`. Una fila nueva ligada a identidad tambien fue eliminada al bajar a `0018`; el indice anterior y la ausencia de las tres columnas quedaron restaurados antes del re-upgrade final a `0019`. Worker y watchdog permanecieron detenidos y no hubo trafico externo.
-- Con Redis detenido, API siguio `healthy` y `worker_available=true`; worker tambien permanecio `healthy` mientras sus dos consumidores registraban errores de reserva/recuperacion. Al restaurar Redis, todas las colas seguian a cero.
+- Antes de 14.19, con Redis detenido, API, `worker_available` y worker permanecian `healthy` mientras los consumidores repetian errores. La pasada aislada de 14.19 sustituyo ese comportamiento: un worker Docker sobre PostgreSQL/Redis desechables salio con error, entro en restart, dejo vencer el heartbeat y la PWA mostro indisponibilidad; al volver Redis recupero disponibilidad sin fuentes, runs ni cola y sin cambiar fingerprints operativos.
 - En la pasada de lifecycle previa a auth, PostgreSQL detenido hacia que `/api/monitors` devolviese `500` y reiniciaba worker/watchdog. Con 14.12.1 y ambos ejecutores detenidos, la prueba real actual mantuvo `/health=200`, devolvio `503` en la ruta privada y, al restaurar PostgreSQL sin reiniciar API, recupero el pool y devolvio el `401` esperado para la cookie invalida de prueba.
 - Una API terminada manualmente quedo `exited` porque no tiene restart. Worker y watchdog continuaron sin restart, confirmando que `depends_on` no propaga la caida. `docker compose start api` volvio a ejecutar Alembic antes de Uvicorn.
 - Una parada controlada `docker compose stop -t 5 api` agoto los cinco segundos, termino con codigo `137` y no produjo el shutdown de Uvicorn. El `sh -c` vigente no ofrece propagacion graceful demostrada; el `start` posterior volvio a aplicar Alembic y recupero `/health`.
 - El estado final restauro API/PostgreSQL/Redis sanos, frontend Docker/worker/watchdog detenidos, heartbeat original, cero monitores activos, cero runs en curso y cero colas o claves de tarea; el Vite host preexistente quedo intacto. No se llamo a Vinted ni a proxies.
 
-Las señales superficiales, la ausencia de health del watchdog, el restart parcial y la falta de drain son limitaciones actuales, no promesas de autorrecuperacion. Su correccion pertenece a la tarea de hardening de lifecycle registrada en el roadmap; este documento describe el runtime vigente.
+La ventana de heartbeat obsoleto, la ausencia de health del watchdog, el restart parcial y la falta de drain son limitaciones actuales, no promesas de autorrecuperacion. Solo la perdida Redis del worker tiene ahora el fail-stop acotado anterior; el resto requiere mantenimiento manual o una tarea promovida explicitamente.
 
 ## Outbound Vinted Proxy
 

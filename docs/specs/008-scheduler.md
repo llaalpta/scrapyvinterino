@@ -1,5 +1,23 @@
 # 008 Bounded Concurrent Scheduler and Runtime Cache
 
+## 14.19 Worker Redis availability
+
+Status: `done`. This is a contained fail-stop correction for the current local worker, not a general dependency-readiness platform.
+
+After startup, the worker supervisor probes Redis on its existing supervision cadence. A failed probe is a process-level dependency loss: it is logged safely and the worker exits non-zero without an internal reconnect loop or fallback. The producer heartbeat is not deleted because a replacement worker may already own a newer signal; instead, process exit stops renewal and the existing timeout makes scheduler availability false. Docker Compose owns restart, and a replacement cannot publish a heartbeat until Redis is reachable at startup.
+
+Acceptance criteria:
+
+1. Losing Redis after a successful worker start causes a sanitized critical log and non-zero worker exit; `restart: unless-stopped` starts a replacement attempt, which remains unavailable until Redis returns.
+2. The last PostgreSQL heartbeat is not refreshed after the loss. `GET /api/scheduler` becomes `worker_available=false` and `effective_enabled=false` after the configured timeout, and the existing PWA Settings poll shows unavailable without a new readiness field.
+3. With Redis healthy, the idle worker remains available and ordinary non-Redis consumer failure keeps the existing per-thread restart behavior instead of terminating the whole process.
+
+Representative integration: use a migrated disposable PostgreSQL database, a disposable Redis container and a disposable worker container with Docker restart enabled. Keep the scheduler without sources or queued work and block every outbound destination. Observe a fresh heartbeat, stop only the disposable Redis, prove worker restart/non-zero failure plus heartbeat expiry and the live API/PWA unavailable state, restore Redis and prove the worker and PWA become available again. Remove the containers, database, role, Redis state, API/Vite processes and logs, and verify the operational PostgreSQL/Redis fingerprints and initial service state are unchanged. The negative variation keeps Redis healthy while a focused supervisor test crashes a consumer and observes only its thread restart. External Vinted, proxy and Telegram allowance is zero.
+
+Excluded: API-wide readiness, explicit heartbeat deletion, queue/drain redesign, Redis restart ownership and production lifecycle hardening.
+
+Verification: 17 focused scheduler/supervisor tests and one live Playwright outage/recovery case passed against a migrated disposable PostgreSQL database plus disposable Redis/worker containers on an internal Docker network. The real worker exited non-zero, Docker restarted it, the heartbeat stopped advancing, API/PWA became unavailable after timeout and recovered after Redis returned. Cleanup left no QA containers, networks, roles, databases, Redis keys, ports or logs; operational PostgreSQL/Redis fingerprints and service state were unchanged. No Vinted, proxy or Telegram traffic was allowed.
+
 ## Planned 14.34 session program
 
 Status: approved and `not-started`. This section defines three replacement slices without claiming that the current implementation below already provides them. Each slice must replace its superseded clauses in specs 001, 003, 005, 008 and 010 plus current architecture/data-model prose before being marked done.
@@ -165,7 +183,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Recurring activation requires a fresh heartbeat written by the scheduler producer itself. Missing, malformed, naive, implausibly future, or expired heartbeat state returns `503` and leaves the source, deadline, monitor session and runs unchanged.
 - `GET /api/scheduler` exposes `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is false unless UI/deployment gates, capacity and the live producer are all available.
 - The PWA treats scheduler refresh failure as unavailable/unknown, discards any previously usable scheduler state, and blocks recurring launch. It never labels missing producer availability as a degraded operating mode.
-- Invalid deployment scheduler configuration terminates worker startup. Once started, the worker supervisor terminates the process when its own producer heartbeat expires; Compose owns restart and reports heartbeat health.
+- Invalid deployment scheduler configuration terminates worker startup. Once started, the worker supervisor terminates the process when its Redis probe fails or its own producer heartbeat expires; Compose owns restart and reports heartbeat health. Redis loss does not add another public readiness field: process exit stops heartbeat renewal and the existing timeout makes API/PWA availability false.
 - The scheduler watchdog starts only after API health confirms API-owned migrations are complete. After its startup grace, an expired producer heartbeat locks active non-manual sources and rechecks liveness before changing them.
 - If liveness is still absent after the lock, the watchdog makes PostgreSQL authoritative first: it clears active/deadline/duration state, closes the active monitor session with `scheduler_worker_unavailable`, and persists one sanitized warning event per stopped source. Manual monitors remain unchanged.
 - Ready-task cleanup happens only after the PostgreSQL stop commits. Redis cleanup failure is logged visibly and never rolls back the inactive source; a later consumer must treat that inactive database state as authoritative.
@@ -251,7 +269,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Unit tests for activation-time persistence of the first recurring deadline, the 60-second jitter floor, and persisted-deadline precedence over stale scheduler runtime state.
 - PostgreSQL/API tests for missing, fresh, expired, malformed, naive and future producer heartbeat plus mutation-free recurring `503`; producer tests cover heartbeat during disabled/idle operation and scheduler polls longer than the heartbeat interval.
 - Supervisor/watchdog tests cover invalid startup configuration, producer expiry grace, recurring-only locked stop, heartbeat recovery during lock acquisition, session/event persistence, DB-first Redis cleanup failure, and unexpected-error process termination.
-- Real-container verification blocks producer progress without external traffic and observes worker exit plus Compose restart; a QA recurring source/session/task proves watchdog database stop and visible Redis-cleanup failure, followed by complete cleanup and service restoration.
+- Real-container verification blocks producer progress without external traffic and observes worker exit plus Compose restart; a separate disposable Redis-loss case observes a non-zero worker exit/restart, unchanged expired heartbeat, live API/PWA unavailability and recovery after Redis returns. A QA recurring source/session/task proves watchdog database stop and visible Redis-cleanup failure, followed by complete cleanup and service restoration.
 - SSE contract tests for tail startup, query/header cursor precedence, duplicate-free resume, backlog batches larger than 100, reconnect advice, heartbeat, disconnect, buffering/cache headers, and redaction.
 - Real PostgreSQL/API verification persists one legitimate marker event and one forged/raw-canary event through the production writer, then confirms identical safe `details` through monitor REST and SSE and complete cleanup of event, outbox, publication and source state.
 - PostgreSQL/outbox tests cover event commit and rollback, concurrent/inverted commits, serialized duplicate-free publication, atomic publication rollback, bounded batches, historical migration backfill and tail high-water behavior.

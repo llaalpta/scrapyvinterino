@@ -327,6 +327,87 @@ def test_worker_invalid_scheduler_configuration_exits(monkeypatch: pytest.Monkey
     assert exc_info.value.code == 2
 
 
+def test_worker_redis_healthcheck_failure_exits_process_and_redacts_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    critical_events: list[tuple[str, dict]] = []
+
+    class FakeLogger:
+        def info(self, _event: str, **_details) -> None:
+            return None
+
+        def warning(self, _event: str, **_details) -> None:
+            return None
+
+        def critical(self, event: str, **details) -> None:
+            critical_events.append((event, details))
+
+    class FakeCache:
+        def __init__(self) -> None:
+            self.checks = 0
+
+        def require_available(self) -> None:
+            self.checks += 1
+            if self.checks > 1:
+                raise SeenCacheUnavailableError(
+                    "Redis at redis://qa-user:qa-password@127.0.0.1:6399/0 is unavailable"
+                )
+
+    class FakeTarget:
+        def __init__(self, _settings, consumer_id: int | None = None) -> None:
+            self.consumer_id = consumer_id
+
+        def run_forever(self) -> None:
+            return None
+
+    class FakeFuture:
+        def result(self) -> None:
+            return None
+
+    class FakePool:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        def submit(self, _wrapper, _target, _name: str, _logger) -> FakeFuture:
+            return FakeFuture()
+
+    class ProcessExit(RuntimeError):
+        def __init__(self, code: int) -> None:
+            super().__init__(f"process exit {code}")
+            self.code = code
+
+    cache = FakeCache()
+    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_main, "configure_logging", lambda _level: None)
+    monkeypatch.setattr(worker_main.structlog, "get_logger", lambda: FakeLogger())
+    monkeypatch.setattr(worker_main, "validate_proxy_settings", lambda _settings: None)
+    monkeypatch.setattr(worker_main, "get_seen_cache", lambda _settings: cache)
+    monkeypatch.setattr(worker_main, "redis_client_from_url", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(worker_main, "recover_inflight_tasks", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(worker_main, "SchedulerRunner", FakeTarget)
+    monkeypatch.setattr(worker_main, "TaskConsumer", FakeTarget)
+    monkeypatch.setattr(worker_main, "ThreadPoolExecutor", FakePool)
+    monkeypatch.setattr(worker_main, "wait", lambda *_args, **_kwargs: (set(), set()))
+    monkeypatch.setattr(
+        worker_main,
+        "_producer_heartbeat_expired",
+        lambda *_args, **_kwargs: pytest.fail("heartbeat must not be checked after Redis fails"),
+    )
+    monkeypatch.setattr(worker_main, "_exit_process", lambda code: (_ for _ in ()).throw(ProcessExit(code)))
+
+    with pytest.raises(ProcessExit) as exc_info:
+        worker_main.main()
+
+    assert exc_info.value.code == 1
+    assert cache.checks == 2
+    assert [event for event, _details in critical_events] == ["worker_redis_healthcheck_failed"]
+    error = critical_events[0][1]["error"]
+    assert "qa-user" not in error
+    assert "qa-password" not in error
+    assert "<redacted>" in error
+
+
 def test_worker_producer_thread_completion_exits_process(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings()
 
@@ -381,6 +462,77 @@ def test_worker_producer_thread_completion_exits_process(monkeypatch: pytest.Mon
     with pytest.raises(ProcessExit) as exc_info:
         worker_main.main()
     assert exc_info.value.code == 1
+
+
+def test_worker_restarts_crashed_consumer_without_exiting_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(worker_consumer_count=1)
+    submitted_names: list[str] = []
+
+    class FakeCache:
+        def require_available(self) -> None:
+            return None
+
+    class FakeTarget:
+        def __init__(self, _settings, consumer_id: int | None = None) -> None:
+            self.consumer_id = consumer_id
+
+        def run_forever(self) -> None:
+            return None
+
+    class FakeFuture:
+        def __init__(self, name: str, *, crashes: bool = False) -> None:
+            self.name = name
+            self.crashes = crashes
+
+        def result(self) -> None:
+            if self.crashes:
+                raise RuntimeError("non-Redis consumer failure")
+
+    class FakePool:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        def submit(self, _wrapper, _target, name: str, _logger) -> FakeFuture:
+            submitted_names.append(name)
+            return FakeFuture(name, crashes=name == "consumer-0" and submitted_names.count(name) == 1)
+
+    class LoopFinished(RuntimeError):
+        pass
+
+    wait_calls = 0
+
+    def complete_consumer_once(futures, **_kwargs):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            consumer = next(future for future in futures if future.name == "consumer-0")
+            return {consumer}, set()
+        raise LoopFinished
+
+    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_main, "configure_logging", lambda _level: None)
+    monkeypatch.setattr(worker_main, "validate_proxy_settings", lambda _settings: None)
+    monkeypatch.setattr(worker_main, "get_seen_cache", lambda _settings: FakeCache())
+    monkeypatch.setattr(worker_main, "redis_client_from_url", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(worker_main, "recover_inflight_tasks", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(worker_main, "SchedulerRunner", FakeTarget)
+    monkeypatch.setattr(worker_main, "TaskConsumer", FakeTarget)
+    monkeypatch.setattr(worker_main, "ThreadPoolExecutor", FakePool)
+    monkeypatch.setattr(worker_main, "wait", complete_consumer_once)
+    monkeypatch.setattr(worker_main.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(worker_main, "_producer_heartbeat_expired", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        worker_main,
+        "_exit_process",
+        lambda _code: pytest.fail("consumer failure must not terminate the worker"),
+    )
+
+    with pytest.raises(LoopFinished):
+        worker_main.main()
+
+    assert submitted_names == ["producer", "consumer-0", "consumer-0"]
 
 
 def test_worker_healthcheck_uses_producer_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:

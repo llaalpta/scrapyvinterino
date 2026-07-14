@@ -80,6 +80,14 @@ def main() -> None:
             return_when=FIRST_COMPLETED,
         )
         try:
+            cache.require_available()
+        except Exception as exc:
+            logger.critical(
+                "worker_redis_healthcheck_failed",
+                error=redact_sensitive_text(str(exc)),
+            )
+            _exit_process(1)
+        try:
             producer_expired = _producer_heartbeat_expired(settings, started_at=started_at)
         except Exception as exc:
             logger.critical("worker_producer_healthcheck_failed", error=redact_sensitive_text(str(exc)))

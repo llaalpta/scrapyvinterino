@@ -43,7 +43,7 @@ La suite completa se ejecuta una vez cerca del cierre si el riesgo lo justifica.
 La tarea 14.18 acepta un runner focalizado con estos criterios:
 
 - ejecuta el escenario seleccionado desde `backend/`, donde no existe `.env`, con configuracion de test explicita, un rol y una base PostgreSQL nuevos y el indice Redis 15 reservado;
-- exige worker y watchdog detenidos y solo admite escenarios locales cerrados: identidad recorre scheduler/cola/consumer con una trampa de proveedor; fail-stop usa respuestas locales; prepared-session levanta API `8001` y Vite `5176` propios para Playwright; full recorre la suite en la misma base aislada y separa el modulo que exige destinos loopback;
+- exige worker y watchdog detenidos y solo admite escenarios locales cerrados: identidad recorre scheduler/cola/consumer con una trampa de proveedor; fail-stop usa respuestas locales; prepared-session levanta API `8001` y Vite `5176` propios para Playwright; worker-redis conecta un worker y Redis desechables por una red Docker interna, prueba su restart y usa la misma API/Vite; full recorre la suite en la misma base aislada y separa el modulo que exige destinos loopback;
 - dos ciclos consecutivos terminan sin la base ni el rol temporales y con Redis 15 vacio; si ese indice ya contiene datos, el runner se niega a ejecutar y no los elimina.
 
 Con PostgreSQL y Redis ya levantados y los ejecutores detenidos:
@@ -52,10 +52,11 @@ Con PostgreSQL y Redis ya levantados y los ejecutores detenidos:
 .\scripts\qa-backend-integration.ps1
 .\scripts\qa-backend-integration.ps1 -Scenario catalog-fail-stop
 .\scripts\qa-backend-integration.ps1 -Scenario prepared-session-read-model -Repeat 1
+.\scripts\qa-backend-integration.ps1 -Scenario worker-redis-availability -Repeat 1
 .\scripts\qa-backend-integration.ps1 -Scenario full -Repeat 1
 ```
 
-El comando predeterminado migra dos bases nuevas y ejecuta dos veces el canary real de identidad. `-Scenario` traduce `identity`, `catalog-fail-stop`, `prepared-session-read-model` y `full` a targets cerrados; nunca acepta un target arbitrario. Prepared-session usa API/Vite/Playwright reales, bloquea hosts no loopback y cierra solo sus procesos. Full conserva las URLs contractuales para unitarios falsos y ejecuta aparte, con destinos loopback, el modulo que lo exige; los dos grupos comparten la misma base efimera. `-Repeat` se limita a `1..3`. El runner localiza los contenedores sin invocar Compose ni cargar la `.env` raiz, sanea el entorno heredado y bloquea egress mediante proxys de entorno a loopback. Una lease reserva Redis 15; el cleanup solo hace `FLUSHDB` si conserva esa lease y elimina exclusivamente el rol/base generados. Antes y despues compara fingerprints sin valores visibles de PostgreSQL operativo y Redis 0; una diferencia falla de forma visible y nunca intenta restaurar datos automaticamente.
+El comando predeterminado migra dos bases nuevas y ejecuta dos veces el canary real de identidad. `-Scenario` traduce `identity`, `catalog-fail-stop`, `prepared-session-read-model`, `worker-redis-availability` y `full` a targets cerrados; nunca acepta un target arbitrario. Prepared-session usa API/Vite/Playwright reales, bloquea hosts no loopback y cierra solo sus procesos. Worker-redis usa imagenes locales, una red `--internal`, ownership por token y una base/Redis desechables; desactiva el restart antes de retirar el worker y restaura exactamente las redes del PostgreSQL operativo. Full conserva las URLs contractuales para unitarios falsos y ejecuta aparte, con destinos loopback, el modulo que lo exige; los dos grupos comparten la misma base efimera. `-Repeat` se limita a `1..3`. El runner localiza los contenedores sin arrancar servicios Compose ni cargar la `.env` raiz, sanea el entorno heredado y bloquea egress mediante proxys de entorno a loopback. Una lease reserva Redis 15; el cleanup solo hace `FLUSHDB` si conserva esa lease y elimina exclusivamente el rol/base generados. Antes y despues compara fingerprints sin valores visibles de PostgreSQL operativo y Redis 0; una diferencia falla de forma visible y nunca intenta restaurar datos automaticamente.
 
 ## Estado local y volumenes
 
