@@ -55,6 +55,7 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onPrepareVintedSession={(source) => void dashboard.onPrepareVintedSession(source)}
           onProbeItemDetail={(source) => void dashboard.onProbeItemDetail(source)}
           onRecalibrateBaseline={(source) => void dashboard.onRecalibrateBaseline(source)}
+          onRunNow={(source) => void dashboard.onRunNow(source)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}

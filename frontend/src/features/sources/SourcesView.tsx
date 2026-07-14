@@ -34,6 +34,7 @@ export function SourcesView({
   onPrepareVintedSession,
   onProbeItemDetail,
   onRecalibrateBaseline,
+  onRunNow,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
@@ -67,6 +68,7 @@ export function SourcesView({
   onPrepareVintedSession: (source: SearchSource) => void;
   onProbeItemDetail: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
+  onRunNow: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
@@ -205,6 +207,7 @@ export function SourcesView({
           onPrepareVintedSession={onPrepareVintedSession}
           onProbeItemDetail={onProbeItemDetail}
           onRecalibrateBaseline={onRecalibrateBaseline}
+          onRunNow={onRunNow}
           onSaveSourceSchedule={onSaveSourceSchedule}
           onStartSession={onStartSession}
           onStopMonitor={onStopMonitor}
@@ -654,6 +657,7 @@ function MonitorDetail({
   onPrepareVintedSession,
   onProbeItemDetail,
   onRecalibrateBaseline,
+  onRunNow,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
@@ -679,6 +683,7 @@ function MonitorDetail({
   onPrepareVintedSession: (source: SearchSource) => void;
   onProbeItemDetail: (source: SearchSource) => void;
   onRecalibrateBaseline: (source: SearchSource) => void;
+  onRunNow: (source: SearchSource) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
@@ -717,9 +722,12 @@ function MonitorDetail({
 
   const sourceDraft = sourceDrafts[source.id] ?? buildSourceDraft(source);
   const hasUnsavedChanges = sourceDraftHasChanges(source, sourceDraft);
-  const launchBlockedByBaseline = !source.baseline_ready;
+  const isManual = source.monitor_mode === 'manual';
+  const launchBlockedByBaseline = !isManual && !source.baseline_ready;
   const launchBlockedByFilters = source.catalog_filter_compatibility ? !source.catalog_filter_compatibility.compatible : false;
-  const detailProbeBlocked = savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges || launchBlockedByFilters || detailProbeRef.trim() === '';
+  const hasNonTerminalRun = monitorRuns.some((run) => run.status === 'running' || run.status === 'finalizing');
+  const hasCommandInFlight = runningSessionId !== null || hasNonTerminalRun;
+  const detailProbeBlocked = savingSourceId === source.id || hasCommandInFlight || hasUnsavedChanges || launchBlockedByFilters || detailProbeRef.trim() === '';
 
   return (
     <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -742,12 +750,18 @@ function MonitorDetail({
       <section className={`monitor-config-panel${source.is_active ? ' readonly' : ''}`}>
         <div className="monitor-config-heading">
           <h4>Configuracion</h4>
-          {source.is_active ? <span>Deten el monitor para editarla.</span> : <span>Editable con el monitor detenido.</span>}
+          {source.is_active || hasCommandInFlight ? (
+            <span>{source.is_active ? 'Deten el monitor para editarla.' : 'Espera a que termine el inicio de sesion.'}</span>
+          ) : (
+            <span>Editable con el monitor detenido.</span>
+          )}
         </div>
-        <div className={`baseline-status ${source.baseline_ready ? 'ready' : 'pending'}`}>
-          <span>{source.baseline_ready ? 'Snapshot inicial calibrado' : 'Snapshot inicial pendiente'}</span>
-          {source.baseline_policy_hash ? <code>{source.baseline_policy_hash}</code> : null}
-        </div>
+        {!isManual ? (
+          <div className={`baseline-status ${source.baseline_ready ? 'ready' : 'pending'}`}>
+            <span>{source.baseline_ready ? 'Snapshot inicial calibrado' : 'Snapshot inicial pendiente'}</span>
+            {source.baseline_policy_hash ? <code>{source.baseline_policy_hash}</code> : null}
+          </div>
+        ) : null}
         <CatalogFilterCompatibilityStatus source={source} />
         {!source.is_active ? (
           <div className="detail-probe-panel">
@@ -758,7 +772,7 @@ function MonitorDetail({
             <div className="detail-probe-controls">
               <input
                 aria-label="ID o URL de item para probar detalle"
-                disabled={savingSourceId === source.id || runningSessionId !== null}
+                disabled={savingSourceId === source.id || hasCommandInFlight}
                 placeholder="ID o URL de item Vinted"
                 value={detailProbeRef}
                 onChange={(event) => updateDetailProbeRef(source.id, event.target.value)}
@@ -785,26 +799,39 @@ function MonitorDetail({
           </div>
         ) : null}
         <MonitorConfigEditor
-          disabled={source.is_active}
+          disabled={source.is_active || hasCommandInFlight}
           source={source}
           sourceDraft={sourceDraft}
           updateSourceDraft={updateSourceDraft}
         />
         <div className="monitor-config-actions">
           {source.is_active ? (
-            <button type="button" disabled={savingSourceId === source.id} onClick={() => onStopMonitor(source.id)}>
-              <Square size={16} />
-              Detener sesion
-            </button>
+            <>
+              {isManual ? (
+                <button type="button" disabled={savingSourceId === source.id || hasCommandInFlight} onClick={() => onRunNow(source)}>
+                  <Play size={16} />
+                  {runningSessionId === source.id ? 'Ejecutando...' : 'Ejecutar ahora'}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={savingSourceId === source.id || hasCommandInFlight}
+                title={hasCommandInFlight ? 'Espera a que termine la ejecucion antes de detener la sesion' : 'Detener sesion'}
+                onClick={() => onStopMonitor(source.id)}
+              >
+                <Square size={16} />
+                Detener sesion
+              </button>
+            </>
           ) : (
             <>
-              <button type="button" disabled={savingSourceId === source.id || !hasUnsavedChanges} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
+              <button type="button" disabled={savingSourceId === source.id || hasCommandInFlight || !hasUnsavedChanges} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
                 <Save size={16} />
                 Guardar
               </button>
               <button
                 type="button"
-                disabled={savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges || launchBlockedByFilters}
+                disabled={savingSourceId === source.id || hasCommandInFlight || hasUnsavedChanges || launchBlockedByFilters}
                 title={
                   hasUnsavedChanges
                     ? 'Guarda los cambios antes de preparar la sesion Vinted'
@@ -817,42 +844,46 @@ function MonitorDetail({
                 <KeyRound size={16} />
                 Preparar sesion
               </button>
+              {!isManual ? (
+                <button
+                  type="button"
+                  disabled={savingSourceId === source.id || hasCommandInFlight || hasUnsavedChanges || launchBlockedByFilters}
+                  title={
+                    hasUnsavedChanges
+                      ? 'Guarda los cambios antes de recalibrar'
+                      : launchBlockedByFilters
+                        ? 'Corrige los filtros de URL no soportados antes de recalibrar'
+                        : 'Recalibrar listado inicial'
+                  }
+                  onClick={() => onRecalibrateBaseline(source)}
+                >
+                  <RefreshCw size={16} />
+                  Recalibrar listado inicial
+                </button>
+              ) : null}
               <button
                 type="button"
-                disabled={savingSourceId === source.id || runningSessionId !== null || hasUnsavedChanges || launchBlockedByFilters}
+                disabled={hasCommandInFlight || savingSourceId === source.id || hasUnsavedChanges || launchBlockedByBaseline || launchBlockedByFilters}
                 title={
                   hasUnsavedChanges
-                    ? 'Guarda los cambios antes de recalibrar'
-                    : launchBlockedByFilters
-                      ? 'Corrige los filtros de URL no soportados antes de recalibrar'
-                      : 'Recalibrar listado inicial'
-                }
-                onClick={() => onRecalibrateBaseline(source)}
-              >
-                <RefreshCw size={16} />
-                Recalibrar listado inicial
-              </button>
-              <button
-                type="button"
-                disabled={runningSessionId !== null || savingSourceId === source.id || hasUnsavedChanges || launchBlockedByBaseline || launchBlockedByFilters}
-                title={
-                  hasUnsavedChanges
-                    ? 'Guarda los cambios antes de lanzar la sesion'
+                    ? 'Guarda los cambios antes de iniciar la sesion'
                     : launchBlockedByFilters
                       ? 'Corrige los filtros de URL no soportados antes de ejecutar este monitor'
                     : launchBlockedByBaseline
                       ? 'Recalibra el listado inicial antes de ejecutar este monitor'
-                      : 'Lanzar sesion'
+                      : isManual
+                        ? 'Iniciar sesion y calibrar el listado actual'
+                        : 'Lanzar sesion'
                 }
                 onClick={() => onStartSession(source)}
               >
                 <Play size={17} />
-                Lanzar sesion
+                {runningSessionId === source.id ? 'Iniciando...' : 'Iniciar sesion'}
               </button>
               <button
                 className="danger-button"
                 type="button"
-                disabled={savingSourceId === source.id}
+                disabled={savingSourceId === source.id || hasCommandInFlight}
                 title="Archivar monitor"
                 onClick={() => setArchiveSource(source)}
               >

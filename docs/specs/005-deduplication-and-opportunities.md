@@ -1,6 +1,6 @@
 # 005 Fast Detection, Redis Seen Tracking, and Detail Enrichment
 
-> Planned replacement: roadmap items 14.34.1 and 14.34.2 move calibration into manual and recurring session start, then remove explicit recalibration. Every start adds the current catalog window to the monitor/policy seen state without creating opportunities, while retaining earlier seen markers to avoid resurfacing old listings as new. The decision-complete lifecycle and verification contracts live in spec 008. Until those slices merge, the explicit-baseline behavior documented below remains implemented.
+Manual calibration is owned by session start since roadmap item 14.34.1. Recurring modes still use the explicit baseline contract until 14.34.2 moves their calibration into start and removes the temporary public baseline surface.
 
 ## Goal
 
@@ -14,7 +14,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Request `newest_first`, `page=1`, and a small configurable `per_page` window, default `5`.
 - Force `newest_first` for the fast API request even if the saved catalog URL has another `order`.
 - Require Redis before a monitor processes candidates. If Redis is unavailable, fail the run and stop/block that monitor execution.
-- Require an explicit initial catalog snapshot before manual, continuous, duration, window, or scheduler runs can process candidates.
+- Capture the manual initial catalog snapshot inside `Iniciar sesion`; require the temporary explicit snapshot for continuous, duration, window and scheduler runs until 14.34.2.
 - Use Redis seen keys scoped by monitor and evaluation policy hash as the source of truth for whether an item should be processed.
 - Store the initial snapshot marker in Redis by monitor and evaluation policy hash with the same TTL as seen keys.
 - Use short-lived Redis processing locks to avoid concurrent duplicate work for the same monitor/item.
@@ -65,13 +65,13 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - HTML catalog parsing is not used as a fallback for a failed fast run.
 - Redis availability is checked before candidate processing; unavailable Redis marks the run failed and no detail/opportunity work happens.
 - Item catalog identity is checked idempotently against Redis seen state before detail/filter work.
-- A monitor without a valid initial snapshot is rejected before detail/filter/opportunity work and must be recalibrated explicitly.
-- Recalibrating the initial snapshot fetches the current catalog window, marks visible IDs as seen, records a baseline run, and creates no opportunities.
+- An ordinary run without a valid initial snapshot fails before catalog/detail/filter/opportunity work. Manual mode closes and requires a new session; recurring modes currently require explicit recalibration.
+- Manual session start fetches the current catalog window, marks visible IDs as seen, records a sessionless baseline run and creates no item or opportunity. Explicit recurring recalibration currently has the same snapshot effect.
 - First time an item appears in a monitor/policy, it is considered new for that monitor.
 - Re-running the same monitor with the same top items does not create another opportunity.
 - The same item appearing under another monitor can be considered new for that other monitor.
 - Changing the monitor URL or monitor-owned filter definition changes the policy hash and can reevaluate visible items.
-- Changing the monitor URL or monitor-owned filter definition also requires a new explicit initial snapshot for the new policy hash.
+- Changing the monitor URL or monitor-owned filter definition requires the next manual start, or the temporary recurring recalibration action, to seed the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
 - Details are fetched for monitor-new candidates before opportunity creation and are bounded by the configured per-run limit.
 - Ordinary detail transport, response or parser failures do not create opportunities and remain retryable for three total attempts. A Cloudflare/DataDome detail challenge instead terminates the whole task on its first response while preserving claimed candidates for a future new task; candidates skipped by the per-run detail budget are queued without consuming an attempt.
@@ -91,7 +91,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Missing optional shipping, buyer-protection, total-price or availability signals remain null/unknown and do not block opportunity creation.
 - A run is reported successful only after its PostgreSQL effects and Redis candidate transitions are durable. Recovery paths must not leave contradictory terminal events.
 - Concurrent monitors may share one global `Item` row without either run failing; each monitor still owns its opportunity independently.
-- The evaluation policy hash includes a versioned description-only contract so Redis state produced under earlier multi-field filtering is never mixed with new decisions. Monitors require an explicit baseline for the new policy.
+- The evaluation policy hash includes a versioned description-only contract so Redis state produced under earlier multi-field filtering is never mixed with new decisions. Every policy needs a baseline owned by manual start or, temporarily, explicit recurring recalibration.
 
 ## Verification
 
@@ -99,8 +99,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Simulate expired anonymous session and confirm one bootstrap-and-retry.
 - Simulate retry failure and confirm a failed run plus error row.
 - Run with repeated seen Redis IDs and confirm no detail fetch.
-- Confirm manual and continuous runs without initial snapshot are rejected.
-- Confirm explicit recalibration marks visible IDs as seen without creating opportunities.
+- Confirm a manual start marks visible IDs as seen without creating opportunities and opens a session only after success.
+- Confirm manual and continuous ordinary runs without a marker fail before candidate work; manual closes and asks for a new session, while recurring retains explicit recalibration until 14.34.2.
 - Run the same fixture twice and confirm no duplicate opportunity or repeated filter work.
 - Run the same item under two monitors and confirm each monitor can count the item once without duplicating alerts inside either monitor.
 - Confirm `items_found`, `items_new`, and `opportunities_created` reflect catalog results, monitor-new items, and created opportunities.

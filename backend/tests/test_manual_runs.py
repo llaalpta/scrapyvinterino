@@ -606,14 +606,18 @@ def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
 def source_id() -> int:
     cleanup_source(None)
     with SessionLocal() as db:
+        started_at = datetime.now(UTC)
         source = SearchSource(
             name="pytest manual run source",
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
             is_active=True,
+            monitor_started_at=started_at,
             scheduler_config={},
         )
         db.add(source)
+        db.flush()
+        start_monitor_session(db, source, started_at=started_at, allow_manual=True)
         db.commit()
         db.refresh(source)
         created_id = source.id
@@ -1547,15 +1551,20 @@ def test_active_monitor_stops_after_vinted_session_use_limit() -> None:
     cleanup_source(source_id)
 
 
-def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(source_id: int) -> None:
+def test_manual_run_reuses_active_session_without_closing_it(source_id: int) -> None:
     with SessionLocal() as db:
         source = db.get(SearchSource, source_id)
         assert source is not None
-        source.is_active = False
         source.monitor_mode = "manual"
         source.monitor_started_at = datetime(2026, 7, 4, 8, 0, tzinfo=UTC)
-        source.monitor_until = datetime(2026, 7, 4, 9, 0, tzinfo=UTC)
-        source.next_run_at = datetime(2026, 7, 4, 8, 5, tzinfo=UTC)
+        session = db.scalar(
+            select(MonitorSession).where(
+                MonitorSession.source_id == source_id,
+                MonitorSession.stopped_at.is_(None),
+            )
+        )
+        assert session is not None
+        session_id = session.id
         db.commit()
 
     with SessionLocal() as db:
@@ -1567,14 +1576,18 @@ def test_punctual_manual_run_executes_inactive_monitor_without_activating_it(sou
             egress=_test_direct_egress(),
         )
         source = db.get(SearchSource, source_id)
+        session = db.get(MonitorSession, session_id)
 
         assert run.status == SUCCESS
         assert source is not None
-        assert source.is_active is False
-        assert source.monitor_started_at is None
+        assert source.is_active is True
+        assert source.monitor_started_at == datetime(2026, 7, 4, 8, 0, tzinfo=UTC)
         assert source.monitor_until is None
         assert source.next_run_at is None
         assert source.last_run_at == run.finished_at
+        assert session is not None
+        assert session.stopped_at is None
+        assert run.monitor_session_id == session.id
 
 
 def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> None:
@@ -1595,12 +1608,13 @@ def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> No
             )
 
 
-def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_id: int) -> None:
+def test_recurring_recalibration_marks_visible_items_without_opportunities(source_id: int) -> None:
     with SessionLocal() as db:
         source = db.get(SearchSource, source_id)
         assert source is not None
         source.is_active = False
-        source.monitor_mode = "manual"
+        source.monitor_mode = "continuous"
+        db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)
         db.commit()
 
     cache = FakeSeenCache(baseline_ready=False)
@@ -1619,6 +1633,7 @@ def test_recalibrate_baseline_marks_visible_items_without_opportunities(source_i
 
         assert run.status == SUCCESS
         assert run.trigger == "baseline"
+        assert run.runtime_metadata["baseline_reason"] == "explicit_recalibration"
         assert run.items_found == 2
         assert run.items_new == 0
         assert run.opportunities_created == 0
@@ -1663,7 +1678,7 @@ def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.M
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
             is_active=False,
-            monitor_mode="manual",
+            monitor_mode="continuous",
             scheduler_config={},
         )
         db.add(source)
@@ -1720,12 +1735,25 @@ def test_monitor_run_without_baseline_fails_before_catalog(source_id: int) -> No
             egress=_test_direct_egress(),
         )
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+        source = db.get(SearchSource, source_id)
+        session = db.get(MonitorSession, run.monitor_session_id)
 
         assert run.status == FAILED
-        assert "Recalibra el listado inicial" in (run.error_message or "")
+        assert "inicia una nueva sesion" in (run.error_message or "")
         assert provider.detail_calls == []
         assert any(event.phase == "baseline_required" for event in events)
         assert all(event.phase != "catalog_search_start" for event in events)
+        assert next(event for event in events if event.phase == "run_failed").details["recovery_action"] == (
+            "start_new_manual_session"
+        )
+        closure_events = [event for event in events if event.phase == "monitor_session_closed"]
+        assert len(closure_events) == 1
+        assert closure_events[0].details["reason"] == "baseline_required"
+        assert source is not None
+        assert source.is_active is False
+        assert session is not None
+        assert session.stopped_at is not None
+        assert session.stop_reason == "baseline_required"
 
 
 def test_monitor_run_skips_existing_opportunity_before_filters(source_id: int) -> None:
@@ -1752,15 +1780,21 @@ def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> N
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
+        started_at = datetime.now(UTC)
         source = SearchSource(
             name="pytest api baseline required monitor",
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
-            is_active=False,
+            is_active=True,
             monitor_mode="manual",
+            monitor_started_at=started_at,
             scheduler_config={},
         )
         db.add(source)
+        db.flush()
+        session = start_monitor_session(db, source, started_at=started_at, allow_manual=True)
+        assert session is not None
+        session_id = session.id
         db.commit()
         source_id = source.id
 
@@ -1769,13 +1803,25 @@ def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> N
     try:
         response = client.post(f"/api/monitors/{source_id}/runs")
 
-        assert response.status_code == 409
-        assert "Recalibra el listado inicial" in response.json()["detail"]
+        assert response.status_code == 201
+        assert response.json()["status"] == FAILED
+        assert "inicia una nueva sesion" in response.json()["error_message"]
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            session = db.get(MonitorSession, session_id)
+            run = db.get(Run, response.json()["id"])
+            assert source is not None
+            assert source.is_active is False
+            assert session is not None
+            assert session.stopped_at is not None
+            assert session.stop_reason == "baseline_required"
+            assert run is not None
+            assert run.monitor_session_id == session.id
     finally:
         cleanup_source(source_id)
 
 
-def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recurring_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     cache = FakeSeenCache(baseline_ready=False)
@@ -1785,7 +1831,7 @@ def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPa
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
             is_active=False,
-            monitor_mode="manual",
+            monitor_mode="continuous",
             scheduler_config={},
         )
         db.add(source)
@@ -1813,6 +1859,37 @@ def test_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPa
         cleanup_source(source_id)
 
 
+def test_manual_monitor_baseline_api_is_hidden_from_manual_flow() -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest manual baseline hidden monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/baseline")
+
+        assert response.status_code == 409
+        assert "modo manual" in response.json()["detail"]
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.is_active is False
+            assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == source_id)) == 0
+            assert db.scalar(select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == source_id)) == 0
+    finally:
+        cleanup_source(source_id)
+
+
 def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
@@ -1822,7 +1899,7 @@ def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filt
             url="https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12",
             normalized_query={"catalog[]": ["76"], "color_ids[]": ["12"]},
             is_active=False,
-            monitor_mode="manual",
+            monitor_mode="continuous",
             scheduler_config={},
         )
         db.add(source)
@@ -1865,6 +1942,12 @@ def test_monitor_traffic_actions_reject_unsupported_url_filter_before_creating_r
             scheduler_config={},
         )
         db.add(source)
+        db.flush()
+        if endpoint == "runs":
+            started_at = datetime.now(UTC)
+            source.is_active = True
+            source.monitor_started_at = started_at
+            start_monitor_session(db, source, started_at=started_at, allow_manual=True)
         db.commit()
         source_id = source.id
 
@@ -1882,20 +1965,25 @@ def test_monitor_traffic_actions_reject_unsupported_url_filter_before_creating_r
         cleanup_source(source_id)
 
 
-def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_monitor_run_api_reuses_active_manual_session(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
+        started_at = datetime.now(UTC)
         source = SearchSource(
             name="pytest api manual monitor",
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
-            is_active=False,
+            is_active=True,
             monitor_mode="manual",
+            monitor_started_at=started_at,
             scheduler_config={},
         )
         db.add(source)
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
+        db.flush()
+        session = start_monitor_session(db, source, started_at=started_at, allow_manual=True)
+        assert session is not None
+        session_id = session.id
         db.commit()
         source_id = source.id
 
@@ -1909,19 +1997,47 @@ def test_monitor_run_api_executes_inactive_manual_monitor(monkeypatch: pytest.Mo
         assert response.json()["status"] == SUCCESS
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
-            session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
+            session = db.get(MonitorSession, session_id)
             run = db.get(Run, response.json()["id"])
             assert source is not None
-            assert source.is_active is False
+            assert source.is_active is True
             assert source.monitor_until is None
             assert source.next_run_at is None
             assert session is not None
-            assert session.stopped_at is not None
-            assert session.stop_reason == "completed"
+            assert session.stopped_at is None
+            assert session.stop_reason is None
             assert run is not None
             assert run.monitor_session_id == session.id
     finally:
         app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_monitor_run_api_rejects_inactive_manual_monitor() -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api inactive manual monitor",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/runs")
+
+        assert response.status_code == 409
+        assert "sesion manual" in response.json()["detail"]
+        with SessionLocal() as db:
+            assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == source_id)) == 0
+            assert db.scalar(select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == source_id)) == 0
+    finally:
         cleanup_source(source_id)
 
 
@@ -1936,15 +2052,19 @@ def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: p
                 synchronize_session=False,
             )
         update_scheduler_config(db, {"allow_direct_without_proxy": False}, Settings())
+        started_at = datetime.now(UTC)
         source = SearchSource(
             name="pytest no egress capacity",
             url="https://www.vinted.es/catalog?search_text=no-egress",
             normalized_query={"search_text": ["no-egress"]},
-            is_active=False,
+            is_active=True,
             monitor_mode="manual",
+            monitor_started_at=started_at,
             scheduler_config={},
         )
         db.add(source)
+        db.flush()
+        start_monitor_session(db, source, started_at=started_at, allow_manual=True)
         db.commit()
         source_id = source.id
 
@@ -1966,7 +2086,7 @@ def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: p
         cleanup_source(source_id)
 
 
-def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
@@ -1984,27 +2104,88 @@ def test_monitor_start_api_in_manual_mode_runs_once_and_stays_inactive(monkeypat
         source_id = source.id
 
     _enable_direct_runtime(monkeypatch)
+    cache = FakeSeenCache(baseline_ready=False)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
-    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
     try:
         response = client.post(f"/api/monitors/{source_id}/start")
 
         assert response.status_code == 201
-        assert response.json()["status"] == SUCCESS
+        body = response.json()
+        assert body["status"] == SUCCESS
+        assert body["trigger"] == "baseline"
+        assert body["items_found"] == 1
+        assert body["items_new"] == 0
+        assert body["opportunities_created"] == 0
+        assert body["monitor_session_id"] is None
+        second_response = client.post(f"/api/monitors/{source_id}/start")
+        assert second_response.status_code == 409
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
-            session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
+            sessions = list(db.scalars(select(MonitorSession).where(MonitorSession.source_id == source_id)))
+            runs = list(db.scalars(select(Run).where(Run.source_id == source_id)))
+            item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
+            opportunity_count = db.scalar(
+                select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id)
+            )
+            assert source is not None
+            assert source.is_active is True
+            assert source.monitor_started_at is not None
+            assert source.monitor_until is None
+            assert source.next_run_at is None
+            assert len(sessions) == 1
+            assert sessions[0].stopped_at is None
+            assert len(runs) == 1
+            assert runs[0].id == body["id"]
+            assert runs[0].monitor_session_id is None
+            assert runs[0].runtime_metadata["baseline_reason"] == "session_start"
+            assert cache.marked_seen == ["pytest-run-item-0"]
+            assert cache.baseline_ready is True
+            assert item_count == 0
+            assert opportunity_count == 0
+    finally:
+        app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+def test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest api manual baseline failure",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    _enable_direct_runtime(monkeypatch)
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSearchFailingProvider()
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache(baseline_ready=False))
+    try:
+        response = client.post(f"/api/monitors/{source_id}/start")
+
+        assert response.status_code == 201
+        assert response.json()["status"] == FAILED
+        assert response.json()["trigger"] == "baseline"
+        assert "session-secret" not in (response.json()["error_message"] or "")
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
             run = db.get(Run, response.json()["id"])
             assert source is not None
             assert source.is_active is False
             assert source.monitor_started_at is None
             assert source.monitor_until is None
             assert source.next_run_at is None
-            assert session is not None
-            assert session.stopped_at is not None
-            assert session.stop_reason == "completed"
             assert run is not None
-            assert run.monitor_session_id == session.id
+            assert run.monitor_session_id is None
+            assert run.runtime_metadata["baseline_reason"] == "session_start"
+            assert db.scalar(select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == source_id)) == 0
     finally:
         app.dependency_overrides.clear()
         cleanup_source(source_id)
@@ -2271,6 +2452,61 @@ def test_monitor_stop_closes_active_session() -> None:
         cleanup_source(source_id)
 
 
+@pytest.mark.parametrize("run_status", ["running", "finalizing"])
+def test_monitor_stop_rejects_non_terminal_run_without_mutation(run_status: str) -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    started_at = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name=f"pytest stop blocked {run_status}",
+            url="https://www.vinted.es/catalog?search_text=stop-blocked",
+            normalized_query={"search_text": ["stop-blocked"]},
+            is_active=True,
+            monitor_mode="manual",
+            monitor_started_at=started_at,
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        session = start_monitor_session(db, source, started_at=started_at, allow_manual=True)
+        assert session is not None
+        run = Run(
+            source_id=source.id,
+            monitor_session_id=session.id,
+            status=run_status,
+            trigger="manual",
+            runtime_metadata={},
+        )
+        db.add(run)
+        db.commit()
+        source_id = source.id
+        session_id = session.id
+        run_id = run.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/stop")
+
+        assert response.status_code == 409
+        assert "ejecucion en curso" in response.json()["detail"]
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            session = db.get(MonitorSession, session_id)
+            run = db.get(Run, run_id)
+            assert source is not None
+            assert source.is_active is True
+            assert source.monitor_started_at == started_at
+            assert source.next_run_at is None
+            assert session is not None
+            assert session.stopped_at is None
+            assert session.stop_reason is None
+            assert run is not None
+            assert run.status == run_status
+            assert run.finished_at is None
+    finally:
+        cleanup_source(source_id)
+
+
 def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
@@ -2332,6 +2568,21 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
             [
                 Run(
                     source_id=source.id,
+                    monitor_session_id=None,
+                    status=SUCCESS,
+                    trigger="baseline",
+                    started_at=datetime(2026, 7, 4, 8, 5, tzinfo=UTC),
+                    finished_at=datetime(2026, 7, 4, 8, 6, tzinfo=UTC),
+                    items_found=100,
+                    items_new=0,
+                    items_filter_passed=0,
+                    items_discarded_by_filters=0,
+                    items_filter_pending=0,
+                    opportunities_created=0,
+                    runtime_metadata={"baseline_run": True},
+                ),
+                Run(
+                    source_id=source.id,
                     monitor_session_id=session.id,
                     status=SUCCESS,
                     trigger="manual",
@@ -2375,6 +2626,8 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
         assert stats.session_summary.sessions_count == 1
         assert stats.session_summary.runs_count == 2
         assert stats.session_summary.items_found == 7
+        assert stats.historical_summary.runs_count == 2
+        assert stats.historical_summary.items_found == 7
         assert stats.historical_summary.opportunities_created == 3
         assert stats.bucket_label == "1 h"
         assert stats.bucket_seconds == 3600
@@ -3032,14 +3285,18 @@ def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:
 
 def test_same_item_can_create_opportunity_in_different_monitor(source_id: int) -> None:
     with SessionLocal() as db:
+        started_at = datetime.now(UTC)
         second = SearchSource(
             name="pytest second monitor",
             url="https://www.vinted.es/catalog?search_text=second",
             normalized_query={"search_text": ["second"]},
             is_active=True,
+            monitor_started_at=started_at,
             scheduler_config={},
         )
         db.add(second)
+        db.flush()
+        start_monitor_session(db, second, started_at=started_at, allow_manual=True)
         db.commit()
         second_id = second.id
 

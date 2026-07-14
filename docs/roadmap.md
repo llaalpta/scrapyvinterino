@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | not-started | 14.34.1 Manual session-start baseline | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/manual-session-start-baseline` | Starting a manual monitor calibrates without opportunities and opens one active session; `Ejecutar ahora` owns later business runs until an explicit stop. |
+| 1 | done | 14.34.1 Manual session-start baseline | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/manual-session-start-baseline` | Starting a manual monitor calibrates without opportunities and opens one active session; `Ejecutar ahora` owns later business runs until an explicit stop. Live PWA/API/PostgreSQL/Redis QA, full backend, Ruff and PWA gates passed without external traffic or residue. |
 | 2 | not-started | 14.34.2 Recurring session-start baseline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/recurring-session-start-baseline` | Starting a recurring monitor calibrates, activates and persists its first later deadline without an immediate business run; the standalone baseline contract is then removed. |
 | 3 | not-started | 14.34.3 Graceful monitor-session stop | `docs/specs/003-manual-run.md`, `docs/specs/008-scheduler.md` | `fix/session-stop-drain` | Stop blocks new/ready work immediately, lets a run already started finish, keeps configuration locked while draining and closes the session at its terminal result. |
 

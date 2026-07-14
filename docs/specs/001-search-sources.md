@@ -1,6 +1,6 @@
 # 001 Search Sources
 
-> Planned replacement: the 14.34 program changes `is_active` from recurring-only state to an open manual or recurring monitor session, removes public baseline-readiness fields after every start path owns calibration, and keeps configuration locked during the later stop-drain slice. Until those slices merge, the current command boundaries below remain implemented.
+Since 14.34.1, `is_active` represents an open manual or recurring monitor session. Public baseline-readiness fields remain temporarily for recurring modes until 14.34.2; 14.34.3 later extends configuration locking through stop drain.
 
 ## Goal
 
@@ -12,7 +12,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - List configured monitors through API and PWA.
 - Store a normalized representation of query parameters.
 - Keep new monitors inactive until the user launches them.
-- Treat active/inactive as monitor scheduling state; executing/running belongs to individual runs.
+- Treat active/inactive as monitor-session state; executing/running still belongs to individual runs.
 - Validate that the URL is an anonymous public Vinted catalog URL before saving it.
 - Archive monitors from the PWA as the safe delete behavior while preserving historical runs, events, items, and opportunities.
 - Allow the API to change monitor name/URL and both API/PWA to change filters, cadence, and execution mode without creating a new monitor identity.
@@ -34,7 +34,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - PWA:
   - monitor creation form;
   - monitor count and visible monitor table with a selected monitor detail panel;
-  - editing of filters, cadence, window/duration, and execution mode while `is_active=false`;
+  - editing of filters, cadence, window/duration, and execution mode while stopped and without a local command/run in progress;
   - archive/delete action with confirmation.
 - Database:
   - `search_sources`.
@@ -57,12 +57,12 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 ## Current Command Boundaries
 
 - `POST /api/monitors` validates locally, commits one inactive/manual row, and only then derives baseline fields from Redis for the response. Redis unavailability is represented as `baseline_ready=false`.
-- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. This gate does not exclude a simultaneous manual run. The normal-use restriction, name/URL PWA editing and storage validation are grouped in 14.26; adversarial cross-process edit/run serialization is not a separate MVP task.
+- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. The PWA blocks editing during its manual start baseline or a loaded non-terminal run, but another tab/client can still race that inactive baseline window. Name/URL PWA editing and storage validation are grouped in 14.26; adversarial cross-process serialization remains conditional in 14.30.
 - Payloads rejected with `422`, active updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row; 14.26 must turn that into mutation-free validation as part of the edit flow.
-- URL and blacklist participate in the baseline policy hash. Changing either keeps the monitor identity and may require calibration unless a baseline for the resulting hash still exists; Redis read failure is not distinguishable from baseline absence in the current response.
+- URL and blacklist participate in the baseline policy hash. Changing either keeps the monitor identity; the next manual start seeds the resulting hash, while recurring modes retain temporary explicit calibration until 14.34.2. Redis read failure is not distinguishable from baseline absence in the current response.
 - `DELETE /api/monitors/{monitor_id}` is a soft archive. The first successful call returns `204`; repeating it is idempotent and also returns `204`. Default listing omits the row.
 - Archiving makes PostgreSQL inactive, removes future deadlines, closes the open monitor session and purges encrypted context from owned Vinted sessions. It may inspect/cancel Redis queue state, so the no-Redis-residue assertion applies to a newly created QA monitor, not to every archive.
-- A task already reserved/executing and stale `monitor_started_at` remain known archive gaps. The local operator rule is stop, wait for a terminal run and then archive. 14.30 is conditional on a normal-use reproduction; the former 14.31 exactly-once Redis/SQL convergence project is not part of the personal MVP.
+- A task already reserved/executing or a baseline started from another client remains a known archive gap. The local PWA blocks archive during its command; the operator rule is stop, wait for a terminal run and then archive. 14.30 is conditional on a normal-use reproduction; the former 14.31 exactly-once Redis/SQL convergence project is not part of the personal MVP.
 
 ## Acceptance Criteria
 
@@ -70,7 +70,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Saved monitors are visible after refresh.
 - Multiple saved monitors are shown in one compact selectable table with active monitors first, status chips/styles per row, and one selected monitor detail visible at a time.
 - The monitor detail updates when a different monitor row is selected.
-- The selected monitor detail shows name, URL, session state when available, configuration editable while `is_active=false`, performance chart, and active logs in that order.
+- The selected monitor detail shows name, URL, session state when available, configuration editable while stopped and idle, performance chart, and active logs in that order.
 - Archived monitors are hidden from the default monitor list and cannot be scheduled or launched.
 - Archiving a monitor prevents new scheduler admission, closes its open monitor session, and preserves historical rows for audit and result traceability.
 - Archiving invalidates every prepared Vinted session owned by the monitor and purges its encrypted cookie/token payload while preserving safe session metadata.

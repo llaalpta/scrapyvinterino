@@ -73,6 +73,42 @@ def test_start_source_monitor_persists_first_recurring_deadline_with_interval_fl
             db.commit()
 
 
+def test_start_source_monitor_opens_manual_session_without_deadline() -> None:
+    started_at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest manual session activation",
+            url="https://www.vinted.es/catalog?search_text=manual-session",
+            normalized_query={"search_text": ["manual-session"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    try:
+        with SessionLocal() as db:
+            activated = start_source_monitor(db, source_id, now=started_at)
+            sessions = list(db.query(MonitorSession).filter(MonitorSession.source_id == source_id))
+
+            assert activated.is_active is True
+            assert activated.monitor_started_at == started_at
+            assert activated.monitor_until is None
+            assert activated.next_run_at is None
+            assert len(sessions) == 1
+            assert sessions[0].started_at == started_at
+            assert sessions[0].stopped_at is None
+    finally:
+        with SessionLocal() as db:
+            db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            db.commit()
+
+
 def test_start_source_monitor_rejects_a_second_activation() -> None:
     with SessionLocal() as db:
         source = SearchSource(
