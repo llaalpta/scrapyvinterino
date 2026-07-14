@@ -16,11 +16,10 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | not-started | 14.12.5 Honest prepared-session state | `docs/specs/010-producer-consumer-bypass.md` | `fix/prepared-session-read-model` | Runtime, API and PWA use the same eligibility decision and expose `usable_now` plus a safe unusable reason instead of trusting the latest `ready` label. |
-| 2 | not-started | 14.19 Worker Redis availability | `docs/specs/008-scheduler.md`, `docs/deployment.md` | `fix/worker-redis-availability` | Redis loss makes the worker stop advertising availability and exit for Compose restart; existing scheduler/PWA state converges to unavailable without a general readiness platform. |
-| 3 | not-started | 14.34.1 Manual session-start baseline | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/manual-session-start-baseline` | Starting a manual monitor calibrates without opportunities and opens one active session; `Ejecutar ahora` owns later business runs until an explicit stop. |
-| 4 | not-started | 14.34.2 Recurring session-start baseline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/recurring-session-start-baseline` | Starting a recurring monitor calibrates, activates and persists its first later deadline without an immediate business run; the standalone baseline contract is then removed. |
-| 5 | not-started | 14.34.3 Graceful monitor-session stop | `docs/specs/003-manual-run.md`, `docs/specs/008-scheduler.md` | `fix/session-stop-drain` | Stop blocks new/ready work immediately, lets a run already started finish, keeps configuration locked while draining and closes the session at its terminal result. |
+| 1 | not-started | 14.19 Worker Redis availability | `docs/specs/008-scheduler.md`, `docs/deployment.md` | `fix/worker-redis-availability` | Redis loss makes the worker stop advertising availability and exit for Compose restart; existing scheduler/PWA state converges to unavailable without a general readiness platform. |
+| 2 | not-started | 14.34.1 Manual session-start baseline | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/manual-session-start-baseline` | Starting a manual monitor calibrates without opportunities and opens one active session; `Ejecutar ahora` owns later business runs until an explicit stop. |
+| 3 | not-started | 14.34.2 Recurring session-start baseline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/recurring-session-start-baseline` | Starting a recurring monitor calibrates, activates and persists its first later deadline without an immediate business run; the standalone baseline contract is then removed. |
+| 4 | not-started | 14.34.3 Graceful monitor-session stop | `docs/specs/003-manual-run.md`, `docs/specs/008-scheduler.md` | `fix/session-stop-drain` | Stop blocks new/ready work immediately, lets a run already started finish, keeps configuration locked while draining and closes the session at its terminal result. |
 
 ## Next
 
@@ -81,6 +80,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.12.1 | done | Private local PWA/API access control. |
 | 14.12.2 | done | Proxy/session identity generation and pre-provider fencing, merged through PR #8 at `e9eed13`; Alembic `0019` deliberately removes incompatible prepared sessions. |
 | 14.12.3 | done | Catalog response fail-stop merged through PR #13: the first classified challenge/rejection/`429` terminates and ACKs without failure-triggered refresh, retry or requeue. |
+| 14.12.5 | done | Runtime/API/PWA canonical prepared-session eligibility, monitor-scoped safe reasons and one-shot expiry refresh passed the isolated live API/Playwright gate (10 tests) plus the isolated backend suite (510 passed, 2 opt-in skipped), with no external traffic or operational-state drift. |
 | 14.18 | done | The fixed scheduler/consumer identity canary passed twice in fresh PostgreSQL databases and Redis 15; occupied-Redis rejection and failed-test cleanup preserved operational PostgreSQL/Redis fingerprints, with no worker, provider or proxy traffic. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.

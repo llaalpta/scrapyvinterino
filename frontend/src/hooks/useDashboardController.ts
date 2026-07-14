@@ -222,6 +222,68 @@ export function useDashboardController() {
     }
 
     let disposed = false;
+    void fetchSources()
+      .then((sourceData) => {
+        if (!disposed) {
+          setSources(sourceData);
+        }
+      })
+      .catch((caught: unknown) => {
+        if (!disposed) {
+          setSources((current) => markPreparedSessionsExpired(current, Date.now()));
+          setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el estado de los monitores');
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [activeSection]);
+
+  useEffect(() => {
+    if (activeSection !== 'sources') {
+      return undefined;
+    }
+
+    const now = Date.now();
+    const nearestExpiry = sources
+      .flatMap((source) => source.prepared_sessions)
+      .filter((session) => session.usable_now)
+      .map((session) => session.expires_at ? Date.parse(session.expires_at) : Number.NaN)
+      .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now)
+      .sort((left, right) => left - right)[0];
+    if (nearestExpiry === undefined) {
+      return undefined;
+    }
+
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      void fetchSources()
+        .then((sourceData) => {
+          if (!disposed) {
+            setSources(sourceData);
+          }
+        })
+        .catch((caught: unknown) => {
+          if (!disposed) {
+            setSources((current) => markPreparedSessionsExpired(current, Date.now()));
+            setError(caught instanceof Error ? caught.message : 'No se pudo actualizar la expiracion de la sesion preparada');
+          }
+        });
+    }, Math.max(0, nearestExpiry - now + 100));
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeSection, sources]);
+
+  useEffect(() => {
+    if (activeSection !== 'sources') {
+      return undefined;
+    }
+
+    let disposed = false;
     const pendingTerminalEvents = pendingTerminalEventsRef.current;
     let stream: EventSource | null = null;
     let streamLivenessTimer: number | null = null;
@@ -695,7 +757,6 @@ export function useDashboardController() {
       const run = await prepareMonitorVintedSession(source.id);
       const [sourceData, runData, proxyData] = await Promise.all([fetchSources(), fetchRuns(), fetchProxyProfiles()]);
       setSources(sourceData);
-      setSourceDrafts(buildSourceDrafts(sourceData));
       setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
       setProxyProfiles(proxyData);
       setMonitorRunsBySource((current) => ({
@@ -1079,6 +1140,21 @@ export function useDashboardController() {
       }
     });
   }
+}
+
+function markPreparedSessionsExpired(sourceData: SearchSource[], expiryThreshold: number): SearchSource[] {
+  return sourceData.map((source) => {
+    let changed = false;
+    const preparedSessions = source.prepared_sessions.map((session) => {
+      const expiresAt = session.expires_at ? Date.parse(session.expires_at) : Number.NaN;
+      if (!session.usable_now || !Number.isFinite(expiresAt) || expiresAt > expiryThreshold) {
+        return session;
+      }
+      changed = true;
+      return { ...session, usable_now: false, unusable_reason: 'expired' as const };
+    });
+    return changed ? { ...source, prepared_sessions: preparedSessions } : source;
+  });
 }
 
 function detailProbeMessage(result: Record<string, unknown>): string {

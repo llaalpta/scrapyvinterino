@@ -48,6 +48,16 @@ The maintained end-to-end map is in `docs/architecture.md`. This spec owns the p
 - Expiry, exhaustion, incomplete preparation, invalidation and archive are distinct reasons. They must be visible without exposing secrets, and retention/purge must be explicit rather than inferred from the `status` label.
 - The PWA read model must identify the session the runtime can actually select for a monitor. A latest-created row per proxy is diagnostic history, not the canonical current session.
 
+### 14.12.5 honest prepared-session state
+
+This slice changes only the prepared-session eligibility read model. It does not add a migration, retention or repair policy, automatic purging, provider fallback, proxy-pool selection changes, or external traffic.
+
+Acceptance criteria:
+
+1. Runtime selection and the monitor read model use one canonical eligibility decision. It includes durable status, monitor/proxy identity generation, browser profile, country, locale, `Accept-Language`, viewport, `x-screen`, expiry, use budget, decryptability and required context; selection keeps the existing least-recently-used ordering and never falls through silently after the selected row proves unreadable or incomplete.
+2. Each monitor response exposes at most one canonical prepared-session summary per proxy with `proxy_name`, `usable_now` and one stable safe `unusable_reason`. It never exposes ciphertext, cookies, tokens or proxy credentials, and proxy settings no longer present a latest-created session as the runtime truth.
+3. Monitor detail refreshes this state when the section is entered, after relevant terminal/preparation updates and once at the nearest visible expiry without polling or recreating SSE. An isolated PostgreSQL/Redis/API test proves runtime/API ID agreement plus an unusable negative path with zero provider construction or external traffic; live PWA QA proves the visible expiry transition and removes all QA rows.
+
 ### Effective proxy identity and pre-provider fence
 
 - `proxy_profiles.identity_generation` is a monotonic counter and `proxy_profiles.identity_fingerprint` is the current keyed digest. `vinted_sessions.proxy_identity_generation` stores their combined opaque token and binds each encrypted context to the exact effective proxy identity used to prepare it. A change to scheme, host, port, username, password, country-derived locale/`Accept-Language`/viewport/`x-screen`, or sticky username template advances the counter and changes the binding. Profile name, kind, capacity, telemetry and operational eligibility do not alter that transport identity.
@@ -118,9 +128,9 @@ The maintained end-to-end map is in `docs/architecture.md`. This spec owns the p
 - Stop/archive cancels work that is still in the ready list. A task already reserved immediately before stop can survive until its consumer acknowledges it; a future activation-generation field should distinguish the rare stop-edit-restart race before multi-instance deployment.
 - REST, SSE and traffic-producing commands sit behind the local opaque PostgreSQL session boundary owned by `docs/specs/011-local-pwa-access-control.md`. This access session is independent of the anonymous Vinted context described here.
 - Catalog/probe cookie rotation is not observed by the same refresh detector used for item documents, so PostgreSQL can retain stale context. Invalidation also lacks its own monitor-row lock. 14.12.4 closes every context mutation/write-order fence.
-- Viewport is omitted from selection, repeated explicit preparation can leave several `ready` rows while runtime and PWA choose different ones, and the UI does not derive expiry/exhaustion or refresh automatic changes. 14.12.5 defines one canonical eligible read model.
+- `usable_now` describes whether the prepared context could be reused after its proxy has been admitted; proxy activity, cooldown and capacity remain separate scheduler/egress decisions and are deliberately not folded into this read model.
 - No durable key sentinel detects a global `APP_SECRET_KEY` mismatch before API/worker begin serving. A dependent read/operation must still stop with a clear safe error and no fallback; 14.12.6 is conditional early-startup detection for key rotation, long-lived data or server deployment.
-- With a valid global key, invalid Vinted-session ciphertext/JSON can stay durably labelled `ready`, while one unreadable proxy password can fail summaries or egress construction. The affected operation must stop without retry loop or proxy penalty, and 14.12.5 must not present the row as usable. 14.12.7 is only the conditional durable corruption state; local repair may remove the affected row/profile manually.
+- With a valid global key, invalid Vinted-session ciphertext/JSON can stay durably labelled `ready`, while one unreadable proxy password can fail summaries or egress construction. The prepared-session read model presents an unreadable canonical row as unusable and runtime stops without falling through; 14.12.7 remains only the conditional durable corruption state, and local repair may remove the affected row/profile manually.
 - Proxy username is persisted and returned raw despite the credential contract. 14.12.8 minimizes and encrypts that read/write model.
 - Reuse increments logical use before business traffic but commits it only with the later run transaction, so a crash or rollback can erase a consumed use. The personal local MVP accepts that rare visible drift and does not add the former 14.12.9 durable acquisition ledger.
 - Preparation performs egress/bootstrap/probe before any attempt row or use exists, then records use one only for an accepted context. An abrupt crash may require manual relaunch and may repeat preparation; the former 14.12.10 exactly-once attempt owner is intentionally retired.
@@ -132,6 +142,8 @@ The maintained end-to-end map is in `docs/architecture.md`. This spec owns the p
 - `ruff check backend/src backend/alembic`
 - `python -m pytest backend/tests/test_vinted_catalog_provider.py backend/tests/test_scheduler.py backend/tests/test_task_queue.py backend/tests/test_proxies.py backend/tests/test_consumer.py backend/tests/test_manual_runs.py backend/tests/test_proxy_identity_fence.py backend/tests/test_ephemeral_http.py backend/tests/test_verify_impersonation_script.py`
 - `.\scripts\qa-backend-integration.ps1 -Scenario catalog-fail-stop`
+- `.\scripts\qa-backend-integration.ps1 -Scenario prepared-session-read-model -Repeat 1`
+- `.\scripts\qa-backend-integration.ps1 -Scenario full -Repeat 1`
 - `python scripts/verify_impersonation.py`
 - Docker smoke: `docker compose ps`, API health, Redis ready/processing queue drain after scheduled work, restart recovery, and persisted Redis AOF storage.
 - Optional live diagnostics when credentials/proxies are available: `scripts/check_ja3.py`, `scripts/check_headers.py`, `scripts/check_datadome.py`, `scripts/inspect_vinted_session.py`, and `scripts/compare_fingerprints.py`.

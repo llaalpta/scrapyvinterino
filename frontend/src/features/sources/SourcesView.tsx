@@ -1,6 +1,14 @@
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Search, Square, Trash2 } from 'lucide-react';
-import { type MonitorStats, type MonitorStatsRange, type Run, type RunEvent, type SearchSource } from '../../api';
+import {
+  type MonitorStats,
+  type MonitorStatsRange,
+  type Run,
+  type RunEvent,
+  type SearchSource,
+  type VintedSession,
+  type VintedSessionUnusableReason
+} from '../../api';
 import { formatDate } from '../../utils/format';
 import { eventSearchText } from '../runs/runEventSearch';
 import { RunEventEntry } from '../runs/RunsView';
@@ -729,6 +737,8 @@ function MonitorDetail({
 
       <MonitorSessionOverview source={source} stats={stats} />
 
+      <PreparedSessionsPanel sessions={source.prepared_sessions} />
+
       <section className={`monitor-config-panel${source.is_active ? ' readonly' : ''}`}>
         <div className="monitor-config-heading">
           <h4>Configuracion</h4>
@@ -932,6 +942,71 @@ function MonitorDetail({
       ) : null}
     </div>
   );
+}
+
+function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
+  const usableCount = sessions.filter((session) => session.usable_now).length;
+
+  return (
+    <section className="monitor-session-panel" aria-label="Sesiones Vinted preparadas para este monitor">
+      <div className="monitor-session-heading">
+        <div className="monitor-prepared-session-heading-copy">
+          <h4>Sesiones Vinted preparadas</h4>
+          <p>Contexto canonico reutilizable si el runtime admite ese proxy.</p>
+        </div>
+        <span>{sessions.length === 0 ? 'Sin contexto' : `${usableCount}/${sessions.length} utilizables`}</span>
+      </div>
+      {sessions.length === 0 ? (
+        <p className="empty-inline compact">Sin contexto preparado para este monitor.</p>
+      ) : (
+        <div className="monitor-prepared-session-list">
+          {sessions.map((session) => (
+            <PreparedSessionRow key={session.proxy_profile_id} session={session} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PreparedSessionRow({ session }: { session: VintedSession }) {
+  const reason = session.unusable_reason ? preparedSessionReasonLabel(session.unusable_reason) : null;
+
+  return (
+    <article className={`catalog-filter-status monitor-prepared-session-row ${session.usable_now ? 'ready' : 'blocked'}`}>
+      <div className="monitor-prepared-session-main">
+        <div>
+          <strong>{session.proxy_name}</strong>
+          <span>Sesion #{session.id} | estado durable {session.status}</span>
+        </div>
+        <span className={session.usable_now ? 'status active' : 'status failed'}>
+          {session.usable_now ? 'Utilizable ahora' : 'No utilizable'}
+        </span>
+      </div>
+      <p>{session.usable_now ? 'Cumple el contexto efectivo del runtime.' : reason ?? 'Motivo no disponible.'}</p>
+      <dl className="monitor-session-strip">
+        <Metric label="Usos" value={`${session.request_count}/${session.max_requests}`} />
+        <Metric label="Expira" value={session.expires_at ? formatDate(session.expires_at) : 'Sin expiracion'} />
+        <Metric label="Ultimo uso" value={session.last_used_at ? formatDate(session.last_used_at) : 'Nunca'} />
+      </dl>
+    </article>
+  );
+}
+
+function preparedSessionReasonLabel(reason: VintedSessionUnusableReason): string {
+  const labels: Record<VintedSessionUnusableReason, string> = {
+    status_incomplete: 'La preparacion quedo incompleta.',
+    status_invalid: 'La sesion fue invalidada.',
+    status_unrecognized: 'El estado durable no es reconocido.',
+    proxy_identity_mismatch: 'La identidad efectiva del proxy ha cambiado.',
+    browser_profile_mismatch: 'El perfil de navegador ya no coincide.',
+    request_context_mismatch: 'El contexto HTTP efectivo ya no coincide.',
+    expired: 'La sesion ha expirado.',
+    exhausted: 'La sesion ha agotado su limite de usos.',
+    context_unreadable: 'El contexto cifrado no se puede leer.',
+    context_incomplete: 'Faltan datos requeridos en el contexto preparado.'
+  };
+  return labels[reason];
 }
 
 function CatalogFilterCompatibilityStatus({ source }: { source: SearchSource }) {

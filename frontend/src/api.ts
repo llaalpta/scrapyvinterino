@@ -54,6 +54,7 @@ export type SearchSource = {
   baseline_ready: boolean;
   baseline_policy_hash: string | null;
   catalog_filter_compatibility: CatalogFilterCompatibility;
+  prepared_sessions: VintedSession[];
 };
 
 export type CatalogFilterCompatibility = {
@@ -88,13 +89,27 @@ export type ProxyProfile = {
   last_test_status: string | null;
   last_test_ip: string | null;
   last_test_error: string | null;
-  vinted_session: VintedSession | null;
 };
+
+export type VintedSessionUnusableReason =
+  | 'status_incomplete'
+  | 'status_invalid'
+  | 'status_unrecognized'
+  | 'proxy_identity_mismatch'
+  | 'browser_profile_mismatch'
+  | 'request_context_mismatch'
+  | 'expired'
+  | 'exhausted'
+  | 'context_unreadable'
+  | 'context_incomplete';
 
 export type VintedSession = {
   id: number;
   source_id: number;
   proxy_profile_id: number;
+  proxy_name: string;
+  usable_now: boolean;
+  unusable_reason: VintedSessionUnusableReason | null;
   status: 'ready' | 'incomplete' | 'invalid' | string;
   browser_profile: string;
   impersonate: string;

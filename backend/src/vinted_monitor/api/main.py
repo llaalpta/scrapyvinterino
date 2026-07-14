@@ -102,7 +102,7 @@ from vinted_monitor.services.search_sources import (
 from vinted_monitor.services.seen_cache import SeenCacheUnavailableError
 from vinted_monitor.services.vinted_sessions import (
     VintedSessionRequiredError,
-    get_latest_vinted_session_summary,
+    list_vinted_session_summaries_for_source,
 )
 
 settings = get_settings()
@@ -145,53 +145,52 @@ def get_manual_run_provider() -> ManualRunProvider | None:
     return None
 
 
-def _source_read(source: SearchSource) -> SearchSourceRead:
+def _source_read(source: SearchSource, db: Session) -> SearchSourceRead:
     baseline_ready, policy_hash = monitor_baseline_ready(source)
     return SearchSourceRead.model_validate(source).model_copy(
         update={
             "baseline_ready": baseline_ready,
             "baseline_policy_hash": policy_hash,
             "catalog_filter_compatibility": catalog_filter_compatibility(source.url),
+            "prepared_sessions": [
+                VintedSessionRead(**summary.__dict__)
+                for summary in list_vinted_session_summaries_for_source(db, source.id, settings)
+            ],
         }
     )
 
 
-def _vinted_session_read(summary) -> VintedSessionRead | None:
-    if summary is None:
-        return None
-    return VintedSessionRead(**summary.__dict__)
-
-
-def _proxy_profile_read(profile, db: Session) -> ProxyProfileRead:
-    public = profile_to_public_fields(profile, settings).__dict__
-    public["vinted_session"] = _vinted_session_read(get_latest_vinted_session_summary(db, profile.id, settings))
-    return ProxyProfileRead(**public)
+def _proxy_profile_read(profile) -> ProxyProfileRead:
+    return ProxyProfileRead(**profile_to_public_fields(profile, settings).__dict__)
 
 
 @business_router.get("/monitors", response_model=list[SearchSourceRead])
 def get_monitors(db: Session = Depends(get_db)) -> list[SearchSourceRead]:
-    return [_source_read(source) for source in list_sources(db)]
+    return [_source_read(source, db) for source in list_sources(db)]
 
 
 @business_router.post("/monitors", response_model=SearchSourceRead, status_code=201)
 def post_monitor(payload: SearchSourceCreate, db: Session = Depends(get_db)):
-    return _source_read(create_source(db, payload.name, payload.url))
+    return _source_read(create_source(db, payload.name, payload.url), db)
 
 
 @business_router.patch("/monitors/{monitor_id}", response_model=SearchSourceRead)
 def patch_monitor(monitor_id: int, payload: SearchSourceUpdate, db: Session = Depends(get_db)):
     try:
-        return _source_read(update_source(
+        return _source_read(
+            update_source(
+                db,
+                monitor_id,
+                name=payload.name,
+                url=payload.url,
+                scheduler_config=payload.scheduler_config,
+                monitor_mode=payload.monitor_mode,
+                duration_minutes=payload.duration_minutes,
+                clear_duration_minutes="duration_minutes" in payload.model_fields_set and payload.duration_minutes is None,
+                filter_definition=payload.filter_definition,
+            ),
             db,
-            monitor_id,
-            name=payload.name,
-            url=payload.url,
-            scheduler_config=payload.scheduler_config,
-            monitor_mode=payload.monitor_mode,
-            duration_minutes=payload.duration_minutes,
-            clear_duration_minutes="duration_minutes" in payload.model_fields_set and payload.duration_minutes is None,
-            filter_definition=payload.filter_definition,
-        ))
+        )
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
@@ -260,7 +259,7 @@ def post_monitor_start(
 @business_router.post("/monitors/{monitor_id}/stop", response_model=SearchSourceRead)
 def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
     try:
-        return _source_read(stop_source_monitor(db, monitor_id))
+        return _source_read(stop_source_monitor(db, monitor_id), db)
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -283,7 +282,7 @@ def patch_scheduler(payload: SchedulerUpdate, db: Session = Depends(get_db)):
 
 @business_router.get("/proxy-profiles", response_model=list[ProxyProfileRead])
 def get_proxy_profiles(db: Session = Depends(get_db)) -> list[ProxyProfileRead]:
-    return [_proxy_profile_read(profile, db) for profile in list_proxy_profiles(db)]
+    return [_proxy_profile_read(profile) for profile in list_proxy_profiles(db)]
 
 
 @business_router.post("/proxy-profiles", response_model=ProxyProfileRead, status_code=201)
@@ -305,7 +304,7 @@ def post_proxy_profile(payload: ProxyProfileCreate, db: Session = Depends(get_db
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _proxy_profile_read(profile, db)
+    return _proxy_profile_read(profile)
 
 
 @business_router.patch("/proxy-profiles/{profile_id}", response_model=ProxyProfileRead)
@@ -331,7 +330,7 @@ def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Sessio
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return _proxy_profile_read(profile, db)
+    return _proxy_profile_read(profile)
 
 
 @business_router.post("/proxy-profiles/{profile_id}/test", response_model=ProxyProfileRead)
@@ -351,7 +350,7 @@ def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> P
         updated = mark_proxy_test_result(db, profile_id, status="success", ip=str(ip) if ip else None)
     except Exception as exc:
         updated = mark_proxy_test_result(db, profile_id, status="failed", error=str(exc))
-    return _proxy_profile_read(updated, db)
+    return _proxy_profile_read(updated)
 
 
 @business_router.post("/proxy-profiles/{profile_id}/vinted-session/preflight", status_code=410)
