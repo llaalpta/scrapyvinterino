@@ -1,5 +1,7 @@
 # 001 Search Sources
 
+> Planned replacement: the 14.34 program changes `is_active` from recurring-only state to an open manual or recurring monitor session, removes public baseline-readiness fields after every start path owns calibration, and keeps configuration locked during the later stop-drain slice. Until those slices merge, the current command boundaries below remain implemented.
+
 ## Goal
 
 Allow the user to configure Vinted catalog search URLs from the private app and persist them as reusable opportunity monitors.

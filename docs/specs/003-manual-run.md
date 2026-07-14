@@ -1,5 +1,7 @@
 # 003 Manual Run
 
+> Planned replacement: roadmap items 14.34.1 and 14.34.3 change punctual execution into an active manual session and later add graceful stop drain. `Iniciar sesion` first captures the catalog baseline without opportunities; only a later `Ejecutar ahora` run may process new candidates. The decision-complete target contracts live in spec 008. Until those slices merge, the current behavior documented below remains implemented.
+
 ## Goal
 
 Allow the user to manually execute a configured monitor and record the execution lifecycle.

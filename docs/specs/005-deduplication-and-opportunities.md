@@ -1,5 +1,7 @@
 # 005 Fast Detection, Redis Seen Tracking, and Detail Enrichment
 
+> Planned replacement: roadmap items 14.34.1 and 14.34.2 move calibration into manual and recurring session start, then remove explicit recalibration. Every start adds the current catalog window to the monitor/policy seen state without creating opportunities, while retaining earlier seen markers to avoid resurfacing old listings as new. The decision-complete lifecycle and verification contracts live in spec 008. Until those slices merge, the explicit-baseline behavior documented below remains implemented.
+
 ## Goal
 
 Detect public Vinted items as fast as possible, use Redis to decide whether each monitor already processed an item, and prevent duplicate work and alerts within the same monitor.

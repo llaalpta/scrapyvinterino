@@ -8,13 +8,12 @@ Construir una aplicacion personal para monitorizar catalogos publicos de Vinted,
 
 - Login local.
 - Gestion de URLs de busqueda.
-- Ejecucion manual de busquedas.
+- Sesiones de observacion que calibran el catalogo al iniciar y despues permiten ejecucion manual o programada.
 - Persistencia de articulos, ejecuciones y errores.
 - Deteccion global de articulos nuevos con trazabilidad por fuente.
-- Scheduler concurrente acotado con cache runtime para velocidad de alertas.
+- Scheduler concurrente acotado con cache runtime para velocidad de deteccion.
 - Terminos excluyentes propios por monitor.
 - Tabla de oportunidades en la web.
-- Primer aviso opcional por Telegram para una oportunidad nueva, despues del gate local de fiabilidad vigente.
 - Docker Compose local sin Traefik.
 
 ## Roadmap y specs de feature
@@ -40,6 +39,7 @@ Specs MVP iniciales:
 - Favoritos autenticados.
 - Descubrimiento de checkout: envio, pago, domicilio y puntos pickup.
 - Precompra y compra explicita desde UI.
+- Primer canal de notificacion opcional por Telegram, despues de aceptar manualmente el MVP de monitorizacion.
 - Canales de notificacion adicionales: PWA push, webhook, Discord o email.
 
 ## Limites

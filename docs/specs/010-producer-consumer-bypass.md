@@ -1,5 +1,7 @@
 # 010 Producer-Consumer Architecture with DataDome Bypass
 
+> Planned replacement: 14.34.1/14.34.2 move catalog baseline work into manual and recurring session start, and 14.34.3 later owns stop drain. References below to explicit recalibration and current stop behavior remain implementation truth until those slices merge; each slice must then replace them rather than preserve legacy paths.
+
 ## Goal
 
 Move scheduled monitor execution from an in-process scheduler/executor to a Redis-backed producer-consumer flow, and make every public Vinted catalog request use the `curl_cffi` browser impersonation stack with a prepared persistent Vinted session bound to a sticky residential proxy identity.

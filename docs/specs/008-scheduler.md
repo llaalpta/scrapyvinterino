@@ -1,5 +1,51 @@
 # 008 Bounded Concurrent Scheduler and Runtime Cache
 
+## Planned 14.34 session program
+
+Status: approved and `not-started`. This section defines three replacement slices without claiming that the current implementation below already provides them. Each slice must replace its superseded clauses in specs 001, 003, 005, 008 and 010 plus current architecture/data-model prose before being marked done.
+
+The user saves mode, cadence, duration/window and filters while stopped. Every session start observes one internal `baseline` run while the monitor remains inactive. It adds current catalog IDs to the existing monitor/policy seen state, preserves older seen markers, creates no item/opportunity and is returned as `201 RunRead`. Validation failures create no run; operational baseline failure returns its failed run and leaves no active session/deadline. If the Redis baseline marker later expires during an active session, the next ordinary run fails visibly and closes/stops that session; it never recalibrates silently. Restarting is the manual recovery.
+
+No slice adds a migration, compatibility adapter, automatic retry, hidden fallback or hard network cancellation. Baseline events and policy hashes remain internal diagnostics. Configuration stays read-only while a session is active and, after 14.34.3, while it is draining. Vinted, proxy and Telegram traffic allowance is zero; every QA slice cleans its rows, Redis keys and temporary processes and restores initial services.
+
+### 14.34.1 Manual session-start baseline
+
+`POST /api/monitors/{id}/start` in manual mode performs the baseline and, only on success, creates one active monitor session with `next_run_at=null`. `POST /api/monitors/{id}/runs` requires that active manual session, attaches each single-flight `Ejecutar ahora` run to it and no longer creates/closes a punctual session per run. Until 14.34.3, stop during a non-terminal run is rejected with `409` and disabled in the PWA; stopping after terminal closes the session normally. The explicit baseline route/read fields remain temporarily for recurring modes but are hidden from the manual flow.
+
+Acceptance criteria:
+
+1. Manual start creates exactly one zero-opportunity baseline run and then one active session without a deadline; baseline failure leaves the monitor inactive with no open session.
+2. `Ejecutar ahora` is available only inside that active manual session, reuses its session ID and creates exactly one opportunity for one later unseen passing ID without duplicates.
+3. Restarting takes another baseline so entries visible during downtime are ignored; a missing/expired marker fails visibly and requires another stop/start instead of implicit calibration.
+
+Representative integration: with the authenticated live API, PostgreSQL and Redis plus a synthetic provider at the Vinted boundary, start on IDs A/B/C, run the same set with zero opportunities, add D and observe exactly one, repeat D without duplication, stop after terminal, add E and restart with another zero-opportunity baseline. The negative variation makes baseline search fail and proves a visible failed run with no active source/session/deadline. Playwright verifies the manual start, active `Ejecutar ahora`, disabled conflicting controls and persisted API/database state.
+
+### 14.34.2 Recurring session-start baseline
+
+Recurring start preflights effective scheduler availability/capacity before baseline traffic and revalidates admission after it. Success creates one active continuous/duration/window session and persists the first later deadline from activation without a second immediate business run. With interval 60 and jitter 10 percent, the deadline is 60 to 66 seconds after activation. A post-baseline availability/capacity loss returns the existing `503`/`409`, preserves the successful baseline run and leaves the monitor inactive. Recurring active views do not add a manual override.
+
+After every start path owns calibration, remove `POST /api/monitors/{id}/baseline`, its frontend client/button/status panel and public `baseline_ready`/`baseline_policy_hash` fields. Do not retain tombstones or adapters.
+
+Acceptance criteria:
+
+1. Recurring start produces one zero-opportunity baseline, one active session and one persisted later deadline, with no immediate business run or duplicate initial task.
+2. The first scheduled run on the same IDs is a no-op; a later unseen passing ID creates one opportunity and repetition creates none.
+3. Preflight failure is traffic- and mutation-free; post-baseline admission loss is visible and leaves no active session/deadline while preserving the completed baseline run.
+
+Representative integration: use the authenticated API, PostgreSQL, Redis, real scheduler queue and consumer with a synthetic provider only at the Vinted boundary. Start on five IDs, verify the 60-to-66-second deadline and no immediate business run, consume the same IDs with zero opportunities, then add one ID and observe exactly one opportunity and terminal ACK. The negative variation uses unavailable scheduler preflight and proves zero run/session/task/provider calls. Playwright verifies that the standalone recalibration contract is absent.
+
+### 14.34.3 Graceful monitor-session stop
+
+`POST /api/monitors/{id}/stop` makes PostgreSQL inactive first, clears future scheduling and best-effort cancels a ready task. A reserved task rechecks authoritative state under the existing source/admission ownership and cannot create a run after stop commits. A run already created reaches its normal terminal state; only then does finalization close the monitor session with reason `stopped`. The PWA derives `Deteniendo...` from an inactive source plus a non-terminal run and keeps edit/archive/start controls blocked until terminal. There is no new durable stopping state.
+
+Acceptance criteria:
+
+1. Stop with no non-terminal run closes the session immediately and admits no later scheduled/manual work.
+2. Stop during an existing run returns promptly, admits nothing else, preserves that run's terminal result and closes the session only afterward.
+3. A deterministic reserved-task race cannot create a run after stop commit, and the PWA cannot edit, archive or restart during drain.
+
+Representative integration: use real PostgreSQL, Redis queue/consumer and API with a blocking synthetic provider. Stop after the run row exists, release the provider, and verify inactive source first, one terminal run, then `monitor_sessions.stopped_at`/reason with no ready/processing residue. The negative barrier reserves a task before stop but delays run admission until after commit and proves zero run/provider calls. Playwright verifies `Deteniendo...` and locked controls until the synthetic terminal event.
+
 ## Goal
 
 Automatically execute active opportunity monitors on safe, bounded intervals with enough concurrency and runtime cache support to keep opportunity alerts fast without relying on post-MVP optimizations.

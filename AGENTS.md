@@ -9,12 +9,12 @@ The current target is a personal, private, single-user Vinted catalog monitor:
 - configure public catalog URLs from the PWA;
 - prepare public anonymous sessions without a Vinted account login;
 - run manual and recurring monitors through the real API/worker/PostgreSQL/Redis/PWA path;
-- persist and filter opportunities, then deliver one useful Telegram alert;
+- start each observation session from an automatic catalog baseline, then persist and filter only later opportunities;
 - run locally with Docker Compose, with manual maintenance and relaunch accepted.
 
 This is not yet an unattended 24/7 production service. One worker instance, best-effort queue recovery and a rare duplicate around abrupt process death are acceptable when visible. Do not build exactly-once ledgers, distributed recovery or production hardening unless the roadmap/user explicitly promotes them.
 
-Authenticated Vinted actions remain future work. Do not implement favorites, checkout, pre-purchase or purchase flows until public monitoring and alerts are stable.
+Notifications and authenticated Vinted actions remain future work. Do not implement alerts, favorites, checkout, pre-purchase or purchase flows until the public monitoring MVP is manually accepted and the user explicitly reprioritizes them.
 
 ## Required workflow
 
