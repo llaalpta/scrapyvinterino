@@ -7,18 +7,9 @@ from vinted_monitor.services.filters import monitor_filter_snapshot
 from vinted_monitor.services.runs import (
     EVALUATION_CONTRACT_VERSION,
     _run_runtime_metadata,
-    monitor_baseline_ready,
     monitor_policy_hash,
 )
 from vinted_monitor.services.scheduler import RunEgress
-
-
-class PolicyBaselineCache:
-    def __init__(self, baselines: set[tuple[int, str]]) -> None:
-        self.baselines = baselines
-
-    def has_baseline(self, monitor_id: int, policy_hash: str) -> bool:
-        return (monitor_id, policy_hash) in self.baselines
 
 
 def build_source() -> SearchSource:
@@ -46,11 +37,7 @@ def test_description_only_contract_invalidates_legacy_baseline() -> None:
     old_hash = legacy_policy_hash(source)
     current_hash = monitor_policy_hash(source)
 
-    ready, observed_hash = monitor_baseline_ready(source, PolicyBaselineCache({(source.id, old_hash)}))
-
     assert current_hash != old_hash
-    assert observed_hash == current_hash
-    assert ready is False
 
 
 def test_runtime_metadata_identifies_description_only_contract() -> None:

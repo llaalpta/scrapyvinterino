@@ -1,7 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   announceAuthenticationRequired,
-  calibrateMonitorBaseline,
   createProxyProfile,
   createSource,
   deleteSource,
@@ -647,10 +646,6 @@ export function useDashboardController() {
       setError('Guarda los cambios antes de lanzar la sesion');
       return;
     }
-    if (source.monitor_mode !== 'manual' && !source.baseline_ready) {
-      setError('Recalibra el listado inicial antes de ejecutar este monitor');
-      return;
-    }
     if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
       setError('Corrige los filtros de URL no soportados antes de ejecutar este monitor');
       return;
@@ -733,40 +728,6 @@ export function useDashboardController() {
       );
     }
     await Promise.all(refreshes);
-  }
-
-  async function onRecalibrateBaseline(source: SearchSource) {
-    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    setError(null);
-    if (sourceDraftHasChanges(source, draft)) {
-      setError('Guarda los cambios antes de recalibrar el listado inicial');
-      return;
-    }
-    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
-      setError('Corrige los filtros de URL no soportados antes de recalibrar el listado inicial');
-      return;
-    }
-    setSavingSourceId(source.id);
-    try {
-      const run = await calibrateMonitorBaseline(source.id);
-      const [sourceData, runData] = await Promise.all([fetchSources(), fetchRuns()]);
-      setSources(sourceData);
-      setSourceDrafts(buildSourceDrafts(sourceData));
-      setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
-      setMonitorRunsBySource((current) => ({
-        ...current,
-        [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
-      }));
-      await loadMonitorStats(source.id);
-      await loadMonitorEvents(source.id);
-      if (run.status !== 'success') {
-        setError(run.error_message || 'No se pudo recalibrar el listado inicial');
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo recalibrar el listado inicial');
-    } finally {
-      setSavingSourceId(null);
-    }
   }
 
   async function onPrepareVintedSession(source: SearchSource) {
@@ -1094,7 +1055,6 @@ export function useDashboardController() {
     onSaveSourceSchedule,
     onPrepareVintedSession,
     onProbeItemDetail,
-    onRecalibrateBaseline,
     onRunNow,
     onStartSession,
     onStopMonitor,

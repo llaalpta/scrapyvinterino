@@ -54,7 +54,14 @@ from vinted_monitor.services.runs import (
     execute_monitor_baseline,
     execute_monitor_run,
 )
-from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, RunEgress, update_scheduler_config, update_scheduler_enabled
+from vinted_monitor.services.scheduler import (
+    SCHEDULER_SETTING_KEY,
+    RunEgress,
+    SchedulerCapacityError,
+    SchedulerUnavailableError,
+    update_scheduler_config,
+    update_scheduler_enabled,
+)
 from vinted_monitor.services.scheduler_liveness import SchedulerWorkerAvailability
 from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.services.seen_cache import (
@@ -1608,7 +1615,7 @@ def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> No
             )
 
 
-def test_recurring_recalibration_marks_visible_items_without_opportunities(source_id: int) -> None:
+def test_internal_baseline_marks_visible_items_without_opportunities(source_id: int) -> None:
     with SessionLocal() as db:
         source = db.get(SearchSource, source_id)
         assert source is not None
@@ -1633,7 +1640,7 @@ def test_recurring_recalibration_marks_visible_items_without_opportunities(sourc
 
         assert run.status == SUCCESS
         assert run.trigger == "baseline"
-        assert run.runtime_metadata["baseline_reason"] == "explicit_recalibration"
+        assert run.runtime_metadata["baseline_reason"] == "internal_snapshot"
         assert run.items_found == 2
         assert run.items_new == 0
         assert run.opportunities_created == 0
@@ -1647,7 +1654,7 @@ def test_recurring_recalibration_marks_visible_items_without_opportunities(sourc
         assert "opportunity_created" not in phases
 
 
-def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_internal_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     FakeSessionPreparingProvider.created = []
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
@@ -1724,9 +1731,13 @@ def test_recalibrate_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.M
         cleanup_source(source_id)
 
 
-def test_monitor_run_without_baseline_fails_before_catalog(source_id: int) -> None:
+def test_recurring_monitor_run_without_baseline_fails_before_catalog_and_preserves_mode(source_id: int) -> None:
     provider = FakeSuccessProvider(item_count=1)
     with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.monitor_mode = "continuous"
+        db.commit()
         run = execute_monitor_run(
             db,
             source_id,
@@ -1743,14 +1754,13 @@ def test_monitor_run_without_baseline_fails_before_catalog(source_id: int) -> No
         assert provider.detail_calls == []
         assert any(event.phase == "baseline_required" for event in events)
         assert all(event.phase != "catalog_search_start" for event in events)
-        assert next(event for event in events if event.phase == "run_failed").details["recovery_action"] == (
-            "start_new_manual_session"
-        )
+        assert next(event for event in events if event.phase == "run_failed").details["recovery_action"] == "start_new_session"
         closure_events = [event for event in events if event.phase == "monitor_session_closed"]
         assert len(closure_events) == 1
         assert closure_events[0].details["reason"] == "baseline_required"
         assert source is not None
         assert source.is_active is False
+        assert source.monitor_mode == "continuous"
         assert session is not None
         assert session.stopped_at is not None
         assert session.stop_reason == "baseline_required"
@@ -1821,10 +1831,9 @@ def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> N
         cleanup_source(source_id)
 
 
-def test_recurring_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_standalone_baseline_contract_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
-    cache = FakeSeenCache(baseline_ready=False)
     with SessionLocal() as db:
         source = SearchSource(
             name="pytest api baseline monitor",
@@ -1838,59 +1847,22 @@ def test_recurring_monitor_baseline_api_recalibrates_snapshot(monkeypatch: pytes
         db.commit()
         source_id = source.id
 
-    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=2)
-    _enable_direct_runtime(monkeypatch)
-    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
     try:
         response = client.post(f"/api/monitors/{source_id}/baseline")
 
-        assert response.status_code == 201
-        body = response.json()
-        assert body["trigger"] == "baseline"
-        assert body["items_found"] == 2
-        assert body["items_new"] == 0
-        assert body["opportunities_created"] == 0
-        assert cache.baseline_ready is True
+        assert response.status_code == 404
+        assert "/api/monitors/{monitor_id}/baseline" not in client.get("/openapi.json").json()["paths"]
         monitors_response = client.get("/api/monitors")
         monitor = next(entry for entry in monitors_response.json() if entry["id"] == source_id)
-        assert monitor["baseline_ready"] is True
-    finally:
-        app.dependency_overrides.clear()
-        cleanup_source(source_id)
-
-
-def test_manual_monitor_baseline_api_is_hidden_from_manual_flow() -> None:
-    cleanup_source(None)
-    client = authenticated_test_client()
-    with SessionLocal() as db:
-        source = SearchSource(
-            name="pytest manual baseline hidden monitor",
-            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
-            normalized_query={"order": ["newest_first"]},
-            is_active=False,
-            monitor_mode="manual",
-            scheduler_config={},
-        )
-        db.add(source)
-        db.commit()
-        source_id = source.id
-
-    try:
-        response = client.post(f"/api/monitors/{source_id}/baseline")
-
-        assert response.status_code == 409
-        assert "modo manual" in response.json()["detail"]
+        assert "baseline_ready" not in monitor
+        assert "baseline_policy_hash" not in monitor
         with SessionLocal() as db:
-            source = db.get(SearchSource, source_id)
-            assert source is not None
-            assert source.is_active is False
             assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == source_id)) == 0
-            assert db.scalar(select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == source_id)) == 0
     finally:
         cleanup_source(source_id)
 
 
-def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_monitor_start_rejects_existing_monitor_with_unsupported_url_filter(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
@@ -1906,9 +1878,9 @@ def test_monitor_baseline_api_rejects_existing_monitor_with_unsupported_url_filt
         db.commit()
         source_id = source.id
 
-    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    _enable_direct_runtime(monkeypatch)
     try:
-        response = client.post(f"/api/monitors/{source_id}/baseline")
+        response = client.post(f"/api/monitors/{source_id}/start")
 
         assert response.status_code == 422
         assert "color_ids" in response.json()["detail"]
@@ -2191,17 +2163,31 @@ def test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive(monke
         cleanup_source(source_id)
 
 
-def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("monitor_mode", "duration_minutes", "allowed_windows"),
+    [
+        ("continuous", None, []),
+        ("duration", 5, []),
+        ("window", None, ["00:00-12:00", "12:00-00:00"]),
+    ],
+)
+def test_recurring_monitor_start_baselines_then_opens_session_with_future_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    monitor_mode: str,
+    duration_minutes: int | None,
+    allowed_windows: list[str],
+) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
-            name="pytest api recurring start monitor",
+            name=f"pytest api {monitor_mode} start monitor",
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
             is_active=False,
-            monitor_mode="continuous",
-            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+            monitor_mode=monitor_mode,
+            duration_minutes=duration_minutes,
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": allowed_windows},
         )
         db.add(source)
         update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
@@ -2228,10 +2214,20 @@ def test_recurring_monitor_start_creates_session_and_run_uses_it(monkeypatch: py
             assert source.is_active is True
             assert source.monitor_started_at is not None
             assert source.next_run_at == source.monitor_started_at + timedelta(seconds=60)
+            assert source.monitor_until == (
+                source.monitor_started_at + timedelta(minutes=duration_minutes)
+                if duration_minutes is not None
+                else None
+            )
             assert session is not None
             assert session.stopped_at is None
             assert run is not None
-            assert run.monitor_session_id == session.id
+            assert run.trigger == "baseline"
+            assert run.status == SUCCESS
+            assert run.finished_at is not None
+            assert source.monitor_started_at > run.finished_at
+            assert run.opportunities_created == 0
+            assert run.monitor_session_id is None
             assert [entry.id for entry in source_runs] == [run.id]
     finally:
         app.dependency_overrides.clear()
@@ -2242,13 +2238,9 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
     cleanup_source(None)
     settings = _enable_direct_runtime(monkeypatch)
     source_ids: list[int] = []
-    from vinted_monitor.api import main as api_main
 
-    first_activation_reached_run = Event()
-    release_first_activation = Event()
-    second_activation_reached_lock = Event()
-    second_activation_acquired_lock = Event()
-    second_activation_reached_run = Event()
+    first_baseline_reached_catalog = Event()
+    release_first_baseline = Event()
 
     with SessionLocal() as db:
         scheduler_setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
@@ -2287,29 +2279,14 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
                 source_ids.append(source.id)
             db.commit()
 
-        app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=0)
+        class BlockingBaselineProvider(FakeSuccessProvider):
+            def search(self, source, page=None):
+                first_baseline_reached_catalog.set()
+                assert release_first_baseline.wait(timeout=5)
+                return super().search(source, page)
+
+        app.dependency_overrides[get_manual_run_provider] = lambda: BlockingBaselineProvider(item_count=0)
         monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
-        original_execute_monitor_run = api_main.execute_monitor_run
-        original_acquire_initial_run_admission_lock = api_main.acquire_initial_run_admission_lock
-
-        def observed_acquire_initial_run_admission_lock(db) -> None:
-            is_second_activation = first_activation_reached_run.is_set()
-            if is_second_activation:
-                second_activation_reached_lock.set()
-            original_acquire_initial_run_admission_lock(db)
-            if is_second_activation:
-                second_activation_acquired_lock.set()
-
-        def delayed_execute_monitor_run(db, source_id: int, *args, **kwargs):
-            if source_id == source_ids[0]:
-                first_activation_reached_run.set()
-                assert release_first_activation.wait(timeout=5)
-            else:
-                second_activation_reached_run.set()
-            return original_execute_monitor_run(db, source_id, *args, **kwargs)
-
-        monkeypatch.setattr(api_main, "acquire_initial_run_admission_lock", observed_acquire_initial_run_admission_lock)
-        monkeypatch.setattr(api_main, "execute_monitor_run", delayed_execute_monitor_run)
 
         # Keep password hashing and session bootstrap outside the scheduler
         # concurrency window. The assertion below is about admission locking,
@@ -2325,18 +2302,22 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             first_future = executor.submit(activate, source_ids[0])
-            if not first_activation_reached_run.wait(timeout=5):
-                assert first_future.done(), "first activation did not return or reach run execution"
-                pytest.fail(f"first activation returned before run execution: {first_future.result()}")
+            if not first_baseline_reached_catalog.wait(timeout=5):
+                assert first_future.done(), "first activation did not return or reach baseline catalog search"
+                pytest.fail(f"first activation returned before baseline catalog search: {first_future.result()}")
             second_future = executor.submit(activate, source_ids[1])
-            assert second_activation_reached_lock.wait(timeout=5)
-            assert not second_activation_acquired_lock.wait(timeout=0.25)
-            assert not second_activation_reached_run.wait(timeout=0.25)
-            release_first_activation.set()
+            second_response = second_future.result(timeout=5)
+            assert second_response == (
+                409,
+                "No proxy is available for country ES and direct Vinted catalog access is disabled or saturated",
+            )
+            release_first_baseline.set()
             responses = [first_future.result(timeout=5), second_future.result(timeout=5)]
 
         assert sorted(status for status, _detail in responses) == [201, 409]
-        assert [detail for status, detail in responses if status == 409] == ["Scheduler capacity limit reached"]
+        assert [detail for status, detail in responses if status == 409] == [
+            "No proxy is available for country ES and direct Vinted catalog access is disabled or saturated"
+        ]
         with SessionLocal() as db:
             sources = list(db.scalars(select(SearchSource).where(SearchSource.id.in_(source_ids))))
             runs = list(db.scalars(select(Run).where(Run.source_id.in_(source_ids))))
@@ -2352,9 +2333,10 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
             assert len(sessions) == 1
             assert runs[0].source_id == active_sources[0].id
             assert sessions[0].source_id == active_sources[0].id
-            assert runs[0].monitor_session_id == sessions[0].id
+            assert runs[0].trigger == "baseline"
+            assert runs[0].monitor_session_id is None
     finally:
-        release_first_activation.set()
+        release_first_baseline.set()
         app.dependency_overrides.clear()
         try:
             for source_id in source_ids:
@@ -2377,14 +2359,25 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
                 db.commit()
 
 
-def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("admission_error", "expected_status"),
+    [
+        (SchedulerUnavailableError("synthetic post-baseline worker loss"), 503),
+        (SchedulerCapacityError("synthetic post-baseline capacity loss"), 409),
+    ],
+)
+def test_recurring_monitor_start_preserves_successful_baseline_when_postflight_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    admission_error: Exception,
+    expected_status: int,
+) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
-            name="pytest activation compensation",
-            url="https://www.vinted.es/catalog?search_text=activation-compensation",
-            normalized_query={"search_text": ["activation-compensation"]},
+            name="pytest postflight admission loss",
+            url="https://www.vinted.es/catalog?search_text=postflight-admission-loss",
+            normalized_query={"search_text": ["postflight-admission-loss"]},
             is_active=False,
             monitor_mode="continuous",
             scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
@@ -2395,16 +2388,18 @@ def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(mon
         source_id = source.id
 
     _enable_direct_runtime(monkeypatch)
-    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    cache = FakeSeenCache(baseline_ready=False)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
+    app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=2)
     monkeypatch.setattr(
-        "vinted_monitor.api.main.execute_monitor_run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(SeenCacheUnavailableError("synthetic initial run failure")),
+        "vinted_monitor.services.runs.ensure_scheduler_can_activate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(admission_error),
     )
     try:
         response = client.post(f"/api/monitors/{source_id}/start")
 
-        assert response.status_code == 409
-        assert response.json()["detail"] == "synthetic initial run failure"
+        assert response.status_code == expected_status
+        assert response.json()["detail"] == str(admission_error)
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
             sessions = list(db.scalars(select(MonitorSession).where(MonitorSession.source_id == source_id)))
@@ -2415,8 +2410,15 @@ def test_recurring_monitor_start_compensates_when_initial_run_is_not_created(mon
             assert source.monitor_until is None
             assert source.next_run_at is None
             assert sessions == []
-            assert runs == []
+            assert len(runs) == 1
+            assert runs[0].trigger == "baseline"
+            assert runs[0].status == SUCCESS
+            assert runs[0].items_found == 2
+            assert runs[0].opportunities_created == 0
+            assert runs[0].monitor_session_id is None
+            assert cache.baseline_ready is True
     finally:
+        app.dependency_overrides.clear()
         cleanup_source(source_id)
 
 
@@ -2507,7 +2509,7 @@ def test_monitor_stop_rejects_non_terminal_run_without_mutation(run_status: str)
         cleanup_source(source_id)
 
 
-def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recurring_monitor_baseline_failure_leaves_session_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
@@ -2537,12 +2539,13 @@ def test_recurring_monitor_failure_below_threshold_keeps_session_active(monkeypa
             session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
             run = db.get(Run, response.json()["id"])
             assert source is not None
-            assert source.is_active is True
-            assert source.monitor_started_at is not None
-            assert session is not None
-            assert session.stopped_at is None
+            assert source.is_active is False
+            assert source.monitor_started_at is None
+            assert source.next_run_at is None
+            assert session is None
             assert run is not None
-            assert run.monitor_session_id == session.id
+            assert run.trigger == "baseline"
+            assert run.monitor_session_id is None
     finally:
         app.dependency_overrides.clear()
         cleanup_source(source_id)

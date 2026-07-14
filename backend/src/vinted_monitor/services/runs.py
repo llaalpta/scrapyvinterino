@@ -53,7 +53,15 @@ from vinted_monitor.services.proxies import (
     proxy_url_with_sticky_session,
 )
 from vinted_monitor.services.run_events import record_run_event
-from vinted_monitor.services.scheduler import RunEgress, SchedulerCapacityError, choose_run_egress, get_scheduler_runtime_config
+from vinted_monitor.services.scheduler import (
+    RunEgress,
+    SchedulerCapacityError,
+    SchedulerUnavailableError,
+    acquire_initial_run_admission_lock,
+    choose_run_egress,
+    ensure_scheduler_can_activate,
+    get_scheduler_runtime_config,
+)
 from vinted_monitor.services.search_sources import (
     SearchSourceConfigError,
     catalog_filter_compatibility,
@@ -183,28 +191,6 @@ def monitor_policy_hash(source: SearchSource) -> str:
     return _policy_hash(source, monitor_filter_snapshot(source.filter_definition))
 
 
-def monitor_baseline_ready(source: SearchSource, cache: SeenCache | None = None) -> tuple[bool, str]:
-    resolved_cache = cache or get_seen_cache()
-    policy_hash = monitor_policy_hash(source)
-    try:
-        return resolved_cache.has_baseline(source.id, policy_hash), policy_hash
-    except SeenCacheUnavailableError:
-        return False, policy_hash
-
-
-def ensure_monitor_baseline_ready(db: Session, source_id: int, seen_cache: SeenCache | None = None) -> str:
-    source = db.get(SearchSource, source_id)
-    if source is None or source.archived_at is not None:
-        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
-    _validated_catalog_filter_compatibility(source)
-    cache = seen_cache or get_seen_cache()
-    policy_hash = monitor_policy_hash(source)
-    cache.require_available()
-    if not cache.has_baseline(source.id, policy_hash):
-        raise BaselineRequiredError("Recalibra el listado inicial antes de ejecutar este monitor")
-    return policy_hash
-
-
 def _validated_catalog_filter_compatibility(source: SearchSource) -> dict[str, Any]:
     try:
         validate_vinted_catalog_url(source.url)
@@ -226,7 +212,7 @@ def execute_monitor_baseline(
     provider: ManualRunProvider | None = None,
     seen_cache: SeenCache | None = None,
     egress: RunEgress | None = None,
-    activate_manual_session: bool = False,
+    activate_session: bool = False,
 ) -> Run:
     source = db.scalar(
         select(SearchSource)
@@ -236,10 +222,8 @@ def execute_monitor_baseline(
     )
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
-    if activate_manual_session and source.monitor_mode != "manual":
-        raise SearchSourceConfigError("Automatic baseline activation is only valid for manual monitors")
     if source.is_active:
-        raise RunAlreadyActiveError("Deten la sesion antes de recalibrar el listado inicial")
+        raise RunAlreadyActiveError("Deten la sesion antes de iniciar una nueva")
     if _active_source_run_exists(db, source_id=source.id, include_finalizing=True):
         raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
     catalog_filters = _validated_catalog_filter_compatibility(source)
@@ -253,7 +237,7 @@ def execute_monitor_baseline(
 
     filter_snapshot = monitor_filter_snapshot(source.filter_definition)
     policy_hash = _policy_hash(source, filter_snapshot)
-    baseline_reason = "session_start" if activate_manual_session else "explicit_recalibration"
+    baseline_reason = "session_start" if activate_session else "internal_snapshot"
     run = Run(
         source_id=source.id,
         monitor_session_id=None,
@@ -476,13 +460,20 @@ def execute_monitor_baseline(
         run.error_message = None
         source.last_run_at = run.finished_at
         mark_proxy_run_success(db, proxy_profile_id)
-        if activate_manual_session:
-            start_source_monitor(
-                db,
-                source.id,
-                now=run.finished_at,
-                commit=False,
-            )
+        activation_error: SchedulerCapacityError | SchedulerUnavailableError | None = None
+        if activate_session:
+            if source.monitor_mode != "manual":
+                try:
+                    acquire_initial_run_admission_lock(db)
+                    ensure_scheduler_can_activate(db, settings, source_id=source.id)
+                except (SchedulerCapacityError, SchedulerUnavailableError) as exc:
+                    activation_error = exc
+            if activation_error is None:
+                start_source_monitor(
+                    db,
+                    source.id,
+                    commit=False,
+                )
         record_run_event(
             db,
             run_id=run.id,
@@ -519,8 +510,13 @@ def execute_monitor_baseline(
         )
         db.commit()
         db.refresh(run)
+        if activation_error is not None:
+            raise activation_error
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return run
+    except (SchedulerCapacityError, SchedulerUnavailableError):
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        raise
     except Exception as exc:
         failed_run = _record_failed_run(
             db,
@@ -1185,7 +1181,6 @@ def execute_monitor_run(
             details={"policy_hash": policy_hash},
         )
         source.is_active = False
-        source.monitor_mode = "manual"
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
@@ -1213,11 +1208,7 @@ def execute_monitor_run(
     try:
         _reconcile_finalizing_runs(db, source, cache, exclude_run_id=run.id)
         if not cache.has_baseline(source.id, policy_hash):
-            baseline_required_message = (
-                "La foto inicial ya no esta disponible; inicia una nueva sesion"
-                if source.monitor_mode == "manual"
-                else "Recalibra el listado inicial antes de ejecutar este monitor"
-            )
+            baseline_required_message = "La foto inicial ya no esta disponible; inicia una nueva sesion"
             record_run_event(
                 db,
                 run_id=run.id,
@@ -1229,7 +1220,6 @@ def execute_monitor_run(
                 details={"policy_hash": policy_hash},
             )
             source.is_active = False
-            source.monitor_mode = "manual"
             source.monitor_started_at = None
             source.monitor_until = None
             source.next_run_at = None
@@ -1257,7 +1247,6 @@ def execute_monitor_run(
             details={"policy_hash": policy_hash},
         )
         source.is_active = False
-        source.monitor_mode = "manual"
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
@@ -1593,7 +1582,6 @@ def execute_monitor_run(
                     details={"recovery_pending": True, "policy_hash": policy_hash},
                 )
                 source.is_active = False
-                source.monitor_mode = "manual"
                 source.monitor_started_at = None
                 source.monitor_until = None
                 source.next_run_at = None
@@ -1603,7 +1591,6 @@ def execute_monitor_run(
                 _close_owned_provider(run_provider, owned_provider=owned_provider)
                 return run
         source.is_active = False
-        source.monitor_mode = "manual"
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
@@ -1913,7 +1900,7 @@ def _prepare_vinted_session_for_run(
             )
         else:
             usable = False
-            last_error = "Prepared Vinted session rejected: probe payload unavailable for recalibration"
+            last_error = "Prepared Vinted session rejected: probe payload unavailable for baseline"
 
     saved = save_prepared_vinted_session(
         db,
@@ -2550,9 +2537,7 @@ def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dic
     if isinstance(exc, BaselineRequiredError):
         return {
             "session_end_reason": "baseline_required",
-            "recovery_action": (
-                "start_new_manual_session" if "nueva sesion" in text else "recalibrate_initial_snapshot"
-            ),
+            "recovery_action": "start_new_session",
         }
     if isinstance(exc, ProxyProfileEligibilityError):
         return {

@@ -379,36 +379,6 @@
   font-size: 13px;
 }
 
-.baseline-status {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  border: 1px solid #d8dee8;
-  border-radius: 6px;
-  padding: 8px 10px;
-  color: #475467;
-  background: #f8fafc;
-  font-size: 13px;
-}
-
-.baseline-status.ready {
-  border-color: #bbf7d0;
-  color: #166534;
-  background: #f0fdf4;
-}
-
-.baseline-status.pending {
-  border-color: #fed7aa;
-  color: #9a3412;
-  background: #fff7ed;
-}
-
-.baseline-status code {
-  color: inherit;
-  font-size: 12px;
-}
-
 .catalog-filter-status {
   display: flex;
   flex-direction: column;

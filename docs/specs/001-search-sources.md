@@ -1,6 +1,6 @@
 # 001 Search Sources
 
-Since 14.34.1, `is_active` represents an open manual or recurring monitor session. Public baseline-readiness fields remain temporarily for recurring modes until 14.34.2; 14.34.3 later extends configuration locking through stop drain.
+Since 14.34.2, `is_active` represents an open manual or recurring monitor session and every start owns its internal baseline. Baseline readiness is not a public source field or command. 14.34.3 later extends configuration locking through stop drain.
 
 ## Goal
 
@@ -56,10 +56,10 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 
 ## Current Command Boundaries
 
-- `POST /api/monitors` validates locally, commits one inactive/manual row, and only then derives baseline fields from Redis for the response. Redis unavailability is represented as `baseline_ready=false`.
-- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. The PWA blocks editing during its manual start baseline or a loaded non-terminal run, but another tab/client can still race that inactive baseline window. Name/URL PWA editing and storage validation are grouped in 14.26; adversarial cross-process serialization remains conditional in 14.30.
+- `POST /api/monitors` validates locally and commits one inactive/manual row. Source reads do not consult Redis or expose baseline readiness.
+- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. The PWA blocks editing during a manual or recurring session-start baseline or a loaded non-terminal run, but another tab/client can still race that inactive baseline window. Name/URL PWA editing and storage validation are grouped in 14.26; adversarial cross-process serialization remains conditional in 14.30.
 - Payloads rejected with `422`, active updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row; 14.26 must turn that into mutation-free validation as part of the edit flow.
-- URL and blacklist participate in the baseline policy hash. Changing either keeps the monitor identity; the next manual start seeds the resulting hash, while recurring modes retain temporary explicit calibration until 14.34.2. Redis read failure is not distinguishable from baseline absence in the current response.
+- URL and blacklist participate in the internal baseline policy hash. Changing either keeps the monitor identity; the next manual or recurring start seeds the resulting hash before activation.
 - `DELETE /api/monitors/{monitor_id}` is a soft archive. The first successful call returns `204`; repeating it is idempotent and also returns `204`. Default listing omits the row.
 - Archiving makes PostgreSQL inactive, removes future deadlines, closes the open monitor session and purges encrypted context from owned Vinted sessions. It may inspect/cancel Redis queue state, so the no-Redis-residue assertion applies to a newly created QA monitor, not to every archive.
 - A task already reserved/executing or a baseline started from another client remains a known archive gap. The local PWA blocks archive during its command; the operator rule is stop, wait for a terminal run and then archive. 14.30 is conditional on a normal-use reproduction; the former 14.31 exactly-once Redis/SQL convergence project is not part of the personal MVP.

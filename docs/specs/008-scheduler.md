@@ -20,7 +20,7 @@ Verification: 17 focused scheduler/supervisor tests and one live Playwright outa
 
 ## Planned 14.34 session program
 
-Status: `in-progress`. Slice 14.34.1 is implemented and verified; 14.34.2 and 14.34.3 remain pending. Each slice must replace its superseded clauses in specs 001, 003, 005, 008 and 010 plus current architecture/data-model prose before being marked done.
+Status: `in-progress`. Slices 14.34.1 and 14.34.2 are implemented and verified; 14.34.3 remains pending. Each slice must replace its superseded clauses in specs 001, 003, 005, 008 and 010 plus current architecture/data-model prose before being marked done.
 
 The user saves mode, cadence, duration/window and filters while stopped. Every session start observes one internal `baseline` run while the monitor remains inactive. It adds current catalog IDs to the existing monitor/policy seen state, preserves older seen markers, creates no item/opportunity and is returned as `201 RunRead`. Validation failures create no run; operational baseline failure returns its failed run and leaves no active session/deadline. If the Redis baseline marker later expires during an active session, the next ordinary run fails visibly and closes/stops that session; it never recalibrates silently. Restarting is the manual recovery.
 
@@ -30,7 +30,7 @@ No slice adds a migration, compatibility adapter, automatic retry, hidden fallba
 
 Status: `done`. This standard vertical slice has no migration: manual session start, its later user-triggered runs and their existing PostgreSQL/Redis state form one outcome. Recurring start and graceful in-flight stop remain in 14.34.2 and 14.34.3. Verification passed the isolated live PWA/API/PostgreSQL/Redis scenario, `515` backend tests plus `3` loopback-only cases, Ruff and PWA lint/build without external traffic or QA residue.
 
-`POST /api/monitors/{id}/start` in manual mode performs the baseline and, only on success, creates one active monitor session with `next_run_at=null`. `POST /api/monitors/{id}/runs` requires that active manual session, attaches each single-flight `Ejecutar ahora` run to it and no longer creates/closes a punctual session per run. Until 14.34.3, stop during a non-terminal run is rejected with `409` and disabled in the PWA; stopping after terminal closes the session normally. The explicit baseline route/read fields remain temporarily for recurring modes but are hidden from the manual flow.
+`POST /api/monitors/{id}/start` in manual mode performs the baseline and, only on success, creates one active monitor session with `next_run_at=null`. `POST /api/monitors/{id}/runs` requires that active manual session, attaches each single-flight `Ejecutar ahora` run to it and no longer creates/closes a punctual session per run. Until 14.34.3, stop during a non-terminal run is rejected with `409` and disabled in the PWA; stopping after terminal closes the session normally.
 
 Acceptance criteria:
 
@@ -41,6 +41,8 @@ Acceptance criteria:
 Representative integration: with the authenticated live API, PostgreSQL and Redis plus a synthetic provider at the Vinted boundary, start on IDs A/B/C, run the same set with zero opportunities, add D and observe exactly one, repeat D without duplication, stop after terminal, add E and restart with another zero-opportunity baseline. The negative variation makes baseline search fail and proves a visible failed run with no active source/session/deadline. Playwright verifies the manual start, active `Ejecutar ahora`, disabled conflicting controls and persisted API/database state.
 
 ### 14.34.2 Recurring session-start baseline
+
+Status: `done` on `feature/recurring-session-start-baseline`.
 
 Recurring start preflights effective scheduler availability/capacity before baseline traffic and revalidates admission after it. Success creates one active continuous/duration/window session and persists the first later deadline from activation without a second immediate business run. With interval 60 and jitter 10 percent, the deadline is 60 to 66 seconds after activation. A post-baseline availability/capacity loss returns the existing `503`/`409`, preserves the successful baseline run and leaves the monitor inactive. Recurring active views do not add a manual override.
 
@@ -53,6 +55,8 @@ Acceptance criteria:
 3. Preflight failure is traffic- and mutation-free; post-baseline admission loss is visible and leaves no active session/deadline while preserving the completed baseline run.
 
 Representative integration: use the authenticated API, PostgreSQL, Redis, real scheduler queue and consumer with a synthetic provider only at the Vinted boundary. Start on five IDs, verify the 60-to-66-second deadline and no immediate business run, consume the same IDs with zero opportunities, then add one ID and observe exactly one opportunity and terminal ACK. The negative variation uses unavailable scheduler preflight and proves zero run/session/task/provider calls. Playwright verifies that the standalone recalibration contract is absent.
+
+Verification passed with the isolated live PWA/API/PostgreSQL/Redis scenario and real in-process scheduler/queue/consumer, the complete backend gate (`516 passed`, `5 skipped` contractually, plus `3 passed` loopback-only), Ruff, PWA lint/build and Compose rendering. The same-ID run, one-new-ID run and repeat were terminal and ACKed with zero queue residue. Two additional isolated manual-session cycles also passed. No Vinted, proxy or Telegram request was allowed; temporary SQL, Redis, process and log state was removed and operational fingerprints were unchanged.
 
 ### 14.34.3 Graceful monitor-session stop
 
@@ -165,18 +169,18 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - A monitor can be stopped without deleting it.
 - A new monitor is inactive until launched.
 - Manual start creates one sessionless baseline and opens one active session only after success; later explicit runs reuse that session until stop or fail-stop.
-- Scheduler-triggered runs are not dispatched outside configured local-time windows. Explicit user activation still performs its promised immediate run before later runs follow the configured window.
+- Scheduler-triggered runs are not dispatched outside configured local-time windows. Session start performs only its internal baseline before scheduling later business runs inside the configured window.
 - Time window UI exposes one start time and one end time; empty start/end means no daily window restriction.
 - A bounded monitor started for N minutes stores `monitor_until = now + N minutes`.
-- Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, marks it active, and immediately executes one run.
-- Before that immediate recurring run begins, activation persists `next_run_at` from the activation timestamp, interval, jitter and allowed window. The scheduler treats this PostgreSQL value as authoritative over any in-process due-time cache, so activation cannot also enqueue an immediately due scheduler run.
+- Launching a recurring monitor from the PWA uses the monitor's already persisted configuration, performs one sessionless zero-opportunity baseline while inactive and activates only after it succeeds.
+- Activation persists `next_run_at` from the post-baseline activation timestamp, interval, jitter and allowed window. The scheduler treats this PostgreSQL value as authoritative over any in-process due-time cache, so start cannot enqueue or execute an immediate business run.
 - Initial recurring admission is serialized with a PostgreSQL transaction-scoped advisory lock before capacity and egress selection. With capacity one, two concurrent starts produce exactly one `201` and one `409` without exceeding capacity.
-- Activation reserves its initial egress and persists active state, monitor session, `next_run_at`, and the initial running row in one transaction. A failure before creating that run rolls the transaction back, leaving no active source, deadline, run, or monitor session to compensate.
+- Recurring start revalidates scheduler availability/capacity after the baseline. Success commits the terminal baseline, active state, monitor session and future deadline together; a post-baseline `503`/`409` commits the successful baseline alone and leaves no active source, session or deadline.
 - Starting an already active recurring monitor is rejected without changing its session, activation timestamp, deadline, or run history.
 - The scheduler rechecks the persisted deadline after locking a due source and persists window deferrals independently from later capacity failures.
 - With a 60-second interval and 10% jitter, the minimum interval floor makes the first post-activation due time 60 to 66 seconds after activation, plus scheduler tick latency.
-- Manual `Iniciar sesion` creates the Redis snapshot before activation; later manual runs require it. Recurring, duration, window and scheduler runs retain explicit recalibration until 14.34.2.
-- Launching or recalibrating is blocked when the saved URL contains catalog filters that cannot be translated to the fast API.
+- Every `Iniciar sesion` creates the Redis snapshot before activation; later manual and scheduler runs require it.
+- Starting, preparing a Vinted session or probing detail is blocked when the saved URL contains catalog filters that cannot be translated to the fast API.
 - `Guardar` is the only PWA action that persists monitor configuration.
 - `Iniciar sesion` is disabled when the selected monitor has unsaved configuration changes and must not send `PATCH /api/monitors/{id}`.
 - Monitor active state is controlled only by `POST /api/monitors/{id}/start` and `POST /api/monitors/{id}/stop`; monitor configuration `PATCH` rejects legacy `is_active` payloads.
@@ -205,7 +209,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - If neither proxy nor direct capacity is available, a periodic monitor is not activated or run.
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
 - Manual and scheduler-triggered runs share the same URL-filter compatibility validation and fast API parameter translation.
-- Manual start owns its initial snapshot and never creates opportunities from it. Scheduler-triggered runs still require the temporary explicit recurring snapshot until 14.34.2.
+- Manual and recurring start own their initial snapshot and never create opportunities from it. Scheduler-triggered runs require that session-start marker.
 - Redis stores safe task/cache/retry data: IDs, timestamps/due times, policy hash, counters/types, processing/seen markers and normalized public candidates needed for bounded detail retries.
 - Redis never stores cookies, tokens, HTML, raw Vinted payloads, proxy credentials, addresses, or payment data. Prepared Vinted cookies/tokens are stored only in the database encrypted with the local app secret.
 - Run logs show operational progress with sanitized URLs, request headers after redaction/masking, response headers after redaction/masking, status codes, per-request durations in milliseconds, egress mode, proxy profile id when used, auth mode, IP/country from the egress diagnostic, filter snapshot, Redis/cache decisions, candidate decisions, persistence decisions, opportunity outcomes, and safe counts only.
@@ -227,7 +231,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - The monitor log follows the newest event while the reader remains at the bottom. Scrolling upward suspends forced scrolling and exposes a new-event control that returns to the tail on desktop and mobile.
 - An SSE error or 22.5-second silence is presented as a reconnecting state; the dashboard closes the failed/quiet instance, performs one bounded authentication revalidation and creates one replacement after three seconds with the latest explicit publication cursor. The liveness timer starts during `CONNECTING` and is rearmed by `open`, `stream_ready`, `stream_heartbeat` and valid monitor events. If that replacement also fails during a prolonged outage, it may schedule the next sequential attempt; only one timer, one auth check and one current connection may exist at any instant.
 - Every `open`, `error`, `stream_ready`, `stream_heartbeat` and `monitor_event` callback is scoped to the `EventSource` instance that registered it. Once replaced or closed, stale callbacks are inert: they cannot change status/readiness, advance the cursor, append events, close the current stream or schedule another reconnect.
-- Run logs show `baseline_snapshot_seeded` when the initial catalog snapshot is explicitly recalibrated and `baseline_required` when a run is blocked because no snapshot exists.
+- Run logs show `baseline_snapshot_seeded` when session start seeds the initial catalog snapshot and `baseline_required` when an ordinary run is blocked because that snapshot no longer exists.
 - Run configuration logs identify the evaluation contract, policy hash, description-only filter scope, detail mode, early-filter mode and head byte limit. Detail/filter logs expose received bytes, match counts and durations without response content.
 - Rejected HTTP responses use a safe body observation containing lengths and type flags; response body snippets are never persisted or returned.
 - The PWA Monitors view renders selected monitor accumulated logs as a non-interactive operational checklist: one wrapped multi-line block per event with run id, exact time, state, label, method, URL, status, ms, recovered/missing context, safe cookie flags, API parameters, and failure/skip reason when available, whether the monitor is active or stopped.
@@ -250,7 +254,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
 - Inactive monitors appear after active monitors in the compact monitor table; selecting an inactive monitor shows editable configuration, launch/archive controls, historical performance, and archive confirmation without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
-- The PWA monitor detail shows supported, ignored, and unsupported URL filters; unsupported filters block recalibration and launch.
+- The PWA monitor detail shows supported, ignored, and unsupported URL filters; unsupported filters block session start and other traffic-producing actions.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - Candidates with an already existing opportunity for the same monitor are marked seen and skipped before filter/detail work if Redis lost that seen state.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
@@ -280,7 +284,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Unit tests for concurrency limit and per-source single-flight behavior.
 - Unit tests for Redis hit, miss, processing lock, seen mark, policy-hash reevaluation, and Redis-unavailable failure.
 - Unit tests confirming Redis cache contents do not include cookies, tokens, raw payloads, HTML, or proxy credentials.
-- Live Playwright check through PWA/API/worker/PostgreSQL/Redis with a 60-second interval and 10% jitter: one immediate run plus exactly two scheduler runs, initial persisted deadline in `60..66` seconds, no duplicate cadence, and bounded traffic/cleanup from the owning roadmap contract.
+- Live Playwright check through PWA/API/PostgreSQL/Redis plus the real scheduler queue/consumer with a 60-second interval and 10% jitter: one baseline, no immediate business run, later deduplicated scheduler runs, initial persisted deadline in `60..66` seconds, terminal ACK and bounded loopback-only cleanup.
 - Confirm run records identify scheduler-triggered executions.
 - Confirm a manual baseline is sessionless, its successful start opens one session, later manual runs reuse it, and stop/fail-stop closes it; confirm recurring session ownership separately.
 - Confirm monitor stats aggregate session, historical, and chart bucket data.
@@ -293,9 +297,9 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Confirm the compact monitor table selects active and inactive monitors, updates the full-width detail panel, and scrolls the detail into view on mobile without horizontal overflow.
 - Confirm active monitor details show read-only configuration and stop/log controls; manual mode also shows one `Ejecutar ahora`, while recurring modes do not expose a manual override.
 - Confirm inactive monitor launch is blocked while there are unsaved changes, save persists the configuration, and launch then starts using that persisted configuration without another PATCH.
-- Confirm manual start creates its zero-opportunity snapshot before activation; confirm recurring launch remains blocked until its temporary explicit recalibration succeeds.
+- Confirm manual and recurring start create one zero-opportunity snapshot before activation; recurring activation exposes one later deadline and no immediate business run/task.
 - Confirm a recurring monitor configured with `stop_after_vinted_session_uses=1` stops after one completed run, logs the limit, and leaves the encrypted Vinted session history available for diagnosis.
-- Confirm inactive monitor launch and recalibration are blocked when URL filters are unsupported.
+- Confirm inactive monitor start and other traffic-producing actions are blocked when URL filters are unsupported.
 - Confirm inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
