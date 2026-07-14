@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "monitor-identity-edit", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -35,6 +35,17 @@ $SessionStopFocusedTargets = @(
 $SessionStopLiveTargets = @(
     "tests/test_recurring_session_start_live.py::test_live_session_stop_drains_run_and_fences_reserved_task"
 )
+$MonitorIdentityFocusedTargets = @(
+    "tests/test_search_sources.py::test_validate_search_source_name_enforces_database_length_after_trim",
+    "tests/test_search_sources.py::test_search_source_create_schema_rejects_name_beyond_storage_limit",
+    "tests/test_search_sources.py::test_update_source_api_persists_identity_on_same_monitor",
+    "tests/test_search_sources.py::test_update_source_api_rejects_invalid_identity_without_mutation",
+    "tests/test_search_sources.py::test_update_source_api_rejects_active_monitor_configuration_change",
+    "tests/test_search_sources.py::test_update_source_api_rejects_configuration_change_while_stop_is_draining"
+)
+$MonitorIdentityLiveTargets = @(
+    "tests/test_search_source_identity_live.py::test_live_monitor_identity_editing_contract"
+)
 $TestTargets = @{
     "identity" = @(
         "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
@@ -57,6 +68,7 @@ $TestTargets = @{
         "tests/test_recurring_session_start_live.py::test_live_recurring_session_start_baseline_and_real_consumer"
     )
     "session-stop-drain" = @($SessionStopFocusedTargets + $SessionStopLiveTargets)
+    "monitor-identity-edit" = @($MonitorIdentityFocusedTargets + $MonitorIdentityLiveTargets)
     "full" = @("tests")
 }
 $ScenarioTargets = @($TestTargets[$Scenario])
@@ -447,7 +459,7 @@ function Get-OperationalRedisDigest {
 }
 
 function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
-    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
+    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MONITOR_IDENTITY_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
     $Saved = @{}
     $Entries = @(Get-ChildItem Env: | Where-Object { $_.Name -match $Pattern })
     foreach ($Entry in $Entries) {
@@ -485,6 +497,12 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["PREPARED_SESSION_QA_API_URL"] = "http://127.0.0.1:8001"
             $Values["PREPARED_SESSION_QA_PWA_URL"] = "http://127.0.0.1:5176"
             $Values["PREPARED_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
+        if ($Scenario -eq "monitor-identity-edit") {
+            $Values["MONITOR_IDENTITY_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["MONITOR_IDENTITY_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["MONITOR_IDENTITY_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         if ($Scenario -eq "worker-redis-availability") {
@@ -558,6 +576,8 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "ACTION_REQUESTS_ENABLED", "SCHEDULER_ENABLED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
         "PREPARED_SESSION_QA_API_URL", "PREPARED_SESSION_QA_PWA_URL",
         "PREPARED_SESSION_QA_BROWSER_CHANNEL", "VITE_DEV_API_PROXY_TARGET",
+        "MONITOR_IDENTITY_QA_API_URL", "MONITOR_IDENTITY_QA_PWA_URL",
+        "MONITOR_IDENTITY_QA_BROWSER_CHANNEL",
         "MANUAL_SESSION_QA_API_URL", "MANUAL_SESSION_QA_PWA_URL",
         "MANUAL_SESSION_QA_BROWSER_CHANNEL", "MANUAL_SESSION_QA_PROVIDER_STATE",
         "RECURRING_SESSION_QA_API_URL", "RECURRING_SESSION_QA_PWA_URL",
@@ -718,7 +738,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
+        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
@@ -798,6 +818,13 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             Invoke-PythonChecked `
                 -Label "Session-stop live integration" `
                 -Arguments (@("-m", "pytest", "-q") + $SessionStopLiveTargets)
+        } elseif ($Scenario -eq "monitor-identity-edit") {
+            Invoke-PythonChecked `
+                -Label "Monitor-identity focused contract" `
+                -Arguments (@("-m", "pytest", "-q") + $MonitorIdentityFocusedTargets)
+            Invoke-PythonChecked `
+                -Label "Monitor-identity live integration" `
+                -Arguments (@("-m", "pytest", "-q") + $MonitorIdentityLiveTargets)
         } else {
             Invoke-PythonChecked -Label "Selected integration tests" -Arguments (@("-m", "pytest", "-q") + $ScenarioTargets)
         }

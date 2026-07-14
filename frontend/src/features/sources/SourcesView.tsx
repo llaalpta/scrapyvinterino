@@ -1101,6 +1101,25 @@ function MonitorConfigEditor({
 
   return (
     <div className="monitor-config-editor">
+      <div className="source-identity-editor compact">
+        <label>
+          Nombre
+          <input
+            disabled={disabled}
+            value={sourceDraft.name}
+            onChange={(event) => updateSourceDraft(source.id, 'name', event.target.value)}
+          />
+        </label>
+        <label>
+          URL de catalogo
+          <input
+            disabled={disabled}
+            type="url"
+            value={sourceDraft.url}
+            onChange={(event) => updateSourceDraft(source.id, 'url', event.target.value)}
+          />
+        </label>
+      </div>
       <div className="source-schedule compact">
         <label>
           Modo

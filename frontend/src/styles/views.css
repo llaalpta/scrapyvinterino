@@ -490,6 +490,35 @@
   gap: 12px;
 }
 
+.source-identity-editor {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(260px, 1.3fr);
+  gap: 8px;
+}
+
+.source-identity-editor label {
+  display: grid;
+  gap: 4px;
+  color: #52606d;
+  font-size: 12px;
+}
+
+.source-identity-editor input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #1f2933;
+  background: #ffffff;
+}
+
+.source-identity-editor input:disabled {
+  color: #697586;
+  background: #f8fafc;
+  cursor: not-allowed;
+}
+
 .source-card {
   display: grid;
   gap: 14px;
