@@ -35,6 +35,13 @@ def test_validate_search_source_name_rejects_blank_value() -> None:
         validate_search_source_name("   ")
 
 
+def test_validate_search_source_name_enforces_database_length_after_trim() -> None:
+    assert validate_search_source_name(f" {'n' * 160} ") == "n" * 160
+
+    with pytest.raises(ValueError, match="160 characters"):
+        validate_search_source_name("n" * 161)
+
+
 @pytest.mark.parametrize(("jitter_seconds", "expected_delay"), [(-6, 60), (6, 66)])
 def test_start_source_monitor_persists_first_recurring_deadline_with_interval_floor(
     jitter_seconds: int,
@@ -229,6 +236,11 @@ def test_search_source_create_schema_rejects_invalid_url() -> None:
         SearchSourceCreate(name="test", url="https://example.com/catalog")
 
 
+def test_search_source_create_schema_rejects_name_beyond_storage_limit() -> None:
+    with pytest.raises(ValidationError, match="160 characters"):
+        SearchSourceCreate(name="n" * 161, url="https://www.vinted.es/catalog")
+
+
 def test_create_source_api_persists_normalized_query() -> None:
     client = authenticated_test_client()
     response = client.post(
@@ -336,6 +348,113 @@ def test_update_source_api_persists_scheduler_config() -> None:
                 db.commit()
 
 
+def test_update_source_api_persists_identity_on_same_monitor() -> None:
+    client = authenticated_test_client()
+    create_response = client.post(
+        "/api/monitors",
+        json={"name": "pytest identity source", "url": "https://www.vinted.es/catalog?search_text=before"},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+    with SessionLocal() as db:
+        historical_run = Run(
+            source_id=source_id,
+            status="success",
+            trigger="manual",
+            finished_at=datetime.now(UTC),
+            runtime_metadata={},
+        )
+        db.add(historical_run)
+        db.commit()
+        historical_run_id = historical_run.id
+
+    try:
+        response = client.patch(
+            f"/api/monitors/{source_id}",
+            json={
+                "name": "  pytest identity renamed  ",
+                "url": "  https://www.vinted.es/catalog?search_text=after&brand_ids[]=88  ",
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == source_id
+        assert body["name"] == "pytest identity renamed"
+        assert body["url"] == "https://www.vinted.es/catalog?search_text=after&brand_ids[]=88"
+        assert body["normalized_query"] == {"brand_ids[]": ["88"], "search_text": ["after"]}
+        assert body["catalog_filter_compatibility"]["compatible"] is True
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.id == source_id
+            assert source.name == body["name"]
+            assert source.url == body["url"]
+            assert source.normalized_query == body["normalized_query"]
+            persisted_run = db.get(Run, historical_run_id)
+            assert persisted_run is not None and persisted_run.source_id == source_id
+    finally:
+        with SessionLocal() as db:
+            db.query(Run).filter(Run.source_id == source_id).delete(synchronize_session=False)
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_error"),
+    [
+        (
+            {
+                "name": "n" * 161,
+                "url": "https://www.vinted.es/catalog?search_text=must-not-persist",
+            },
+            "160 characters",
+        ),
+        (
+            {
+                "name": "pytest forbidden invalid URL rename",
+                "url": "https://www.vinted.es/catalog?search_text=must-not-persist&color_ids[]=12",
+            },
+            "color_ids",
+        ),
+    ],
+)
+def test_update_source_api_rejects_invalid_identity_without_mutation(
+    payload: dict[str, str],
+    expected_error: str,
+) -> None:
+    client = authenticated_test_client()
+    create_response = client.post(
+        "/api/monitors",
+        json={"name": "pytest identity limit", "url": "https://www.vinted.es/catalog?search_text=unchanged"},
+    )
+    assert create_response.status_code == 201
+    source_id = create_response.json()["id"]
+
+    try:
+        response = client.patch(
+            f"/api/monitors/{source_id}",
+            json=payload,
+        )
+
+        assert response.status_code == 422
+        assert expected_error in response.text
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.name == "pytest identity limit"
+            assert source.url == "https://www.vinted.es/catalog?search_text=unchanged"
+            assert source.normalized_query == {"search_text": ["unchanged"]}
+    finally:
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+                db.commit()
+
+
 def test_update_source_api_persists_monitor_filter_definition() -> None:
     client = authenticated_test_client()
     create_response = client.post(
@@ -427,13 +546,21 @@ def test_update_source_api_rejects_active_monitor_configuration_change() -> None
         db.commit()
 
     try:
-        response = client.patch(f"/api/monitors/{source_id}", json={"filter_definition": {"blacklist_terms": ["roto"]}})
+        response = client.patch(
+            f"/api/monitors/{source_id}",
+            json={
+                "name": "pytest forbidden active rename",
+                "url": "https://www.vinted.es/catalog?search_text=forbidden-active-edit",
+            },
+        )
 
         assert response.status_code == 409
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
             assert source is not None
-            assert source.filter_definition == {"blacklist_terms": []}
+            assert source.name == "pytest active edit source"
+            assert source.url == "https://www.vinted.es/catalog?search_text="
+            assert source.normalized_query == {"search_text": [""]}
     finally:
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
@@ -442,11 +569,12 @@ def test_update_source_api_rejects_active_monitor_configuration_change() -> None
                 db.commit()
 
 
-def test_update_source_api_rejects_configuration_change_while_stop_is_draining() -> None:
+@pytest.mark.parametrize("run_status", ["running", "finalizing"])
+def test_update_source_api_rejects_configuration_change_while_stop_is_draining(run_status: str) -> None:
     client = authenticated_test_client()
     with SessionLocal() as db:
         source = SearchSource(
-            name="pytest draining edit source",
+            name=f"pytest draining edit source {run_status}",
             url="https://www.vinted.es/catalog?search_text=draining-edit",
             normalized_query={"search_text": ["draining-edit"]},
             is_active=False,
@@ -462,7 +590,7 @@ def test_update_source_api_rejects_configuration_change_while_stop_is_draining()
         run = Run(
             source_id=source.id,
             monitor_session_id=session.id,
-            status="running",
+            status=run_status,
             trigger="scheduler",
             runtime_metadata={},
         )
@@ -473,14 +601,19 @@ def test_update_source_api_rejects_configuration_change_while_stop_is_draining()
     try:
         response = client.patch(
             f"/api/monitors/{source_id}",
-            json={"filter_definition": {"blacklist_terms": ["roto"]}},
+            json={
+                "name": "pytest forbidden draining rename",
+                "url": "https://www.vinted.es/catalog?search_text=forbidden-draining-edit",
+            },
         )
 
         assert response.status_code == 409
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
             assert source is not None
-            assert source.filter_definition == {"blacklist_terms": []}
+            assert source.name == f"pytest draining edit source {run_status}"
+            assert source.url == "https://www.vinted.es/catalog?search_text=draining-edit"
+            assert source.normalized_query == {"search_text": ["draining-edit"]}
     finally:
         with SessionLocal() as db:
             db.query(Run).filter(Run.source_id == source_id).delete(synchronize_session=False)

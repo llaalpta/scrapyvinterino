@@ -15,7 +15,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Treat active/inactive as monitor-session state; executing/running still belongs to individual runs.
 - Validate that the URL is an anonymous public Vinted catalog URL before saving it.
 - Archive monitors from the PWA as the safe delete behavior while preserving historical runs, events, items, and opportunities.
-- Allow the API to change monitor name/URL and both API/PWA to change filters, cadence, and execution mode without creating a new monitor identity.
+- Allow the API and PWA to change monitor name/URL, filters, cadence, and execution mode without creating a new monitor identity.
 
 ## Out of Scope
 
@@ -34,7 +34,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - PWA:
   - monitor creation form;
   - monitor count and visible monitor table with a selected monitor detail panel;
-  - editing of filters, cadence, window/duration, and execution mode while stopped and without a local command/run in progress;
+  - editing of name, original catalog URL, filters, cadence, window/duration, and execution mode while stopped and without a local command/run in progress;
   - archive/delete action with confirmation.
 - Database:
   - `search_sources`.
@@ -54,11 +54,31 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Any other query parameter is rejected with a clear validation error before saving.
 - URL validation must not call Vinted and must not trigger scraping.
 
+## Identity Rules
+
+- The saved display name is trimmed, must contain at least one non-whitespace character and must not exceed the PostgreSQL `varchar(160)` limit after trimming. Create and PATCH apply the same validation before mutation.
+- The original catalog URL follows the local URL rules above. A valid edit trims only surrounding whitespace, recomputes `normalized_query` and keeps the monitor ID and all historical ownership unchanged.
+- The PWA edits name and URL in the existing stopped-monitor configuration draft and saves them in the same PATCH as the other changed configuration. A rejected name or URL remains visible for correction while the persisted source is unchanged.
+
+### 14.26 task contract
+
+Status: `done` on `feature/pwa-monitor-identity-editing`.
+
+1. A stopped, idle monitor can save a valid name and catalog URL from its selected PWA detail; the response, table/detail and PostgreSQL row keep the same ID and expose the recomputed normalized query.
+2. A trimmed name longer than 160 characters or an invalid/unsupported catalog URL is rejected with `422`, produces a visible PWA error and leaves the complete persisted source unchanged.
+3. Identity fields and save remain unavailable while active, draining, running or awaiting the initial runs read; the existing API gate returns `409` for active/non-terminal work.
+
+Representative integration: use one isolated migrated PostgreSQL database, authenticated live API and Vite/Playwright PWA. Edit one inactive monitor successfully, inspect the same row through API and PostgreSQL, then submit an over-limit name and prove the visible error plus byte-for-byte identity/config persistence. Seed an active state locally to confirm the fields are disabled without starting a session or provider.
+
+Worker and watchdog stay stopped. Redis is only fingerprinted by the isolated runner, every browser request is loopback-only, no Vinted/proxy/Telegram request is allowed, and the QA user/source rows, database, Redis lease, processes and logs are removed. This task adds no schema, run behavior, archive hardening or cross-process identity versioning.
+
+Verification passed `8` focused cases plus `1` live Playwright case on an isolated migrated PostgreSQL database, authenticated API and Vite PWA. The live case proved same-ID edit/UI/API/database consistency, a visible over-limit rejection with the draft preserved and PostgreSQL unchanged, and disabled identity fields after a local active-state transition. Ruff, PWA lint/build and Compose rendering passed; worker/watchdog stayed stopped, all traffic was loopback-only, operational PostgreSQL/Redis fingerprints were unchanged and no QA process/log/data residue remained.
+
 ## Current Command Boundaries
 
 - `POST /api/monitors` validates locally and commits one inactive/manual row. Source reads do not consult Redis or expose baseline readiness.
-- `PATCH /api/monitors/{monitor_id}` locks one non-archived row, requires `is_active=false` and rejects any `running/finalizing` run before keeping the same ID. The same PostgreSQL gate covers an inactive session-start baseline and an inactive stop drain; the PWA derives those intervals from loaded runs and also blocks editing. Name/URL PWA editing and storage validation are grouped in 14.26; the archive race remains conditional in 14.30.
-- Payloads rejected with `422`, active or non-terminal updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row; 14.26 must turn that into mutation-free validation as part of the edit flow.
+- `PATCH /api/monitors/{monitor_id}` locks one non-archived row, requires `is_active=false` and rejects any `running/finalizing` run before keeping the same ID. The same PostgreSQL gate covers an inactive session-start baseline and an inactive stop drain; the PWA derives those intervals from loaded runs and also blocks editing. The archive race remains conditional in 14.30.
+- Payloads rejected with `422`, active or non-terminal updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. The shared name validator owns the database length boundary before either create or PATCH can flush a row.
 - URL and blacklist participate in the internal baseline policy hash. Changing either keeps the monitor identity; the next manual or recurring start seeds the resulting hash before activation.
 - `DELETE /api/monitors/{monitor_id}` is a soft archive. The first successful call returns `204`; repeating it is idempotent and also returns `204`. Default listing omits the row.
 - Archiving makes PostgreSQL inactive, removes future deadlines, closes the open monitor session and purges encrypted context from owned Vinted sessions. It may inspect/cancel Redis queue state, so the no-Redis-residue assertion applies to a newly created QA monitor, not to every archive.

@@ -22,6 +22,7 @@ from vinted_monitor.services.vinted_sessions import invalidate_vinted_sessions_f
 
 ALLOWED_VINTED_CATALOG_HOSTS = {"www.vinted.es", "vinted.es"}
 ALLOWED_VINTED_CATALOG_PATHS = {"/catalog", "/catalog/"}
+SEARCH_SOURCE_NAME_MAX_LENGTH = 160
 MONITOR_MODES = {"manual", "continuous", "duration", "window"}
 
 
@@ -45,6 +46,8 @@ def validate_search_source_name(name: str) -> str:
     normalized_name = name.strip()
     if not normalized_name:
         raise ValueError("Search source name cannot be empty")
+    if len(normalized_name) > SEARCH_SOURCE_NAME_MAX_LENGTH:
+        raise ValueError(f"Search source name cannot exceed {SEARCH_SOURCE_NAME_MAX_LENGTH} characters")
     return normalized_name
 
 

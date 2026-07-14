@@ -1,6 +1,8 @@
 import type { SearchSource } from '../../api';
 
 export type SourceDraft = {
+  name: string;
+  url: string;
   monitorMode: SearchSource['monitor_mode'];
   intervalSeconds: string;
   jitterPercent: string;
@@ -19,6 +21,8 @@ export function buildSourceDraft(source: SearchSource): SourceDraft {
   const config = source.scheduler_config ?? {};
   const [windowStart, windowEnd] = splitWindow(config.allowed_windows?.[0]);
   return {
+    name: source.name,
+    url: source.url,
     monitorMode: source.monitor_mode ?? 'manual',
     intervalSeconds: String(config.interval_seconds ?? 300),
     jitterPercent: String(config.jitter_percent ?? 20),
@@ -52,6 +56,8 @@ export function filterTermLabelFromSource(source: SearchSource): string {
 
 function draftFingerprint(draft: SourceDraft): string {
   const payload: Record<string, string | string[]> = {
+    name: draft.name.trim(),
+    url: draft.url.trim(),
     mode: draft.monitorMode,
     filters: parseFilterTerms(draft.filterTerms)
   };

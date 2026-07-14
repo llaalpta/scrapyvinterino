@@ -940,6 +940,8 @@ export function useDashboardController() {
       ...current,
       [sourceId]: {
         ...(current[sourceId] ?? {
+          name: '',
+          url: '',
           monitorMode: 'manual',
           intervalSeconds: '300',
           jitterPercent: '20',
@@ -1144,6 +1146,8 @@ export function useDashboardController() {
     const durationMinutes =
       draft.monitorMode === 'duration' ? parseIntegerInRange(draft.sessionDurationMinutes, 'La duracion del monitor', 1, 1440) : null;
     return updateSource(source.id, {
+      name: draft.name,
+      url: draft.url,
       monitor_mode: draft.monitorMode,
       duration_minutes: durationMinutes,
       filter_definition: { blacklist_terms: parseFilterTerms(draft.filterTerms) },
