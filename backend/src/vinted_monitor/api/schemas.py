@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -50,6 +50,57 @@ class SearchSourceCreate(BaseModel):
         return validate_vinted_catalog_url(value)
 
 
+class VintedSessionContextRead(BaseModel):
+    csrf_token: bool
+    anon_id: bool
+    access_token_web: bool
+    datadome: bool
+    cf_bm: bool
+    v_udt: bool
+    user_iso_locale: bool
+    vinted_screen: bool
+
+
+class VintedSessionRead(BaseModel):
+    id: int
+    source_id: int
+    proxy_profile_id: int
+    proxy_name: str
+    usable_now: bool
+    unusable_reason: Literal[
+        "status_incomplete",
+        "status_invalid",
+        "status_unrecognized",
+        "proxy_identity_mismatch",
+        "browser_profile_mismatch",
+        "request_context_mismatch",
+        "expired",
+        "exhausted",
+        "context_unreadable",
+        "context_incomplete",
+    ] | None
+    status: str
+    browser_profile: str
+    impersonate: str
+    country_code: str
+    locale: str
+    accept_language: str
+    viewport_size: str
+    vinted_screen: str
+    egress_ip: str | None
+    egress_country_code: str | None
+    proxy_session: dict[str, Any] | None
+    request_count: int
+    max_requests: int
+    failure_count: int
+    prepared_at: datetime
+    expires_at: datetime | None
+    last_used_at: datetime | None
+    invalidated_at: datetime | None
+    last_error: str | None
+    context: VintedSessionContextRead
+
+
 class SearchSourceRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -70,6 +121,7 @@ class SearchSourceRead(BaseModel):
     baseline_ready: bool = False
     baseline_policy_hash: str | None = None
     catalog_filter_compatibility: dict[str, Any] = Field(default_factory=dict)
+    prepared_sessions: list[VintedSessionRead] = Field(default_factory=list)
 
 
 class SearchSourceUpdate(BaseModel):
@@ -221,44 +273,6 @@ class ProxyProfileRead(BaseModel):
     last_test_status: str | None
     last_test_ip: str | None
     last_test_error: str | None
-    vinted_session: VintedSessionRead | None = None
-
-
-class VintedSessionContextRead(BaseModel):
-    csrf_token: bool
-    anon_id: bool
-    access_token_web: bool
-    datadome: bool
-    cf_bm: bool
-    v_udt: bool
-    user_iso_locale: bool
-    vinted_screen: bool
-
-
-class VintedSessionRead(BaseModel):
-    id: int
-    source_id: int
-    proxy_profile_id: int
-    status: str
-    browser_profile: str
-    impersonate: str
-    country_code: str
-    locale: str
-    accept_language: str
-    viewport_size: str
-    vinted_screen: str
-    egress_ip: str | None
-    egress_country_code: str | None
-    proxy_session: dict[str, Any] | None
-    request_count: int
-    max_requests: int
-    failure_count: int
-    prepared_at: datetime
-    expires_at: datetime | None
-    last_used_at: datetime | None
-    invalidated_at: datetime | None
-    last_error: str | None
-    context: VintedSessionContextRead
 
 
 class ItemRead(BaseModel):

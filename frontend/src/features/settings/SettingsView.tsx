@@ -287,7 +287,6 @@ export function SettingsView({
                     <span>
                       Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
                     </span>
-                    <ProxySessionStatus proxy={proxy} />
                     <ProxyTestStatus proxy={proxy} testing={testing} message={proxyActionMessages[proxy.id]} />
                   </div>
                   <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
@@ -340,43 +339,6 @@ function proxyTestStatusClass(proxy: ProxyProfile, testing: boolean) {
     return 'status failed';
   }
   return 'status';
-}
-
-function ProxySessionStatus({ proxy }: { proxy: ProxyProfile }) {
-  const session = proxy.vinted_session;
-  if (!session) {
-    return <span>Ultima sesion Vinted asociada: sin datos</span>;
-  }
-  const ok = session.status === 'ready';
-  const checks = [
-    ['csrf', session.context.csrf_token],
-    ['anon', session.context.anon_id],
-    ['access', session.context.access_token_web],
-    ['datadome', session.context.datadome],
-    ['cf_bm', session.context.cf_bm],
-    ['v_udt', session.context.v_udt],
-    ['screen', session.context.vinted_screen]
-  ]
-    .map(([label, value]) => `${label}=${value ? 'ok' : 'missing'}`)
-    .join(' ');
-  const expires = session.expires_at ? ` expira ${formatShortDateTime(session.expires_at)}` : '';
-  return (
-    <span>
-      Ultima sesion Vinted monitor #{session.source_id}: {ok ? 'ready' : session.status} | {session.egress_ip ?? 'sin IP'} | {checks} |{' '}
-      {session.request_count}/{session.max_requests}
-      {expires}
-      {session.last_error ? ` | ${session.last_error}` : ''}
-    </span>
-  );
-}
-
-function formatShortDateTime(value: string) {
-  return new Intl.DateTimeFormat('es-ES', {
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    month: '2-digit'
-  }).format(new Date(value));
 }
 
 function SummaryItem({ label, value }: { label: string; value: string }) {

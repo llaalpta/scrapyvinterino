@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop")]
+    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -10,7 +10,9 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BackendDir = Join-Path $RepoRoot "backend"
-$TestsRoot = [IO.Path]::GetFullPath((Join-Path $BackendDir "tests")) + [IO.Path]::DirectorySeparatorChar
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$TestsDirectory = [IO.Path]::GetFullPath((Join-Path $BackendDir "tests"))
+$TestsRoot = $TestsDirectory + [IO.Path]::DirectorySeparatorChar
 $Python = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $ComposeProject = (Split-Path -Leaf $RepoRoot).ToLowerInvariant()
 $RedisDatabase = 15
@@ -25,6 +27,11 @@ $TestTargets = @{
         "tests/test_item_detail_state_audit.py::test_transient_failure_while_preserving_challenge_keeps_terminal_run_and_retry",
         "tests/test_item_detail_state_audit.py::test_challenge_attempt_counter_only_advances_for_failing_candidate"
     )
+    "prepared-session-read-model" = @(
+        "tests/test_prepared_session_read_model.py",
+        "tests/test_prepared_session_live_contract.py::test_live_prepared_session_read_model_matches_runtime_and_pwa"
+    )
+    "full" = @("tests")
 }
 $ScenarioTargets = @($TestTargets[$Scenario])
 
@@ -49,6 +56,45 @@ function Assert-ExecutorServicesStopped {
         if (@(Get-RunningComposeContainers $Service).Count -gt 0) {
             throw "Docker service '$Service' is running. Stop it deliberately before isolated integration QA."
         }
+    }
+}
+
+function Assert-TcpPortAvailable([int]$Port) {
+    $Listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($Listeners.Count -gt 0) {
+        $Owners = ($Listeners | Select-Object -ExpandProperty OwningProcess -Unique) -join ", "
+        throw "QA port $Port is already used by process id(s): $Owners. No process was stopped."
+    }
+}
+
+function Wait-HttpReady([string]$Url, [int]$Seconds, [System.Diagnostics.Process]$Process) {
+    $Deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        if ($Process.HasExited) {
+            throw "The isolated process for $Url exited with code $($Process.ExitCode)."
+        }
+        try {
+            $Response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 3
+            if ($Response.StatusCode -ge 200 -and $Response.StatusCode -lt 500) {
+                return
+            }
+        } catch {
+            Start-Sleep -Milliseconds 250
+        }
+    } while ((Get-Date) -lt $Deadline)
+    throw "Timed out waiting for isolated endpoint $Url."
+}
+
+function Stop-OwnedProcessTree([System.Diagnostics.Process]$Process) {
+    if ($null -eq $Process -or $Process.HasExited) {
+        return
+    }
+    & taskkill.exe /PID $Process.Id /T /F 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0 -and -not $Process.HasExited) {
+        throw "Could not stop owned QA process $($Process.Id)."
+    }
+    if (-not $Process.WaitForExit(10000)) {
+        throw "Owned QA process $($Process.Id) did not exit in time."
     }
 }
 
@@ -176,7 +222,7 @@ function Get-OperationalRedisDigest {
 }
 
 function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
-    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
+    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
     $Saved = @{}
     $Entries = @(Get-ChildItem Env: | Where-Object { $_.Name -match $Pattern })
     foreach ($Entry in $Entries) {
@@ -194,15 +240,27 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             REDIS_URL = "redis://127.0.0.1:6379/$RedisDatabase"
             PYTHONPATH = (Join-Path $BackendDir "src")
             BACKEND_CORS_ORIGINS = "http://127.0.0.1:5176"
-            VINTED_BASE_URL = "http://127.0.0.1:9"
-            VINTED_DATADOME_COLLECTOR_URL = "http://127.0.0.1:9"
-            EGRESS_DIAGNOSTIC_URL = "http://127.0.0.1:9"
-            VINTED_DIRECT_CATALOG_ENABLED = "false"
-            VINTED_DATADOME_COLLECTOR_ENABLED = "false"
-            VINTED_AUTH_ENABLED = "false"
-            ACTION_REQUESTS_ENABLED = "false"
-            SCHEDULER_ENABLED = "false"
-            PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
+            HTTP_PROXY = "http://127.0.0.1:9"
+            HTTPS_PROXY = "http://127.0.0.1:9"
+            ALL_PROXY = "http://127.0.0.1:9"
+            NO_PROXY = "127.0.0.1,localhost,::1"
+        }
+        if ($Scenario -ne "full") {
+            $Values["VINTED_BASE_URL"] = "http://127.0.0.1:9"
+            $Values["VINTED_DATADOME_COLLECTOR_URL"] = "http://127.0.0.1:9"
+            $Values["EGRESS_DIAGNOSTIC_URL"] = "http://127.0.0.1:9"
+            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "false"
+            $Values["VINTED_DATADOME_COLLECTOR_ENABLED"] = "false"
+            $Values["VINTED_AUTH_ENABLED"] = "false"
+            $Values["ACTION_REQUESTS_ENABLED"] = "false"
+            $Values["SCHEDULER_ENABLED"] = "false"
+            $Values["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        }
+        if ($Scenario -eq "prepared-session-read-model") {
+            $Values["PREPARED_SESSION_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["PREPARED_SESSION_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["PREPARED_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         foreach ($Name in $Values.Keys) {
             [Environment]::SetEnvironmentVariable($Name, $Values[$Name], "Process")
@@ -225,7 +283,10 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "BACKEND_CORS_ORIGINS", "VINTED_BASE_URL", "VINTED_DATADOME_COLLECTOR_URL",
         "EGRESS_DIAGNOSTIC_URL", "VINTED_DIRECT_CATALOG_ENABLED",
         "VINTED_DATADOME_COLLECTOR_ENABLED", "VINTED_AUTH_ENABLED",
-        "ACTION_REQUESTS_ENABLED", "SCHEDULER_ENABLED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
+        "ACTION_REQUESTS_ENABLED", "SCHEDULER_ENABLED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+        "PREPARED_SESSION_QA_API_URL", "PREPARED_SESSION_QA_PWA_URL",
+        "PREPARED_SESSION_QA_BROWSER_CHANNEL", "VITE_DEV_API_PROXY_TARGET",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"
     )
     foreach ($Name in $CurrentNames) {
         [Environment]::SetEnvironmentVariable($Name, $null, "Process")
@@ -259,6 +320,9 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
     $RedisLeaseAcquired = $false
     $SavedEnvironment = $null
     $LocationPushed = $false
+    $ApiProcess = $null
+    $ViteProcess = $null
+    $QaLogFiles = @()
     try {
         Acquire-RedisLease $LeaseToken
         $RedisLeaseAcquired = $true
@@ -274,11 +338,76 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
 
         Write-Host "Cycle $Cycle/${Repeat}: migrating an isolated PostgreSQL database"
         Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
+        if ($Scenario -eq "prepared-session-read-model") {
+            Assert-TcpPortAvailable 8001
+            Assert-TcpPortAvailable 5176
+            $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
+            New-Item -ItemType Directory -Path $QaStateDir -Force | Out-Null
+            $ApiOutLog = Join-Path $QaStateDir "prepared-session-api-$Suffix.out.log"
+            $ApiErrLog = Join-Path $QaStateDir "prepared-session-api-$Suffix.err.log"
+            $ViteOutLog = Join-Path $QaStateDir "prepared-session-vite-$Suffix.out.log"
+            $ViteErrLog = Join-Path $QaStateDir "prepared-session-vite-$Suffix.err.log"
+            $QaLogFiles = @($ApiOutLog, $ApiErrLog, $ViteOutLog, $ViteErrLog)
+
+            $ApiProcess = Start-Process `
+                -FilePath $Python `
+                -ArgumentList @("-m", "uvicorn", "vinted_monitor.api.main:app", "--host", "127.0.0.1", "--port", "8001") `
+                -WorkingDirectory $BackendDir `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $ApiOutLog `
+                -RedirectStandardError $ApiErrLog `
+                -PassThru
+            Wait-HttpReady "http://127.0.0.1:8001/health" 45 $ApiProcess
+
+            $ViteProcess = Start-Process `
+                -FilePath "cmd.exe" `
+                -ArgumentList @("/d", "/s", "/c", "pnpm.cmd exec vite --host 127.0.0.1 --port 5176 --strictPort") `
+                -WorkingDirectory $FrontendDir `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $ViteOutLog `
+                -RedirectStandardError $ViteErrLog `
+                -PassThru
+            Wait-HttpReady "http://127.0.0.1:5176" 45 $ViteProcess
+            Write-Host "Cycle $Cycle/${Repeat}: live API 8001 and strict Vite 5176 are isolated and ready"
+        }
         Write-Host "Cycle $Cycle/${Repeat}: running audited scenario '$Scenario'"
-        Invoke-PythonChecked -Label "Selected integration tests" -Arguments (@("-m", "pytest", "-q") + $ScenarioTargets)
+        if ($Scenario -eq "full") {
+            Invoke-PythonChecked `
+                -Label "Backend suite" `
+                -Arguments @("-m", "pytest", "-q", "tests", "--ignore=tests/test_catalog_failstop_integration.py")
+            $env:VINTED_BASE_URL = "http://127.0.0.1:9"
+            $env:VINTED_DATADOME_COLLECTOR_URL = "http://127.0.0.1:9"
+            $env:EGRESS_DIAGNOSTIC_URL = "http://127.0.0.1:9"
+            $env:VINTED_DIRECT_CATALOG_ENABLED = "false"
+            $env:VINTED_DATADOME_COLLECTOR_ENABLED = "false"
+            $env:VINTED_AUTH_ENABLED = "false"
+            $env:ACTION_REQUESTS_ENABLED = "false"
+            $env:SCHEDULER_ENABLED = "false"
+            Invoke-PythonChecked `
+                -Label "Loopback-guarded catalog integration" `
+                -Arguments @("-m", "pytest", "-q", "tests/test_catalog_failstop_integration.py")
+        } else {
+            Invoke-PythonChecked -Label "Selected integration tests" -Arguments (@("-m", "pytest", "-q") + $ScenarioTargets)
+        }
     } catch {
         $PrimaryError = $_
     } finally {
+        foreach ($OwnedProcess in @($ViteProcess, $ApiProcess)) {
+            if ($null -ne $OwnedProcess) {
+                try {
+                    Stop-OwnedProcessTree $OwnedProcess
+                } catch {
+                    $CleanupErrors += $_.Exception.Message
+                }
+            }
+        }
+        foreach ($QaLogFile in $QaLogFiles) {
+            try {
+                Remove-Item -LiteralPath $QaLogFile -ErrorAction SilentlyContinue
+            } catch {
+                $CleanupErrors += $_.Exception.Message
+            }
+        }
         if ($LocationPushed) {
             try {
                 Pop-Location
@@ -344,7 +473,10 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir ".env")) {
 foreach ($TestTarget in $ScenarioTargets) {
     $TestFile = ($TestTarget -split "::", 2)[0]
     $ResolvedTestFile = [IO.Path]::GetFullPath((Join-Path $BackendDir $TestFile))
-    if (-not $ResolvedTestFile.StartsWith($TestsRoot, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $ResolvedTestFile -PathType Leaf)) {
+    $IsTestsDirectory = $ResolvedTestFile.Equals($TestsDirectory, [StringComparison]::OrdinalIgnoreCase)
+    $IsTestBelowRoot = $ResolvedTestFile.StartsWith($TestsRoot, [StringComparison]::OrdinalIgnoreCase)
+    $PathType = if ($IsTestsDirectory) { "Container" } else { "Leaf" }
+    if ((-not $IsTestsDirectory -and -not $IsTestBelowRoot) -or -not (Test-Path -LiteralPath $ResolvedTestFile -PathType $PathType)) {
         throw "Every audited target for scenario '$Scenario' must resolve to an existing file below backend/tests."
     }
 }

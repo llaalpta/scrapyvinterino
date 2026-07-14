@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +16,7 @@ from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_mar
 from vinted_monitor.db.models import ProxyProfile, SearchSource, VintedSession
 from vinted_monitor.providers.browser_profiles import BrowserProfile, profile_for_impersonate
 from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
-from vinted_monitor.services.proxies import effective_proxy_identity_generation
+from vinted_monitor.services.proxies import ProxyProfileEligibilityError, effective_proxy_identity_generation
 
 READY = "ready"
 INVALID = "invalid"
@@ -47,6 +48,9 @@ class VintedSessionSummary:
     id: int
     source_id: int
     proxy_profile_id: int
+    proxy_name: str
+    usable_now: bool
+    unusable_reason: str | None
     status: str
     browser_profile: str
     impersonate: str
@@ -70,24 +74,145 @@ class VintedSessionSummary:
     context: dict[str, bool]
 
 
+@dataclass(frozen=True)
+class VintedSessionEligibility:
+    session: VintedSession
+    usable_now: bool
+    unusable_reason: str | None
+    prepared: PreparedCatalogSession | None
+    context: dict[str, bool]
+    missing_context: tuple[str, ...] = ()
+
+
 def generate_proxy_session_id() -> str:
     return uuid.uuid4().hex
 
 
-def get_latest_vinted_session_summary(
+def list_vinted_session_summaries_for_source(
     db: Session,
-    proxy_profile_id: int,
+    source_id: int,
     settings: Settings | None = None,
     *,
-    source_id: int | None = None,
-) -> VintedSessionSummary | None:
-    statement = select(VintedSession).where(VintedSession.proxy_profile_id == proxy_profile_id)
-    if source_id is not None:
-        statement = statement.where(VintedSession.source_id == source_id)
-    session = db.scalar(statement.order_by(VintedSession.created_at.desc(), VintedSession.id.desc()).limit(1))
-    if session is None:
+    now: datetime | None = None,
+    require_datadome: bool = True,
+) -> list[VintedSessionSummary]:
+    resolved_settings = settings or get_settings()
+    current_time = now or datetime.now(UTC)
+    profile = profile_for_impersonate(resolved_settings.curl_impersonate_browser)
+    rows = db.execute(
+        select(ProxyProfile, VintedSession)
+        .join(VintedSession, VintedSession.proxy_profile_id == ProxyProfile.id)
+        .where(VintedSession.source_id == source_id)
+        .order_by(ProxyProfile.id.asc(), VintedSession.id.asc())
+    ).all()
+    sessions_by_proxy: dict[int, tuple[ProxyProfile, list[VintedSession]]] = {}
+    for proxy_profile, session in rows:
+        grouped = sessions_by_proxy.setdefault(proxy_profile.id, (proxy_profile, []))
+        grouped[1].append(session)
+
+    summaries: list[VintedSessionSummary] = []
+    for proxy_profile, sessions in sessions_by_proxy.values():
+        try:
+            current_generation = effective_proxy_identity_generation(proxy_profile)
+        except ProxyProfileEligibilityError:
+            current_generation = None
+        eligibility = resolve_vinted_session_eligibility(
+            sessions,
+            source_id=source_id,
+            proxy_profile=proxy_profile,
+            current_generation=current_generation,
+            profile=profile,
+            settings=resolved_settings,
+            now=current_time,
+            require_datadome=require_datadome,
+        )
+        if eligibility is not None:
+            summaries.append(
+                summarize_vinted_session(
+                    eligibility,
+                    proxy_name=proxy_profile.name,
+                )
+            )
+    return summaries
+
+
+def resolve_vinted_session_eligibility(
+    sessions: list[VintedSession],
+    *,
+    source_id: int,
+    proxy_profile: ProxyProfile,
+    current_generation: str | None,
+    profile: BrowserProfile,
+    settings: Settings,
+    now: datetime | None = None,
+    require_datadome: bool = True,
+) -> VintedSessionEligibility | None:
+    if not sessions:
         return None
-    return summarize_vinted_session(session, settings=settings)
+    current_time = now or datetime.now(UTC)
+    metadata_candidates = [
+        session
+        for session in sessions
+        if _vinted_session_metadata_unusable_reason(
+            session,
+            source_id=source_id,
+            proxy_profile=proxy_profile,
+            current_generation=current_generation,
+            profile=profile,
+            now=current_time,
+        )
+        is None
+    ]
+    if metadata_candidates:
+        selected = min(metadata_candidates, key=_vinted_session_lru_key)
+    else:
+        selected = max(sessions, key=_vinted_session_diagnostic_key)
+
+    metadata_reason = _vinted_session_metadata_unusable_reason(
+        selected,
+        source_id=source_id,
+        proxy_profile=proxy_profile,
+        current_generation=current_generation,
+        profile=profile,
+        now=current_time,
+    )
+    if metadata_reason is not None:
+        return VintedSessionEligibility(
+            session=selected,
+            usable_now=False,
+            unusable_reason=metadata_reason,
+            prepared=None,
+            context=_empty_prepared_context_flags(),
+        )
+
+    try:
+        prepared = prepared_context_from_session(selected, settings)
+    except VintedSessionImportError:
+        return VintedSessionEligibility(
+            session=selected,
+            usable_now=False,
+            unusable_reason="context_unreadable",
+            prepared=None,
+            context=_empty_prepared_context_flags(),
+        )
+    context_flags = prepared_context_flags(prepared)
+    missing = tuple(missing_prepared_context(prepared, require_datadome=require_datadome))
+    if missing:
+        return VintedSessionEligibility(
+            session=selected,
+            usable_now=False,
+            unusable_reason="context_incomplete",
+            prepared=prepared,
+            context=context_flags,
+            missing_context=missing,
+        )
+    return VintedSessionEligibility(
+        session=selected,
+        usable_now=True,
+        unusable_reason=None,
+        prepared=prepared,
+        context=context_flags,
+    )
 
 
 def get_ready_vinted_session(
@@ -123,37 +248,45 @@ def get_ready_vinted_session(
             reason="Prepared Vinted session proxy identity changed",
             settings=settings,
         )
-    statement = (
-        select(VintedSession)
-        .where(
-            VintedSession.source_id == source.id,
-            VintedSession.proxy_profile_id == proxy_profile.id,
-            VintedSession.proxy_identity_generation == current_generation,
-            VintedSession.status == READY,
-            VintedSession.browser_profile == profile.name,
-            VintedSession.impersonate == profile.impersonate,
-            VintedSession.country_code == proxy_profile.country_code,
-            VintedSession.locale == proxy_profile.locale,
-            VintedSession.accept_language == proxy_profile.accept_language,
-            VintedSession.vinted_screen == proxy_profile.vinted_screen,
-            (VintedSession.expires_at.is_(None) | (VintedSession.expires_at > current_time)),
-            VintedSession.request_count < VintedSession.max_requests,
+    sessions = list(
+        db.scalars(
+            select(VintedSession).where(
+                VintedSession.source_id == source.id,
+                VintedSession.proxy_profile_id == proxy_profile.id,
+            )
         )
-        .order_by(VintedSession.last_used_at.asc().nullsfirst(), VintedSession.prepared_at.asc(), VintedSession.id.asc())
-        .limit(1)
     )
-    session = db.scalar(statement)
-    if session is None:
+    eligibility = resolve_vinted_session_eligibility(
+        sessions,
+        source_id=source.id,
+        proxy_profile=proxy_profile,
+        current_generation=current_generation,
+        profile=profile,
+        settings=settings,
+        now=current_time,
+        require_datadome=require_datadome,
+    )
+    if eligibility is None or eligibility.unusable_reason not in {None, "context_incomplete", "context_unreadable"}:
         raise VintedSessionRequiredError(
             f"No hay sesion Vinted usable para el monitor {source.id} con el proxy {proxy_profile.name}"
         )
-    prepared = prepared_context_from_session(session, settings)
-    missing = missing_prepared_context(prepared, require_datadome=require_datadome)
-    if missing:
-        mark_vinted_session_invalid(db, session.id, reason=f"Prepared Vinted session missing context: {', '.join(missing)}")
+    session = eligibility.session
+    if eligibility.unusable_reason == "context_unreadable":
+        raise VintedSessionImportError("Prepared Vinted session context is unreadable")
+    if eligibility.unusable_reason == "context_incomplete":
+        missing = eligibility.missing_context
+        mark_vinted_session_invalid(
+            db,
+            session.id,
+            reason=f"Prepared Vinted session missing context: {', '.join(missing)}",
+            settings=settings,
+        )
         raise VintedSessionRequiredError(
             f"La sesion Vinted preparada esta incompleta ({', '.join(missing)}); prepara una sesion nueva"
         )
+    prepared = eligibility.prepared
+    if prepared is None:
+        raise VintedSessionImportError("Prepared Vinted session context is unreadable")
     mark_vinted_session_used(db, session, now=current_time)
     return session, prepared
 
@@ -357,17 +490,78 @@ def _lock_live_source_for_session_write(db: Session, source_id: int) -> SearchSo
     return source
 
 
-def summarize_vinted_session(session: VintedSession, settings: Settings | None = None) -> VintedSessionSummary:
-    context_flags: dict[str, bool]
-    try:
-        prepared = prepared_context_from_session(session, settings or get_settings())
-        context_flags = prepared_context_flags(prepared)
-    except Exception:
-        context_flags = {key: False for key in REQUIRED_CONTEXT_FLAGS}
+def _vinted_session_metadata_unusable_reason(
+    session: VintedSession,
+    *,
+    source_id: int,
+    proxy_profile: ProxyProfile,
+    current_generation: str | None,
+    profile: BrowserProfile,
+    now: datetime,
+) -> str | None:
+    if session.status == INCOMPLETE:
+        return "status_incomplete"
+    if session.status == INVALID:
+        return "status_invalid"
+    if session.status != READY:
+        return "status_unrecognized"
+    if (
+        session.source_id != source_id
+        or session.proxy_profile_id != proxy_profile.id
+        or current_generation is None
+        or session.proxy_identity_generation != current_generation
+    ):
+        return "proxy_identity_mismatch"
+    if session.browser_profile != profile.name or session.impersonate != profile.impersonate:
+        return "browser_profile_mismatch"
+    if (
+        session.country_code != proxy_profile.country_code
+        or session.locale != proxy_profile.locale
+        or session.accept_language != proxy_profile.accept_language
+        or session.viewport_size != proxy_profile.screen
+        or session.vinted_screen != proxy_profile.vinted_screen
+    ):
+        return "request_context_mismatch"
+    if session.expires_at is None or _as_utc(session.expires_at) <= _as_utc(now):
+        return "expired"
+    if (session.request_count or 0) >= (session.max_requests or 0):
+        return "exhausted"
+    return None
+
+
+def _vinted_session_lru_key(session: VintedSession) -> tuple[bool, datetime, datetime, int]:
+    prepared_at = _as_utc(session.prepared_at)
+    last_used_at = _as_utc(session.last_used_at) if session.last_used_at is not None else prepared_at
+    return (session.last_used_at is not None, last_used_at, prepared_at, session.id)
+
+
+def _vinted_session_diagnostic_key(session: VintedSession) -> tuple[datetime, int]:
+    return (_as_utc(session.created_at or session.prepared_at), session.id)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _empty_prepared_context_flags() -> dict[str, bool]:
+    return {key: False for key in REQUIRED_CONTEXT_FLAGS}
+
+
+def summarize_vinted_session(
+    eligibility: VintedSessionEligibility,
+    *,
+    proxy_name: str,
+) -> VintedSessionSummary:
+    session = eligibility.session
     return VintedSessionSummary(
         id=session.id,
         source_id=session.source_id,
         proxy_profile_id=session.proxy_profile_id,
+        proxy_name=proxy_name,
+        usable_now=eligibility.usable_now,
+        unusable_reason=eligibility.unusable_reason,
         status=session.status,
         browser_profile=session.browser_profile,
         impersonate=session.impersonate,
@@ -387,14 +581,17 @@ def summarize_vinted_session(session: VintedSession, settings: Settings | None =
         expires_at=session.expires_at,
         last_used_at=session.last_used_at,
         invalidated_at=session.invalidated_at,
-        last_error=session.last_error,
-        context=context_flags,
+        last_error=redact_sensitive_text(session.last_error) if session.last_error else None,
+        context=eligibility.context,
     )
 
 
 def prepared_context_from_session(session: VintedSession, settings: Settings) -> PreparedCatalogSession:
-    raw = decrypt_text(session.context_encrypted, settings.app_secret_key)
-    payload = json.loads(raw)
+    try:
+        raw = decrypt_text(session.context_encrypted, settings.app_secret_key)
+        payload = json.loads(raw)
+    except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VintedSessionImportError("Prepared Vinted session context is unreadable") from exc
     if not isinstance(payload, dict):
         raise VintedSessionImportError("Prepared Vinted session payload is invalid")
     cookies = payload.get("cookies")
