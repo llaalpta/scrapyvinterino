@@ -17,11 +17,13 @@ import { buildSourceDraft, filterTermLabelFromDraft, filterTermLabelFromSource, 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
+  creatingSource,
   detailProbeMessages,
   detailProbeRefs,
   monitorEventHistoryLoadedBySource,
   monitorEventsBySource,
   monitorHiddenEventIdsBySource,
+  monitorCommandPending,
   monitorRunsBySource,
   pendingStopSourceIds,
   monitorStatsBySource,
@@ -51,11 +53,13 @@ export function SourcesView({
   updateDetailProbeRef,
   updateSourceDraft,
 }: {
+  creatingSource: boolean;
   detailProbeMessages: Record<number, string>;
   detailProbeRefs: Record<number, string>;
   monitorEventHistoryLoadedBySource: Record<number, boolean>;
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorHiddenEventIdsBySource: Record<number, number[]>;
+  monitorCommandPending: boolean;
   monitorRunsBySource: Record<number, Run[]>;
   pendingStopSourceIds: number[];
   monitorStatsBySource: Record<number, MonitorStats>;
@@ -189,9 +193,9 @@ export function SourcesView({
           <span>{sources.length} configurados</span>
         </div>
         <form className="source-form" onSubmit={onCreateSource}>
-          <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
-          <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
-          <button type="submit">Guardar URL</button>
+          <input disabled={monitorCommandPending} value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
+          <input disabled={monitorCommandPending} value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
+          <button disabled={monitorCommandPending} type="submit">{creatingSource ? 'Guardando...' : 'Guardar URL'}</button>
         </form>
       </section>
 
@@ -223,6 +227,7 @@ export function SourcesView({
           monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
           monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
           monitorRunStateKnown={selectedSource ? Object.hasOwn(monitorRunsBySource, selectedSource.id) : false}
+          monitorCommandPending={monitorCommandPending}
           onClearMonitorEventsView={onClearMonitorEventsView}
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
@@ -682,6 +687,7 @@ function MonitorDetail({
   monitorEvents,
   monitorRuns,
   monitorRunStateKnown,
+  monitorCommandPending,
   onClearMonitorEventsView,
   onDeleteSource,
   onLoadMonitorStats,
@@ -709,6 +715,7 @@ function MonitorDetail({
   monitorEvents: RunEvent[];
   monitorRuns: Run[];
   monitorRunStateKnown: boolean;
+  monitorCommandPending: boolean;
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
@@ -757,7 +764,7 @@ function MonitorDetail({
   const launchBlockedByFilters = source.catalog_filter_compatibility ? !source.catalog_filter_compatibility.compatible : false;
   const hasNonTerminalRun = monitorRuns.some((run) => run.status === 'running' || run.status === 'finalizing');
   const isRunStateUnknown = !source.is_active && !monitorRunStateKnown;
-  const hasCommandInFlight = runningSessionId !== null || savingSourceId === source.id || hasNonTerminalRun || isRunStateUnknown;
+  const hasCommandInFlight = monitorCommandPending || hasNonTerminalRun || isRunStateUnknown;
   const detailProbeBlocked = savingSourceId === source.id || hasCommandInFlight || hasUnsavedChanges || launchBlockedByFilters || detailProbeRef.trim() === '';
 
   return (
@@ -791,7 +798,7 @@ function MonitorDetail({
                   ? 'Deten el monitor para editarla.'
                   : isRunStateUnknown
                     ? 'Comprobando el estado de ejecucion antes de habilitar acciones.'
-                  : 'Espera a que termine el inicio de sesion.'}
+                    : 'Espera a que termine el comando de monitor en curso.'}
             </span>
           ) : (
             <span>Editable con el monitor detenido.</span>
@@ -850,8 +857,8 @@ function MonitorDetail({
               ) : null}
               <button
                 type="button"
-                disabled={savingSourceId === source.id}
-                title={savingSourceId === source.id ? 'Deteniendo sesion' : 'Detener sesion'}
+                disabled={monitorCommandPending}
+                title={monitorCommandPending ? 'Hay un comando de monitor en curso' : 'Detener sesion'}
                 onClick={() => onStopMonitor(source.id)}
               >
                 <Square size={16} />
@@ -973,7 +980,7 @@ function MonitorDetail({
               <button
                 className="danger-button"
                 type="button"
-                disabled={savingSourceId === archiveSource.id}
+                disabled={monitorCommandPending}
                 onClick={() => {
                   const sourceToArchive = archiveSource;
                   setArchiveSource(null);

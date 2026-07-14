@@ -38,11 +38,14 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
 
       {dashboard.activeSection === 'sources' ? (
         <SourcesView
+          key={dashboard.sources.map((source) => source.id).sort((left, right) => left - right).join(':')}
+          creatingSource={dashboard.creatingSource}
           detailProbeMessages={dashboard.detailProbeMessages}
           detailProbeRefs={dashboard.detailProbeRefs}
           monitorEventHistoryLoadedBySource={dashboard.monitorEventHistoryLoadedBySource}
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
+          monitorCommandPending={dashboard.monitorCommandPending}
           monitorRunsBySource={dashboard.monitorRunsBySource}
           pendingStopSourceIds={dashboard.pendingStopSourceIds}
           monitorStatsBySource={dashboard.monitorStatsBySource}
