@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "worker-redis-availability", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -17,6 +17,14 @@ $Python = Join-Path $BackendDir ".venv\Scripts\python.exe"
 $ComposeProject = (Split-Path -Leaf $RepoRoot).ToLowerInvariant()
 $RedisDatabase = 15
 $RedisLeaseKey = "qa:isolated-integration:lease"
+$QaOwnerLabel = "com.scrapyvinterino.qa.owner"
+$WorkerRedisFocusedTargets = @(
+    "tests/test_scheduler_watchdog.py",
+    "tests/test_scheduler_availability.py"
+)
+$WorkerRedisLiveTargets = @(
+    "tests/test_worker_redis_availability_live.py::test_worker_redis_loss_exits_restarts_and_updates_live_pwa"
+)
 $TestTargets = @{
     "identity" = @(
         "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
@@ -31,6 +39,7 @@ $TestTargets = @{
         "tests/test_prepared_session_read_model.py",
         "tests/test_prepared_session_live_contract.py::test_live_prepared_session_read_model_matches_runtime_and_pwa"
     )
+    "worker-redis-availability" = @($WorkerRedisFocusedTargets + $WorkerRedisLiveTargets)
     "full" = @("tests")
 }
 $ScenarioTargets = @($TestTargets[$Scenario])
@@ -113,6 +122,174 @@ function Assert-ContainerBelongsToRepo([string]$Container, [string]$Service) {
     if (-not $ContainerRepoRoot.Equals([IO.Path]::GetFullPath($RepoRoot), [StringComparison]::OrdinalIgnoreCase)) {
         throw "Docker service '$Service' belongs to another repository checkout."
     }
+}
+
+function Invoke-DockerChecked([string]$Label, [string[]]$Arguments) {
+    $Output = @(& docker @Arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label failed."
+    }
+    return $Output
+}
+
+function Test-DockerContainerExists([string]$Container) {
+    $Output = @(& docker container ls --all --filter "name=^/${Container}$" --format "{{.Names}}" 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect disposable Docker containers."
+    }
+    return @($Output | Where-Object { ([string]$_).Trim() -eq $Container }).Count -eq 1
+}
+
+function Test-DockerNetworkExists([string]$Network) {
+    $Output = @(& docker network ls --filter "name=^${Network}$" --format "{{.Name}}" 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not inspect disposable Docker networks."
+    }
+    return @($Output | Where-Object { ([string]$_).Trim() -eq $Network }).Count -eq 1
+}
+
+function Assert-OwnedQaContainer([string]$Container, [string]$OwnerToken) {
+    $Output = @(Invoke-DockerChecked "QA container ownership inspection" @(
+        "inspect", "--format", "{{json .Config.Labels}}", $Container
+    ))
+    try {
+        $Labels = ([string]$Output[-1]) | ConvertFrom-Json
+        $Owner = $Labels.PSObject.Properties[$QaOwnerLabel].Value
+    } catch {
+        throw "QA container '$Container' has invalid ownership labels."
+    }
+    if ($Owner -ne $OwnerToken) {
+        throw "Refusing to control container '$Container' without the expected QA ownership."
+    }
+}
+
+function Assert-OwnedQaNetwork([string]$Network, [string]$OwnerToken) {
+    $Output = @(Invoke-DockerChecked "QA network ownership inspection" @(
+        "network", "inspect", "--format", "{{json .Labels}}", $Network
+    ))
+    try {
+        $Labels = ([string]$Output[-1]) | ConvertFrom-Json
+        $Owner = $Labels.PSObject.Properties[$QaOwnerLabel].Value
+    } catch {
+        throw "QA network '$Network' has invalid ownership labels."
+    }
+    if ($Owner -ne $OwnerToken) {
+        throw "Refusing to control network '$Network' without the expected QA ownership."
+    }
+}
+
+function Get-ContainerNetworkNames([string]$Container) {
+    $Output = @(Invoke-DockerChecked "Container network inspection" @(
+        "inspect", "--format", "{{json .NetworkSettings.Networks}}", $Container
+    ))
+    try {
+        $Networks = ([string]$Output[-1]) | ConvertFrom-Json
+        return @($Networks.PSObject.Properties.Name | Sort-Object -Unique)
+    } catch {
+        throw "Container '$Container' returned invalid network state."
+    }
+}
+
+function Assert-ContainerNetworksExact([string]$Container, [string[]]$Expected) {
+    $ExpectedNames = @($Expected | Sort-Object -Unique)
+    $ActualNames = @(Get-ContainerNetworkNames $Container)
+    $Difference = @(Compare-Object -ReferenceObject $ExpectedNames -DifferenceObject $ActualNames)
+    if ($Difference.Count -gt 0) {
+        throw "Container '$Container' network attachments do not match the initial snapshot."
+    }
+}
+
+function Get-ContainerImageId([string]$Container) {
+    $Output = @(Invoke-DockerChecked "Container image inspection" @(
+        "inspect", "--format", "{{.Image}}", $Container
+    ))
+    $ImageId = ([string]$Output[-1]).Trim()
+    if ($ImageId -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw "Container '$Container' returned an invalid local image id."
+    }
+    Invoke-DockerChecked "Local image verification" @("image", "inspect", $ImageId) | Out-Null
+    return $ImageId
+}
+
+function Get-LocalBackendImageId {
+    $ComposeFile = Join-Path $RepoRoot "docker-compose.yml"
+    foreach ($Service in @("worker", "api")) {
+        $Output = @(& docker compose --project-directory $RepoRoot -f $ComposeFile images --quiet $Service 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not inspect the local Compose image for '$Service'."
+        }
+        $Candidates = @($Output | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+        foreach ($Candidate in $Candidates) {
+            $ImageOutput = @(& docker image inspect --format "{{.Id}}" $Candidate 2>&1)
+            if ($LASTEXITCODE -eq 0 -and $ImageOutput.Count -eq 1) {
+                $ImageId = ([string]$ImageOutput[0]).Trim()
+                if ($ImageId -match '^sha256:[0-9a-f]{64}$') {
+                    return $ImageId
+                }
+            }
+        }
+    }
+    throw "No existing local worker/API image is available; refusing to pull or build during isolated QA."
+}
+
+function Wait-RedisContainerReady([string]$Container, [string]$OwnerToken, [int]$Seconds) {
+    $Deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        Assert-OwnedQaContainer $Container $OwnerToken
+        $Output = @(& docker exec $Container redis-cli --raw PING 2>&1)
+        if ($LASTEXITCODE -eq 0 -and $Output.Count -gt 0 -and ([string]$Output[-1]).Trim() -eq "PONG") {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $Deadline)
+    throw "Timed out waiting for the disposable Redis container."
+}
+
+function Remove-OwnedQaContainer(
+    [string]$Container,
+    [string]$OwnerToken,
+    [bool]$DisableRestart
+) {
+    if (-not (Test-DockerContainerExists $Container)) {
+        return
+    }
+    Assert-OwnedQaContainer $Container $OwnerToken
+    if ($DisableRestart) {
+        Invoke-DockerChecked "Disabling disposable worker restart" @(
+            "update", "--restart=no", $Container
+        ) | Out-Null
+    }
+    Assert-OwnedQaContainer $Container $OwnerToken
+    Invoke-DockerChecked "Removing disposable QA container" @(
+        "rm", "--force", $Container
+    ) | Out-Null
+    if (Test-DockerContainerExists $Container) {
+        throw "Disposable QA container '$Container' still exists after cleanup."
+    }
+}
+
+function Remove-OwnedQaNetwork(
+    [string]$Network,
+    [string]$OwnerToken,
+    [string]$PostgresContainer,
+    [string[]]$InitialPostgresNetworks
+) {
+    if (Test-DockerNetworkExists $Network) {
+        Assert-OwnedQaNetwork $Network $OwnerToken
+        if (@(Get-ContainerNetworkNames $PostgresContainer) -contains $Network) {
+            Invoke-DockerChecked "Disconnecting operational PostgreSQL from QA network" @(
+                "network", "disconnect", $Network, $PostgresContainer
+            ) | Out-Null
+        }
+        Assert-OwnedQaNetwork $Network $OwnerToken
+        Invoke-DockerChecked "Removing disposable QA network" @(
+            "network", "rm", $Network
+        ) | Out-Null
+        if (Test-DockerNetworkExists $Network) {
+            throw "Disposable QA network '$Network' still exists after cleanup."
+        }
+    }
+    Assert-ContainerNetworksExact $PostgresContainer $InitialPostgresNetworks
 }
 
 function Invoke-PostgresAdmin([string]$Sql) {
@@ -262,6 +439,22 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["PREPARED_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
+        if ($Scenario -eq "worker-redis-availability") {
+            $Values["REDIS_URL"] = "redis://127.0.0.1:9/0"
+            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
+            $Values["SCHEDULER_ENABLED"] = "true"
+            $Values["SCHEDULER_POLL_INTERVAL_SECONDS"] = "1"
+            $Values["SCHEDULER_WORKER_HEARTBEAT_INTERVAL_SECONDS"] = "1"
+            $Values["SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = "5"
+            $Values["SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS"] = "1"
+            $Values["SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS"] = "5"
+            $Values["WORKER_CONSUMER_COUNT"] = "1"
+            $Values["WORKER_RESERVE_TIMEOUT_SECONDS"] = "1"
+            $Values["WORKER_REDIS_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["WORKER_REDIS_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["WORKER_REDIS_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
         foreach ($Name in $Values.Keys) {
             [Environment]::SetEnvironmentVariable($Name, $Values[$Name], "Process")
         }
@@ -286,6 +479,13 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "ACTION_REQUESTS_ENABLED", "SCHEDULER_ENABLED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
         "PREPARED_SESSION_QA_API_URL", "PREPARED_SESSION_QA_PWA_URL",
         "PREPARED_SESSION_QA_BROWSER_CHANNEL", "VITE_DEV_API_PROXY_TARGET",
+        "SCHEDULER_POLL_INTERVAL_SECONDS", "SCHEDULER_WORKER_HEARTBEAT_INTERVAL_SECONDS",
+        "SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS", "SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS",
+        "SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS", "WORKER_CONSUMER_COUNT",
+        "WORKER_RESERVE_TIMEOUT_SECONDS", "WORKER_REDIS_QA_API_URL",
+        "WORKER_REDIS_QA_PWA_URL", "WORKER_REDIS_QA_BROWSER_CHANNEL",
+        "WORKER_REDIS_QA_REDIS_CONTAINER", "WORKER_REDIS_QA_WORKER_CONTAINER",
+        "WORKER_REDIS_QA_OWNER_TOKEN",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"
     )
     foreach ($Name in $CurrentNames) {
@@ -309,8 +509,20 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
     $RoleName = "vinted_monitor_qa_$Suffix"
     $Password = [Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N")
     $LeaseToken = [Guid]::NewGuid().ToString("N")
+    $QaOwnerToken = [Guid]::NewGuid().ToString("N")
+    $QaNetwork = "scrapyvinterino-qa-net-$Suffix"
+    $QaRedisContainer = "scrapyvinterino-qa-redis-$Suffix"
+    $QaWorkerContainer = "scrapyvinterino-qa-worker-$Suffix"
+    $QaPostgresAlias = "qa-postgres-$Suffix"
     $SafeNamePattern = '^vinted_monitor_qa_[0-9a-f]{32}$'
-    if ($DatabaseName -notmatch $SafeNamePattern -or $RoleName -notmatch $SafeNamePattern) {
+    $SafeQaDockerNamePattern = '^scrapyvinterino-qa-(net|redis|worker)-[0-9a-f]{32}$'
+    if (
+        $DatabaseName -notmatch $SafeNamePattern -or
+        $RoleName -notmatch $SafeNamePattern -or
+        $QaNetwork -notmatch $SafeQaDockerNamePattern -or
+        $QaRedisContainer -notmatch $SafeQaDockerNamePattern -or
+        $QaWorkerContainer -notmatch $SafeQaDockerNamePattern
+    ) {
         throw "Generated QA resource names failed the safety check."
     }
 
@@ -323,6 +535,8 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
     $ApiProcess = $null
     $ViteProcess = $null
     $QaLogFiles = @()
+    $QaNetworkCreated = $false
+    $InitialPostgresNetworks = @()
     try {
         Acquire-RedisLease $LeaseToken
         $RedisLeaseAcquired = $true
@@ -338,15 +552,94 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
 
         Write-Host "Cycle $Cycle/${Repeat}: migrating an isolated PostgreSQL database"
         Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
-        if ($Scenario -eq "prepared-session-read-model") {
+
+        if ($Scenario -eq "worker-redis-availability") {
+            Write-Host "Cycle $Cycle/${Repeat}: verifying worker supervisor behavior before live worker startup"
+            Invoke-PythonChecked `
+                -Label "Worker supervisor focused tests" `
+                -Arguments (@("-m", "pytest", "-q") + $WorkerRedisFocusedTargets)
+
+            $InitialPostgresNetworks = @(Get-ContainerNetworkNames $script:PostgresContainer)
+            Invoke-DockerChecked "Creating disposable internal QA network" @(
+                "network", "create", "--driver", "bridge", "--internal",
+                "--label", "$QaOwnerLabel=$QaOwnerToken", $QaNetwork
+            ) | Out-Null
+            $QaNetworkCreated = $true
+            Assert-OwnedQaNetwork $QaNetwork $QaOwnerToken
+
+            Invoke-DockerChecked "Connecting PostgreSQL to disposable QA network" @(
+                "network", "connect", "--alias", $QaPostgresAlias,
+                $QaNetwork, $script:PostgresContainer
+            ) | Out-Null
+            Assert-ContainerNetworksExact `
+                $script:PostgresContainer `
+                @($InitialPostgresNetworks + $QaNetwork)
+
+            Invoke-DockerChecked "Starting disposable Redis container" @(
+                "run", "--detach", "--name", $QaRedisContainer,
+                "--network", $QaNetwork, "--network-alias", $QaRedisContainer,
+                "--label", "$QaOwnerLabel=$QaOwnerToken",
+                $script:RedisImageId
+            ) | Out-Null
+            Assert-OwnedQaContainer $QaRedisContainer $QaOwnerToken
+            Wait-RedisContainerReady $QaRedisContainer $QaOwnerToken 30
+
+            $WorkerDatabaseUrl = "postgresql+psycopg://${RoleName}:${Password}@${QaPostgresAlias}:5432/${DatabaseName}"
+            $WorkerRedisUrl = "redis://${QaRedisContainer}:6379/0"
+            $WorkerEnvironment = @{
+                APP_ENV = "test"
+                APP_SECRET_KEY = $env:APP_SECRET_KEY
+                DATABASE_URL = $WorkerDatabaseUrl
+                REDIS_URL = $WorkerRedisUrl
+                PYTHONPATH = "/app/src"
+                BACKEND_CORS_ORIGINS = "http://127.0.0.1:5176"
+                HTTP_PROXY = "http://127.0.0.1:9"
+                HTTPS_PROXY = "http://127.0.0.1:9"
+                ALL_PROXY = "http://127.0.0.1:9"
+                NO_PROXY = "$QaPostgresAlias,$QaRedisContainer,127.0.0.1,localhost,::1"
+                VINTED_BASE_URL = "http://127.0.0.1:9"
+                VINTED_DATADOME_COLLECTOR_URL = "http://127.0.0.1:9"
+                EGRESS_DIAGNOSTIC_URL = "http://127.0.0.1:9"
+                VINTED_DIRECT_CATALOG_ENABLED = "true"
+                VINTED_DATADOME_COLLECTOR_ENABLED = "false"
+                VINTED_AUTH_ENABLED = "false"
+                ACTION_REQUESTS_ENABLED = "false"
+                SCHEDULER_ENABLED = "true"
+                SCHEDULER_POLL_INTERVAL_SECONDS = "1"
+                SCHEDULER_WORKER_HEARTBEAT_INTERVAL_SECONDS = "1"
+                SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS = "5"
+                SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS = "1"
+                SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS = "5"
+                WORKER_CONSUMER_COUNT = "1"
+                WORKER_RESERVE_TIMEOUT_SECONDS = "1"
+            }
+            $WorkerArguments = @(
+                "run", "--detach", "--name", $QaWorkerContainer,
+                "--restart", "unless-stopped", "--network", $QaNetwork,
+                "--label", "$QaOwnerLabel=$QaOwnerToken",
+                "--mount", "type=bind,source=$([IO.Path]::GetFullPath((Join-Path $BackendDir 'src'))),target=/app/src,readonly"
+            )
+            foreach ($Name in @($WorkerEnvironment.Keys | Sort-Object)) {
+                $WorkerArguments += @("--env", "$Name=$($WorkerEnvironment[$Name])")
+            }
+            $WorkerArguments += @($script:BackendImageId, "python", "-m", "vinted_monitor.worker.main")
+            Invoke-DockerChecked "Starting disposable worker container" $WorkerArguments | Out-Null
+            Assert-OwnedQaContainer $QaWorkerContainer $QaOwnerToken
+
+            $env:WORKER_REDIS_QA_REDIS_CONTAINER = $QaRedisContainer
+            $env:WORKER_REDIS_QA_WORKER_CONTAINER = $QaWorkerContainer
+            $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
+        }
+
+        if ($Scenario -in @("prepared-session-read-model", "worker-redis-availability")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
             New-Item -ItemType Directory -Path $QaStateDir -Force | Out-Null
-            $ApiOutLog = Join-Path $QaStateDir "prepared-session-api-$Suffix.out.log"
-            $ApiErrLog = Join-Path $QaStateDir "prepared-session-api-$Suffix.err.log"
-            $ViteOutLog = Join-Path $QaStateDir "prepared-session-vite-$Suffix.out.log"
-            $ViteErrLog = Join-Path $QaStateDir "prepared-session-vite-$Suffix.err.log"
+            $ApiOutLog = Join-Path $QaStateDir "$Scenario-api-$Suffix.out.log"
+            $ApiErrLog = Join-Path $QaStateDir "$Scenario-api-$Suffix.err.log"
+            $ViteOutLog = Join-Path $QaStateDir "$Scenario-vite-$Suffix.out.log"
+            $ViteErrLog = Join-Path $QaStateDir "$Scenario-vite-$Suffix.err.log"
             $QaLogFiles = @($ApiOutLog, $ApiErrLog, $ViteOutLog, $ViteErrLog)
 
             $ApiProcess = Start-Process `
@@ -386,6 +679,10 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             Invoke-PythonChecked `
                 -Label "Loopback-guarded catalog integration" `
                 -Arguments @("-m", "pytest", "-q", "tests/test_catalog_failstop_integration.py")
+        } elseif ($Scenario -eq "worker-redis-availability") {
+            Invoke-PythonChecked `
+                -Label "Live worker Redis availability contract" `
+                -Arguments (@("-m", "pytest", "-q") + $WorkerRedisLiveTargets)
         } else {
             Invoke-PythonChecked -Label "Selected integration tests" -Arguments (@("-m", "pytest", "-q") + $ScenarioTargets)
         }
@@ -399,6 +696,27 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
                 } catch {
                     $CleanupErrors += $_.Exception.Message
                 }
+            }
+        }
+        if ($Scenario -eq "worker-redis-availability" -and $QaNetworkCreated) {
+            try {
+                Remove-OwnedQaContainer $QaWorkerContainer $QaOwnerToken $true
+            } catch {
+                $CleanupErrors += $_.Exception.Message
+            }
+            try {
+                Remove-OwnedQaContainer $QaRedisContainer $QaOwnerToken $false
+            } catch {
+                $CleanupErrors += $_.Exception.Message
+            }
+            try {
+                Remove-OwnedQaNetwork `
+                    $QaNetwork `
+                    $QaOwnerToken `
+                    $script:PostgresContainer `
+                    $InitialPostgresNetworks
+            } catch {
+                $CleanupErrors += $_.Exception.Message
             }
         }
         foreach ($QaLogFile in $QaLogFiles) {
@@ -491,6 +809,10 @@ $script:RedisContainer = $RedisContainers[0]
 Assert-ContainerBelongsToRepo $script:PostgresContainer "postgres"
 Assert-ContainerBelongsToRepo $script:RedisContainer "redis"
 Assert-ExecutorServicesStopped
+if ($Scenario -eq "worker-redis-availability") {
+    $script:RedisImageId = Get-ContainerImageId $script:RedisContainer
+    $script:BackendImageId = Get-LocalBackendImageId
+}
 
 $InitialPostgresDigest = Get-OperationalPostgresDigest
 $InitialRedisDigest = Get-OperationalRedisDigest
