@@ -1,6 +1,6 @@
 # 001 Search Sources
 
-Since 14.34.2, `is_active` represents an open manual or recurring monitor session and every start owns its internal baseline. Baseline readiness is not a public source field or command. 14.34.3 later extends configuration locking through stop drain.
+Since 14.34.3, `is_active` represents admission for a manual or recurring monitor session, not proof that no run is draining. Every start owns its internal baseline, and configuration remains locked during either a non-terminal baseline or stop drain. Baseline readiness and drain are derived behavior, not public source fields or commands.
 
 ## Goal
 
@@ -57,8 +57,8 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 ## Current Command Boundaries
 
 - `POST /api/monitors` validates locally and commits one inactive/manual row. Source reads do not consult Redis or expose baseline readiness.
-- `PATCH /api/monitors/{monitor_id}` locks one non-archived row with `is_active=false` and keeps its ID. The PWA blocks editing during a manual or recurring session-start baseline or a loaded non-terminal run, but another tab/client can still race that inactive baseline window. Name/URL PWA editing and storage validation are grouped in 14.26; adversarial cross-process serialization remains conditional in 14.30.
-- Payloads rejected with `422`, active updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row; 14.26 must turn that into mutation-free validation as part of the edit flow.
+- `PATCH /api/monitors/{monitor_id}` locks one non-archived row, requires `is_active=false` and rejects any `running/finalizing` run before keeping the same ID. The same PostgreSQL gate covers an inactive session-start baseline and an inactive stop drain; the PWA derives those intervals from loaded runs and also blocks editing. Name/URL PWA editing and storage validation are grouped in 14.26; the archive race remains conditional in 14.30.
+- Payloads rejected with `422`, active or non-terminal updates rejected with `409`, and missing/archived updates rejected with `404` do not mutate PostgreSQL. Names beyond the database limit currently fail with `500` without a row; 14.26 must turn that into mutation-free validation as part of the edit flow.
 - URL and blacklist participate in the internal baseline policy hash. Changing either keeps the monitor identity; the next manual or recurring start seeds the resulting hash before activation.
 - `DELETE /api/monitors/{monitor_id}` is a soft archive. The first successful call returns `204`; repeating it is idempotent and also returns `204`. Default listing omits the row.
 - Archiving makes PostgreSQL inactive, removes future deadlines, closes the open monitor session and purges encrypted context from owned Vinted sessions. It may inspect/cancel Redis queue state, so the no-Redis-residue assertion applies to a newly created QA monitor, not to every archive.

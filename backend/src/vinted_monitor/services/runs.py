@@ -1010,7 +1010,7 @@ def execute_monitor_run(
     egress: RunEgress | None = None,
     runtime_metadata_extra: dict[str, Any] | None = None,
 ) -> Run:
-    source = db.get(SearchSource, source_id)
+    source = _lock_source_for_run_transition(db, source_id)
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if require_active and not source.is_active:
@@ -1028,8 +1028,10 @@ def execute_monitor_run(
     active_session = run_session
     if active_session is None and require_active:
         active_session = get_active_monitor_session(db, source.id)
-    if require_active and source.monitor_mode == "manual" and active_session is None:
-        raise SearchSourceInactiveError("Inicia la sesion manual antes de ejecutar este monitor")
+    if require_active and active_session is None:
+        if source.monitor_mode == "manual":
+            raise SearchSourceInactiveError("Inicia la sesion manual antes de ejecutar este monitor")
+        raise SearchSourceInactiveError(f"Search source {source_id} has no active monitor session")
     run = Run(
         source_id=source.id,
         monitor_session_id=active_session.id if active_session is not None else None,
@@ -2078,6 +2080,18 @@ def _active_source_run_exists(
     )
 
 
+def _lock_source_for_run_transition(db: Session, source_id: int) -> SearchSource | None:
+    return db.scalar(
+        select(SearchSource)
+        .where(SearchSource.id == source_id)
+        # Admission, stop and terminal writers mutate no source key. NO KEY
+        # UPDATE preserves their mutual exclusion without waiting on FK
+        # key-share locks from events emitted during the provider request.
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+
+
 def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_config) -> dict:
     return {
         "evaluation_contract": EVALUATION_CONTRACT_VERSION,
@@ -2201,7 +2215,7 @@ def recover_task_run_before_delivery(
     if previous_run.status in {SUCCESS, FAILED}:
         return previous_run
 
-    source = db.get(SearchSource, source_id)
+    source = _lock_source_for_run_transition(db, source_id)
     if source is None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     if previous_run.status == FINALIZING:
@@ -2237,6 +2251,7 @@ def recover_task_run_before_delivery(
                 details={"task_id": task_id},
             )
         )
+        _close_draining_monitor_session(db, previous_run, source, level="warning")
         db.commit()
         db.refresh(previous_run)
         return previous_run
@@ -2280,6 +2295,57 @@ def _apply_pending_candidate_state_transition(
     )
 
 
+def _close_draining_monitor_session(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    *,
+    level: str | None = None,
+) -> bool:
+    if not _is_draining_monitor_session(db, run, source):
+        return False
+    db.flush()
+    other_non_terminal_run_id = db.scalar(
+        select(Run.id)
+        .where(
+            Run.id != run.id,
+            Run.source_id == source.id,
+            Run.monitor_session_id == run.monitor_session_id,
+            Run.status.in_((RUNNING, FINALIZING)),
+            Run.finished_at.is_(None),
+        )
+        .limit(1)
+    )
+    if other_non_terminal_run_id is not None:
+        return False
+    closed_session = stop_active_monitor_session(
+        db,
+        source.id,
+        stopped_at=run.finished_at or datetime.now(UTC),
+        reason="stopped",
+    )
+    if closed_session is None:
+        return False
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="monitor_session_closed",
+        level=level,
+        proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
+        message="Monitor session closed after stop request",
+        details={"monitor_session_id": run.monitor_session_id, "reason": "stopped"},
+    )
+    return True
+
+
+def _is_draining_monitor_session(db: Session, run: Run, source: SearchSource) -> bool:
+    if source.is_active or run.monitor_session_id is None:
+        return False
+    active_session = get_active_monitor_session(db, source.id)
+    return active_session is not None and active_session.id == run.monitor_session_id
+
+
 def _complete_finalizing_run(
     db: Session,
     run: Run,
@@ -2288,12 +2354,20 @@ def _complete_finalizing_run(
     close_session_on_finish: bool,
     reconciled: bool,
 ) -> None:
+    mark_proxy_run_success(db, (run.runtime_metadata or {}).get("proxy_profile_id"))
+    db.flush()
+    current_source = _lock_source_for_run_transition(db, source.id)
+    if current_source is None:
+        raise SearchSourceNotFoundError(f"Search source {source.id} does not exist")
+    source = current_source
     run.status = SUCCESS
     run.finished_at = datetime.now(UTC)
     run.error_message = None
     source.last_run_at = run.finished_at
-    mark_proxy_run_success(db, (run.runtime_metadata or {}).get("proxy_profile_id"))
-    if close_session_on_finish and run.monitor_session_id is not None:
+    drain_requested = _is_draining_monitor_session(db, run, source)
+    if drain_requested:
+        _close_draining_monitor_session(db, run, source)
+    if not drain_requested and close_session_on_finish and run.monitor_session_id is not None:
         stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="completed")
         record_run_event(
             db,
@@ -2304,7 +2378,7 @@ def _complete_finalizing_run(
             message="Monitor session closed after run completion",
             details={"monitor_session_id": run.monitor_session_id, "reason": "completed"},
         )
-    elif not close_session_on_finish:
+    elif not drain_requested and not close_session_on_finish:
         _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
     if close_session_on_finish:
         _clear_manual_monitor_runtime(source)
@@ -2382,9 +2456,6 @@ def _record_failed_run(
             "vinted_session_use_count": (run.runtime_metadata or {}).get("vinted_session_request_count"),
         },
     )
-    run.status = FAILED
-    run.finished_at = datetime.now(UTC)
-    run.error_message = message
     vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
     if isinstance(
         exc,
@@ -2403,30 +2474,49 @@ def _record_failed_run(
         mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
     elif penalize_proxy:
         mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
-    should_stop_monitor = _should_stop_monitor_after_failure(db, run, source, force_stop_monitor=force_stop_monitor)
-    if run.monitor_session_id is not None and should_stop_monitor:
-        closed_session = stop_active_monitor_session(
+    db.flush()
+    current_source = _lock_source_for_run_transition(db, source.id)
+    if current_source is None:
+        raise SearchSourceNotFoundError(f"Search source {source.id} does not exist")
+    source = current_source
+    run.status = FAILED
+    run.finished_at = datetime.now(UTC)
+    run.error_message = message
+    drain_requested = not force_stop_monitor and _is_draining_monitor_session(db, run, source)
+    stopped_after_request = drain_requested and _close_draining_monitor_session(db, run, source, level="warning")
+    should_stop_monitor = stopped_after_request or (
+        not drain_requested
+        and _should_stop_monitor_after_failure(
             db,
-            source.id,
-            stopped_at=run.finished_at,
-            reason=monitor_stop_reason,
+            run,
+            source,
+            force_stop_monitor=force_stop_monitor,
         )
-        if closed_session is not None:
-            record_run_event(
+    )
+    if run.monitor_session_id is not None and should_stop_monitor:
+        if not stopped_after_request:
+            closed_session = stop_active_monitor_session(
                 db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="monitor_session_closed",
-                level="warning",
-                proxy_profile_id=event_proxy_profile_id,
-                message="Monitor session closed after run failure",
-                details={"monitor_session_id": run.monitor_session_id, "reason": closed_session.stop_reason},
+                source.id,
+                stopped_at=run.finished_at,
+                reason=monitor_stop_reason,
             )
+            if closed_session is not None:
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="monitor_session_closed",
+                    level="warning",
+                    proxy_profile_id=event_proxy_profile_id,
+                    message="Monitor session closed after run failure",
+                    details={"monitor_session_id": run.monitor_session_id, "reason": closed_session.stop_reason},
+                )
         source.is_active = False
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
-    elif run.monitor_session_id is not None:
+    elif run.monitor_session_id is not None and not drain_requested:
         _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
     _clear_manual_monitor_runtime(source)
     db.add(

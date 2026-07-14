@@ -8,7 +8,7 @@ from api_client import authenticated_test_client
 from pydantic import ValidationError
 
 from vinted_monitor.api.schemas import SearchSourceCreate
-from vinted_monitor.db.models import AppSetting, MonitorSession, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, Run, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services import search_sources as search_sources_service
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY
@@ -440,6 +440,55 @@ def test_update_source_api_rejects_active_monitor_configuration_change() -> None
             if source is not None:
                 db.delete(source)
                 db.commit()
+
+
+def test_update_source_api_rejects_configuration_change_while_stop_is_draining() -> None:
+    client = authenticated_test_client()
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest draining edit source",
+            url="https://www.vinted.es/catalog?search_text=draining-edit",
+            normalized_query={"search_text": ["draining-edit"]},
+            is_active=False,
+            monitor_mode="continuous",
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+            filter_definition={"blacklist_terms": []},
+        )
+        db.add(source)
+        db.flush()
+        session = MonitorSession(source_id=source.id, started_at=datetime.now(UTC))
+        db.add(session)
+        db.flush()
+        run = Run(
+            source_id=source.id,
+            monitor_session_id=session.id,
+            status="running",
+            trigger="scheduler",
+            runtime_metadata={},
+        )
+        db.add(run)
+        db.commit()
+        source_id = source.id
+
+    try:
+        response = client.patch(
+            f"/api/monitors/{source_id}",
+            json={"filter_definition": {"blacklist_terms": ["roto"]}},
+        )
+
+        assert response.status_code == 409
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            assert source is not None
+            assert source.filter_definition == {"blacklist_terms": []}
+    finally:
+        with SessionLocal() as db:
+            db.query(Run).filter(Run.source_id == source_id).delete(synchronize_session=False)
+            db.query(MonitorSession).filter(MonitorSession.source_id == source_id).delete(synchronize_session=False)
+            source = db.get(SearchSource, source_id)
+            if source is not None:
+                db.delete(source)
+            db.commit()
 
 
 def test_update_source_api_rejects_monitor_level_proxy_field() -> None:

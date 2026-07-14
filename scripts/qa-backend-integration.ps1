@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -25,6 +25,16 @@ $WorkerRedisFocusedTargets = @(
 $WorkerRedisLiveTargets = @(
     "tests/test_worker_redis_availability_live.py::test_worker_redis_loss_exits_restarts_and_updates_live_pwa"
 )
+$SessionStopFocusedTargets = @(
+    "tests/test_manual_runs.py::test_monitor_stop_commits_inactive_session_before_ready_task_cleanup",
+    "tests/test_manual_runs.py::test_monitor_stop_drains_non_terminal_session_run",
+    "tests/test_manual_runs.py::test_monitor_stop_still_rejects_sessionless_baseline_run",
+    "tests/test_manual_runs.py::test_failed_run_preserves_failure_and_drain_waits_for_finalizing_sibling",
+    "tests/test_search_sources.py::test_update_source_api_rejects_configuration_change_while_stop_is_draining"
+)
+$SessionStopLiveTargets = @(
+    "tests/test_recurring_session_start_live.py::test_live_session_stop_drains_run_and_fences_reserved_task"
+)
 $TestTargets = @{
     "identity" = @(
         "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
@@ -46,6 +56,7 @@ $TestTargets = @{
     "recurring-session-start-baseline" = @(
         "tests/test_recurring_session_start_live.py::test_live_recurring_session_start_baseline_and_real_consumer"
     )
+    "session-stop-drain" = @($SessionStopFocusedTargets + $SessionStopLiveTargets)
     "full" = @("tests")
 }
 $ScenarioTargets = @($TestTargets[$Scenario])
@@ -101,16 +112,47 @@ function Wait-HttpReady([string]$Url, [int]$Seconds, [System.Diagnostics.Process
 }
 
 function Stop-OwnedProcessTree([System.Diagnostics.Process]$Process) {
-    if ($null -eq $Process -or $Process.HasExited) {
+    if ($null -eq $Process) {
         return
     }
-    & taskkill.exe /PID $Process.Id /T /F 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0 -and -not $Process.HasExited) {
-        throw "Could not stop owned QA process $($Process.Id)."
+    if (-not $Process.HasExited) {
+        & taskkill.exe /PID $Process.Id /T /F 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0 -and -not $Process.HasExited) {
+            throw "Could not stop owned QA process $($Process.Id)."
+        }
     }
     if (-not $Process.WaitForExit(10000)) {
         throw "Owned QA process $($Process.Id) did not exit in time."
     }
+    $Process.Dispose()
+}
+
+function Remove-OwnedQaFile([string]$Path, [string]$QaRoot) {
+    $ResolvedRoot = [IO.Path]::GetFullPath($QaRoot)
+    $ResolvedPath = [IO.Path]::GetFullPath($Path)
+    $RootPrefix = $ResolvedRoot
+    if (-not $RootPrefix.EndsWith([string][IO.Path]::DirectorySeparatorChar)) {
+        $RootPrefix += [IO.Path]::DirectorySeparatorChar
+    }
+    if (-not $ResolvedPath.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove QA file outside the isolated state directory."
+    }
+    for ($Attempt = 1; $Attempt -le 20; $Attempt++) {
+        if (-not (Test-Path -LiteralPath $ResolvedPath)) {
+            return
+        }
+        try {
+            Remove-Item -LiteralPath $ResolvedPath -Force -ErrorAction Stop
+        } catch {
+            if ($Attempt -eq 20) {
+                throw
+            }
+        }
+        if (Test-Path -LiteralPath $ResolvedPath) {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    throw "QA temporary file still exists after bounded cleanup: $ResolvedPath"
 }
 
 function Assert-ContainerBelongsToRepo([string]$Container, [string]$Service) {
@@ -405,7 +447,7 @@ function Get-OperationalRedisDigest {
 }
 
 function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
-    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
+    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
     $Saved = @{}
     $Entries = @(Get-ChildItem Env: | Where-Object { $_.Name -match $Pattern })
     foreach ($Entry in $Entries) {
@@ -480,6 +522,18 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["RECURRING_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
+        if ($Scenario -eq "session-stop-drain") {
+            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
+            $Values["VINTED_PREPARED_SESSION_REQUIRED"] = "false"
+            $Values["SCHEDULER_ENABLED"] = "true"
+            $Values["SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = "600"
+            $Values["WORKER_CONSUMER_COUNT"] = "1"
+            $Values["WORKER_RESERVE_TIMEOUT_SECONDS"] = "1"
+            $Values["SESSION_STOP_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["SESSION_STOP_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["SESSION_STOP_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
         foreach ($Name in $Values.Keys) {
             [Environment]::SetEnvironmentVariable($Name, $Values[$Name], "Process")
         }
@@ -508,6 +562,8 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "MANUAL_SESSION_QA_BROWSER_CHANNEL", "MANUAL_SESSION_QA_PROVIDER_STATE",
         "RECURRING_SESSION_QA_API_URL", "RECURRING_SESSION_QA_PWA_URL",
         "RECURRING_SESSION_QA_BROWSER_CHANNEL", "SESSION_QA_PROVIDER_STATE",
+        "SESSION_STOP_QA_API_URL", "SESSION_STOP_QA_PWA_URL",
+        "SESSION_STOP_QA_BROWSER_CHANNEL",
         "SCHEDULER_POLL_INTERVAL_SECONDS", "SCHEDULER_WORKER_HEARTBEAT_INTERVAL_SECONDS",
         "SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS", "SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS",
         "SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS", "WORKER_CONSUMER_COUNT",
@@ -565,6 +621,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
     $ViteProcess = $null
     $QaLogFiles = @()
     $QaTemporaryFiles = @()
+    $QaStateDir = $null
     $QaNetworkCreated = $false
     $InitialPostgresNetworks = @()
     try {
@@ -661,7 +718,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline")) {
+        if ($Scenario -in @("prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
@@ -674,12 +731,14 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
 
             $ApiApplication = "vinted_monitor.api.main:app"
             $ApiArguments = @("-m", "uvicorn", $ApiApplication, "--host", "127.0.0.1", "--port", "8001")
-            if ($Scenario -in @("manual-session-start-baseline", "recurring-session-start-baseline")) {
+            if ($Scenario -in @("manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
                 $ProviderStateFile = Join-Path $QaStateDir "$Scenario-provider-$Suffix.json"
                 $QaTemporaryFiles = @($ProviderStateFile)
                 $env:SESSION_QA_PROVIDER_STATE = $ProviderStateFile
                 if ($Scenario -eq "manual-session-start-baseline") {
                     $env:MANUAL_SESSION_QA_PROVIDER_STATE = $ProviderStateFile
+                } elseif ($Scenario -eq "session-stop-drain") {
+                    $env:WORKER_TASK_QUEUE_KEY = "qa:session-stop-drain:$Suffix"
                 } else {
                     $env:WORKER_TASK_QUEUE_KEY = "qa:recurring-session:$Suffix"
                 }
@@ -732,6 +791,13 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             Invoke-PythonChecked `
                 -Label "Live worker Redis availability contract" `
                 -Arguments (@("-m", "pytest", "-q") + $WorkerRedisLiveTargets)
+        } elseif ($Scenario -eq "session-stop-drain") {
+            Invoke-PythonChecked `
+                -Label "Session-stop focused contract" `
+                -Arguments (@("-m", "pytest", "-q") + $SessionStopFocusedTargets)
+            Invoke-PythonChecked `
+                -Label "Session-stop live integration" `
+                -Arguments (@("-m", "pytest", "-q") + $SessionStopLiveTargets)
         } else {
             Invoke-PythonChecked -Label "Selected integration tests" -Arguments (@("-m", "pytest", "-q") + $ScenarioTargets)
         }
@@ -770,17 +836,14 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
         }
         foreach ($QaLogFile in $QaLogFiles) {
             try {
-                Remove-Item -LiteralPath $QaLogFile -ErrorAction SilentlyContinue
+                Remove-OwnedQaFile $QaLogFile $QaStateDir
             } catch {
                 $CleanupErrors += $_.Exception.Message
             }
         }
         foreach ($QaTemporaryFile in $QaTemporaryFiles) {
             try {
-                Remove-Item -LiteralPath $QaTemporaryFile -ErrorAction SilentlyContinue
-                if (Test-Path -LiteralPath $QaTemporaryFile) {
-                    throw "QA temporary state still exists after cleanup."
-                }
+                Remove-OwnedQaFile $QaTemporaryFile $QaStateDir
             } catch {
                 $CleanupErrors += $_.Exception.Message
             }
