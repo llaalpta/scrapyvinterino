@@ -65,6 +65,7 @@ from vinted_monitor.services.runs import (
     BaselineRequiredError,
     ManualRunProvider,
     RunAlreadyActiveError,
+    SearchSourceInactiveError,
     SearchSourceNotFoundError,
     ensure_monitor_baseline_ready,
     execute_manual_run,
@@ -88,6 +89,7 @@ from vinted_monitor.services.scheduler import (
 from vinted_monitor.services.search_sources import (
     SearchSourceActiveError,
     SearchSourceConfigError,
+    SearchSourceRunActiveError,
     archive_source,
     catalog_filter_compatibility,
     create_source,
@@ -219,8 +221,12 @@ def post_monitor_start(
     try:
         source = db.get(SearchSource, monitor_id)
         if source is not None and source.monitor_mode == "manual":
-            ensure_monitor_baseline_ready(db, monitor_id)
-            return execute_manual_run(db, monitor_id, provider=provider)
+            return execute_monitor_baseline(
+                db,
+                monitor_id,
+                provider=provider,
+                activate_manual_session=True,
+            )
         acquire_initial_run_admission_lock(db)
         ensure_scheduler_can_activate(db, settings, source_id=monitor_id)
         ensure_monitor_baseline_ready(db, monitor_id)
@@ -262,6 +268,8 @@ def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
         return _source_read(stop_source_monitor(db, monitor_id), db)
     except SourceUpdateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SearchSourceRunActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @business_router.get("/scheduler", response_model=SchedulerStateRead)
@@ -475,11 +483,12 @@ def post_monitor_run(
     provider: ManualRunProvider | None = Depends(get_manual_run_provider),
 ):
     try:
-        ensure_monitor_baseline_ready(db, monitor_id)
         return execute_manual_run(db, monitor_id, provider=provider)
     except SearchSourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RunAlreadyActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SearchSourceInactiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SchedulerCapacityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -496,6 +505,12 @@ def post_monitor_baseline(
     provider: ManualRunProvider | None = Depends(get_manual_run_provider),
 ):
     try:
+        source = db.get(SearchSource, monitor_id)
+        if source is not None and source.monitor_mode == "manual":
+            raise HTTPException(
+                status_code=409,
+                detail="El listado inicial del modo manual se calibra al iniciar la sesion",
+            )
         return execute_monitor_baseline(db, monitor_id, provider=provider)
     except SearchSourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

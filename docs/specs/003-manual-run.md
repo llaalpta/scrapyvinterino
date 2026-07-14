@@ -1,74 +1,61 @@
 # 003 Manual Run
 
-> Planned replacement: roadmap items 14.34.1 and 14.34.3 change punctual execution into an active manual session and later add graceful stop drain. `Iniciar sesion` first captures the catalog baseline without opportunities; only a later `Ejecutar ahora` run may process new candidates. The decision-complete target contracts live in spec 008. Until those slices merge, the current behavior documented below remains implemented.
-
 ## Goal
 
-Allow the user to manually execute a configured monitor and record the execution lifecycle.
+Allow one user to open a manual monitor session, execute explicit catalog checks inside it and inspect the complete safe lifecycle.
 
 ## Scope
 
-- Trigger a run for one monitor.
-- Create a `runs` record with started/finished timestamps.
-- Create and close a `monitor_sessions` record for punctual/manual launches.
-- Track status, item counters, opportunity counters, and errors.
-- Record the same safe run-event log used by scheduled monitor runs so a manual launch can be inspected from start to final opportunity/no-op decision.
-- Require an explicit initial snapshot before a manual run can process candidates.
-- Expose run history through API and in the PWA monitor view.
-- Execute synchronously from the API for this vertical slice.
-- Use the public Vinted catalog provider contract from spec 002.
+- `POST /api/monitors/{monitor_id}/start` captures the current catalog as an internal `baseline` run before opening the manual session.
+- A successful baseline marks the visible IDs as seen, creates no item or opportunity, leaves `next_run_at=null` and opens exactly one `monitor_sessions` row.
+- `POST /api/monitors/{monitor_id}/runs` is available only while that manual session is active. Every run is synchronous, single-flight and keeps the same `monitor_session_id` until explicit stop or fail-stop.
+- `POST /api/monitors/{monitor_id}/stop` closes an idle manual session. Until roadmap item 14.34.3, a non-terminal run makes stop return `409`; the PWA disables the conflicting controls.
+- Run status, counters, errors and the safe event timeline remain visible in the monitor view.
+- Manual and scheduled business runs use the same public catalog provider, Redis seen state, filters, persistence, redaction and opportunity contracts.
 
 ## Out of Scope
 
-- Scheduler.
-- Full deduplication logic beyond recording counters needed by the run.
-- Persisting catalog items.
-- Authenticated actions.
-- Notifications.
+- Automatic cadence for manual mode.
+- Graceful stop while a run is already executing; roadmap item 14.34.3 owns that change.
+- Authenticated Vinted actions, notifications and purchase behavior.
 
 ## Interfaces
 
 - API:
+  - `POST /api/monitors/{monitor_id}/start`;
   - `POST /api/monitors/{monitor_id}/runs`;
+  - `POST /api/monitors/{monitor_id}/stop`;
   - `GET /api/runs?limit=50`.
 - PWA:
-  - execute a monitor;
-  - show recent run history inside the monitor view.
+  - `Iniciar sesion` while stopped;
+  - `Ejecutar ahora` and `Detener sesion` while active;
+  - no standalone recalibration action in manual mode.
 - Database:
-  - `monitor_sessions`;
-  - `runs`;
-  - `errors`.
+  - one open `monitor_sessions` row for the active manual session;
+  - one sessionless `baseline` run at each start;
+  - later business runs associated with that session;
+  - persisted errors and redacted run events.
 
 ## Acceptance Criteria
 
-- A manual run can be requested for an inactive monitor.
-- A manual run creates a session, associates the run with it, and closes the session after success or failure.
-- Run status moves to success or failed.
-- Errors are persisted and visible.
-- A failed run does not crash the worker.
-- API/PWA can show recent run state from the monitor view.
-- Manual run events include safe configuration, egress, HTTP/session, request-duration, Redis/cache, candidate, filter, persistence, and opportunity/no-op decisions without raw secrets.
-- The PWA log console presents those events as non-interactive operational checklist blocks with wrapped visible lines; large JSON diagnostics are not rendered in the main timeline.
-- A manual run without a current initial snapshot is rejected with a clear message to recalibrate the listing first.
-- The PWA does not expose a separate Activity navigation item for run history.
-- `items_found` counts provider candidates.
-- `items_new` and `opportunities_created` stay `0` until later specs.
-- Item rows are not inserted or updated by this spec.
-- Punctual/manual test runs count as closed monitor sessions, not active recurring sessions.
+- Starting a stopped manual monitor creates exactly one successful zero-opportunity baseline and then one active session without a deadline.
+- Baseline operational failure returns a visible failed run and leaves the source inactive with no open session or deadline.
+- `Ejecutar ahora` is rejected while stopped and reuses the open session while active.
+- Repeating the same catalog state creates no duplicate opportunity; one later unseen passing item creates exactly one.
+- Losing the baseline marker during an active session creates a visible failed run, closes the session with `baseline_required`, stops the source and tells the user to start a new session. It never recalibrates silently.
+- Restarting captures another baseline, so listings that appeared while stopped are not reported as opportunities.
+- Manual run events retain safe configuration, egress, HTTP/session, Redis, candidate, filter, persistence and terminal decisions without raw secrets.
 
 ## Verification
 
-- Run one monitor manually.
-- Confirm the manual run has `monitor_session_id` and the session has `stopped_at`.
-- Simulate provider failure and confirm persisted error.
-- Confirm worker keeps running after failure.
-- Confirm manual run logs are visible in the monitor log console as one wrapped block per event and expose only masked/fingerprinted cookie, token, HTTP session, and proxy session markers.
-- Confirm a manual run cannot start until `Recalibrar listado inicial` has seeded the current monitor/policy snapshot.
-- Confirm items table remains unchanged after a run.
-- Confirm PWA can trigger a run from `Monitores` and display its activity there.
+- Run the isolated `manual-session-start-baseline` scenario documented in `docs/development.md`.
+- Through the live PWA, baseline A/B/C, execute the same set, add D, repeat D, remove the marker, restart with E and force a provider failure.
+- Confirm through API, PostgreSQL and Redis that counters, session ownership, dedupe, fail-stop and cleanup match the acceptance criteria.
+- Confirm start/run/stop/configuration controls are honest and disabled during conflicting non-terminal work.
 
 ## Audit
 
-- Confirm the UI does not imply scheduler, deduplication, filters, or item persistence.
-- Confirm failed provider calls create a failed run and an error row.
-- Confirm no authenticated Vinted action is introduced.
+- Confirm the manual flow performs no scheduler enqueue and persists no deadline.
+- Confirm baseline runs remain outside performance statistics and business sessions.
+- Confirm no Vinted, proxy or Telegram traffic occurs in the controlled integration scenario.
+- Confirm no authenticated action or hidden fallback is introduced.

@@ -54,7 +54,12 @@ from vinted_monitor.services.proxies import (
 )
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.scheduler import RunEgress, SchedulerCapacityError, choose_run_egress, get_scheduler_runtime_config
-from vinted_monitor.services.search_sources import SearchSourceConfigError, catalog_filter_compatibility, validate_vinted_catalog_url
+from vinted_monitor.services.search_sources import (
+    SearchSourceConfigError,
+    catalog_filter_compatibility,
+    start_source_monitor,
+    validate_vinted_catalog_url,
+)
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
     DetailRetryRecord,
@@ -147,18 +152,29 @@ def execute_manual_run(
     seen_cache: SeenCache | None = None,
     egress: RunEgress | None = None,
 ) -> Run:
-    source = db.get(SearchSource, source_id)
-    if source is not None and source.is_active:
-        raise RunAlreadyActiveError(f"Monitor {source.id} already has an active session")
+    source = db.scalar(
+        select(SearchSource)
+        .where(SearchSource.id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if source is None or source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.monitor_mode != "manual":
+        raise SearchSourceConfigError("Ejecutar ahora solo esta disponible para una sesion manual activa")
+    if not source.is_active or get_active_monitor_session(db, source.id) is None:
+        raise SearchSourceInactiveError("Inicia la sesion manual antes de ejecutar este monitor")
+    if _active_source_run_exists(db, source_id=source.id, include_finalizing=True):
+        raise RunAlreadyActiveError(f"Monitor {source.id} already has a running run")
     return execute_monitor_run(
         db,
         source_id,
         provider=provider,
         trigger=MANUAL_TRIGGER,
         seen_cache=seen_cache,
-        require_active=False,
-        create_session_for_run=True,
-        close_session_on_finish=True,
+        require_active=True,
+        create_session_for_run=False,
+        close_session_on_finish=False,
         egress=egress,
     )
 
@@ -210,10 +226,18 @@ def execute_monitor_baseline(
     provider: ManualRunProvider | None = None,
     seen_cache: SeenCache | None = None,
     egress: RunEgress | None = None,
+    activate_manual_session: bool = False,
 ) -> Run:
-    source = db.get(SearchSource, source_id)
+    source = db.scalar(
+        select(SearchSource)
+        .where(SearchSource.id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if activate_manual_session and source.monitor_mode != "manual":
+        raise SearchSourceConfigError("Automatic baseline activation is only valid for manual monitors")
     if source.is_active:
         raise RunAlreadyActiveError("Deten la sesion antes de recalibrar el listado inicial")
     if _active_source_run_exists(db, source_id=source.id, include_finalizing=True):
@@ -229,6 +253,7 @@ def execute_monitor_baseline(
 
     filter_snapshot = monitor_filter_snapshot(source.filter_definition)
     policy_hash = _policy_hash(source, filter_snapshot)
+    baseline_reason = "session_start" if activate_manual_session else "explicit_recalibration"
     run = Run(
         source_id=source.id,
         monitor_session_id=None,
@@ -244,6 +269,7 @@ def execute_monitor_baseline(
             **_run_runtime_metadata(source, selected_egress, runtime_config),
             "policy_hash": policy_hash,
             "baseline_run": True,
+            "baseline_reason": baseline_reason,
         },
     )
     db.add(run)
@@ -297,6 +323,7 @@ def execute_monitor_baseline(
             "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "baseline_run": True,
+            "baseline_reason": baseline_reason,
         },
     )
     record_run_event(
@@ -320,6 +347,7 @@ def execute_monitor_baseline(
                 "request_timeout_ms": runtime_config.request_timeout_ms,
             },
             "baseline_run": True,
+            "baseline_reason": baseline_reason,
         },
     )
     record_run_event(
@@ -448,6 +476,13 @@ def execute_monitor_baseline(
         run.error_message = None
         source.last_run_at = run.finished_at
         mark_proxy_run_success(db, proxy_profile_id)
+        if activate_manual_session:
+            start_source_monitor(
+                db,
+                source.id,
+                now=run.finished_at,
+                commit=False,
+            )
         record_run_event(
             db,
             run_id=run.id,
@@ -461,7 +496,7 @@ def execute_monitor_baseline(
                 "marked_seen_count": len(candidate_ids),
                 "sample_vinted_item_ids": candidate_ids[:10],
                 "policy_hash": policy_hash,
-                "reason": "explicit_recalibration",
+                "reason": baseline_reason,
             },
         )
         record_run_event(
@@ -473,6 +508,7 @@ def execute_monitor_baseline(
             auth_mode="public_anonymous",
             details={
                 "baseline_run": True,
+                "baseline_reason": baseline_reason,
                 "items_found": run.items_found,
                 "items_new": run.items_new,
                 "items_filter_passed": run.items_filter_passed,
@@ -994,8 +1030,10 @@ def execute_monitor_run(
     run_provider: ManualRunProvider | None = provider
     run_session = start_monitor_session(db, source, allow_manual=True) if create_session_for_run else None
     active_session = run_session
-    if active_session is None and require_active and source.monitor_mode != "manual":
+    if active_session is None and require_active:
         active_session = get_active_monitor_session(db, source.id)
+    if require_active and source.monitor_mode == "manual" and active_session is None:
+        raise SearchSourceInactiveError("Inicia la sesion manual antes de ejecutar este monitor")
     run = Run(
         source_id=source.id,
         monitor_session_id=active_session.id if active_session is not None else None,
@@ -1151,9 +1189,15 @@ def execute_monitor_run(
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
-        stop_active_monitor_session(db, source.id, reason="redis_unavailable")
         failed_run = _record_failed_run(
-            db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True
+            db,
+            run,
+            source,
+            exc,
+            kind="redis_unavailable",
+            penalize_proxy=False,
+            force_stop_monitor=True,
+            monitor_stop_reason="redis_unavailable",
         )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
@@ -1169,6 +1213,11 @@ def execute_monitor_run(
     try:
         _reconcile_finalizing_runs(db, source, cache, exclude_run_id=run.id)
         if not cache.has_baseline(source.id, policy_hash):
+            baseline_required_message = (
+                "La foto inicial ya no esta disponible; inicia una nueva sesion"
+                if source.monitor_mode == "manual"
+                else "Recalibra el listado inicial antes de ejecutar este monitor"
+            )
             record_run_event(
                 db,
                 run_id=run.id,
@@ -1176,7 +1225,7 @@ def execute_monitor_run(
                 phase="baseline_required",
                 level="warning",
                 proxy_profile_id=proxy_profile_id,
-                message="Recalibra el listado inicial antes de ejecutar este monitor",
+                message=baseline_required_message,
                 details={"policy_hash": policy_hash},
             )
             source.is_active = False
@@ -1184,15 +1233,15 @@ def execute_monitor_run(
             source.monitor_started_at = None
             source.monitor_until = None
             source.next_run_at = None
-            stop_active_monitor_session(db, source.id, reason="baseline_required")
             failed_run = _record_failed_run(
                 db,
                 run,
                 source,
-                BaselineRequiredError("Recalibra el listado inicial antes de ejecutar este monitor"),
+                BaselineRequiredError(baseline_required_message),
                 kind="baseline_required",
                 penalize_proxy=False,
                 force_stop_monitor=True,
+                monitor_stop_reason="baseline_required",
             )
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             return failed_run
@@ -1212,9 +1261,15 @@ def execute_monitor_run(
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
-        stop_active_monitor_session(db, source.id, reason="redis_unavailable")
         failed_run = _record_failed_run(
-            db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True
+            db,
+            run,
+            source,
+            exc,
+            kind="redis_unavailable",
+            penalize_proxy=False,
+            force_stop_monitor=True,
+            monitor_stop_reason="redis_unavailable",
         )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
@@ -1552,7 +1607,6 @@ def execute_monitor_run(
         source.monitor_started_at = None
         source.monitor_until = None
         source.next_run_at = None
-        stop_active_monitor_session(db, source.id, reason="redis_unavailable")
         if claimed_ids:
             try:
                 cache.release_processing(source.id, policy_hash, list(claimed_ids))
@@ -1562,7 +1616,14 @@ def execute_monitor_run(
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise_(exc)
         failed_run = _record_failed_run(
-            db, run, source, exc, kind="redis_unavailable", penalize_proxy=False, force_stop_monitor=True
+            db,
+            run,
+            source,
+            exc,
+            kind="redis_unavailable",
+            penalize_proxy=False,
+            force_stop_monitor=True,
+            monitor_stop_reason="redis_unavailable",
         )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
@@ -2258,7 +2319,8 @@ def _complete_finalizing_run(
         )
     elif not close_session_on_finish:
         _stop_monitor_if_vinted_session_use_limit_reached(db, run, source)
-    _clear_manual_monitor_runtime(source)
+    if close_session_on_finish:
+        _clear_manual_monitor_runtime(source)
     metadata = dict(run.runtime_metadata or {})
     metadata.pop("candidate_state_transition", None)
     metadata["candidate_state_transition_status"] = "applied"
@@ -2303,6 +2365,7 @@ def _record_failed_run(
     kind: str | None = None,
     penalize_proxy: bool = False,
     force_stop_monitor: bool = False,
+    monitor_stop_reason: str = "failed",
 ) -> Run:
     message = redact_sensitive_text(str(exc))
     failure_kind = kind or exc.__class__.__name__
@@ -2355,17 +2418,23 @@ def _record_failed_run(
         mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
     should_stop_monitor = _should_stop_monitor_after_failure(db, run, source, force_stop_monitor=force_stop_monitor)
     if run.monitor_session_id is not None and should_stop_monitor:
-        stop_active_monitor_session(db, source.id, stopped_at=run.finished_at, reason="failed")
-        record_run_event(
+        closed_session = stop_active_monitor_session(
             db,
-            run_id=run.id,
-            source_id=source.id,
-            phase="monitor_session_closed",
-            level="warning",
-            proxy_profile_id=event_proxy_profile_id,
-            message="Monitor session closed after run failure",
-            details={"monitor_session_id": run.monitor_session_id, "reason": "failed"},
+            source.id,
+            stopped_at=run.finished_at,
+            reason=monitor_stop_reason,
         )
+        if closed_session is not None:
+            record_run_event(
+                db,
+                run_id=run.id,
+                source_id=source.id,
+                phase="monitor_session_closed",
+                level="warning",
+                proxy_profile_id=event_proxy_profile_id,
+                message="Monitor session closed after run failure",
+                details={"monitor_session_id": run.monitor_session_id, "reason": closed_session.stop_reason},
+            )
         source.is_active = False
         source.monitor_started_at = None
         source.monitor_until = None
@@ -2478,6 +2547,13 @@ def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_sessio
 
 def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
     text = str(exc).lower()
+    if isinstance(exc, BaselineRequiredError):
+        return {
+            "session_end_reason": "baseline_required",
+            "recovery_action": (
+                "start_new_manual_session" if "nueva sesion" in text else "recalibrate_initial_snapshot"
+            ),
+        }
     if isinstance(exc, ProxyProfileEligibilityError):
         return {
             "session_end_reason": "proxy_selection_stale_or_ineligible",

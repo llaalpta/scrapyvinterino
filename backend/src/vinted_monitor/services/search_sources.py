@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
-from vinted_monitor.db.models import SearchSource
+from vinted_monitor.db.models import Run, SearchSource
 from vinted_monitor.providers.catalog_url import analyze_catalog_url, ensure_catalog_url_filters_supported
 from vinted_monitor.services.filters import normalize_filter_definition
 from vinted_monitor.services.monitor_sessions import start_monitor_session, stop_active_monitor_session
@@ -34,6 +34,10 @@ class SearchSourceConfigError(ValueError):
 
 
 class SearchSourceActiveError(ValueError):
+    pass
+
+
+class SearchSourceRunActiveError(ValueError):
     pass
 
 
@@ -166,17 +170,17 @@ def start_source_monitor(
         source.monitor_until = started_at + timedelta(minutes=source.duration_minutes)
     else:
         source.monitor_until = None
-    source.is_active = source.monitor_mode != "manual"
-    if source.is_active:
+    source.is_active = True
+    if source.monitor_mode != "manual":
         source.next_run_at = next_run_after(
             started_at,
             source_config(source),
             rng,
             get_scheduler_timezone(get_settings()),
         )
-        start_monitor_session(db, source, started_at=started_at)
     else:
         source.next_run_at = None
+    start_monitor_session(db, source, started_at=started_at, allow_manual=True)
     if commit:
         db.commit()
         db.refresh(source)
@@ -187,6 +191,18 @@ def start_source_monitor(
 
 def stop_source_monitor(db: Session, source_id: int) -> SearchSource:
     source = _get_live_source(db, source_id)
+    active_run_id = db.scalar(
+        select(Run.id)
+        .where(
+            Run.source_id == source.id,
+            Run.status.in_(("running", "finalizing")),
+        )
+        .limit(1)
+    )
+    if active_run_id is not None:
+        raise SearchSourceRunActiveError(
+            f"El monitor {source.id} tiene una ejecucion en curso; espera a que termine antes de detener la sesion"
+        )
     source.is_active = False
     source.monitor_started_at = None
     source.next_run_at = None

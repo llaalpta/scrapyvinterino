@@ -28,6 +28,7 @@ from vinted_monitor.db.session import SessionLocal, engine
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.services.items import get_or_persist_catalog_item
+from vinted_monitor.services.monitor_sessions import start_monitor_session
 from vinted_monitor.services.runs import (
     FAILED,
     FINALIZING,
@@ -368,14 +369,18 @@ def audit_session_factory():
 @pytest.fixture
 def source_id(audit_session_factory) -> int:
     with audit_session_factory() as db:
+        started_at = datetime.now(UTC)
         source = SearchSource(
             name=f"{PREFIX}-monitor",
             url="https://www.vinted.es/catalog?order=newest_first",
             normalized_query={"order": ["newest_first"]},
             is_active=True,
+            monitor_started_at=started_at,
             scheduler_config={},
         )
         db.add(source)
+        db.flush()
+        start_monitor_session(db, source, started_at=started_at, allow_manual=True)
         db.commit()
         db.refresh(source)
         return source.id

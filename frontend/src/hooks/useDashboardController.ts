@@ -647,7 +647,7 @@ export function useDashboardController() {
       setError('Guarda los cambios antes de lanzar la sesion');
       return;
     }
-    if (!source.baseline_ready) {
+    if (source.monitor_mode !== 'manual' && !source.baseline_ready) {
       setError('Recalibra el listado inicial antes de ejecutar este monitor');
       return;
     }
@@ -678,23 +678,10 @@ export function useDashboardController() {
     }
     setRunningSessionId(source.id);
     try {
-      const run = source.monitor_mode === 'manual' ? await runMonitor(source.id) : await startMonitor(source.id);
-      const [sourceData, opportunityData, runData] = await Promise.all([
-        fetchSources(),
-        fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)),
-        fetchRuns()
-      ]);
-      setSources(sourceData);
-      setSourceDrafts(buildSourceDrafts(sourceData));
-      setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
-      setOpportunityPage(opportunityData);
-      setMonitorRunsBySource((current) => ({
-        ...current,
-        [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
-      }));
-      await loadMonitorStats(source.id);
-      if (monitorEventsBySource[source.id]) {
-        await loadMonitorEvents(source.id);
+      const run = await startMonitor(source.id);
+      await refreshMonitorCommandResult(source.id, run);
+      if (run.status !== 'success') {
+        setError(run.error_message || 'No se pudo iniciar la sesion');
       }
     } catch (caught) {
       if (source.monitor_mode !== 'manual') {
@@ -705,6 +692,47 @@ export function useDashboardController() {
     } finally {
       setRunningSessionId(null);
     }
+  }
+
+  async function onRunNow(source: SearchSource) {
+    setError(null);
+    if (!source.is_active || source.monitor_mode !== 'manual') {
+      setError('Inicia una sesion manual antes de ejecutar el monitor');
+      return;
+    }
+    setRunningSessionId(source.id);
+    try {
+      const run = await runMonitor(source.id);
+      await refreshMonitorCommandResult(source.id, run);
+      if (run.status !== 'success') {
+        setError(run.error_message || 'La ejecucion manual ha fallado');
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
+    } finally {
+      setRunningSessionId(null);
+    }
+  }
+
+  async function refreshMonitorCommandResult(sourceId: number, run: Run) {
+    const sourceData = await fetchSources();
+    setSources(sourceData);
+    setSourceDrafts(buildSourceDrafts(sourceData));
+    setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)].slice(0, 50));
+    setMonitorRunsBySource((current) => ({
+      ...current,
+      [sourceId]: [run, ...(current[sourceId] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+    }));
+    const refreshes: Promise<unknown>[] = [loadMonitorStats(sourceId)];
+    if (monitorEventsBySource[sourceId]) {
+      refreshes.push(loadMonitorEvents(sourceId));
+    }
+    if (run.opportunities_created > 0) {
+      refreshes.push(
+        fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)).then(setOpportunityPage)
+      );
+    }
+    await Promise.all(refreshes);
   }
 
   async function onRecalibrateBaseline(source: SearchSource) {
@@ -1067,6 +1095,7 @@ export function useDashboardController() {
     onPrepareVintedSession,
     onProbeItemDetail,
     onRecalibrateBaseline,
+    onRunNow,
     onStartSession,
     onStopMonitor,
     onTestProxy,

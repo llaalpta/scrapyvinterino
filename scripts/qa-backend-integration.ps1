@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "worker-redis-availability", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -40,6 +40,9 @@ $TestTargets = @{
         "tests/test_prepared_session_live_contract.py::test_live_prepared_session_read_model_matches_runtime_and_pwa"
     )
     "worker-redis-availability" = @($WorkerRedisFocusedTargets + $WorkerRedisLiveTargets)
+    "manual-session-start-baseline" = @(
+        "tests/test_manual_session_start_live.py::test_live_manual_session_start_baseline_lifecycle"
+    )
     "full" = @("tests")
 }
 $ScenarioTargets = @($TestTargets[$Scenario])
@@ -399,7 +402,7 @@ function Get-OperationalRedisDigest {
 }
 
 function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
-    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
+    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MANUAL_SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
     $Saved = @{}
     $Entries = @(Get-ChildItem Env: | Where-Object { $_.Name -match $Pattern })
     foreach ($Entry in $Entries) {
@@ -455,6 +458,13 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["WORKER_REDIS_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
+        if ($Scenario -eq "manual-session-start-baseline") {
+            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
+            $Values["MANUAL_SESSION_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["MANUAL_SESSION_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["MANUAL_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
         foreach ($Name in $Values.Keys) {
             [Environment]::SetEnvironmentVariable($Name, $Values[$Name], "Process")
         }
@@ -479,6 +489,8 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "ACTION_REQUESTS_ENABLED", "SCHEDULER_ENABLED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
         "PREPARED_SESSION_QA_API_URL", "PREPARED_SESSION_QA_PWA_URL",
         "PREPARED_SESSION_QA_BROWSER_CHANNEL", "VITE_DEV_API_PROXY_TARGET",
+        "MANUAL_SESSION_QA_API_URL", "MANUAL_SESSION_QA_PWA_URL",
+        "MANUAL_SESSION_QA_BROWSER_CHANNEL", "MANUAL_SESSION_QA_PROVIDER_STATE",
         "SCHEDULER_POLL_INTERVAL_SECONDS", "SCHEDULER_WORKER_HEARTBEAT_INTERVAL_SECONDS",
         "SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS", "SCHEDULER_WATCHDOG_POLL_INTERVAL_SECONDS",
         "SCHEDULER_WATCHDOG_STARTUP_GRACE_SECONDS", "WORKER_CONSUMER_COUNT",
@@ -535,6 +547,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
     $ApiProcess = $null
     $ViteProcess = $null
     $QaLogFiles = @()
+    $QaTemporaryFiles = @()
     $QaNetworkCreated = $false
     $InitialPostgresNetworks = @()
     try {
@@ -631,7 +644,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "worker-redis-availability")) {
+        if ($Scenario -in @("prepared-session-read-model", "worker-redis-availability", "manual-session-start-baseline")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
@@ -642,9 +655,23 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $ViteErrLog = Join-Path $QaStateDir "$Scenario-vite-$Suffix.err.log"
             $QaLogFiles = @($ApiOutLog, $ApiErrLog, $ViteOutLog, $ViteErrLog)
 
+            $ApiApplication = "vinted_monitor.api.main:app"
+            $ApiArguments = @("-m", "uvicorn", $ApiApplication, "--host", "127.0.0.1", "--port", "8001")
+            if ($Scenario -eq "manual-session-start-baseline") {
+                $ProviderStateFile = Join-Path $QaStateDir "manual-session-provider-$Suffix.json"
+                $QaTemporaryFiles = @($ProviderStateFile)
+                $env:MANUAL_SESSION_QA_PROVIDER_STATE = $ProviderStateFile
+                $ApiApplication = "manual_session_qa_app:app"
+                $ApiArguments = @(
+                    "-m", "uvicorn", $ApiApplication,
+                    "--app-dir", (Join-Path $BackendDir "tests"),
+                    "--host", "127.0.0.1", "--port", "8001"
+                )
+            }
+
             $ApiProcess = Start-Process `
                 -FilePath $Python `
-                -ArgumentList @("-m", "uvicorn", "vinted_monitor.api.main:app", "--host", "127.0.0.1", "--port", "8001") `
+                -ArgumentList $ApiArguments `
                 -WorkingDirectory $BackendDir `
                 -WindowStyle Hidden `
                 -RedirectStandardOutput $ApiOutLog `
@@ -722,6 +749,16 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
         foreach ($QaLogFile in $QaLogFiles) {
             try {
                 Remove-Item -LiteralPath $QaLogFile -ErrorAction SilentlyContinue
+            } catch {
+                $CleanupErrors += $_.Exception.Message
+            }
+        }
+        foreach ($QaTemporaryFile in $QaTemporaryFiles) {
+            try {
+                Remove-Item -LiteralPath $QaTemporaryFile -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $QaTemporaryFile) {
+                    throw "QA temporary state still exists after cleanup."
+                }
             } catch {
                 $CleanupErrors += $_.Exception.Message
             }

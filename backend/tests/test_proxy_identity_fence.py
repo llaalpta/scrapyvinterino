@@ -180,7 +180,8 @@ class LocalAcceptedProvider:
 
 
 @contextmanager
-def _identity_graph(*, active: bool = False):
+def _identity_graph(*, active: bool = False, manual_active: bool = False, recurring_inactive: bool = False):
+    assert sum((active, manual_active, recurring_inactive)) <= 1
     settings = get_settings()
     suffix = uuid4().hex
     with SessionLocal() as db:
@@ -200,13 +201,14 @@ def _identity_graph(*, active: bool = False):
             name=f"qa identity monitor {suffix}",
             url="https://www.vinted.es/catalog?search_text=&order=newest_first",
             normalized_query={"order": ["newest_first"]},
-            is_active=active,
-            monitor_mode="window" if active else "manual",
+            is_active=active or manual_active,
+            monitor_mode="window" if active or recurring_inactive else "manual",
+            monitor_started_at=datetime.now(UTC) if manual_active else None,
             scheduler_config={"interval_seconds": 60, "jitter_percent": 0},
         )
         db.add(source)
         db.flush()
-        if active:
+        if active or manual_active:
             db.add(MonitorSession(source_id=source.id))
         session = save_prepared_vinted_session(
             db,
@@ -372,7 +374,7 @@ def test_manual_api_stale_proxy_selection_never_constructs_provider(
     command_client = authenticated_test_client()
     mutation_client = authenticated_test_client()
 
-    with _identity_graph() as graph, ThreadPoolExecutor(max_workers=1) as pool:
+    with _identity_graph(manual_active=True) as graph, ThreadPoolExecutor(max_workers=1) as pool:
         with SessionLocal() as db:
             original_profile = db.get(ProxyProfile, graph.proxy_id)
             original_session = db.get(VintedSession, graph.session_id)
@@ -440,7 +442,7 @@ def test_auxiliary_api_traffic_actions_share_the_proxy_identity_fence(
     command_client = authenticated_test_client()
     mutation_client = authenticated_test_client()
 
-    with _identity_graph() as graph, ThreadPoolExecutor(max_workers=1) as pool:
+    with _identity_graph(recurring_inactive=endpoint == "baseline") as graph, ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
             command_client.post,
             f"/api/monitors/{graph.source_id}/{endpoint}",
@@ -641,7 +643,7 @@ def test_manual_api_missing_proxy_fails_before_first_event_or_provider(
     captured, release = _install_fence_barrier(monkeypatch)
     command_client = authenticated_test_client()
 
-    with _identity_graph() as graph, ThreadPoolExecutor(max_workers=1) as pool:
+    with _identity_graph(manual_active=True) as graph, ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(command_client.post, f"/api/monitors/{graph.source_id}/runs")
         assert captured.wait(timeout=10), "manual command did not reach the identity fence"
         with SessionLocal() as db:
@@ -1194,7 +1196,7 @@ def test_fresh_command_after_identity_change_prepares_only_current_generation(
 ) -> None:
     LocalAcceptedProvider.reset()
     client = authenticated_test_client()
-    with _identity_graph() as graph:
+    with _identity_graph(manual_active=True) as graph:
         response = client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.2"})
         assert response.status_code == 200, response.text
         monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", LocalAcceptedProvider)
@@ -1385,7 +1387,7 @@ def test_admitted_run_keeps_identity_fence_through_final_provider_io(
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", LocalAcceptedProvider)
     monkeypatch.setattr(proxies_module, "_acquire_proxy_identity_lock", observed_identity_lock)
 
-    with _identity_graph() as graph:
+    with _identity_graph(manual_active=True) as graph:
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 run_future = pool.submit(run_client.post, f"/api/monitors/{graph.source_id}/runs")
