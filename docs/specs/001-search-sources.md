@@ -74,6 +74,20 @@ Worker and watchdog stay stopped. Redis is only fingerprinted by the isolated ru
 
 Verification passed `8` focused cases plus `1` live Playwright case on an isolated migrated PostgreSQL database, authenticated API and Vite PWA. The live case proved same-ID edit/UI/API/database consistency, a visible over-limit rejection with the draft preserved and PostgreSQL unchanged, and disabled identity fields after a local active-state transition. Ruff, PWA lint/build and Compose rendering passed; worker/watchdog stayed stopped, all traffic was loopback-only, operational PostgreSQL/Redis fingerprints were unchanged and no QA process/log/data residue remained.
 
+### 14.27 task contract
+
+Status: `done` on `fix/pwa-monitor-command-state`.
+
+1. The PWA admits at most one monitor mutation command at a time across create, configuration, session/run, diagnostic and archive actions. The gate is immediate rather than render-dependent, every monitor mutation control reflects it, and a rapid repeated submit produces one HTTP mutation and one PostgreSQL result.
+2. After `POST /api/monitors` returns `201` or `DELETE /api/monitors/{id}` returns `204`, that committed outcome is applied locally before optional derived reads. A failed stats/runtime refresh reports the confirmed command plus incomplete refresh instead of claiming that create/archive failed; form/source state remains committed and a reload converges with API/PostgreSQL.
+3. A confirmed archive removes every controller/view cache, loading marker, pending command marker and request generation keyed by the archived monitor.
+
+Representative integration: use one isolated migrated PostgreSQL database, authenticated live API and Vite/Playwright PWA. Rapidly submit one monitor creation while locally aborting its first derived stats request, prove one `POST`, one row, cleared create fields, visible committed monitor and an honest refresh warning, then reload successfully. Load its monitor detail, archive it while locally aborting one runtime refresh, prove one `DELETE`, immediate absence, an honest refresh warning and absent API/default-list state after reload.
+
+Worker and watchdog stay stopped. Every browser request is loopback-only; no Vinted, proxy or Telegram request is allowed. The QA user, sessions and complete source graph are removed, isolated PostgreSQL/Redis ownership is released and temporary API/Vite processes and logs are deleted. This task does not split the initial dashboard bootstrap, add cross-tab/API serialization, change server command contracts or redesign per-surface errors; those are separate or conditional outcomes.
+
+Verification passed one live Playwright case against an authenticated API, migrated isolated PostgreSQL database and strict Vite PWA. The test held only delivery of real `201`/`204` responses to React, proved two synchronous submits emitted one `POST` and one row while every monitor mutation control was disabled, then aborted one derived stats read and one runtime read locally. It also held a real source-list snapshot obtained before archive, released it after the `204` and proved the monotonic generation discarded it instead of resurrecting the monitor. The committed monitor remained visible/cleared after create, absent after archive, warnings named the incomplete refresh, and reload/API/PostgreSQL converged. Ruff, PWA lint/build, Compose rendering and the PowerShell runner parser passed; worker/watchdog stayed stopped, all traffic was loopback-only, operational fingerprints were unchanged and no QA process/log/data residue remained.
+
 ## Current Command Boundaries
 
 - `POST /api/monitors` validates locally and commits one inactive/manual row. Source reads do not consult Redis or expose baseline readiness.

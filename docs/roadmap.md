@@ -20,6 +20,7 @@ Keep no more than five independently valuable tasks here.
 | 2 | done | 14.34.2 Recurring session-start baseline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/recurring-session-start-baseline` | Starting a recurring monitor calibrates, activates and persists its first later deadline without an immediate business run; the standalone contract is removed. Live PWA/API/PostgreSQL/Redis plus real scheduler/queue/consumer QA, full backend, Ruff and PWA gates passed without external traffic or residue. |
 | 3 | done | 14.34.3 Graceful monitor-session stop | `docs/specs/003-manual-run.md`, `docs/specs/008-scheduler.md` | `fix/session-stop-drain` | PostgreSQL-first stop, session-run drain, reserved-task fence while inactive and honest PWA locking passed the isolated real scheduler/queue/consumer/API/PWA gate, full backend, Ruff and PWA checks without external traffic or residue. |
 | 4 | done | 14.26 PWA monitor identity editing | `docs/specs/001-search-sources.md` | `feature/pwa-monitor-identity-editing` | Name and catalog URL editing on the same stopped, idle monitor passed the isolated live PWA/API/PostgreSQL gate; 160-character and invalid-URL rejection remain mutation-free, with active/non-terminal locks covered and no external traffic or residue. |
+| 5 | done | 14.27 Honest PWA command state | `docs/specs/001-search-sources.md`, `docs/development.md` | `fix/pwa-monitor-command-state` | One real double submit produced one `POST`/row while every monitor mutation control was locked; controlled post-`201`/`204` read failures preserved confirmed state and a held pre-archive source snapshot stayed discarded, with reload/PostgreSQL convergence and no external traffic or residue. |
 
 ## Next
 
@@ -27,7 +28,6 @@ These are user-facing improvements after the current local reliability block.
 
 | Status | Item | Owner | Outcome |
 | --- | --- | --- | --- |
-| not-started | 14.27 Honest PWA command state | `docs/specs/001-search-sources.md`, `docs/development.md` | One mutation command at a time; a successful server mutation remains successful even if a derived refresh fails. |
 | not-started | 14.28 Independent PWA bootstrap surfaces | `docs/development.md` | A runs, opportunities or proxies failure cannot hide monitors that loaded successfully. |
 
 ## Conditional hardening

@@ -61,6 +61,19 @@ const MONITOR_STREAM_LIVENESS_TIMEOUT_MS = 22_500;
 const MONITOR_STREAM_AUTH_TIMEOUT_MS = 10_000;
 const MONITOR_RUN_STATE_LOAD_ERROR = 'No se pudo comprobar el estado de ejecucion del monitor; recarga Monitores para reintentar';
 const STOP_MONITOR_STATE_REFRESH_ERROR = 'La sesion se detuvo, pero no se pudo confirmar por completo su estado; recarga Monitores';
+const CREATE_MONITOR_STATE_REFRESH_ERROR = 'El monitor se creo, pero no se pudieron cargar sus estadisticas; recarga Monitores';
+const START_MONITOR_STATE_REFRESH_ERROR = 'La sesion se inicio, pero no se pudo actualizar por completo su estado; recarga Monitores';
+const RUN_MONITOR_STATE_REFRESH_ERROR = 'La ejecucion termino, pero no se pudo actualizar por completo su estado; recarga Monitores';
+const PREPARE_MONITOR_STATE_REFRESH_ERROR = 'La sesion Vinted se preparo, pero no se pudo actualizar por completo su estado; recarga Monitores';
+const PROBE_MONITOR_STATE_REFRESH_ERROR = 'La prueba de detalle termino, pero no se pudo actualizar por completo su estado; recarga Monitores';
+const ARCHIVE_MONITOR_STATE_REFRESH_ERROR = 'El monitor se archivo, pero no se pudieron actualizar por completo los datos derivados; recarga la PWA';
+
+type MonitorCommandKind = 'create' | 'save' | 'prepare' | 'probe' | 'start' | 'run' | 'stop' | 'archive';
+
+type MonitorCommand = {
+  kind: MonitorCommandKind;
+  sourceId: number | null;
+};
 
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
@@ -80,8 +93,7 @@ export function useDashboardController() {
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
   const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
-  const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
-  const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
+  const [monitorCommand, setMonitorCommand] = useState<MonitorCommand | null>(null);
   const [pendingStopSourceIds, setPendingStopSourceIds] = useState<number[]>([]);
   const [savingScheduler, setSavingScheduler] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
@@ -102,12 +114,15 @@ export function useDashboardController() {
     [activeSection, opportunityPage.total, sources.length]
   );
   const monitorStreamCursorRef = useRef<number | null>(null);
+  const monitorCommandRef = useRef<MonitorCommand | null>(null);
   const monitorStreamSeenEventIdsRef = useRef<Set<number>>(new Set());
   const pendingTerminalEventsRef = useRef<Map<number, boolean>>(new Map());
   const terminalRefreshTimerRef = useRef<number | null>(null);
   const monitorStreamReconnectTimerRef = useRef<number | null>(null);
   const monitorRunsRequestGenerationRef = useRef<Map<number, number>>(new Map());
   const monitorStatsRequestGenerationRef = useRef<Map<number, number>>(new Map());
+  const monitorEventsRequestGenerationRef = useRef<Map<number, number>>(new Map());
+  const sourceListRequestGenerationRef = useRef(0);
   const monitorStreamRuntimeRef = useRef({
     sourceIds: new Set<number>(),
     statsRanges: monitorStatsRangeBySource,
@@ -120,6 +135,11 @@ export function useDashboardController() {
     opportunityFilters,
     opportunitiesPageSize
   };
+  const monitorCommandPending = monitorCommand !== null;
+  const runningSessionId = monitorCommand && (monitorCommand.kind === 'start' || monitorCommand.kind === 'run')
+    ? monitorCommand.sourceId
+    : null;
+  const savingSourceId = monitorCommand?.sourceId ?? null;
 
   const refreshLoadedMonitorStats = useCallback(
     async (sourceData: SearchSource[]) => {
@@ -148,6 +168,8 @@ export function useDashboardController() {
 
   useEffect(() => {
     let disposed = false;
+    sourceListRequestGenerationRef.current += 1;
+    const sourceRequestGeneration = sourceListRequestGenerationRef.current;
     Promise.all([
       fetchSources(),
       fetchOpportunities(),
@@ -158,11 +180,13 @@ export function useDashboardController() {
         if (disposed) {
           return;
         }
-        setSources(sourceData);
+        if (sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+          setSources(sourceData);
+          setSourceDrafts(buildSourceDrafts(sourceData));
+        }
         setOpportunityPage(opportunityData);
         setRuns(runData);
         setProxyProfiles(proxyData);
-        setSourceDrafts(buildSourceDrafts(sourceData));
       })
       .catch((caught: unknown) => {
         if (!disposed) {
@@ -224,9 +248,11 @@ export function useDashboardController() {
     }
 
     let disposed = false;
+    sourceListRequestGenerationRef.current += 1;
+    const sourceRequestGeneration = sourceListRequestGenerationRef.current;
     void fetchSources()
       .then((sourceData) => {
-        if (!disposed) {
+        if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
           setSources(sourceData);
         }
       })
@@ -260,9 +286,11 @@ export function useDashboardController() {
 
     let disposed = false;
     const timer = window.setTimeout(() => {
+      sourceListRequestGenerationRef.current += 1;
+      const sourceRequestGeneration = sourceListRequestGenerationRef.current;
       void fetchSources()
         .then((sourceData) => {
-          if (!disposed) {
+          if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
             setSources(sourceData);
           }
         })
@@ -303,6 +331,8 @@ export function useDashboardController() {
       const sourceIds = [...pending.keys()];
       const runtime = monitorStreamRuntimeRef.current;
       const shouldRefreshOpportunities = [...pending.values()].some(Boolean);
+      sourceListRequestGenerationRef.current += 1;
+      const sourceRequestGeneration = sourceListRequestGenerationRef.current;
       const runRequests = sourceIds.map(async (sourceId) => {
         const generation = nextRequestGeneration(monitorRunsRequestGenerationRef.current, sourceId);
         const sourceRuns = await fetchRuns({ source_id: sourceId, limit: MONITOR_RUN_HISTORY_LIMIT });
@@ -325,7 +355,10 @@ export function useDashboardController() {
         )
       ]);
 
-      if (sourceResult.status === 'fulfilled') {
+      if (
+        sourceResult.status === 'fulfilled'
+        && sourceListRequestGenerationRef.current === sourceRequestGeneration
+      ) {
         setSources(sourceResult.value);
       }
       const runEntries = runResults
@@ -359,7 +392,9 @@ export function useDashboardController() {
         || opportunityResult.status === 'rejected';
       if (failed) {
         pending.forEach((refreshOpportunities, sourceId) => {
-          pendingTerminalEvents.set(sourceId, (pendingTerminalEvents.get(sourceId) ?? false) || refreshOpportunities);
+          if (monitorStreamRuntimeRef.current.sourceIds.has(sourceId)) {
+            pendingTerminalEvents.set(sourceId, (pendingTerminalEvents.get(sourceId) ?? false) || refreshOpportunities);
+          }
         });
         setError('No se pudo actualizar por completo el monitor terminado');
         if (terminalRefreshTimerRef.current === null) {
@@ -562,6 +597,24 @@ export function useDashboardController() {
     await refreshLoadedMonitorStats(sourceData);
   }, [refreshLoadedMonitorStats, sources]);
 
+  function beginMonitorCommand(kind: MonitorCommandKind, sourceId: number | null): MonitorCommand | null {
+    if (monitorCommandRef.current !== null) {
+      return null;
+    }
+    const command = { kind, sourceId };
+    monitorCommandRef.current = command;
+    setMonitorCommand(command);
+    return command;
+  }
+
+  function finishMonitorCommand(command: MonitorCommand) {
+    if (monitorCommandRef.current !== command) {
+      return;
+    }
+    monitorCommandRef.current = null;
+    setMonitorCommand(null);
+  }
+
   async function loadOpportunities(page = 1, filters = opportunityFilters, pageSize = opportunitiesPageSize) {
     setLoadingOpportunities(true);
     setError(null);
@@ -576,16 +629,27 @@ export function useDashboardController() {
 
   async function onCreateSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const command = beginMonitorCommand('create', null);
+    if (!command) {
+      return;
+    }
     setError(null);
     try {
       const created = await createSource({ name: sourceName, url: sourceUrl });
+      sourceListRequestGenerationRef.current += 1;
       setSources((current) => [created, ...current]);
       setSourceDrafts((current) => ({ ...current, [created.id]: buildSourceDraft(created) }));
-      await loadMonitorStats(created.id, DEFAULT_MONITOR_STATS_RANGE);
       setSourceName('');
       setSourceUrl('');
+      try {
+        await loadMonitorStats(created.id, DEFAULT_MONITOR_STATS_RANGE);
+      } catch {
+        setError(CREATE_MONITOR_STATE_REFRESH_ERROR);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo crear el monitor');
+    } finally {
+      finishMonitorCommand(command);
     }
   }
 
@@ -649,42 +713,47 @@ export function useDashboardController() {
 
   async function onStartSession(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    const command = beginMonitorCommand('start', source.id);
+    if (!command) {
+      return;
+    }
     setError(null);
-    if (sourceDraftHasChanges(source, draft)) {
-      setError('Guarda los cambios antes de lanzar la sesion');
-      return;
-    }
-    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
-      setError('Corrige los filtros de URL no soportados antes de ejecutar este monitor');
-      return;
-    }
-    if (source.monitor_mode !== 'manual') {
-      let schedulerData: SchedulerState;
-      try {
-        schedulerData = await fetchScheduler();
-      } catch {
-        setScheduler(null);
-        setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
-        setError('No se pudo confirmar que el worker del scheduler este disponible.');
-        return;
-      }
-      setScheduler(schedulerData);
-      setSchedulerAvailabilityError(null);
-      if (!schedulerData.worker_available) {
-        setError('El worker del scheduler no esta disponible. Inicia el worker antes de lanzar una sesion periodica.');
-        return;
-      }
-      if (!schedulerData.effective_enabled) {
-        setError('El scheduler no esta operativo. Revisa los ajustes de interfaz, despliegue y capacidad.');
-        return;
-      }
-    }
-    setRunningSessionId(source.id);
     try {
+      if (sourceDraftHasChanges(source, draft)) {
+        setError('Guarda los cambios antes de lanzar la sesion');
+        return;
+      }
+      if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+        setError('Corrige los filtros de URL no soportados antes de ejecutar este monitor');
+        return;
+      }
+      if (source.monitor_mode !== 'manual') {
+        let schedulerData: SchedulerState;
+        try {
+          schedulerData = await fetchScheduler();
+        } catch {
+          setScheduler(null);
+          setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
+          setError('No se pudo confirmar que el worker del scheduler este disponible.');
+          return;
+        }
+        setScheduler(schedulerData);
+        setSchedulerAvailabilityError(null);
+        if (!schedulerData.worker_available) {
+          setError('El worker del scheduler no esta disponible. Inicia el worker antes de lanzar una sesion periodica.');
+          return;
+        }
+        if (!schedulerData.effective_enabled) {
+          setError('El scheduler no esta operativo. Revisa los ajustes de interfaz, despliegue y capacidad.');
+          return;
+        }
+      }
       const run = await startMonitor(source.id);
-      await refreshMonitorCommandResult(source.id, run);
+      const refreshComplete = await refreshMonitorCommandResult(source.id, run);
       if (run.status !== 'success') {
         setError(run.error_message || 'No se pudo iniciar la sesion');
+      } else if (!refreshComplete) {
+        setError(START_MONITOR_STATE_REFRESH_ERROR);
       }
     } catch (caught) {
       if (source.monitor_mode !== 'manual') {
@@ -693,39 +762,40 @@ export function useDashboardController() {
       }
       setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
     } finally {
-      setRunningSessionId(null);
+      finishMonitorCommand(command);
     }
   }
 
   async function onRunNow(source: SearchSource) {
-    setError(null);
-    if (!source.is_active || source.monitor_mode !== 'manual') {
-      setError('Inicia una sesion manual antes de ejecutar el monitor');
+    const command = beginMonitorCommand('run', source.id);
+    if (!command) {
       return;
     }
-    setRunningSessionId(source.id);
+    setError(null);
     try {
+      if (!source.is_active || source.monitor_mode !== 'manual') {
+        setError('Inicia una sesion manual antes de ejecutar el monitor');
+        return;
+      }
       const run = await runMonitor(source.id);
-      await refreshMonitorCommandResult(source.id, run);
+      const refreshComplete = await refreshMonitorCommandResult(source.id, run);
       if (run.status !== 'success') {
         setError(run.error_message || 'La ejecucion manual ha fallado');
+      } else if (!refreshComplete) {
+        setError(RUN_MONITOR_STATE_REFRESH_ERROR);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo ejecutar el monitor');
     } finally {
-      setRunningSessionId(null);
+      finishMonitorCommand(command);
     }
   }
 
-  async function refreshMonitorCommandResult(sourceId: number, run: Run) {
-    const sourceData = await fetchSources();
-    setSources(sourceData);
-    setSourceDrafts(buildSourceDrafts(sourceData));
-    setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)].slice(0, 50));
-    setMonitorRunsBySource((current) => ({
-      ...current,
-      [sourceId]: [run, ...(current[sourceId] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
-    }));
+  async function refreshMonitorCommandResult(sourceId: number, run: Run): Promise<boolean> {
+    recordMonitorRun(sourceId, run);
+    sourceListRequestGenerationRef.current += 1;
+    const sourceRequestGeneration = sourceListRequestGenerationRef.current;
+    const sourceResultPromise = settlePromise(fetchSources());
     const refreshes: Promise<unknown>[] = [loadMonitorStats(sourceId)];
     if (monitorEventsBySource[sourceId]) {
       refreshes.push(loadMonitorEvents(sourceId));
@@ -735,90 +805,132 @@ export function useDashboardController() {
         fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)).then(setOpportunityPage)
       );
     }
-    await Promise.all(refreshes);
+    const [sourceResult, refreshResults] = await Promise.all([
+      sourceResultPromise,
+      Promise.allSettled(refreshes)
+    ]);
+    if (
+      sourceResult.status === 'fulfilled'
+      && sourceListRequestGenerationRef.current === sourceRequestGeneration
+    ) {
+      setSources(sourceResult.value);
+      setSourceDrafts(buildSourceDrafts(sourceResult.value));
+    }
+    return sourceResult.status === 'fulfilled'
+      && refreshResults.every((result) => result.status === 'fulfilled');
+  }
+
+  async function refreshDiagnosticCommandResult(sourceId: number, run: Run): Promise<boolean> {
+    recordMonitorRun(sourceId, run);
+    sourceListRequestGenerationRef.current += 1;
+    const sourceRequestGeneration = sourceListRequestGenerationRef.current;
+    const [sourceResult, runResult, proxyResult, statsResult, eventsResult] = await Promise.all([
+      settlePromise(fetchSources()),
+      settlePromise(fetchRuns()),
+      settlePromise(fetchProxyProfiles()),
+      settlePromise(loadMonitorStats(sourceId)),
+      settlePromise(loadMonitorEvents(sourceId))
+    ]);
+    if (
+      sourceResult.status === 'fulfilled'
+      && sourceListRequestGenerationRef.current === sourceRequestGeneration
+    ) {
+      setSources(sourceResult.value);
+      setSourceDrafts(buildSourceDrafts(sourceResult.value));
+    }
+    if (runResult.status === 'fulfilled') {
+      setRuns([run, ...runResult.value.filter((entry) => entry.id !== run.id)].slice(0, 50));
+    }
+    if (proxyResult.status === 'fulfilled') {
+      setProxyProfiles(proxyResult.value);
+    }
+    return [sourceResult, runResult, proxyResult, statsResult, eventsResult]
+      .every((result) => result.status === 'fulfilled');
+  }
+
+  function recordMonitorRun(sourceId: number, run: Run) {
+    setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)].slice(0, 50));
+    setMonitorRunsBySource((current) => ({
+      ...current,
+      [sourceId]: [run, ...(current[sourceId] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
+    }));
   }
 
   async function onPrepareVintedSession(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    const command = beginMonitorCommand('prepare', source.id);
+    if (!command) {
+      return;
+    }
     setError(null);
-    if (sourceDraftHasChanges(source, draft)) {
-      setError('Guarda los cambios antes de preparar la sesion Vinted');
-      return;
-    }
-    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
-      setError('Corrige los filtros de URL no soportados antes de preparar la sesion Vinted');
-      return;
-    }
-    setSavingSourceId(source.id);
     try {
+      if (sourceDraftHasChanges(source, draft)) {
+        setError('Guarda los cambios antes de preparar la sesion Vinted');
+        return;
+      }
+      if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+        setError('Corrige los filtros de URL no soportados antes de preparar la sesion Vinted');
+        return;
+      }
       const run = await prepareMonitorVintedSession(source.id);
-      const [sourceData, runData, proxyData] = await Promise.all([fetchSources(), fetchRuns(), fetchProxyProfiles()]);
-      setSources(sourceData);
-      setRuns([run, ...runData.filter((entry) => entry.id !== run.id)].slice(0, 50));
-      setProxyProfiles(proxyData);
-      setMonitorRunsBySource((current) => ({
-        ...current,
-        [source.id]: [run, ...(current[source.id] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
-      }));
-      await loadMonitorStats(source.id);
-      await loadMonitorEvents(source.id);
+      const refreshComplete = await refreshDiagnosticCommandResult(source.id, run);
       if (run.status !== 'success') {
         setError(run.error_message || 'No se pudo preparar la sesion Vinted');
+      } else if (!refreshComplete) {
+        setError(PREPARE_MONITOR_STATE_REFRESH_ERROR);
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted');
     } finally {
-      setSavingSourceId(null);
+      finishMonitorCommand(command);
     }
   }
 
   async function onProbeItemDetail(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
     const itemRef = (detailProbeRefs[source.id] ?? '').trim();
+    const command = beginMonitorCommand('probe', source.id);
+    if (!command) {
+      return;
+    }
     setError(null);
-    if (sourceDraftHasChanges(source, draft)) {
-      setError('Guarda los cambios antes de probar el detalle de un item');
-      return;
-    }
-    if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
-      setError('Corrige los filtros de URL no soportados antes de probar el detalle de un item');
-      return;
-    }
-    if (!itemRef) {
-      setError('Introduce un ID o URL de item Vinted para probar el detalle');
-      return;
-    }
-    setSavingSourceId(source.id);
-    setDetailProbeMessages((current) => ({ ...current, [source.id]: 'Probando detalle...' }));
     try {
+      if (sourceDraftHasChanges(source, draft)) {
+        setError('Guarda los cambios antes de probar el detalle de un item');
+        return;
+      }
+      if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
+        setError('Corrige los filtros de URL no soportados antes de probar el detalle de un item');
+        return;
+      }
+      if (!itemRef) {
+        setError('Introduce un ID o URL de item Vinted para probar el detalle');
+        return;
+      }
+      setDetailProbeMessages((current) => ({ ...current, [source.id]: 'Probando detalle...' }));
       const probe = await probeMonitorItemDetail(source.id, itemRef);
-      const [sourceData, runData, proxyData] = await Promise.all([fetchSources(), fetchRuns(), fetchProxyProfiles()]);
-      setSources(sourceData);
-      setSourceDrafts(buildSourceDrafts(sourceData));
-      setRuns([probe.run, ...runData.filter((entry) => entry.id !== probe.run.id)].slice(0, 50));
-      setProxyProfiles(proxyData);
-      setMonitorRunsBySource((current) => ({
-        ...current,
-        [source.id]: [probe.run, ...(current[source.id] ?? []).filter((entry) => entry.id !== probe.run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
-      }));
-      await loadMonitorStats(source.id);
-      await loadMonitorEvents(source.id);
       setDetailProbeMessages((current) => ({ ...current, [source.id]: detailProbeMessage(probe.result) }));
+      const refreshComplete = await refreshDiagnosticCommandResult(source.id, probe.run);
       if (probe.run.status !== 'success') {
         setError(probe.run.error_message || 'No se pudo probar el detalle del item');
+      } else if (!refreshComplete) {
+        setError(PROBE_MONITOR_STATE_REFRESH_ERROR);
       }
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'No se pudo probar el detalle del item';
       setError(message);
       setDetailProbeMessages((current) => ({ ...current, [source.id]: message }));
     } finally {
-      setSavingSourceId(null);
+      finishMonitorCommand(command);
     }
   }
 
   async function onStopMonitor(sourceId: number) {
+    const command = beginMonitorCommand('stop', sourceId);
+    if (!command) {
+      return;
+    }
     setError(null);
-    setSavingSourceId(sourceId);
     try {
       const stoppedSource = await stopMonitor(sourceId);
       setPendingStopSourceIds((current) => current.includes(sourceId) ? current : [...current, sourceId]);
@@ -833,7 +945,7 @@ export function useDashboardController() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo parar el monitor');
     } finally {
-      setSavingSourceId(null);
+      finishMonitorCommand(command);
     }
   }
 
@@ -871,49 +983,36 @@ export function useDashboardController() {
   }
 
   async function onDeleteSource(source: SearchSource) {
+    const command = beginMonitorCommand('archive', source.id);
+    if (!command) {
+      return;
+    }
     setError(null);
-    setSavingSourceId(source.id);
     try {
       await deleteSource(source.id);
+      sourceListRequestGenerationRef.current += 1;
       const remainingSources = sources.filter((entry) => entry.id !== source.id);
-      setSources(remainingSources);
-      setSourceDrafts((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      setMonitorStatsBySource((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      setMonitorRunsBySource((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      setMonitorEventsBySource((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      setMonitorHiddenEventIdsBySource((current) => {
-        const next = { ...current };
-        delete next[source.id];
-        return next;
-      });
-      await refreshRuntime(remainingSources);
+      setSources((current) => current.filter((entry) => entry.id !== source.id));
+      removeSourceLocalState(source.id);
+      try {
+        await refreshRuntime(remainingSources);
+      } catch {
+        setError(ARCHIVE_MONITOR_STATE_REFRESH_ERROR);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo archivar el monitor');
     } finally {
-      setSavingSourceId(null);
+      finishMonitorCommand(command);
     }
   }
 
   async function onSaveSourceSchedule(source: SearchSource) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
+    const command = beginMonitorCommand('save', source.id);
+    if (!command) {
+      return;
+    }
     setError(null);
-    setSavingSourceId(source.id);
     try {
       const updated = await saveMonitorConfig(source, draft);
       replaceSource(updated);
@@ -927,12 +1026,29 @@ export function useDashboardController() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo guardar el monitor');
     } finally {
-      setSavingSourceId(null);
+      finishMonitorCommand(command);
     }
   }
 
   function replaceSource(updated: SearchSource) {
     setSources((current) => current.map((source) => (source.id === updated.id ? updated : source)));
+  }
+
+  function removeSourceLocalState(sourceId: number) {
+    setSourceDrafts((current) => withoutSource(current, sourceId));
+    setMonitorStatsBySource((current) => withoutSource(current, sourceId));
+    setMonitorStatsRangeBySource((current) => withoutSource(current, sourceId));
+    setMonitorRunsBySource((current) => withoutSource(current, sourceId));
+    setMonitorEventsBySource((current) => withoutSource(current, sourceId));
+    setMonitorEventHistoryLoadedBySource((current) => withoutSource(current, sourceId));
+    setMonitorHiddenEventIdsBySource((current) => withoutSource(current, sourceId));
+    setDetailProbeRefs((current) => withoutSource(current, sourceId));
+    setDetailProbeMessages((current) => withoutSource(current, sourceId));
+    setPendingStopSourceIds((current) => current.filter((pendingSourceId) => pendingSourceId !== sourceId));
+    pendingTerminalEventsRef.current.delete(sourceId);
+    monitorRunsRequestGenerationRef.current.delete(sourceId);
+    monitorStatsRequestGenerationRef.current.delete(sourceId);
+    monitorEventsRequestGenerationRef.current.delete(sourceId);
   }
 
   function updateSourceDraft(sourceId: number, field: keyof SourceDraft, value: string) {
@@ -1008,21 +1124,30 @@ export function useDashboardController() {
   }
 
   const loadMonitorEvents = useCallback(async (sourceId: number) => {
+    const generation = nextRequestGeneration(monitorEventsRequestGenerationRef.current, sourceId);
     try {
       const events = await fetchMonitorEvents(sourceId);
+      if (monitorEventsRequestGenerationRef.current.get(sourceId) !== generation) {
+        return;
+      }
       setMonitorEventsBySource((current) => ({
         ...current,
         [sourceId]: mergeRunEvents(events, current[sourceId] ?? [])
       }));
       setMonitorEventHistoryLoadedBySource((current) => ({ ...current, [sourceId]: true }));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudieron cargar los logs acumulados');
+      if (monitorEventsRequestGenerationRef.current.get(sourceId) === generation) {
+        setError(caught instanceof Error ? caught.message : 'No se pudieron cargar los logs acumulados');
+      }
     }
   }, []);
 
   const appendMonitorEvent = useCallback((event: RunEvent) => {
     const sourceId = event.source_id;
     if (!sourceId) {
+      return;
+    }
+    if (!monitorStreamRuntimeRef.current.sourceIds.has(sourceId)) {
       return;
     }
     setMonitorEventsBySource((current) => mergeMonitorEventRecords(current, event));
@@ -1063,6 +1188,7 @@ export function useDashboardController() {
     activeTitle,
     changeResultsPageSize,
     clearOpportunityFilters,
+    creatingSource: monitorCommand?.kind === 'create',
     detailProbeMessages,
     detailProbeRefs,
     error,
@@ -1095,6 +1221,7 @@ export function useDashboardController() {
     monitorEventsBySource,
     monitorEventHistoryLoadedBySource,
     monitorHiddenEventIdsBySource,
+    monitorCommandPending,
     monitorStreamStatus,
     monitorStreamReady,
     opportunityPage,
@@ -1331,4 +1458,13 @@ function mergeMonitorEventRecords(current: Record<number, RunEvent[]>, event: Ru
     return current;
   }
   return { ...current, [event.source_id]: mergeRunEvents(existing, [event]) };
+}
+
+function withoutSource<T>(current: Record<number, T>, sourceId: number): Record<number, T> {
+  if (!Object.hasOwn(current, sourceId)) {
+    return current;
+  }
+  const next = { ...current };
+  delete next[sourceId];
+  return next;
 }
