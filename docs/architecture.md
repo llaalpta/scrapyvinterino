@@ -81,10 +81,10 @@ PostgreSQL conserva solo el hash del token opaco. El raw existe solo en cookie h
 | Comando | PWA | API y limite PostgreSQL | Redis y lecturas derivadas | Resultado observable |
 | --- | --- | --- | --- | --- |
 | Crear | El formulario envia nombre y URL a `POST /api/monitors`. | La API recorta ambos valores, valida localmente HTTPS/host/ruta/filtros e inserta un monitor `manual`, inactivo y con blacklist vacia. El `201` se construye despues del commit. Un `422` de validacion no abre ninguna identidad. | La respuesta no consulta Redis ni expone estado interno de baseline. La PWA incorpora el monitor y despues solicita sus estadisticas. | La fila aparece en el listado con el mismo ID y sin run, sesion, evento u oportunidad derivados. |
-| Editar | Con `is_active=false` y sin comando/run no terminal visible, el detalle edita modo, cadencia, ventana, duracion y blacklist. La PWA aun no expone nombre o URL; la API si los admite. | `PATCH /api/monitors/{id}` bloquea la fila viva, conserva el ID, normaliza el payload y hace un commit. Devuelve `409` si `is_active=true`, `404` si falta o esta archivado y `422` si la configuracion es invalida; esos rechazos no persisten cambios. No comprueba por separado un baseline iniciado desde otro cliente. | Editar no consulta Redis, encola ni crea trabajo. URL y blacklist forman parte del hash de politica: el siguiente inicio de sesion siembra ese hash. | La PWA sustituye la representacion del mismo monitor. Cambiar la URL recalcula tambien `normalized_query`. |
+| Editar | Con `is_active=false` y sin comando/run no terminal, el detalle edita modo, cadencia, ventana, duracion y blacklist. La PWA aun no expone nombre o URL; la API si los admite. | `PATCH /api/monitors/{id}` bloquea la fila viva, conserva el ID, rechaza `is_active=true` o cualquier run `running/finalizing`, normaliza el payload y hace un commit. Devuelve `409` durante sesion, baseline o drain, `404` si falta o esta archivado y `422` si la configuracion es invalida; esos rechazos no persisten cambios. | Editar no consulta Redis, encola ni crea trabajo. URL y blacklist forman parte del hash de politica: el siguiente inicio de sesion siembra ese hash. | La PWA sustituye la representacion del mismo monitor. Cambiar la URL recalcula tambien `normalized_query`. |
 | Archivar | Un dialogo interno confirma `DELETE /api/monitors/{id}`. Solo tras el `204` la PWA retira fuente, draft, estadisticas/runs/eventos cargados e IDs ocultos; otros estados por monitor permanecen hoy en memoria. | La API bloquea la fila, marca `is_active=false`, borra `next_run_at`/`monitor_until`, fija `archived_at`, cierra la sesion de monitor e invalida las sesiones Vinted, purgando su contexto cifrado, antes del commit. Un ID inexistente da `404`; repetir el DELETE de uno ya archivado da `204`. | Antes del commit intenta cancelar una tarea `ready`, pero Redis no participa en la transaccion y el error se ignora actualmente. Si Redis cancela y el commit SQL falla, el monitor queda vivo sin esa tarea. No se crea ningun evento. | `GET /api/monitors` oculta la fila; un PATCH posterior da `404`, mientras PostgreSQL conserva historial y metadatos seguros. |
 
-Todo inicio conserva `is_active=false` mientras obtiene el baseline y solo lo cambia junto con la apertura de sesion tras el exito. Por ello `is_active=false` por si solo no prueba ausencia de trabajo. La PWA bloquea configuracion, archivo y comandos mientras su peticion o un run cargado sea no terminal; PATCH/archive desde otra pestaña o cliente API no tienen hoy un gate adicional. Ese riesgo de uso personal permanece condicionado a evidencia en 14.30.
+Todo inicio conserva `is_active=false` mientras obtiene el baseline y solo lo cambia junto con la apertura de sesion tras el exito. La parada tambien hace inactiva la fuente antes de que termine un run admitido. Por ello `is_active=false` por si solo no prueba ausencia de trabajo: un baseline o un drain se distinguen por su run no terminal y, en el segundo caso, por una `monitor_sessions` aun abierta. La PWA bloquea configuracion, archivo y comandos en ambos intervalos; PATCH replica el gate en PostgreSQL. Archive desde otra pestaña o cliente API conserva el riesgo de uso personal condicionado a evidencia en 14.30.
 
 ### Ciclo de sesion manual
 
@@ -103,9 +103,15 @@ PWA Ejecutar ahora -> POST /api/monitors/{id}/runs
   -> marker ausente/Redis no disponible/fallo manual: Run failed + sesion cerrada + source inactiva
 
 PWA Detener sesion -> POST /api/monitors/{id}/stop
-  -> sin run no terminal: cierra sesion, limpia runtime y cancela ready best-effort
-  -> running/finalizing: 409 hasta que 14.34.3 implemente drain
+  -> source FOR NO KEY UPDATE; PostgreSQL queda inactivo y sin deadlines antes del cleanup Redis
+  -> sin run no terminal: cierra MonitorSession con reason=stopped en el mismo commit
+  -> run(es) de sesion running/finalizing: devuelve 200, deja la sesion abierta y la PWA muestra Deteniendo...
+  -> cada terminal conserva su resultado; el ultimo terminal normal cierra esa sesion con reason=stopped
+  -> fail-stop fuerte conserva su razon diagnostica; un baseline sin sesion sigue devolviendo 409
+  -> una tarea ya reservada revalida la source bajo el mismo lock y, mientras siga inactiva, no crea run/proveedor y hace ACK
 ```
+
+El factory de admision usado por consumer, la parada y el terminal usan `FOR NO KEY UPDATE`: esos escritores se excluyen entre si, pero la parada no espera los locks `KEY SHARE` que los FK de eventos mantienen durante el I/O del proveedor. El comando manual conserva un gate exterior `FOR UPDATE`, que se libera al confirmar el run antes del I/O. Ningun flujo cambia `search_sources.id`.
 
 ### Ciclo de sesion automatica
 
@@ -122,6 +128,10 @@ SchedulerRunner al vencer next_run_at
   -> PostgreSQL prevalece sobre el espejo temporal; encola una MonitorTask unica en Redis
   -> TaskConsumer reserva, ejecuta Run(trigger=scheduler, session_id=<sesion abierta>) y hace ACK terminal
   -> mismos IDs: no-op; un ID nuevo: una oportunidad; repeticion: ninguna
+
+PWA Detener sesion sigue el mismo drain que manual
+  -> el commit inactivo impide nuevas admisiones y deadlines antes de cancelar ready best-effort
+  -> los runs ya admitidos terminan sin cancelacion de red; el ultimo terminal normal cierra MonitorSession
 ```
 
 El commit HTTP es el limite del comando, no el de las recargas posteriores de la PWA. Tras crear, un fallo al cargar estadisticas puede mostrar error aunque la fila ya exista; tras archivar, puede fallar la recarga de oportunidades/runs/estadisticas aunque el `DELETE` ya se haya aplicado. El formulario de alta tampoco tiene aun exclusion mutua frente a dos envios rapidos. La reconciliacion honesta, el envio unico y la limpieza local completa estan acotados en 14.27; la carga inicial independiente de monitores, oportunidades, runs y proxies, en 14.28.

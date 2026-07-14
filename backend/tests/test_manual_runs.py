@@ -49,7 +49,9 @@ from vinted_monitor.services.runs import (
     SESSION_PREPARE_TRIGGER,
     SUCCESS,
     SearchSourceInactiveError,
+    _complete_finalizing_run,
     _persist_provider_session_refresh,
+    _record_failed_run,
     execute_manual_run,
     execute_monitor_baseline,
     execute_monitor_run,
@@ -2422,7 +2424,7 @@ def test_recurring_monitor_start_preserves_successful_baseline_when_postflight_f
         cleanup_source(source_id)
 
 
-def test_monitor_stop_closes_active_session() -> None:
+def test_monitor_stop_commits_inactive_session_before_ready_task_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     with SessionLocal() as db:
@@ -2441,10 +2443,30 @@ def test_monitor_stop_closes_active_session() -> None:
         db.commit()
         source_id = source.id
 
+    cleanup_observations: list[int] = []
+
+    def observe_committed_source(ready_source_id: int) -> None:
+        with SessionLocal() as verification_db:
+            persisted_source = verification_db.get(SearchSource, ready_source_id)
+            persisted_session = verification_db.scalar(
+                select(MonitorSession).where(MonitorSession.source_id == ready_source_id)
+            )
+            assert persisted_source is not None
+            assert persisted_source.is_active is False
+            assert persisted_session is not None
+            assert persisted_session.stopped_at is not None
+            assert persisted_session.stop_reason == "stopped"
+        cleanup_observations.append(ready_source_id)
+
+    monkeypatch.setattr(
+        "vinted_monitor.services.search_sources._cancel_ready_source_task",
+        observe_committed_source,
+    )
     try:
         response = client.post(f"/api/monitors/{source_id}/stop")
 
         assert response.status_code == 200
+        assert cleanup_observations == [source_id]
         with SessionLocal() as db:
             session = db.scalar(select(MonitorSession).where(MonitorSession.source_id == source_id))
             assert session is not None
@@ -2455,7 +2477,7 @@ def test_monitor_stop_closes_active_session() -> None:
 
 
 @pytest.mark.parametrize("run_status", ["running", "finalizing"])
-def test_monitor_stop_rejects_non_terminal_run_without_mutation(run_status: str) -> None:
+def test_monitor_stop_drains_non_terminal_session_run(run_status: str) -> None:
     cleanup_source(None)
     client = authenticated_test_client()
     started_at = datetime(2026, 7, 14, 8, 0, tzinfo=UTC)
@@ -2467,6 +2489,8 @@ def test_monitor_stop_rejects_non_terminal_run_without_mutation(run_status: str)
             is_active=True,
             monitor_mode="manual",
             monitor_started_at=started_at,
+            monitor_until=started_at + timedelta(minutes=5),
+            next_run_at=started_at + timedelta(minutes=1),
             scheduler_config={},
         )
         db.add(source)
@@ -2489,15 +2513,19 @@ def test_monitor_stop_rejects_non_terminal_run_without_mutation(run_status: str)
     try:
         response = client.post(f"/api/monitors/{source_id}/stop")
 
-        assert response.status_code == 409
-        assert "ejecucion en curso" in response.json()["detail"]
+        assert response.status_code == 200
+        assert response.json()["is_active"] is False
+        assert response.json()["monitor_started_at"] is None
+        assert response.json()["monitor_until"] is None
+        assert response.json()["next_run_at"] is None
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
             session = db.get(MonitorSession, session_id)
             run = db.get(Run, run_id)
             assert source is not None
-            assert source.is_active is True
-            assert source.monitor_started_at == started_at
+            assert source.is_active is False
+            assert source.monitor_started_at is None
+            assert source.monitor_until is None
             assert source.next_run_at is None
             assert session is not None
             assert session.stopped_at is None
@@ -2505,6 +2533,138 @@ def test_monitor_stop_rejects_non_terminal_run_without_mutation(run_status: str)
             assert run is not None
             assert run.status == run_status
             assert run.finished_at is None
+    finally:
+        cleanup_source(source_id)
+
+
+def test_monitor_stop_still_rejects_sessionless_baseline_run() -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest stop blocked baseline",
+            url="https://www.vinted.es/catalog?search_text=stop-blocked-baseline",
+            normalized_query={"search_text": ["stop-blocked-baseline"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        run = Run(
+            source_id=source.id,
+            monitor_session_id=None,
+            status="running",
+            trigger="baseline",
+            runtime_metadata={},
+        )
+        db.add(run)
+        db.commit()
+        source_id = source.id
+        run_id = run.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/stop")
+
+        assert response.status_code == 409
+        assert "ejecucion en curso" in response.json()["detail"]
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            run = db.get(Run, run_id)
+            assert source is not None
+            assert source.is_active is False
+            assert run is not None
+            assert run.status == "running"
+            assert run.finished_at is None
+    finally:
+        cleanup_source(source_id)
+
+
+def test_failed_run_preserves_failure_and_drain_waits_for_finalizing_sibling() -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    started_at = datetime.now(UTC) - timedelta(minutes=1)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name="pytest failed stop drain",
+            url="https://www.vinted.es/catalog?search_text=failed-stop-drain",
+            normalized_query={"search_text": ["failed-stop-drain"]},
+            is_active=True,
+            monitor_mode="continuous",
+            monitor_started_at=started_at,
+            next_run_at=datetime.now(UTC) + timedelta(minutes=1),
+            scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
+        )
+        db.add(source)
+        db.flush()
+        session = start_monitor_session(db, source, started_at=started_at, allow_manual=True)
+        assert session is not None
+        finalizing_run = Run(
+            source_id=source.id,
+            monitor_session_id=session.id,
+            status="finalizing",
+            trigger="scheduler",
+            runtime_metadata={},
+        )
+        db.add(finalizing_run)
+        db.flush()
+        run = Run(
+            source_id=source.id,
+            monitor_session_id=session.id,
+            status="running",
+            trigger="scheduler",
+            runtime_metadata={},
+        )
+        db.add(run)
+        db.commit()
+        source_id = source.id
+        session_id = session.id
+        finalizing_run_id = finalizing_run.id
+        run_id = run.id
+
+    try:
+        response = client.post(f"/api/monitors/{source_id}/stop")
+        assert response.status_code == 200
+        with SessionLocal() as db:
+            source = db.get(SearchSource, source_id)
+            run = db.get(Run, run_id)
+            assert source is not None
+            assert run is not None
+            _record_failed_run(db, run, source, RuntimeError("synthetic terminal failure"))
+
+        with SessionLocal() as db:
+            session = db.get(MonitorSession, session_id)
+            run = db.get(Run, run_id)
+            assert session is not None
+            assert run is not None
+            assert run.status == FAILED
+            assert run.error_message == "synthetic terminal failure"
+            assert run.finished_at is not None
+            assert session.stopped_at is None
+            assert session.stop_reason is None
+
+            source = db.get(SearchSource, source_id)
+            finalizing_run = db.get(Run, finalizing_run_id)
+            assert source is not None
+            assert finalizing_run is not None
+            _complete_finalizing_run(
+                db,
+                finalizing_run,
+                source,
+                close_session_on_finish=False,
+                reconciled=True,
+            )
+            db.commit()
+
+        with SessionLocal() as db:
+            session = db.get(MonitorSession, session_id)
+            finalizing_run = db.get(Run, finalizing_run_id)
+            assert session is not None
+            assert finalizing_run is not None
+            assert finalizing_run.status == SUCCESS
+            assert finalizing_run.finished_at is not None
+            assert session.stopped_at == finalizing_run.finished_at
+            assert session.stop_reason == "stopped"
     finally:
         cleanup_source(source_id)
 

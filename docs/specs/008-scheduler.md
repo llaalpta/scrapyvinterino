@@ -20,7 +20,7 @@ Verification: 17 focused scheduler/supervisor tests and one live Playwright outa
 
 ## Planned 14.34 session program
 
-Status: `in-progress`. Slices 14.34.1 and 14.34.2 are implemented and verified; 14.34.3 remains pending. Each slice must replace its superseded clauses in specs 001, 003, 005, 008 and 010 plus current architecture/data-model prose before being marked done.
+Status: `done`. Slices 14.34.1, 14.34.2 and 14.34.3 are implemented and verified. Their current clauses replace the temporary calibration/stop contracts across specs 001, 003, 005, 008 and 010 plus architecture/data-model prose.
 
 The user saves mode, cadence, duration/window and filters while stopped. Every session start observes one internal `baseline` run while the monitor remains inactive. It adds current catalog IDs to the existing monitor/policy seen state, preserves older seen markers, creates no item/opportunity and is returned as `201 RunRead`. Validation failures create no run; operational baseline failure returns its failed run and leaves no active session/deadline. If the Redis baseline marker later expires during an active session, the next ordinary run fails visibly and closes/stops that session; it never recalibrates silently. Restarting is the manual recovery.
 
@@ -30,7 +30,7 @@ No slice adds a migration, compatibility adapter, automatic retry, hidden fallba
 
 Status: `done`. This standard vertical slice has no migration: manual session start, its later user-triggered runs and their existing PostgreSQL/Redis state form one outcome. Recurring start and graceful in-flight stop remain in 14.34.2 and 14.34.3. Verification passed the isolated live PWA/API/PostgreSQL/Redis scenario, `515` backend tests plus `3` loopback-only cases, Ruff and PWA lint/build without external traffic or QA residue.
 
-`POST /api/monitors/{id}/start` in manual mode performs the baseline and, only on success, creates one active monitor session with `next_run_at=null`. `POST /api/monitors/{id}/runs` requires that active manual session, attaches each single-flight `Ejecutar ahora` run to it and no longer creates/closes a punctual session per run. Until 14.34.3, stop during a non-terminal run is rejected with `409` and disabled in the PWA; stopping after terminal closes the session normally.
+`POST /api/monitors/{id}/start` in manual mode performs the baseline and, only on success, creates one active monitor session with `next_run_at=null`. `POST /api/monitors/{id}/runs` requires that active manual session, attaches each single-flight `Ejecutar ahora` run to it and no longer creates/closes a punctual session per run. The 14.34.3 contract keeps stop available during non-terminal session work, makes the source inactive immediately and lets normal drain close the session after every admitted run reaches terminal; stronger fail-stop reasons remain dominant.
 
 Acceptance criteria:
 
@@ -60,15 +60,19 @@ Verification passed with the isolated live PWA/API/PostgreSQL/Redis scenario and
 
 ### 14.34.3 Graceful monitor-session stop
 
-`POST /api/monitors/{id}/stop` makes PostgreSQL inactive first, clears future scheduling and best-effort cancels a ready task. A reserved task rechecks authoritative state under the existing source/admission ownership and cannot create a run after stop commits. A run already created reaches its normal terminal state; only then does finalization close the monitor session with reason `stopped`. The PWA derives `Deteniendo...` from an inactive source plus a non-terminal run and keeps edit/archive/start controls blocked until terminal. There is no new durable stopping state.
+Status: `done` on `fix/session-stop-drain`.
+
+`POST /api/monitors/{id}/stop` makes PostgreSQL inactive first, clears future scheduling and best-effort cancels a ready task. A reserved task rechecks authoritative state under the existing source/admission ownership and cannot create a run while the source remains inactive. Session-owned runs already created reach their normal terminal states; only the last normal terminal closes the monitor session with reason `stopped`. Stronger fail-stop paths keep reasons such as `baseline_required` or `redis_unavailable`. The PWA derives `Deteniendo...` from an inactive source plus a session-owned `running/finalizing` run, or conservatively from the successful local Stop command until a directed runs read is accepted. After a reload, unknown run state does not claim a drain but still blocks edit/archive/start until PostgreSQL is read successfully. A sessionless baseline still makes stop return `409`. The local confirmation latch is transient and never overrides PostgreSQL; there is no new durable stopping state or activation generation.
 
 Acceptance criteria:
 
-1. Stop with no non-terminal run closes the session immediately and admits no later scheduled/manual work.
-2. Stop during an existing run returns promptly, admits nothing else, preserves that run's terminal result and closes the session only afterward.
-3. A deterministic reserved-task race cannot create a run after stop commit, and the PWA cannot edit, archive or restart during drain.
+1. Stop with no non-terminal run closes the session immediately and admits no scheduled/manual work while the source remains inactive.
+2. Stop during existing session work returns promptly, admits nothing else while stopped, preserves every run result and closes the session only after the last normal terminal.
+3. A deterministic reserved-task race cannot create a run before a later explicit activation, and the PWA cannot edit, archive or restart during a visible drain.
 
-Representative integration: use real PostgreSQL, Redis queue/consumer and API with a blocking synthetic provider. Stop after the run row exists, release the provider, and verify inactive source first, one terminal run, then `monitor_sessions.stopped_at`/reason with no ready/processing residue. The negative barrier reserves a task before stop but delays run admission until after commit and proves zero run/provider calls. Playwright verifies `Deteniendo...` and locked controls until the synthetic terminal event.
+Representative integration: use real PostgreSQL, Redis queue/consumer and API with a blocking provider only at the Vinted boundary. Stop after the run row exists, release the provider, and verify inactive source first, one terminal run, then `monitor_sessions.stopped_at`/reason with no ready/processing residue. The negative barrier reserves a task before stop but delays run admission until after commit and proves zero run/provider calls while the source remains inactive. Playwright aborts the immediate directed runs read and repeats that failure after a full reload: the local latch first preserves `Deteniendo...`, the reloaded unknown state keeps commands fail-closed, and the real consumer terminal SSE batch finally refreshes PostgreSQL state and unlocks the monitor.
+
+Verification passed the isolated `session-stop-drain` gate (`6` focused plus `1` live Playwright case), the complete backend gate (`519 passed`, `6 skipped`, plus `3 passed` loopback-only), Ruff, PWA lint/build and Compose rendering. The self-review additionally covered a concurrent `finalizing` sibling and preserved the stronger `baseline_required`/`redis_unavailable` reasons. Worker/watchdog remained stopped; all traffic was loopback-only, temporary SQL/Redis/process state was removed and operational fingerprints were unchanged.
 
 ## Goal
 
@@ -184,7 +188,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - `Guardar` is the only PWA action that persists monitor configuration.
 - `Iniciar sesion` is disabled when the selected monitor has unsaved configuration changes and must not send `PATCH /api/monitors/{id}`.
 - Monitor active state is controlled only by `POST /api/monitors/{id}/start` and `POST /api/monitors/{id}/stop`; monitor configuration `PATCH` rejects legacy `is_active` payloads.
-- Active monitor configuration is read-only until the monitor is stopped; direct monitor configuration `PATCH` while active is rejected.
+- Active monitor configuration is read-only; after stop, both PWA and direct `PATCH` remain blocked until every `running/finalizing` run is terminal.
 - Launching a recurring monitor is rejected when the effective scheduler is disabled or no scheduler capacity is available.
 - Recurring activation requires a fresh heartbeat written by the scheduler producer itself. Missing, malformed, naive, implausibly future, or expired heartbeat state returns `503` and leaves the source, deadline, monitor session and runs unchanged.
 - `GET /api/scheduler` exposes `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is false unless UI/deployment gates, capacity and the live producer are all available.
@@ -243,7 +247,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - The PWA Monitors view is organized as three top-level cards: new monitor configuration, the single compact monitor table, and the selected-monitor detail. The table and detail are stacked instead of nested inside a parent card.
 - Active monitors appear before inactive monitors in the PWA's single compact monitor table, using status chips and row styling instead of separate active/inactive sections, and show a selected-monitor detail with session summary, read-only configuration, performance card, logs, and a working stop control.
 - Active recurring monitor detail does not show `Ejecutar ahora` because periodic execution is already configured; active manual detail shows exactly one explicit `Ejecutar ahora`.
-- Every non-archived monitor can be selected from the compact monitor table to show active-session metrics or latest-session metrics above configuration, stopped-only editable configuration, accumulated historical metrics, a default all-history full-width bar chart of `items_found` by time bucket, and accumulated logs so historical manual and recurring runs remain visible after the monitor stops.
+- Every non-archived monitor can be selected from the compact monitor table to show active-session metrics or latest-session metrics above configuration, configuration editable only while stopped and without a non-terminal run, accumulated historical metrics, a default all-history full-width bar chart of `items_found` by time bucket, and accumulated logs so historical manual and recurring runs remain visible after the monitor stops.
 - Monitor detail views with no sessions yet show no session/acumulated metric rows until the first launch produces data.
 - The performance chart supports fixed operational ranges labeled `Minuto`, `Hora`, `Dia`, `Mes`, and `Todo`.
 - Fixed performance chart ranges use deterministic current-period buckets: current minute by 5-second bucket, current hour by 5-minute bucket, current day by 1-hour bucket, and current calendar month by 1-day bucket.
@@ -252,7 +256,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - The performance chart labels the X axis as time and the Y axis as found items, and its tooltip shows the exact bucket interval plus found/run counts.
 - The performance chart renders each bar as the exact bucket interval from `bucket_start` to `bucket_end`; bars must not be centered on bucket midpoints or rely on automatic categorical bar width.
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
-- Inactive monitors appear after active monitors in the compact monitor table; selecting an inactive monitor shows editable configuration, launch/archive controls, historical performance, and archive confirmation without implying the monitor is running.
+- Idle inactive monitors appear after active or draining monitors in the compact monitor table; selecting an inactive monitor shows editable configuration and launch/archive controls only when no run is non-terminal, plus historical performance and archive confirmation without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
 - The PWA monitor detail shows supported, ignored, and unsupported URL filters; unsupported filters block session start and other traffic-producing actions.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
@@ -300,7 +304,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Confirm manual and recurring start create one zero-opportunity snapshot before activation; recurring activation exposes one later deadline and no immediate business run/task.
 - Confirm a recurring monitor configured with `stop_after_vinted_session_uses=1` stops after one completed run, logs the limit, and leaves the encrypted Vinted session history available for diagnosis.
 - Confirm inactive monitor start and other traffic-producing actions are blocked when URL filters are unsupported.
-- Confirm inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog.
+- Confirm idle inactive monitor details show editable configuration above the performance chart and use an in-app archive confirmation dialog; drain keeps both unavailable.
 - Confirm two different monitors can run concurrently up to the global limit.
 - Confirm a third due monitor waits when the global limit is reached.
 - Confirm no monitor API or PWA path exposes proxy selection per monitor.

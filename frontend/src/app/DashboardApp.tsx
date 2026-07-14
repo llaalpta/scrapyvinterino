@@ -44,6 +44,7 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
           monitorRunsBySource={dashboard.monitorRunsBySource}
+          pendingStopSourceIds={dashboard.pendingStopSourceIds}
           monitorStatsBySource={dashboard.monitorStatsBySource}
           monitorStatsRangeBySource={dashboard.monitorStatsRangeBySource}
           onCreateSource={dashboard.onCreateSource}
@@ -51,7 +52,7 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
           onLoadMonitorEvents={dashboard.loadMonitorEvents}
           onLoadMonitorStats={(sourceId, range) => void dashboard.loadMonitorStats(sourceId, range)}
-          onLoadMonitorRuns={(sourceId) => void dashboard.loadMonitorRuns(sourceId)}
+          onLoadMonitorRuns={dashboard.loadMonitorRuns}
           onPrepareVintedSession={(source) => void dashboard.onPrepareVintedSession(source)}
           onProbeItemDetail={(source) => void dashboard.onProbeItemDetail(source)}
           onRunNow={(source) => void dashboard.onRunNow(source)}

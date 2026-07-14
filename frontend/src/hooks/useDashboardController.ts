@@ -59,6 +59,8 @@ const DEFAULT_MONITOR_STATS_RANGE: MonitorStatsRange = 'all';
 const MONITOR_RUN_HISTORY_LIMIT = 1000;
 const MONITOR_STREAM_LIVENESS_TIMEOUT_MS = 22_500;
 const MONITOR_STREAM_AUTH_TIMEOUT_MS = 10_000;
+const MONITOR_RUN_STATE_LOAD_ERROR = 'No se pudo comprobar el estado de ejecucion del monitor; recarga Monitores para reintentar';
+const STOP_MONITOR_STATE_REFRESH_ERROR = 'La sesion se detuvo, pero no se pudo confirmar por completo su estado; recarga Monitores';
 
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
@@ -80,6 +82,7 @@ export function useDashboardController() {
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
   const [savingSourceId, setSavingSourceId] = useState<number | null>(null);
+  const [pendingStopSourceIds, setPendingStopSourceIds] = useState<number[]>([]);
   const [savingScheduler, setSavingScheduler] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [testingProxyIds, setTestingProxyIds] = useState<number[]>([]);
@@ -332,6 +335,11 @@ export function useDashboardController() {
         .map(([sourceId, sourceRuns]) => [sourceId, sourceRuns] as const);
       if (runEntries.length > 0) {
         setMonitorRunsBySource((current) => ({ ...current, ...Object.fromEntries(runEntries) }));
+        const refreshedSourceIds = new Set(runEntries.map(([sourceId]) => sourceId));
+        setPendingStopSourceIds((current) => current.filter((sourceId) => !refreshedSourceIds.has(sourceId)));
+        setError((current) => (
+          current === MONITOR_RUN_STATE_LOAD_ERROR || current === STOP_MONITOR_STATE_REFRESH_ERROR ? null : current
+        ));
       }
       const statsEntries = statsResults
         .filter((result): result is PromiseFulfilledResult<Awaited<(typeof statsRequests)[number]>> => result.status === 'fulfilled')
@@ -812,8 +820,16 @@ export function useDashboardController() {
     setError(null);
     setSavingSourceId(sourceId);
     try {
-      replaceSource(await stopMonitor(sourceId));
-      await refreshRuntime();
+      const stoppedSource = await stopMonitor(sourceId);
+      setPendingStopSourceIds((current) => current.includes(sourceId) ? current : [...current, sourceId]);
+      replaceSource(stoppedSource);
+      const refreshResults = await Promise.allSettled([
+        loadMonitorRuns(sourceId),
+        loadMonitorStats(sourceId)
+      ]);
+      if (refreshResults.some((result) => result.status === 'rejected')) {
+        setError(STOP_MONITOR_STATE_REFRESH_ERROR);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo parar el monitor');
     } finally {
@@ -973,10 +989,19 @@ export function useDashboardController() {
   }
 
   async function loadMonitorRuns(sourceId: number, limit = MONITOR_RUN_HISTORY_LIMIT) {
-    const generation = nextRequestGeneration(monitorRunsRequestGenerationRef.current, sourceId);
-    const sourceRuns = await fetchRuns({ source_id: sourceId, limit });
-    if (monitorRunsRequestGenerationRef.current.get(sourceId) === generation) {
-      setMonitorRunsBySource((current) => ({ ...current, [sourceId]: sourceRuns }));
+    try {
+      const generation = nextRequestGeneration(monitorRunsRequestGenerationRef.current, sourceId);
+      const sourceRuns = await fetchRuns({ source_id: sourceId, limit });
+      if (monitorRunsRequestGenerationRef.current.get(sourceId) === generation) {
+        setMonitorRunsBySource((current) => ({ ...current, [sourceId]: sourceRuns }));
+        setPendingStopSourceIds((current) => current.filter((pendingSourceId) => pendingSourceId !== sourceId));
+        setError((current) => (
+          current === MONITOR_RUN_STATE_LOAD_ERROR || current === STOP_MONITOR_STATE_REFRESH_ERROR ? null : current
+        ));
+      }
+    } catch (caught) {
+      setError(MONITOR_RUN_STATE_LOAD_ERROR);
+      throw caught;
     }
   }
 
@@ -1071,6 +1096,7 @@ export function useDashboardController() {
     monitorStreamStatus,
     monitorStreamReady,
     opportunityPage,
+    pendingStopSourceIds,
     proxyDraft,
     proxyProfiles,
     proxyActionMessages,

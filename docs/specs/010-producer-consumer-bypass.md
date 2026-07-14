@@ -1,6 +1,6 @@
 # 010 Producer-Consumer Architecture with DataDome Bypass
 
-Roadmap items 14.34.1 and 14.34.2 moved manual and recurring calibration into session start and removed the temporary public baseline surface. Item 14.34.3 owns stop drain.
+Roadmap items 14.34.1 and 14.34.2 moved manual and recurring calibration into session start and removed the temporary public baseline surface. Item 14.34.3 makes stop PostgreSQL-first and drains session-owned runs without hard cancellation.
 
 ## Goal
 
@@ -11,6 +11,7 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - `SchedulerRunner` is a producer: it evaluates active monitors, windows and jitter, then enqueues `MonitorTask` payloads in Redis.
 - `TaskConsumer` workers are consumers: they block on the Redis task queue and call `execute_monitor_run()`; the run factory resolves the ready Vinted session for the selected proxy.
 - Manual and recurring start stay synchronous through their zero-opportunity baseline and use the same egress selection and `CurlCffiVintedCatalogProvider` stack as scheduled runs. Start opens the session only after success; manual explicit runs and later scheduler tasks require and reuse it.
+- Stop commits inactive state and clears deadlines before best-effort ready-task cleanup. Reserved consumers and run admission revalidate PostgreSQL under the source lock; admitted session runs keep their result and the last normal terminal closes the session. This does not add an activation generation or hard-cancel provider traffic.
 - Existing business logic remains unchanged: Redis seen cache, deduplication, filters, item persistence, opportunities, run events and monitor sessions.
 
 ## Interfaces
@@ -88,6 +89,7 @@ Acceptance criteria:
 - Prepared sessions are created by monitor start or explicit preparation, are bound to monitor, proxy profile, proxy sticky id, browser profile, locale, viewport and Vinted `x-screen`, and are not reusable across monitors.
 - Session invalidation immediately replaces encrypted cookies/tokens with an empty payload. Archiving and every session-context write take the same monitor row lock, so an in-flight refresh/preparation cannot recreate secrets after archive; all prepared sessions retain only safe lifecycle metadata.
 - Source start/update/stop, scheduler enqueue and archive revalidate under the same PostgreSQL row lock. Stop/archive cancel a still-ready task best-effort; PostgreSQL archive and secret purge remain authoritative when Redis is unavailable.
+- Monitor configuration `PATCH` rejects active sources and every non-terminal run, including an inactive baseline or visible stop drain. The PWA derives drain only from an inactive source plus a session-owned non-terminal run.
 - Automatic preparation attempts the DataDome collector only after the catalog document produced the base context needed for a conservative API request: CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm`, target/egress country match, locale, `Accept-Language`, viewport and `x-screen=catalog`. If any base context is missing, the collector is skipped and the session remains incomplete.
 - The DataDome collector loads a returned `datadome` cookie into the same HTTP session before the prepared session is exported. If the collector returns no cookie, errors, or lacks the DataDome client key, the run continues to the catalog API probe only for diagnostics; the session remains `incomplete` because `datadome` is required.
 - The catalog API probe reports `accepted_json`, `challenge`, `rejected`, `non_json`, or `transport_error` with safe request/response metadata. Only `accepted_json` plus complete prepared context marks the monitor-owned Vinted session ready.
@@ -125,7 +127,7 @@ Acceptance criteria:
 ## Known Limitations
 
 - The deployment supports one worker instance with multiple in-process consumers. Independent worker replicas remain out of scope until queue reservations have distributed worker ownership and a visibility timeout.
-- Stop/archive cancels work that is still in the ready list. A task already reserved immediately before stop can survive until its consumer acknowledges it; a future activation-generation field should distinguish the rare stop-edit-restart race before multi-instance deployment.
+- Stop/archive cancels work that is still in the ready list. A task already reserved immediately before stop is rejected while PostgreSQL remains inactive, but a rapid stop-then-restart can make that old task indistinguishable from work for the new activation. The personal single-user MVP accepts this rare race; activation generation remains a prerequisite only before multi-instance or unattended deployment.
 - REST, SSE and traffic-producing commands sit behind the local opaque PostgreSQL session boundary owned by `docs/specs/011-local-pwa-access-control.md`. This access session is independent of the anonymous Vinted context described here.
 - Catalog/probe cookie rotation is not observed by the same refresh detector used for item documents, so PostgreSQL can retain stale context. Invalidation also lacks its own monitor-row lock. 14.12.4 closes every context mutation/write-order fence.
 - `usable_now` describes whether the prepared context could be reused after its proxy has been admitted; proxy activity, cooldown and capacity remain separate scheduler/egress decisions and are deliberately not folded into this read model.
@@ -144,6 +146,7 @@ Acceptance criteria:
 - `.\scripts\qa-backend-integration.ps1 -Scenario catalog-fail-stop`
 - `.\scripts\qa-backend-integration.ps1 -Scenario prepared-session-read-model -Repeat 1`
 - `.\scripts\qa-backend-integration.ps1 -Scenario recurring-session-start-baseline -Repeat 1`
+- `.\scripts\qa-backend-integration.ps1 -Scenario session-stop-drain -Repeat 1`
 - `.\scripts\qa-backend-integration.ps1 -Scenario full -Repeat 1`
 - `python scripts/verify_impersonation.py`
 - Docker smoke: `docker compose ps`, API health, Redis ready/processing queue drain after scheduled work, restart recovery, and persisted Redis AOF storage.

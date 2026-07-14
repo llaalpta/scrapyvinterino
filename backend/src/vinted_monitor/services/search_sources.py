@@ -119,7 +119,7 @@ def update_source(
     filter_definition: dict | None = None,
 ) -> SearchSource:
     source = _get_live_source(db, source_id)
-    if source.is_active:
+    if source.is_active or _get_non_terminal_run(db, source.id) is not None:
         raise SearchSourceActiveError(f"Monitor {source_id} is active; stop it before editing configuration")
 
     if name is not None:
@@ -191,15 +191,8 @@ def start_source_monitor(
 
 def stop_source_monitor(db: Session, source_id: int) -> SearchSource:
     source = _get_live_source(db, source_id)
-    active_run_id = db.scalar(
-        select(Run.id)
-        .where(
-            Run.source_id == source.id,
-            Run.status.in_(("running", "finalizing")),
-        )
-        .limit(1)
-    )
-    if active_run_id is not None:
+    active_run = _get_non_terminal_run(db, source.id)
+    if active_run is not None and active_run.monitor_session_id is None:
         raise SearchSourceRunActiveError(
             f"El monitor {source.id} tiene una ejecucion en curso; espera a que termine antes de detener la sesion"
         )
@@ -207,9 +200,11 @@ def stop_source_monitor(db: Session, source_id: int) -> SearchSource:
     source.monitor_started_at = None
     source.next_run_at = None
     source.monitor_until = None
-    stop_active_monitor_session(db, source.id, reason="stopped")
-    _cancel_ready_source_task(source.id)
+    if active_run is None:
+        stop_active_monitor_session(db, source.id, reason="stopped")
+    source_id_to_cancel = source.id
     db.commit()
+    _cancel_ready_source_task(source_id_to_cancel)
     db.refresh(source)
     return source
 
@@ -247,12 +242,28 @@ def _get_live_source(db: Session, source_id: int) -> SearchSource:
     source = db.scalar(
         select(SearchSource)
         .where(SearchSource.id == source_id)
-        .with_for_update()
+        # Source lifecycle writers never change the primary key. NO KEY UPDATE
+        # still serializes them while remaining compatible with FK key-share
+        # locks held by run events during provider I/O.
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     if source is None or source.archived_at is not None:
         raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
     return source
+
+
+def _get_non_terminal_run(db: Session, source_id: int) -> Run | None:
+    return db.scalar(
+        select(Run)
+        .where(
+            Run.source_id == source_id,
+            Run.status.in_(("running", "finalizing")),
+            Run.finished_at.is_(None),
+        )
+        .order_by(Run.id.desc())
+        .limit(1)
+    )
 
 
 def _cancel_ready_source_task(source_id: int) -> None:

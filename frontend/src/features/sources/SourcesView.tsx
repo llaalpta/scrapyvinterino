@@ -23,6 +23,7 @@ export function SourcesView({
   monitorEventsBySource,
   monitorHiddenEventIdsBySource,
   monitorRunsBySource,
+  pendingStopSourceIds,
   monitorStatsBySource,
   monitorStatsRangeBySource,
   onClearMonitorEventsView,
@@ -56,13 +57,14 @@ export function SourcesView({
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorHiddenEventIdsBySource: Record<number, number[]>;
   monitorRunsBySource: Record<number, Run[]>;
+  pendingStopSourceIds: number[];
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorEvents: (sourceId: number) => Promise<void>;
-  onLoadMonitorRuns: (sourceId: number) => void;
+  onLoadMonitorRuns: (sourceId: number) => Promise<void>;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onPrepareVintedSession: (source: SearchSource) => void;
   onProbeItemDetail: (source: SearchSource) => void;
@@ -83,8 +85,25 @@ export function SourcesView({
   updateDetailProbeRef: (sourceId: number, value: string) => void;
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
-  const activeSources = useMemo(() => sources.filter((source) => source.is_active), [sources]);
-  const inactiveSources = useMemo(() => sources.filter((source) => !source.is_active), [sources]);
+  const drainingSourceIds = useMemo(
+    () => new Set(
+      sources
+        .filter((source) => (
+          !source.is_active
+          && (pendingStopSourceIds.includes(source.id) || hasNonTerminalSessionRun(monitorRunsBySource[source.id] ?? []))
+        ))
+        .map((source) => source.id)
+    ),
+    [monitorRunsBySource, pendingStopSourceIds, sources]
+  );
+  const activeSources = useMemo(
+    () => sources.filter((source) => source.is_active || drainingSourceIds.has(source.id)),
+    [drainingSourceIds, sources]
+  );
+  const inactiveSources = useMemo(
+    () => sources.filter((source) => !source.is_active && !drainingSourceIds.has(source.id)),
+    [drainingSourceIds, sources]
+  );
   const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
   const [requestedSelectedMonitorId, setSelectedMonitorId] = useState<number | null>(null);
@@ -130,7 +149,7 @@ export function SourcesView({
       return;
     }
     loadingRunsRef.current.add(selectedSource.id);
-    onLoadMonitorRuns(selectedSource.id);
+    void onLoadMonitorRuns(selectedSource.id).catch(() => undefined);
   }, [monitorRunsBySource, onLoadMonitorRuns, selectedSource]);
 
   useEffect(() => {
@@ -177,6 +196,7 @@ export function SourcesView({
       </section>
 
       <MonitorTable
+        drainingSourceIds={drainingSourceIds}
         monitorStatsBySource={monitorStatsBySource}
         selectedMonitorId={selectedMonitorId}
         sources={orderedSources}
@@ -190,15 +210,19 @@ export function SourcesView({
             <h3>Detalle del monitor seleccionado</h3>
             <p>{selectedSource ? 'Configuracion, rendimiento y logs acumulados.' : 'Selecciona un monitor del listado para ver su detalle.'}</p>
           </div>
-          {selectedSource ? <span>{selectedSource.is_active ? 'Activo' : 'Inactivo'}</span> : <span>Sin seleccion</span>}
+          {selectedSource ? (
+            <span>{drainingSourceIds.has(selectedSource.id) ? 'Deteniendo...' : selectedSource.is_active ? 'Activo' : 'Inactivo'}</span>
+          ) : <span>Sin seleccion</span>}
         </div>
         <MonitorDetail
           detailProbeMessage={selectedSource ? (detailProbeMessages[selectedSource.id] ?? '') : ''}
           detailProbeRef={selectedSource ? (detailProbeRefs[selectedSource.id] ?? '') : ''}
           hiddenEventIds={selectedSource ? (monitorHiddenEventIdsBySource[selectedSource.id] ?? []) : []}
+          isDraining={selectedSource ? drainingSourceIds.has(selectedSource.id) : false}
           loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
           monitorEvents={selectedSource ? (monitorEventsBySource[selectedSource.id] ?? []) : []}
           monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
+          monitorRunStateKnown={selectedSource ? Object.hasOwn(monitorRunsBySource, selectedSource.id) : false}
           onClearMonitorEventsView={onClearMonitorEventsView}
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
@@ -522,12 +546,14 @@ function formatSeconds(seconds: number): string {
 }
 
 function MonitorTable({
+  drainingSourceIds,
   monitorStatsBySource,
   onSelectMonitor,
   selectedMonitorId,
   sources,
   sourceDrafts
 }: {
+  drainingSourceIds: Set<number>;
   monitorStatsBySource: Record<number, MonitorStats>;
   onSelectMonitor: (sourceId: number) => void;
   selectedMonitorId: number | null;
@@ -556,9 +582,11 @@ function MonitorTable({
           </div>
           {sources.map((source) => {
             const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-            const summary = source.is_active ? monitorSummary(source) : draftSummary(source, draft);
+            const isDraining = drainingSourceIds.has(source.id);
+            const summary = source.is_active || isDraining ? monitorSummary(source) : draftSummary(source, draft);
             return (
               <MonitorTableRow
+                isDraining={isDraining}
                 isSelected={source.id === selectedMonitorId}
                 key={source.id}
                 source={source}
@@ -575,12 +603,14 @@ function MonitorTable({
 }
 
 function MonitorTableRow({
+  isDraining,
   isSelected,
   onSelect,
   source,
   stats,
   summary
 }: {
+  isDraining: boolean;
   isSelected: boolean;
   onSelect: () => void;
   source: SearchSource;
@@ -591,7 +621,7 @@ function MonitorTableRow({
   const configEntries = summary.filter((entry) => entry.startsWith('Filtros:'));
   const rowClassName = [
     'monitor-table-row',
-    source.is_active ? 'is-active' : '',
+    source.is_active || isDraining ? 'is-active' : '',
     isSelected ? 'selected' : ''
   ]
     .filter(Boolean)
@@ -602,7 +632,7 @@ function MonitorTableRow({
       className={rowClassName}
       type="button"
       aria-pressed={isSelected}
-      aria-label={`${source.name}, ${source.is_active ? 'activo' : 'inactivo'}`}
+      aria-label={`${source.name}, ${isDraining ? 'deteniendo' : source.is_active ? 'activo' : 'inactivo'}`}
       onClick={onSelect}
     >
       <span className="monitor-table-cell monitor-table-main" data-label="Monitor">
@@ -613,7 +643,9 @@ function MonitorTableRow({
       </span>
       <span className="monitor-table-cell" data-label="Estado">
         <span className="monitor-table-value monitor-table-status">
-          <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
+          <span className={source.is_active || isDraining ? 'status running' : 'status'}>
+            {isDraining ? 'Deteniendo...' : source.is_active ? 'Activo' : 'Inactivo'}
+          </span>
         </span>
       </span>
       <span className="monitor-table-cell" data-label="Modo">
@@ -645,9 +677,11 @@ function MonitorDetail({
   detailProbeMessage,
   detailProbeRef,
   hiddenEventIds,
+  isDraining,
   loadingMonitorEvents,
   monitorEvents,
   monitorRuns,
+  monitorRunStateKnown,
   onClearMonitorEventsView,
   onDeleteSource,
   onLoadMonitorStats,
@@ -670,9 +704,11 @@ function MonitorDetail({
   detailProbeMessage: string;
   detailProbeRef: string;
   hiddenEventIds: number[];
+  isDraining: boolean;
   loadingMonitorEvents: boolean;
   monitorEvents: RunEvent[];
   monitorRuns: Run[];
+  monitorRunStateKnown: boolean;
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
@@ -720,11 +756,12 @@ function MonitorDetail({
   const isManual = source.monitor_mode === 'manual';
   const launchBlockedByFilters = source.catalog_filter_compatibility ? !source.catalog_filter_compatibility.compatible : false;
   const hasNonTerminalRun = monitorRuns.some((run) => run.status === 'running' || run.status === 'finalizing');
-  const hasCommandInFlight = runningSessionId !== null || hasNonTerminalRun;
+  const isRunStateUnknown = !source.is_active && !monitorRunStateKnown;
+  const hasCommandInFlight = runningSessionId !== null || savingSourceId === source.id || hasNonTerminalRun || isRunStateUnknown;
   const detailProbeBlocked = savingSourceId === source.id || hasCommandInFlight || hasUnsavedChanges || launchBlockedByFilters || detailProbeRef.trim() === '';
 
   return (
-    <div className={`monitor-detail-content${source.is_active ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
+    <div className={`monitor-detail-content${source.is_active || isDraining ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
       <div className="source-card-header">
         <div className="source-main">
           <strong>{source.name}</strong>
@@ -733,7 +770,9 @@ function MonitorDetail({
           </a>
         </div>
         <div className="source-badges">
-          <span className={source.is_active ? 'status running' : 'status'}>{source.is_active ? 'Activo' : 'Inactivo'}</span>
+          <span className={source.is_active || isDraining ? 'status running' : 'status'}>
+            {isDraining ? 'Deteniendo...' : source.is_active ? 'Activo' : 'Inactivo'}
+          </span>
         </div>
       </div>
 
@@ -741,17 +780,25 @@ function MonitorDetail({
 
       <PreparedSessionsPanel sessions={source.prepared_sessions} />
 
-      <section className={`monitor-config-panel${source.is_active ? ' readonly' : ''}`}>
+      <section className={`monitor-config-panel${source.is_active || isDraining || isRunStateUnknown ? ' readonly' : ''}`}>
         <div className="monitor-config-heading">
           <h4>Configuracion</h4>
           {source.is_active || hasCommandInFlight ? (
-            <span>{source.is_active ? 'Deten el monitor para editarla.' : 'Espera a que termine el inicio de sesion.'}</span>
+            <span>
+              {isDraining
+                ? 'Deteniendo la sesion; espera a que termine la ejecucion.'
+                : source.is_active
+                  ? 'Deten el monitor para editarla.'
+                  : isRunStateUnknown
+                    ? 'Comprobando el estado de ejecucion antes de habilitar acciones.'
+                  : 'Espera a que termine el inicio de sesion.'}
+            </span>
           ) : (
             <span>Editable con el monitor detenido.</span>
           )}
         </div>
         <CatalogFilterCompatibilityStatus source={source} />
-        {!source.is_active ? (
+        {!source.is_active && !isDraining ? (
           <div className="detail-probe-panel">
             <div className="detail-probe-heading">
               <strong>Detalle de item</strong>
@@ -803,8 +850,8 @@ function MonitorDetail({
               ) : null}
               <button
                 type="button"
-                disabled={savingSourceId === source.id || hasCommandInFlight}
-                title={hasCommandInFlight ? 'Espera a que termine la ejecucion antes de detener la sesion' : 'Detener sesion'}
+                disabled={savingSourceId === source.id}
+                title={savingSourceId === source.id ? 'Deteniendo sesion' : 'Detener sesion'}
                 onClick={() => onStopMonitor(source.id)}
               >
                 <Square size={16} />
@@ -893,7 +940,7 @@ function MonitorDetail({
           key={source.id}
           events={visibleMonitorEvents}
           loading={loadingMonitorEvents}
-          streamStatus={source.is_active ? streamStatus : null}
+          streamStatus={source.is_active || isDraining ? streamStatus : null}
           viewCleared={logViewCleared}
         />
       </section>
@@ -941,6 +988,12 @@ function MonitorDetail({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function hasNonTerminalSessionRun(runs: Run[]): boolean {
+  return runs.some(
+    (run) => run.monitor_session_id !== null && (run.status === 'running' || run.status === 'finalizing')
   );
 }
 

@@ -254,7 +254,7 @@ def _run_now(page: Page, source_id: int, *, assert_busy: bool = False) -> dict:
         run_button.click()
         if assert_busy:
             expect(run_button).to_be_disabled()
-            expect(page.get_by_role("button", name="Detener sesion", exact=True)).to_be_disabled()
+            expect(page.get_by_role("button", name="Detener sesion", exact=True)).to_be_enabled()
     return _response_json(info.value, path)
 
 

@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from threading import Event
+from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -35,10 +38,12 @@ from vinted_monitor.db.models import (
     VintedSession,
 )
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.providers.catalog import CatalogSearchResult, CatalogSource
 from vinted_monitor.services.local_auth import create_local_user
 from vinted_monitor.services.scheduler import update_scheduler_config
 from vinted_monitor.services.seen_cache import RedisSeenCache, get_seen_cache
 from vinted_monitor.services.task_queue import (
+    TaskReservation,
     dead_letter_queue_key,
     pending_payload_key,
     pending_task_key,
@@ -115,6 +120,80 @@ def test_live_recurring_session_start_baseline_and_real_consumer(
             state_path=state_path,
         )
     finally:
+        _cleanup(token, cache, settings.worker_task_queue_key)
+        assert _redis_keys(cache) == initial_redis_keys
+        _assert_isolated_database_empty()
+
+
+def test_live_session_stop_drains_run_and_fences_reserved_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_url = _loopback_origin("SESSION_STOP_QA_API_URL")
+    pwa_url = _loopback_origin("SESSION_STOP_QA_PWA_URL")
+    state_path = _state_path()
+    settings = get_settings()
+    assert settings.scheduler_enabled is True
+    assert settings.vinted_direct_catalog_enabled is True
+    assert settings.vinted_prepared_session_required is False
+    assert settings.vinted_datadome_collector_enabled is False
+    assert settings.action_requests_enabled is False
+    for endpoint in (
+        settings.vinted_base_url,
+        settings.vinted_datadome_collector_url,
+        settings.egress_diagnostic_url,
+    ):
+        assert urlsplit(str(endpoint)).hostname in LOOPBACK_HOSTS
+
+    cache = get_seen_cache(settings)
+    initial_redis_keys = _redis_keys(cache)
+    assert initial_redis_keys == {REDIS_LEASE_KEY}
+    _assert_isolated_database_empty()
+
+    from manual_session_qa_app import ControlledManualSessionProvider
+
+    search_entered = Event()
+    release_search = Event()
+    provider_calls = {"constructed": 0, "search": 0}
+
+    class BlockingSessionStopProvider(ControlledManualSessionProvider):
+        def __init__(self, **kwargs: Any) -> None:
+            provider_calls["constructed"] += 1
+            super().__init__(**kwargs)
+
+        def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+            provider_calls["search"] += 1
+            search_entered.set()
+            if not release_search.wait(15):
+                raise TimeoutError("QA session-stop provider was not released")
+            return super().search(source, page)
+
+    token = uuid4().hex
+    queue_client = redis_client_from_url(settings.redis_url, decode_responses=False, socket_timeout=3)
+    try:
+        scenario = _seed(token)
+        first_now = datetime.now(UTC)
+        runner = SchedulerRunner(settings, rng=random.Random(343))
+        assert runner.run_once(now=first_now) == []
+        monkeypatch.setattr(
+            "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
+            BlockingSessionStopProvider,
+        )
+        _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCDE"])
+        _exercise_live_session_stop(
+            scenario,
+            api_url=api_url,
+            cache=cache,
+            monkeypatch=monkeypatch,
+            provider_calls=provider_calls,
+            pwa_url=pwa_url,
+            queue_client=queue_client,
+            release_search=release_search,
+            runner=runner,
+            search_entered=search_entered,
+            settings=settings,
+        )
+    finally:
+        release_search.set()
         _cleanup(token, cache, settings.worker_task_queue_key)
         assert _redis_keys(cache) == initial_redis_keys
         _assert_isolated_database_empty()
@@ -221,6 +300,216 @@ def _exercise_live_stack(
     assert all(_local_or_non_network(url) for url in seen_urls)
 
 
+def _exercise_live_session_stop(
+    scenario: Scenario,
+    *,
+    api_url: str,
+    cache: RedisSeenCache,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_calls: dict[str, int],
+    pwa_url: str,
+    queue_client,
+    release_search: Event,
+    runner: SchedulerRunner,
+    search_entered: Event,
+    settings,
+) -> None:
+    seen_urls: list[str] = []
+    blocked_urls: list[str] = []
+    fail_next_source_runs = False
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            channel=os.getenv("SESSION_STOP_QA_BROWSER_CHANNEL", "chrome"),
+            headless=True,
+            args=["--disable-background-networking", "--disable-component-update", "--disable-sync", "--no-first-run"],
+        )
+        context = browser.new_context(base_url=pwa_url, service_workers="block")
+        try:
+            page = context.new_page()
+
+            def guard(route: Route) -> None:
+                nonlocal fail_next_source_runs
+                seen_urls.append(route.request.url)
+                parsed = urlsplit(route.request.url)
+                if (
+                    fail_next_source_runs
+                    and route.request.method == "GET"
+                    and parsed.path == "/api/runs"
+                    and parse_qs(parsed.query).get("source_id") == [str(scenario.source_id)]
+                ):
+                    fail_next_source_runs = False
+                    route.abort("failed")
+                    return
+                if _local_or_non_network(route.request.url):
+                    route.continue_()
+                else:
+                    blocked_urls.append(route.request.url)
+                    route.abort("blockedbyclient")
+
+            page.route("**/*", guard)
+            page.on("websocket", lambda socket: _assert_loopback(socket.url))
+            _login(page, scenario, pwa_url)
+            _select_monitor(page, scenario.source_name, active=False)
+
+            first_baseline = _start_session(page, scenario.source_id)
+            _assert_run(first_baseline, trigger="baseline", found=5, new=0, opportunities=0)
+            first_session_id, _, first_due = _assert_started_state(scenario, first_baseline)
+            first_reservation = _schedule_and_reserve_due(
+                scenario,
+                expected_due=first_due,
+                queue_client=queue_client,
+                runner=runner,
+                settings=settings,
+            )
+
+            consumer = TaskConsumer(settings, consumer_id=0)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                consumer_future = executor.submit(
+                    consumer._consume_reservation,
+                    cache,
+                    first_reservation,
+                    queue_client=queue_client,
+                )
+                try:
+                    assert search_entered.wait(15), "the consumer did not reach the blocking catalog provider"
+                    assert provider_calls == {"constructed": 1, "search": 1}
+                    _assert_admitted_run_is_active(
+                        scenario,
+                        first_session_id,
+                        first_reservation.task.task_id,
+                    )
+                    _assert_reservation_held(queue_client, settings.worker_task_queue_key, first_reservation)
+                    _reload_monitor_with_running_run(
+                        page,
+                        scenario,
+                        first_reservation.task.task_id,
+                    )
+                    expect(page.get_by_role("button", name="Detener sesion", exact=True)).to_be_enabled()
+
+                    fail_next_source_runs = True
+                    stop_payload = _stop_session(page, scenario.source_id, timeout_ms=5000)
+                    assert stop_payload["is_active"] is False and stop_payload["next_run_at"] is None
+                    expect(
+                        page.get_by_text(
+                            "La sesion se detuvo, pero no se pudo confirmar por completo su estado; recarga Monitores",
+                            exact=True,
+                        )
+                    ).to_be_visible()
+                    assert fail_next_source_runs is False
+                    _assert_stop_committed_before_terminal(
+                        scenario,
+                        first_session_id,
+                        first_reservation.task.task_id,
+                    )
+                    _assert_reservation_held(queue_client, settings.worker_task_queue_key, first_reservation)
+                    _assert_draining_controls(page, scenario)
+
+                    fail_next_source_runs = True
+                    page.reload(wait_until="domcontentloaded")
+                    monitors_button = page.get_by_role("button", name="Monitores", exact=True)
+                    expect(monitors_button).to_be_visible()
+                    with page.expect_request(
+                        lambda request: (
+                            request.method == "GET"
+                            and urlsplit(request.url).path == "/api/runs"
+                            and parse_qs(urlsplit(request.url).query).get("source_id") == [str(scenario.source_id)]
+                        ),
+                        timeout=10000,
+                    ):
+                        monitors_button.click()
+                    expect(
+                        page.get_by_text(
+                            "No se pudo comprobar el estado de ejecucion del monitor; recarga Monitores para reintentar",
+                            exact=True,
+                        )
+                    ).to_be_visible()
+                    assert fail_next_source_runs is False
+                    _assert_unknown_run_state_blocks_controls(page, scenario)
+                finally:
+                    release_search.set()
+                consumer_future.result(timeout=15)
+
+            assert provider_calls == {"constructed": 1, "search": 1}
+            _assert_drained_terminal_state(
+                scenario,
+                first_session_id,
+                first_reservation.task.task_id,
+            )
+            _assert_queue_empty(
+                queue_client,
+                settings.worker_task_queue_key,
+                scenario.source_id,
+                first_reservation.raw_payload,
+            )
+            _assert_terminal_unlocks_controls(page, scenario)
+
+            second_baseline = _start_session(page, scenario.source_id)
+            _assert_run(second_baseline, trigger="baseline", found=5, new=0, opportunities=0)
+            second_session_id, second_due = _assert_restarted_state(scenario, second_baseline)
+            second_reservation = _schedule_and_reserve_due(
+                scenario,
+                expected_due=second_due,
+                queue_client=queue_client,
+                runner=runner,
+                settings=settings,
+            )
+            provider_calls_before_fence = dict(provider_calls)
+            admission_waiting = Event()
+            release_admission = Event()
+
+            from vinted_monitor.worker import consumer as consumer_module
+
+            execute_monitor_run = consumer_module.execute_monitor_run
+
+            def delay_before_authoritative_admission(*args: Any, **kwargs: Any) -> Run:
+                admission_waiting.set()
+                if not release_admission.wait(15):
+                    raise TimeoutError("QA reserved task was not released for authoritative admission")
+                return execute_monitor_run(*args, **kwargs)
+
+            monkeypatch.setattr(consumer_module, "execute_monitor_run", delay_before_authoritative_admission)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                fenced_future = executor.submit(
+                    consumer._consume_reservation,
+                    cache,
+                    second_reservation,
+                    queue_client=queue_client,
+                )
+                try:
+                    assert admission_waiting.wait(15), "the reserved task did not reach the admission barrier"
+                    _assert_no_run_for_task(second_reservation.task.task_id)
+                    _assert_reservation_held(queue_client, settings.worker_task_queue_key, second_reservation)
+                    assert provider_calls == provider_calls_before_fence
+
+                    stop_payload = _stop_session(page, scenario.source_id, timeout_ms=5000)
+                    assert stop_payload["is_active"] is False and stop_payload["next_run_at"] is None
+                    _assert_stop_closed_idle_session(scenario, second_session_id)
+                    _assert_no_run_for_task(second_reservation.task.task_id)
+                    _assert_reservation_held(queue_client, settings.worker_task_queue_key, second_reservation)
+                    assert provider_calls == provider_calls_before_fence
+                finally:
+                    release_admission.set()
+                fenced_future.result(timeout=15)
+
+            _assert_no_run_for_task(second_reservation.task.task_id)
+            assert provider_calls == provider_calls_before_fence
+            _assert_queue_empty(
+                queue_client,
+                settings.worker_task_queue_key,
+                scenario.source_id,
+                second_reservation.raw_payload,
+            )
+            monitors = _get_json(context, f"{api_url}/api/monitors", pwa_url)
+            monitor = next(entry for entry in monitors if entry["id"] == scenario.source_id)
+            assert monitor["is_active"] is False and monitor["next_run_at"] is None
+        finally:
+            release_search.set()
+            context.close()
+            browser.close()
+    assert seen_urls and not blocked_urls
+    assert all(_local_or_non_network(url) for url in seen_urls)
+
+
 def _consume_next_due(
     scenario: Scenario,
     *,
@@ -249,6 +538,34 @@ def _consume_due(
     runner: SchedulerRunner,
     settings,
 ) -> dict:
+    reservation = _schedule_and_reserve_due(
+        scenario,
+        expected_due=expected_due,
+        queue_client=queue_client,
+        runner=runner,
+        settings=settings,
+    )
+    task = reservation.task
+    TaskConsumer(settings, consumer_id=0)._consume_reservation(
+        get_seen_cache(settings),
+        reservation,
+        queue_client=queue_client,
+    )
+    _assert_queue_empty(queue_client, settings.worker_task_queue_key, scenario.source_id, reservation.raw_payload)
+    with SessionLocal() as db:
+        runs = list(db.scalars(select(Run).where(Run.task_id == task.task_id)))
+        assert len(runs) == 1
+        return _run_payload(runs[0])
+
+
+def _schedule_and_reserve_due(
+    scenario: Scenario,
+    *,
+    expected_due: datetime,
+    queue_client,
+    runner: SchedulerRunner,
+    settings,
+) -> TaskReservation:
     # Fast-forward only the scheduler clock. The initial real heartbeat remains
     # authoritative and valid under the test-only 600-second timeout.
     runner._last_heartbeat_at = expected_due
@@ -263,7 +580,6 @@ def _consume_due(
         ),
     )
     assert len(queued) == 1 and queued[0].source_id == scenario.source_id
-    task = queued[0]
     reservation = reserve_task(
         queue_client,
         timeout=1,
@@ -271,16 +587,8 @@ def _consume_due(
         consumer_id=0,
     )
     assert reservation is not None
-    TaskConsumer(settings, consumer_id=0)._consume_reservation(
-        get_seen_cache(settings),
-        reservation,
-        queue_client=queue_client,
-    )
-    _assert_queue_empty(queue_client, settings.worker_task_queue_key, scenario.source_id, reservation.raw_payload)
-    with SessionLocal() as db:
-        runs = list(db.scalars(select(Run).where(Run.task_id == task.task_id)))
-        assert len(runs) == 1
-        return _run_payload(runs[0])
+    assert reservation.task.task_id == queued[0].task_id
+    return reservation
 
 
 def _seed(token: str) -> Scenario:
@@ -348,12 +656,91 @@ def _start_session(page: Page, source_id: int) -> dict:
     return info.value.json()
 
 
-def _stop_session(page: Page, source_id: int) -> dict:
+def _stop_session(page: Page, source_id: int, *, timeout_ms: int = 30000) -> dict:
     path = f"/api/monitors/{source_id}/stop"
-    with page.expect_response(lambda response: response.request.method == "POST" and urlsplit(response.url).path == path) as info:
+    with page.expect_response(
+        lambda response: response.request.method == "POST" and urlsplit(response.url).path == path,
+        timeout=timeout_ms,
+    ) as info:
         page.get_by_role("button", name="Detener sesion", exact=True).click()
     assert info.value.ok, f"POST {path} returned HTTP {info.value.status}"
     return info.value.json()
+
+
+def _reload_monitor_with_running_run(page: Page, scenario: Scenario, task_id: str) -> None:
+    def is_source_runs_response(response) -> bool:
+        parsed = urlsplit(response.url)
+        return (
+            response.request.method == "GET"
+            and parsed.path == "/api/runs"
+            and parse_qs(parsed.query).get("source_id") == [str(scenario.source_id)]
+        )
+
+    page.reload(wait_until="domcontentloaded")
+    monitors_button = page.get_by_role("button", name="Monitores", exact=True)
+    expect(monitors_button).to_be_visible()
+    with page.expect_response(is_source_runs_response, timeout=10000) as info:
+        monitors_button.click()
+    assert info.value.ok, f"GET /api/runs returned HTTP {info.value.status}"
+    runs = info.value.json()
+    assert any(
+        run["status"] in {"running", "finalizing"} and run["runtime_metadata"].get("task_id") == task_id
+        for run in runs
+    )
+    row = page.get_by_role("button", name=f"{scenario.source_name}, activo", exact=True)
+    expect(row).to_be_visible()
+    row.click()
+    page.evaluate("() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+
+def _assert_draining_controls(page: Page, scenario: Scenario) -> None:
+    expect(page.get_by_role("button", name=f"{scenario.source_name}, deteniendo", exact=True)).to_be_visible()
+    expect(page.get_by_text("Deteniendo...", exact=True).first).to_be_visible()
+    expect(page.get_by_text("Deteniendo la sesion; espera a que termine la ejecucion.", exact=True)).to_be_visible()
+    expect(page.get_by_role("combobox", name="Modo", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Guardar", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Archivar monitor", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Detener sesion", exact=True)).to_have_count(0)
+    expect(page.get_by_label("ID o URL de item para probar detalle", exact=True)).to_have_count(0)
+
+
+def _assert_unknown_run_state_blocks_controls(page: Page, scenario: Scenario) -> None:
+    expect(page.get_by_role("button", name=f"{scenario.source_name}, inactivo", exact=True)).to_be_visible()
+    expect(
+        page.get_by_text(
+            "Comprobando el estado de ejecucion antes de habilitar acciones.",
+            exact=True,
+        )
+    ).to_be_visible()
+    expect(page.get_by_role("combobox", name="Modo", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Guardar", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Archivar monitor", exact=True)).to_be_disabled()
+    expect(page.get_by_label("ID o URL de item para probar detalle", exact=True)).to_be_disabled()
+
+
+def _assert_terminal_unlocks_controls(page: Page, scenario: Scenario) -> None:
+    expect(page.get_by_role("button", name=f"{scenario.source_name}, inactivo", exact=True)).to_be_visible(timeout=15000)
+    expect(page.get_by_text("Deteniendo...", exact=True)).to_have_count(0)
+    expect(
+        page.get_by_text(
+            "La sesion se detuvo, pero no se pudo confirmar por completo su estado; recarga Monitores",
+            exact=True,
+        )
+    ).to_have_count(0)
+    expect(
+        page.get_by_text(
+            "No se pudo comprobar el estado de ejecucion del monitor; recarga Monitores para reintentar",
+            exact=True,
+        )
+    ).to_have_count(0)
+    expect(page.get_by_role("combobox", name="Modo", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Archivar monitor", exact=True)).to_be_enabled()
 
 
 def _assert_started_state(scenario: Scenario, baseline: dict) -> tuple[int, datetime, datetime]:
@@ -371,6 +758,98 @@ def _assert_started_state(scenario: Scenario, baseline: dict) -> tuple[int, date
         assert db.scalar(select(func.count()).select_from(Item)) == 0
         assert db.scalar(select(func.count()).select_from(Opportunity)) == 0
         return sessions[0].id, source.monitor_started_at, source.next_run_at
+
+
+def _assert_admitted_run_is_active(scenario: Scenario, session_id: int, task_id: str) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, scenario.source_id)
+        session = db.get(MonitorSession, session_id)
+        runs = list(db.scalars(select(Run).where(Run.task_id == task_id)))
+        assert source is not None and source.is_active is True and source.next_run_at is not None
+        assert session is not None and session.stopped_at is None
+        assert len(runs) == 1
+        assert runs[0].status == "running" and runs[0].finished_at is None
+        assert runs[0].monitor_session_id == session_id
+
+
+def _assert_stop_committed_before_terminal(scenario: Scenario, session_id: int, task_id: str) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, scenario.source_id)
+        session = db.get(MonitorSession, session_id)
+        run = db.scalar(select(Run).where(Run.task_id == task_id))
+        assert source is not None and source.is_active is False
+        assert source.monitor_started_at is None and source.monitor_until is None and source.next_run_at is None
+        assert session is not None and session.stopped_at is None and session.stop_reason is None
+        assert run is not None and run.status == "running" and run.finished_at is None
+        assert run.monitor_session_id == session_id
+
+
+def _assert_drained_terminal_state(scenario: Scenario, session_id: int, task_id: str) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, scenario.source_id)
+        session = db.get(MonitorSession, session_id)
+        runs = list(db.scalars(select(Run).where(Run.task_id == task_id)))
+        assert source is not None and source.is_active is False and source.next_run_at is None
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.status == "success" and run.finished_at is not None
+        assert run.monitor_session_id == session_id
+        assert run.items_found == 5 and run.items_new == 0 and run.opportunities_created == 0
+        assert session is not None and session.stop_reason == "stopped"
+        assert session.stopped_at == run.finished_at
+        closure_events = list(
+            db.scalars(
+                select(RunEvent).where(
+                    RunEvent.run_id == run.id,
+                    RunEvent.phase == "monitor_session_closed",
+                )
+            )
+        )
+        assert len(closure_events) == 1
+        assert closure_events[0].details["monitor_session_id"] == session_id
+        assert closure_events[0].details["reason"] == "stopped"
+
+
+def _assert_restarted_state(scenario: Scenario, baseline: dict) -> tuple[int, datetime]:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, scenario.source_id)
+        baseline_run = db.get(Run, baseline["id"])
+        active_sessions = list(
+            db.scalars(
+                select(MonitorSession).where(
+                    MonitorSession.source_id == scenario.source_id,
+                    MonitorSession.stopped_at.is_(None),
+                )
+            )
+        )
+        assert source is not None and source.is_active is True and source.next_run_at is not None
+        assert baseline_run is not None and baseline_run.trigger == "baseline" and baseline_run.monitor_session_id is None
+        assert len(active_sessions) == 1
+        assert active_sessions[0].started_at == source.monitor_started_at
+        return active_sessions[0].id, source.next_run_at
+
+
+def _assert_stop_closed_idle_session(scenario: Scenario, session_id: int) -> None:
+    with SessionLocal() as db:
+        source = db.get(SearchSource, scenario.source_id)
+        session = db.get(MonitorSession, session_id)
+        open_sessions = db.scalar(
+            select(func.count())
+            .select_from(MonitorSession)
+            .where(
+                MonitorSession.source_id == scenario.source_id,
+                MonitorSession.stopped_at.is_(None),
+            )
+        )
+        assert source is not None and source.is_active is False
+        assert source.monitor_started_at is None and source.monitor_until is None and source.next_run_at is None
+        assert session is not None and session.stopped_at is not None and session.stop_reason == "stopped"
+        assert open_sessions == 0
+
+
+def _assert_no_run_for_task(task_id: str) -> None:
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.task_id == task_id)) == 0
 
 
 def _assert_complete_run_graph(scenario: Scenario, session_id: int) -> None:
@@ -426,6 +905,24 @@ def _assert_queue_empty(queue_client, queue_key: str, source_id: int, raw_payloa
     assert queue_client.get(pending_task_key(source_id, queue_key)) is None
     if raw_payload is not None:
         assert queue_client.get(pending_payload_key(raw_payload, queue_key)) is None
+
+
+def _assert_reservation_held(queue_client, queue_key: str, reservation: TaskReservation) -> None:
+    assert queue_client.llen(queue_key) == 0
+    assert queue_client.llen(processing_queue_key(queue_key)) == 0
+    assert queue_client.llen(processing_queue_key(queue_key, 0)) == 1
+    assert queue_client.llen(dead_letter_queue_key(queue_key)) == 0
+    assert queue_client.get(pending_task_key(reservation.task.source_id, queue_key)) == reservation.task.task_id.encode()
+    assert queue_client.get(pending_payload_key(reservation.raw_payload, queue_key)) is not None
+    queued = pending_tasks(
+        queue_client,
+        queue_key=queue_key,
+        processing_keys=(
+            processing_queue_key(queue_key),
+            processing_queue_key(queue_key, 0),
+        ),
+    )
+    assert len(queued) == 1 and queued[0].task_id == reservation.task.task_id
 
 
 def _write_state(path: Path, *, ids: list[str], delay_ms: int = 0) -> None:
