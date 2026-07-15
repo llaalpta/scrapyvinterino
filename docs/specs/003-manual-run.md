@@ -56,6 +56,20 @@ Allow one user to open a manual monitor session, execute explicit catalog checks
 - Confirm through API, PostgreSQL and Redis that counters, session ownership, dedupe, fail-stop and cleanup match the acceptance criteria.
 - Confirm start/run/stop/configuration controls are honest: stop remains available for an admitted run, then `Deteniendo...` blocks edit/archive/restart until terminal.
 
+### Bounded real acceptance (14.37)
+
+The final manual-session gate uses one temporary manual monitor through the already-running PWA/API and exactly one `start`, one later `run` and one `stop`. Worker and scheduler-watchdog remain stopped. The browser blocks every non-loopback request, so only the backend provider may reach the configured egress diagnostic, Vinted and DataDome collector endpoints through the single eligible proxy.
+
+Before traffic, the gate requires no active monitor, non-terminal run or open monitor session, one active proxy, an empty operational Redis database and the expected serial runtime (`catalog_per_page=5`, detail limit `5`, one catalog retry, prepared sessions required and direct catalog disabled). Its allowance is at most `19` logical external operations: up to two six-operation session preparations, two catalog attempts and five item-detail requests. Redirect hops are not logical operations and remain a declared residual because egress/DataDome clients use their library redirect policy.
+
+Acceptance has three criteria:
+
+1. `start` persists one successful sessionless baseline with zero opportunities before it opens one active manual session with `next_run_at=null`; the Redis marker and visible seen IDs agree with the baseline.
+2. One immediate PWA `run` reuses that monitor session and performs one real later catalog observation without recreating an opportunity for a baseline-seen ID; its SQL counters, events and visible terminal state agree.
+3. PWA `stop` leaves the source inactive and the session closed with `stopped`; a subsequent authenticated local `POST /runs` returns `409` without a new run or Redis mutation, and cleanup removes only the QA user/session, source graph, orphan QA items and source-scoped Redis keys.
+
+This gate passed on 2026-07-15 against the live local stack. Start prepared one anonymous context and persisted a `5/0/0` baseline; the immediate manual run reused both the open monitor session and prepared Vinted session and also finished `5/0/0`. Stop closed the only monitor session with `stopped`, the local post-stop request returned `409`, and recorded request-start phases show six logical external operations. Cleanup removed two runs, 47 events, one prepared session, all authentication/source rows and seven source-scoped Redis keys; Redis returned to zero keys, no monitor/run/session remained active, the pre-existing item and proxy remained, and worker/watchdog were never started.
+
 Verification for the stop slice passed `6` focused cases and one live Playwright/API/PostgreSQL/Redis/scheduler/queue/consumer case, followed by the full backend and PWA gates. The controlled provider existed only at the Vinted boundary; worker/watchdog stayed stopped and no external traffic or QA residue remained.
 
 ## Audit

@@ -38,6 +38,16 @@ Cuando el resultado dependa realmente de Vinted o de un proxy, el contrato de la
 
 La suite completa se ejecuta una vez cerca del cierre si el riesgo lo justifica. Durante desarrollo se usan checks focalizados para no convertir cada iteracion en una tarea enorme.
 
+### Aceptacion manual real acotada
+
+La tarea 14.37 no pulsa `Preparar sesion`: `Iniciar sesion` prepara el contexto anonimo y reutiliza el probe JSON como baseline. Usa una sola fuente y un usuario QA temporales sobre la PWA/API operativos, con worker y watchdog detenidos, un unico proxy activo elegible y Redis 0 inicialmente vacio. El navegador aborta imagenes/CDN y cualquier otro destino no loopback.
+
+La secuencia autorizada es exactamente un start, un run manual inmediato, un stop y un rechazo local posterior al stop. Con `catalog_per_page=5`, limite de detalle `5`, `VINTED_REQUEST_RETRIES=1`, modo serial, sesion preparada obligatoria y acceso directo deshabilitado, admite como maximo `19` operaciones externas logicas: dos preparaciones completas como caso conservador, dos intentos de catalogo y cinco detalles. No se ejecutan test de proxy, segundo run, retry de detalle ni preparacion independiente. Los redirects de egress/DataDome son un riesgo residual de transporte, no permiso para mas operaciones iniciadas por la aplicacion.
+
+Antes y despues se comprueban fuentes activas, runs no terminales, sesiones abiertas, worker/watchdog y Redis. El cleanup se limita al grafo SQL del token QA y a `*monitor:{source_id}:*`; no borra ni restaura telemetria real del proxy ya existente. Debe demostrar cero filas/sesiones/keys QA y no eliminar ni sobrescribir estado ajeno; la telemetria normal producida por el uso real del proxy se conserva como tal. Si start o run falla, se muestra el error real, se intenta el stop solo cuando exista sesion y se ejecuta igualmente el cleanup; no se repite trafico para obtener un verde.
+
+El gate de 2026-07-15 completo `baseline 5/0/0 -> manual 5/0/0 -> stop -> 409`, reutilizo la sesion preparada y consumio seis operaciones logicas externas. El cleanup dejo Redis 0 vacio y cero filas QA, monitores activos, runs no terminales o sesiones abiertas. La autenticacion operativa de Vite usa `http://localhost:5173`; navegar por el bind `127.0.0.1:5173` no convierte ese origen en equivalente para CSRF/CORS.
+
 ### Bootstrap PWA por superficie
 
 Al montar el dashboard autenticado, las colecciones visibles de monitores, oportunidades y proxys empiezan en `loading` y se resuelven de forma independiente. Solo una respuesta valida, aunque contenga cero filas, confirma `ready`; si una coleccion nunca se ha confirmado y su lectura falla, queda `unavailable`. Los contadores y estados vacios se muestran solo en `ready`, y el aviso global identifica las cargas incompletas sin inutilizar las otras superficies.
@@ -91,7 +101,7 @@ Las migraciones Alembic pueden compactarse o romper compatibilidad con datos loc
 
 ## Puertos
 
-- `127.0.0.1:5173`: frontend Vite.
+- `127.0.0.1:5173`: bind local de Vite; con la configuracion predeterminada navega por `http://localhost:5173`.
 - `127.0.0.1:8000`: API FastAPI.
 - `127.0.0.1:5432`: Postgres local.
 - `127.0.0.1:6379`: Redis local.
