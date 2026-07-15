@@ -16,14 +16,13 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | planned | 14.35 Operational Alembic 0019 convergence | `docs/deployment.md`, `docs/development.md` | `chore/schema-0019-convergence` | With worker/watchdog stopped and queues empty, replace the stale API, apply the already-merged destructive migration, preserve every non-session operational surface and prove authenticated DB-backed routes without external traffic. |
-| 2 | planned | 14.36 Honest unavailable PWA collections | `docs/development.md` | `fix/pwa-collection-unavailable-state` | A collection that has never loaded renders unavailable instead of a false zero/empty state and blocks only dependent mutations; previously confirmed data and independent surfaces remain usable. |
-| 3 | planned | 14.37 Real manual-session acceptance | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md` | `qa/live-manual-session-acceptance` | A bounded real proxy/Vinted flow on an owned temporary monitor proves baseline-before-activation, one later manual observation, honest stop and exact SQL/Redis cleanup. |
-| 4 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | A bounded real 60-second session proves no immediate business run, the initial `60..66` deadline, three scheduler/queue/consumer executions, post-baseline opportunity semantics and complete restoration. |
+| 1 | planned | 14.36 Honest unavailable PWA collections | `docs/development.md` | `fix/pwa-collection-unavailable-state` | A collection that has never loaded renders unavailable instead of a false zero/empty state and blocks only dependent mutations; previously confirmed data and independent surfaces remain usable. |
+| 2 | planned | 14.37 Real manual-session acceptance | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md` | `qa/live-manual-session-acceptance` | A bounded real proxy/Vinted flow on an owned temporary monitor proves baseline-before-activation, one later manual observation, honest stop and exact SQL/Redis cleanup. |
+| 3 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | A bounded real 60-second session proves no immediate business run, the initial `60..66` deadline, three scheduler/queue/consumer executions, post-baseline opportunity semantics and complete restoration. |
 
 ## Next
 
-Do not promote another feature until 14.35-14.38 close the manual monitoring MVP acceptance. Telegram remains the first future candidate, subject to a new explicit product decision after that gate.
+Do not promote another feature until 14.36-14.38 close the manual monitoring MVP acceptance. Telegram remains the first future candidate, subject to a new explicit product decision after that gate.
 
 ## Conditional hardening
 
@@ -80,6 +79,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.26-14.28 | done | Monitor identity editing, serialized command state and independently loaded PWA bootstrap surfaces passed their live PWA/API/PostgreSQL gates and were merged through PRs #21-#23. |
 | 14.34.1 | done | Manual session start calibrates without opportunities, opens one active session and leaves later business runs to `Ejecutar ahora` until explicit stop; its real PWA/API/PostgreSQL/Redis gate and full checks passed without external traffic or residue. |
 | 14.34.2-14.34.3 | done | Recurring start now persists only its later deadline after baseline, while stop drains admitted work and fences reserved tasks; both live scheduler/queue/consumer/PWA gates passed without external traffic or residue. |
+| 14.35 | done | The operational database moved from `0018` to head `0019` by recreating only the API: exactly nine incompatible prepared sessions were removed, every non-session SQL/Redis fingerprint stayed identical, all six authenticated DB-backed surfaces returned `200`, and worker/watchdog remained stopped with no Vinted/proxy traffic or QA residue. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 
