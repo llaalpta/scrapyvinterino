@@ -16,8 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | planned | 14.37 Real manual-session acceptance | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md` | `qa/live-manual-session-acceptance` | A bounded real proxy/Vinted flow on an owned temporary monitor proves baseline-before-activation, one later manual observation, honest stop and exact SQL/Redis cleanup. |
-| 2 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | A bounded real 60-second session proves no immediate business run, the initial `60..66` deadline, three scheduler/queue/consumer executions, post-baseline opportunity semantics and complete restoration. |
+| 1 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | A bounded real 60-second session proves no immediate business run, the initial `60..66` deadline, three scheduler/queue/consumer executions, post-baseline opportunity semantics and complete restoration. |
 
 ## Next
 
@@ -80,6 +79,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.34.2-14.34.3 | done | Recurring start now persists only its later deadline after baseline, while stop drains admitted work and fences reserved tasks; both live scheduler/queue/consumer/PWA gates passed without external traffic or residue. |
 | 14.35 | done | The operational database moved from `0018` to head `0019` by recreating only the API: exactly nine incompatible prepared sessions were removed, every non-session SQL/Redis fingerprint stayed identical, all six authenticated DB-backed surfaces returned `200`, and worker/watchdog remained stopped with no Vinted/proxy traffic or QA residue. |
 | 14.36 | done | Visible PWA collections now distinguish loading, confirmed empty and unavailable state, retain confirmed snapshots after refresh failures and lock only dependent mutations. The isolated API/Vite/auth/PostgreSQL Playwright gate, Ruff, frontend lint and production build passed with unchanged operational PostgreSQL/Redis fingerprints, worker/watchdog stopped and no external traffic or QA residue. |
+| 14.37 | done | A bounded live PWA/API/proxy/Vinted run proved baseline-before-activation and prepared-session reuse with `5/0/0 -> 5/0/0`, honest stop and local post-stop `409`. Six logical external operations stayed below the allowance of 19; exact SQL/Redis cleanup left no QA state or active work and kept worker/watchdog stopped. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

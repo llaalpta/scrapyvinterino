@@ -111,6 +111,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Expire and reacquire a processing lock, then confirm a stale release cannot remove the new owner's lock.
 - Process the same item concurrently under two monitors and confirm one global item plus one opportunity per monitor.
 
+The bounded 14.37 real acceptance observed five public catalog IDs during session start, persisted the marker plus five seen entries without items or opportunities, and immediately observed the same five IDs in the manual run as `items_new=0` and `opportunities_created=0`. The run reused the prepared anonymous session; no detail request or retry entry was needed. Exact source cleanup returned operational Redis to zero keys, created no item and left the pre-existing global item row present.
+
 ## Audit
 
 - Confirm the fast path has no hidden HTML catalog fallback.
