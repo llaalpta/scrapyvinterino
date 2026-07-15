@@ -8,7 +8,6 @@ import {
   fetchMonitorStats,
   fetchOpportunities,
   fetchProxyProfiles,
-  fetchRunEvents,
   fetchRuns,
   fetchScheduler,
   fetchSources,
@@ -25,6 +24,7 @@ import {
   updateSource,
   type MonitorStats,
   type MonitorStatsRange,
+  type OpportunityQuery,
   type OpportunityResult,
   type Page,
   type ProxyProfile,
@@ -34,6 +34,7 @@ import {
   type SchedulerState,
   type SearchSource
 } from '../api';
+import { markCollectionUnavailable, type CollectionLoadState } from '../app/collectionLoadState';
 import { navItems } from '../app/navigation';
 import {
   buildOpportunityQuery,
@@ -79,7 +80,9 @@ export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
   const [opportunityPage, setOpportunityPage] = useState<Page<OpportunityResult>>(emptyOpportunityPage);
-  const [runs, setRuns] = useState<Run[]>([]);
+  const [sourceCollectionState, setSourceCollectionState] = useState<CollectionLoadState>('loading');
+  const [opportunityCollectionState, setOpportunityCollectionState] = useState<CollectionLoadState>('loading');
+  const [proxyCollectionState, setProxyCollectionState] = useState<CollectionLoadState>('loading');
   const [monitorRunsBySource, setMonitorRunsBySource] = useState<Record<number, Run[]>>({});
   const [monitorEventsBySource, setMonitorEventsBySource] = useState<Record<number, RunEvent[]>>({});
   const [monitorEventHistoryLoadedBySource, setMonitorEventHistoryLoadedBySource] = useState<Record<number, boolean>>({});
@@ -108,10 +111,21 @@ export function useDashboardController() {
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [monitorStreamStatus, setMonitorStreamStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
   const [monitorStreamReady, setMonitorStreamReady] = useState(false);
+  const fetchOpportunityCollection = useCallback(async (query: OpportunityQuery = {}) => {
+    try {
+      const opportunityData = await fetchOpportunities(query);
+      setOpportunityPage(opportunityData);
+      setOpportunityCollectionState('ready');
+      return opportunityData;
+    } catch (caught) {
+      setOpportunityCollectionState(markCollectionUnavailable);
+      throw caught;
+    }
+  }, []);
   const activeTitle = useMemo(() => navItems.find((item) => item.id === activeSection)?.label ?? 'Oportunidades', [activeSection]);
   const activeSubtitle = useMemo(
-    () => sectionSubtitle(activeSection, opportunityPage.total, sources.length),
-    [activeSection, opportunityPage.total, sources.length]
+    () => sectionSubtitle(activeSection, opportunityPage.total, sources.length, opportunityCollectionState, sourceCollectionState),
+    [activeSection, opportunityCollectionState, opportunityPage.total, sourceCollectionState, sources.length]
   );
   const monitorStreamCursorRef = useRef<number | null>(null);
   const monitorCommandRef = useRef<MonitorCommand | null>(null);
@@ -183,10 +197,12 @@ export function useDashboardController() {
         if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
           setSources(sourceData);
           setSourceDrafts(buildSourceDrafts(sourceData));
+          setSourceCollectionState('ready');
         }
       })
       .catch(() => {
-        if (sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+        if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+          setSourceCollectionState(markCollectionUnavailable);
           reportBootstrapFailure('monitores');
         }
       });
@@ -194,23 +210,28 @@ export function useDashboardController() {
       .then((opportunityData) => {
         if (!disposed) {
           setOpportunityPage(opportunityData);
+          setOpportunityCollectionState('ready');
         }
       })
-      .catch(() => reportBootstrapFailure('oportunidades'));
-    void fetchRuns()
-      .then((runData) => {
+      .catch(() => {
         if (!disposed) {
-          setRuns(runData);
+          setOpportunityCollectionState(markCollectionUnavailable);
         }
-      })
-      .catch(() => reportBootstrapFailure('runs'));
+        reportBootstrapFailure('oportunidades');
+      });
     void fetchProxyProfiles()
       .then((proxyData) => {
         if (!disposed) {
           setProxyProfiles(proxyData);
+          setProxyCollectionState('ready');
         }
       })
-      .catch(() => reportBootstrapFailure('proxies'));
+      .catch(() => {
+        if (!disposed) {
+          setProxyCollectionState(markCollectionUnavailable);
+        }
+        reportBootstrapFailure('proxies');
+      });
 
     void fetchScheduler()
       .then((schedulerData) => {
@@ -272,10 +293,13 @@ export function useDashboardController() {
       .then((sourceData) => {
         if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
           setSources(sourceData);
+          setSourceDrafts((current) => mergeMissingSourceDrafts(current, sourceData));
+          setSourceCollectionState('ready');
         }
       })
       .catch((caught: unknown) => {
-        if (!disposed) {
+        if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+          setSourceCollectionState(markCollectionUnavailable);
           setSources((current) => markPreparedSessionsExpired(current, Date.now()));
           setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el estado de los monitores');
         }
@@ -310,10 +334,12 @@ export function useDashboardController() {
         .then((sourceData) => {
           if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
             setSources(sourceData);
+            setSourceCollectionState('ready');
           }
         })
         .catch((caught: unknown) => {
-          if (!disposed) {
+          if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+            setSourceCollectionState(markCollectionUnavailable);
             setSources((current) => markPreparedSessionsExpired(current, Date.now()));
             setError(caught instanceof Error ? caught.message : 'No se pudo actualizar la expiracion de la sesion preparada');
           }
@@ -368,7 +394,7 @@ export function useDashboardController() {
         Promise.allSettled(statsRequests),
         settlePromise(
           shouldRefreshOpportunities
-            ? fetchOpportunities(buildOpportunityQuery(runtime.opportunityFilters, 1, runtime.opportunitiesPageSize))
+            ? fetchOpportunityCollection(buildOpportunityQuery(runtime.opportunityFilters, 1, runtime.opportunitiesPageSize))
             : Promise.resolve(null)
         )
       ]);
@@ -378,6 +404,12 @@ export function useDashboardController() {
         && sourceListRequestGenerationRef.current === sourceRequestGeneration
       ) {
         setSources(sourceResult.value);
+        setSourceCollectionState('ready');
+      } else if (
+        sourceResult.status === 'rejected'
+        && sourceListRequestGenerationRef.current === sourceRequestGeneration
+      ) {
+        setSourceCollectionState(markCollectionUnavailable);
       }
       const runEntries = runResults
         .filter((result): result is PromiseFulfilledResult<Awaited<(typeof runRequests)[number]>> => result.status === 'fulfilled')
@@ -400,10 +432,6 @@ export function useDashboardController() {
       if (statsEntries.length > 0) {
         setMonitorStatsBySource((current) => ({ ...current, ...Object.fromEntries(statsEntries) }));
       }
-      if (opportunityResult.status === 'fulfilled' && opportunityResult.value) {
-        setOpportunityPage(opportunityResult.value);
-      }
-
       const failed = sourceResult.status === 'rejected'
         || runResults.some((result) => result.status === 'rejected')
         || statsResults.some((result) => result.status === 'rejected')
@@ -596,7 +624,7 @@ export function useDashboardController() {
         monitorStreamReconnectTimerRef.current = null;
       }
     };
-  }, [activeSection]);
+  }, [activeSection, fetchOpportunityCollection]);
 
   useEffect(() => {
     const pendingTerminalEvents = pendingTerminalEventsRef.current;
@@ -609,11 +637,9 @@ export function useDashboardController() {
   }, []);
 
   const refreshRuntime = useCallback(async (sourceData = sources) => {
-    const [opportunityData, runData] = await Promise.all([fetchOpportunities(), fetchRuns()]);
-    setOpportunityPage(opportunityData);
-    setRuns(runData);
+    await fetchOpportunityCollection();
     await refreshLoadedMonitorStats(sourceData);
-  }, [refreshLoadedMonitorStats, sources]);
+  }, [fetchOpportunityCollection, refreshLoadedMonitorStats, sources]);
 
   function beginMonitorCommand(kind: MonitorCommandKind, sourceId: number | null): MonitorCommand | null {
     if (monitorCommandRef.current !== null) {
@@ -637,7 +663,7 @@ export function useDashboardController() {
     setLoadingOpportunities(true);
     setError(null);
     try {
-      setOpportunityPage(await fetchOpportunities(buildOpportunityQuery(filters, page, pageSize)));
+      await fetchOpportunityCollection(buildOpportunityQuery(filters, page, pageSize));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudieron cargar las oportunidades');
     } finally {
@@ -647,6 +673,10 @@ export function useDashboardController() {
 
   async function onCreateSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (sourceCollectionState !== 'ready') {
+      setError('No se puede crear un monitor hasta confirmar la coleccion de monitores');
+      return;
+    }
     const command = beginMonitorCommand('create', null);
     if (!command) {
       return;
@@ -673,6 +703,10 @@ export function useDashboardController() {
 
   async function onCreateProxy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (proxyCollectionState !== 'ready') {
+      setError('No se puede crear un proxy hasta confirmar la coleccion de proxys');
+      return;
+    }
     setError(null);
     setSavingProxy(true);
     try {
@@ -820,7 +854,7 @@ export function useDashboardController() {
     }
     if (run.opportunities_created > 0) {
       refreshes.push(
-        fetchOpportunities(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize)).then(setOpportunityPage)
+        fetchOpportunityCollection(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize))
       );
     }
     const [sourceResult, refreshResults] = await Promise.all([
@@ -833,6 +867,12 @@ export function useDashboardController() {
     ) {
       setSources(sourceResult.value);
       setSourceDrafts(buildSourceDrafts(sourceResult.value));
+      setSourceCollectionState('ready');
+    } else if (
+      sourceResult.status === 'rejected'
+      && sourceListRequestGenerationRef.current === sourceRequestGeneration
+    ) {
+      setSourceCollectionState(markCollectionUnavailable);
     }
     return sourceResult.status === 'fulfilled'
       && refreshResults.every((result) => result.status === 'fulfilled');
@@ -842,9 +882,8 @@ export function useDashboardController() {
     recordMonitorRun(sourceId, run);
     sourceListRequestGenerationRef.current += 1;
     const sourceRequestGeneration = sourceListRequestGenerationRef.current;
-    const [sourceResult, runResult, proxyResult, statsResult, eventsResult] = await Promise.all([
+    const [sourceResult, proxyResult, statsResult, eventsResult] = await Promise.all([
       settlePromise(fetchSources()),
-      settlePromise(fetchRuns()),
       settlePromise(fetchProxyProfiles()),
       settlePromise(loadMonitorStats(sourceId)),
       settlePromise(loadMonitorEvents(sourceId))
@@ -855,19 +894,24 @@ export function useDashboardController() {
     ) {
       setSources(sourceResult.value);
       setSourceDrafts(buildSourceDrafts(sourceResult.value));
-    }
-    if (runResult.status === 'fulfilled') {
-      setRuns([run, ...runResult.value.filter((entry) => entry.id !== run.id)].slice(0, 50));
+      setSourceCollectionState('ready');
+    } else if (
+      sourceResult.status === 'rejected'
+      && sourceListRequestGenerationRef.current === sourceRequestGeneration
+    ) {
+      setSourceCollectionState(markCollectionUnavailable);
     }
     if (proxyResult.status === 'fulfilled') {
       setProxyProfiles(proxyResult.value);
+      setProxyCollectionState('ready');
+    } else {
+      setProxyCollectionState(markCollectionUnavailable);
     }
-    return [sourceResult, runResult, proxyResult, statsResult, eventsResult]
+    return [sourceResult, proxyResult, statsResult, eventsResult]
       .every((result) => result.status === 'fulfilled');
   }
 
   function recordMonitorRun(sourceId: number, run: Run) {
-    setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)].slice(0, 50));
     setMonitorRunsBySource((current) => ({
       ...current,
       [sourceId]: [run, ...(current[sourceId] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
@@ -1222,7 +1266,6 @@ export function useDashboardController() {
     onDeleteSource,
     onAppendMonitorEvent: appendMonitorEvent,
     onClearMonitorEventsView: clearMonitorEventsView,
-    onLoadRunEvents: fetchRunEvents,
     onSaveSourceSchedule,
     onPrepareVintedSession,
     onProbeItemDetail,
@@ -1242,9 +1285,11 @@ export function useDashboardController() {
     monitorCommandPending,
     monitorStreamStatus,
     monitorStreamReady,
+    opportunityCollectionState,
     opportunityPage,
     pendingStopSourceIds,
     proxyDraft,
+    proxyCollectionState,
     proxyProfiles,
     proxyActionMessages,
     refreshRuntime,
@@ -1262,11 +1307,11 @@ export function useDashboardController() {
     setSourceName,
     setSourceUrl,
     sourceDrafts,
+    sourceCollectionState,
     sourceName,
     sources,
     sourceUrl,
     testingProxyIds,
-    runs,
     updateOpportunityFilter,
     updateDetailProbeRef,
     updateSourceDraft
@@ -1365,6 +1410,14 @@ function addId(current: number[], id: number): number[] {
   return current.includes(id) ? current : [...current, id];
 }
 
+function mergeMissingSourceDrafts(
+  current: Record<number, SourceDraft>,
+  sources: SearchSource[]
+): Record<number, SourceDraft> {
+  const missingSources = sources.filter((source) => !Object.hasOwn(current, source.id));
+  return missingSources.length === 0 ? current : { ...current, ...buildSourceDrafts(missingSources) };
+}
+
 function proxyTestMessage(profile: ProxyProfile): string {
   if (profile.last_test_status === 'success') {
     return `Test IP correcto: ${profile.last_test_ip ?? 'IP no informada'}`;
@@ -1375,11 +1428,29 @@ function proxyTestMessage(profile: ProxyProfile): string {
   return 'Test IP completado sin estado';
 }
 
-function sectionSubtitle(section: string, opportunityTotal: number, sourceTotal: number): string {
+function sectionSubtitle(
+  section: string,
+  opportunityTotal: number,
+  sourceTotal: number,
+  opportunityState: CollectionLoadState,
+  sourceState: CollectionLoadState
+): string {
   if (section === 'opportunities') {
+    if (opportunityState === 'loading') {
+      return 'Cargando oportunidades';
+    }
+    if (opportunityState === 'unavailable') {
+      return 'Oportunidades no disponibles';
+    }
     return `${opportunityTotal} oportunidades`;
   }
   if (section === 'sources') {
+    if (sourceState === 'loading') {
+      return 'Cargando monitores';
+    }
+    if (sourceState === 'unavailable') {
+      return 'Monitores no disponibles';
+    }
     return `${sourceTotal} monitores configurados`;
   }
   if (section === 'settings') {

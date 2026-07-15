@@ -1,6 +1,7 @@
 import { Info, Pause, Play, Power, Save } from 'lucide-react';
 import type { FormEvent } from 'react';
 import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
+import type { CollectionLoadState } from '../../app/collectionLoadState';
 
 export function SettingsView({
   onCreateProxy,
@@ -10,6 +11,7 @@ export function SettingsView({
   onUpdateSchedulerConfig,
   proxyDraft,
   proxyActionMessages,
+  proxyCollectionState,
   proxyProfiles,
   savingProxy,
   savingScheduler,
@@ -25,6 +27,7 @@ export function SettingsView({
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
   proxyDraft: ProxyDraft;
   proxyActionMessages: Record<number, string>;
+  proxyCollectionState: CollectionLoadState;
   proxyProfiles: ProxyProfile[];
   savingProxy: boolean;
   savingScheduler: boolean;
@@ -187,7 +190,13 @@ export function SettingsView({
       <div className="proxy-section">
         <div className="panel-heading nested">
           <h3>Proxy pool</h3>
-          <span>{proxyProfiles.length}</span>
+          <span>
+            {proxyCollectionState === 'loading'
+              ? 'Cargando'
+              : proxyCollectionState === 'unavailable'
+                ? 'No disponible'
+                : proxyProfiles.length}
+          </span>
         </div>
         <form className="proxy-form" onSubmit={onCreateProxy}>
           <div className="proxy-form-intro">
@@ -263,13 +272,19 @@ export function SettingsView({
             </label>
           </div>
           <div className="proxy-form-actions">
-            <button type="submit" disabled={savingProxy}>
+            <button type="submit" disabled={savingProxy || proxyCollectionState !== 'ready'}>
               <Save size={16} />
               Guardar proxy
             </button>
           </div>
         </form>
-        {proxyProfiles.length === 0 ? (
+        {proxyCollectionState !== 'ready' ? (
+          <p className="empty-inline" role="status">
+            {proxyCollectionState === 'loading'
+              ? 'Cargando proxys...'
+              : 'Proxys no disponibles. Recarga la PWA para reintentar.'}
+          </p>
+        ) : proxyProfiles.length === 0 ? (
           <p className="empty-inline">Sin proxys configurados. Los runs de catalogo quedan bloqueados mientras el directo este deshabilitado por runtime.</p>
         ) : (
           <div className="proxy-list">
