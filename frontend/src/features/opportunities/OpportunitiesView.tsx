@@ -1,6 +1,7 @@
 import { RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { OpportunityResult, Page, SearchSource } from '../../api';
+import type { CollectionLoadState } from '../../app/collectionLoadState';
 import { ItemCell } from '../../components/ItemCell';
 import { Pagination } from '../../components/Pagination';
 import { RowActions } from '../../components/RowActions';
@@ -13,9 +14,11 @@ import { AvailabilityBadge } from './opportunityPresentation';
 export function OpportunitiesView({
   filters,
   loading,
+  opportunityCollectionState,
   opportunityPage,
   pageSize,
   sources,
+  sourceCollectionState,
   onApply,
   onApplyFilters,
   onClear,
@@ -25,9 +28,11 @@ export function OpportunitiesView({
 }: {
   filters: OpportunityFilters;
   loading: boolean;
+  opportunityCollectionState: CollectionLoadState;
   opportunityPage: Page<OpportunityResult>;
   pageSize: number;
   sources: SearchSource[];
+  sourceCollectionState: CollectionLoadState;
   onApply: () => void;
   onApplyFilters: (filters: OpportunityFilters) => void;
   onClear: () => void;
@@ -40,6 +45,7 @@ export function OpportunitiesView({
   const detailTriggerRef = useRef<HTMLElement | null>(null);
   const activeFilterCount = countActiveFilters(filters);
   const filterSummaries = summarizeFilters(filters, sources);
+  const opportunityLoading = loading || opportunityCollectionState === 'loading';
 
   function applyFilters() {
     onApply();
@@ -104,11 +110,11 @@ export function OpportunitiesView({
         <div className="filter-panel-heading">
           <h3>Filtros de oportunidades</h3>
           <div className="filter-panel-actions">
-            <button type="button" disabled={loading || activeFilterCount === 0} onClick={clearFilters}>
+            <button type="button" disabled={opportunityLoading || activeFilterCount === 0} onClick={clearFilters}>
               <RotateCcw size={17} />
               Limpiar
             </button>
-            <button type="submit" disabled={loading}>
+            <button type="submit" disabled={opportunityLoading}>
               <Search size={17} />
               Aplicar
             </button>
@@ -120,8 +126,18 @@ export function OpportunitiesView({
         <div className="result-filters">
           <label>
             Monitor
-            <select value={filters.sourceId} onChange={(event) => onFilterChange('sourceId', event.target.value)}>
-              <option value="">Todos</option>
+            <select
+              value={filters.sourceId}
+              disabled={sourceCollectionState !== 'ready'}
+              onChange={(event) => onFilterChange('sourceId', event.target.value)}
+            >
+              <option value="">
+                {sourceCollectionState === 'loading'
+                  ? 'Cargando monitores...'
+                  : sourceCollectionState === 'unavailable'
+                    ? 'Monitores no disponibles'
+                    : 'Todos'}
+              </option>
               {sources.map((source) => (
                 <option key={source.id} value={source.id}>
                   {source.name}
@@ -160,64 +176,74 @@ export function OpportunitiesView({
         </div>
       </form>
 
-      <div className="table-wrap result-table">
-        <table>
-          <thead>
-            <tr>
-              <th>Articulo</th>
-              <th>Monitor</th>
-              <th>Filtro</th>
-              <th>Disponibilidad</th>
-              <th>Scrape</th>
-              <th>Marca</th>
-              <th>Talla</th>
-              <th>Condicion</th>
-              <th>Vendedor</th>
-              <th>Pais</th>
-              <th>Precio</th>
-              <th>Favs</th>
-              <th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
+      {opportunityCollectionState === 'ready' ? (
+        <>
+          <div className="table-wrap result-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Articulo</th>
+                  <th>Monitor</th>
+                  <th>Filtro</th>
+                  <th>Disponibilidad</th>
+                  <th>Scrape</th>
+                  <th>Marca</th>
+                  <th>Talla</th>
+                  <th>Condicion</th>
+                  <th>Vendedor</th>
+                  <th>Pais</th>
+                  <th>Precio</th>
+                  <th>Favs</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {opportunityPage.items.length === 0 ? (
+                  <tr>
+                    <td colSpan={13} className="empty">
+                      No hay oportunidades para los filtros actuales.
+                    </td>
+                  </tr>
+                ) : (
+                  opportunityPage.items.map((opportunity) => (
+                    <OpportunityTableRow
+                      key={opportunity.id}
+                      opportunity={opportunity}
+                      onOpenDetails={() => openOpportunityDetails(opportunity)}
+                    />
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="result-cards">
             {opportunityPage.items.length === 0 ? (
-              <tr>
-                <td colSpan={13} className="empty">
-                  No hay oportunidades para los filtros actuales.
-                </td>
-              </tr>
+              <p className="empty-inline">No hay oportunidades para los filtros actuales.</p>
             ) : (
               opportunityPage.items.map((opportunity) => (
-                <OpportunityTableRow
-                  key={opportunity.id}
-                  opportunity={opportunity}
-                  onOpenDetails={() => openOpportunityDetails(opportunity)}
-                />
+                <OpportunityCard key={opportunity.id} opportunity={opportunity} onOpenDetails={() => openOpportunityDetails(opportunity)} />
               ))
             )}
-          </tbody>
-        </table>
-      </div>
+          </div>
 
-      <div className="result-cards">
-        {opportunityPage.items.length === 0 ? (
-          <p className="empty-inline">No hay oportunidades para los filtros actuales.</p>
-        ) : (
-          opportunityPage.items.map((opportunity) => (
-            <OpportunityCard key={opportunity.id} opportunity={opportunity} onOpenDetails={() => openOpportunityDetails(opportunity)} />
-          ))
-        )}
-      </div>
-
-      <Pagination
-        page={opportunityPage.page}
-        pageSize={pageSize}
-        total={opportunityPage.total}
-        totalPages={opportunityPage.total_pages}
-        onPageChange={onPageChange}
-        onPageSizeChange={onPageSizeChange}
-        disabled={loading}
-      />
+          <Pagination
+            page={opportunityPage.page}
+            pageSize={pageSize}
+            total={opportunityPage.total}
+            totalPages={opportunityPage.total_pages}
+            onPageChange={onPageChange}
+            onPageSizeChange={onPageSizeChange}
+            disabled={loading}
+          />
+        </>
+      ) : (
+        <p className="empty-inline" role="status">
+          {opportunityCollectionState === 'loading'
+            ? 'Cargando oportunidades...'
+            : 'Oportunidades no disponibles. Aplica los filtros para reintentar la carga.'}
+        </p>
+      )}
 
       {selectedOpportunity ? (
         <OpportunityDetailDialog key={selectedOpportunity.id} opportunity={selectedOpportunity} onClose={closeOpportunityDetails} />

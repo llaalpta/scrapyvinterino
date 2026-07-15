@@ -9,6 +9,7 @@ import {
   type VintedSession,
   type VintedSessionUnusableReason
 } from '../../api';
+import type { CollectionLoadState } from '../../app/collectionLoadState';
 import { formatDate } from '../../utils/format';
 import { eventSearchText } from '../runs/runEventSearch';
 import { RunEventEntry } from '../runs/RunsView';
@@ -43,6 +44,7 @@ export function SourcesView({
   runningSessionId,
   savingSourceId,
   sourceDrafts,
+  sourceCollectionState,
   sourceName,
   sources,
   sourceUrl,
@@ -79,6 +81,7 @@ export function SourcesView({
   runningSessionId: number | null;
   savingSourceId: number | null;
   sourceDrafts: Record<number, SourceDraft>;
+  sourceCollectionState: CollectionLoadState;
   sourceName: string;
   sources: SearchSource[];
   sourceUrl: string;
@@ -123,6 +126,7 @@ export function SourcesView({
   const loadingEventsRef = useRef<Set<number>>(new Set());
   const detailRef = useRef<HTMLElement | null>(null);
   const [loadingMonitorEventsBySource, setLoadingMonitorEventsBySource] = useState<Record<number, boolean>>({});
+  const sourceCollectionReady = sourceCollectionState === 'ready';
 
   useEffect(() => {
     if (!selectedSource) {
@@ -190,12 +194,18 @@ export function SourcesView({
             <h3>Nuevo monitor</h3>
             <p>Guarda una URL publica de catalogo Vinted para ejecutarla de forma puntual o continua.</p>
           </div>
-          <span>{sources.length} configurados</span>
+          <span>
+            {sourceCollectionState === 'loading'
+              ? 'Cargando'
+              : sourceCollectionState === 'unavailable'
+                ? 'No disponible'
+                : `${sources.length} configurados`}
+          </span>
         </div>
         <form className="source-form" onSubmit={onCreateSource}>
-          <input disabled={monitorCommandPending} value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
-          <input disabled={monitorCommandPending} value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
-          <button disabled={monitorCommandPending} type="submit">{creatingSource ? 'Guardando...' : 'Guardar URL'}</button>
+          <input disabled={monitorCommandPending || !sourceCollectionReady} value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Nombre del monitor" required />
+          <input disabled={monitorCommandPending || !sourceCollectionReady} value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="URL de catalogo Vinted" required />
+          <button disabled={monitorCommandPending || !sourceCollectionReady} type="submit">{creatingSource ? 'Guardando...' : 'Guardar URL'}</button>
         </form>
       </section>
 
@@ -203,12 +213,13 @@ export function SourcesView({
         drainingSourceIds={drainingSourceIds}
         monitorStatsBySource={monitorStatsBySource}
         selectedMonitorId={selectedMonitorId}
+        sourceCollectionState={sourceCollectionState}
         sources={orderedSources}
         sourceDrafts={sourceDrafts}
         onSelectMonitor={setSelectedMonitorId}
       />
 
-      <section className="monitor-page-card monitor-detail-shell" ref={detailRef} aria-label="Detalle del monitor seleccionado">
+      <section className="monitor-page-card monitor-detail-shell" ref={detailRef} aria-label="Detalle del monitor seleccionado" hidden={!sourceCollectionReady}>
         <div className="monitor-section-heading compact">
           <div>
             <h3>Detalle del monitor seleccionado</h3>
@@ -555,6 +566,7 @@ function MonitorTable({
   monitorStatsBySource,
   onSelectMonitor,
   selectedMonitorId,
+  sourceCollectionState,
   sources,
   sourceDrafts
 }: {
@@ -562,6 +574,7 @@ function MonitorTable({
   monitorStatsBySource: Record<number, MonitorStats>;
   onSelectMonitor: (sourceId: number) => void;
   selectedMonitorId: number | null;
+  sourceCollectionState: CollectionLoadState;
   sources: SearchSource[];
   sourceDrafts: Record<number, SourceDraft>;
 }) {
@@ -572,9 +585,21 @@ function MonitorTable({
           <h3>Monitores configurados</h3>
           <p>Activos primero; selecciona una fila para revisar o editar el monitor.</p>
         </div>
-        <span>{sources.length}</span>
+        <span>
+          {sourceCollectionState === 'loading'
+            ? 'Cargando'
+            : sourceCollectionState === 'unavailable'
+              ? 'No disponible'
+              : sources.length}
+        </span>
       </div>
-      {sources.length === 0 ? (
+      {sourceCollectionState !== 'ready' ? (
+        <p className="empty-inline compact" role="status">
+          {sourceCollectionState === 'loading'
+            ? 'Cargando monitores...'
+            : 'Monitores no disponibles. Vuelve a entrar en Monitores o recarga la PWA para reintentar.'}
+        </p>
+      ) : sources.length === 0 ? (
         <p className="empty-inline compact">No hay monitores configurados.</p>
       ) : (
         <div className="monitor-table">

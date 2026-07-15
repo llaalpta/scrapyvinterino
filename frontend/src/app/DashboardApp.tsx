@@ -24,9 +24,11 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
         <OpportunitiesView
           filters={dashboard.opportunityFilters}
           loading={dashboard.loadingOpportunities}
+          opportunityCollectionState={dashboard.opportunityCollectionState}
           opportunityPage={dashboard.opportunityPage}
           pageSize={dashboard.opportunitiesPageSize}
           sources={dashboard.sources}
+          sourceCollectionState={dashboard.sourceCollectionState}
           onApply={() => void dashboard.loadOpportunities(1)}
           onApplyFilters={(filters) => void dashboard.loadOpportunities(1, filters)}
           onClear={dashboard.clearOpportunityFilters}
@@ -66,6 +68,7 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           savingSourceId={dashboard.savingSourceId}
           sourceDrafts={dashboard.sourceDrafts}
           sourceName={dashboard.sourceName}
+          sourceCollectionState={dashboard.sourceCollectionState}
           sources={dashboard.sources}
           sourceUrl={dashboard.sourceUrl}
           streamStatus={dashboard.monitorStreamStatus}
@@ -86,6 +89,7 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onUpdateSchedulerConfig={(payload) => void dashboard.onUpdateSchedulerConfig(payload)}
           proxyDraft={dashboard.proxyDraft}
           proxyActionMessages={dashboard.proxyActionMessages}
+          proxyCollectionState={dashboard.proxyCollectionState}
           proxyProfiles={dashboard.proxyProfiles}
           savingProxy={dashboard.savingProxy}
           savingScheduler={dashboard.savingScheduler}
