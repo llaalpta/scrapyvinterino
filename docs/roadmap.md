@@ -16,19 +16,15 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | done | 14.34.1 Manual session-start baseline | `docs/specs/003-manual-run.md`, `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/manual-session-start-baseline` | Starting a manual monitor calibrates without opportunities and opens one active session; `Ejecutar ahora` owns later business runs until an explicit stop. Live PWA/API/PostgreSQL/Redis QA, full backend, Ruff and PWA gates passed without external traffic or residue. |
-| 2 | done | 14.34.2 Recurring session-start baseline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/recurring-session-start-baseline` | Starting a recurring monitor calibrates, activates and persists its first later deadline without an immediate business run; the standalone contract is removed. Live PWA/API/PostgreSQL/Redis plus real scheduler/queue/consumer QA, full backend, Ruff and PWA gates passed without external traffic or residue. |
-| 3 | done | 14.34.3 Graceful monitor-session stop | `docs/specs/003-manual-run.md`, `docs/specs/008-scheduler.md` | `fix/session-stop-drain` | PostgreSQL-first stop, session-run drain, reserved-task fence while inactive and honest PWA locking passed the isolated real scheduler/queue/consumer/API/PWA gate, full backend, Ruff and PWA checks without external traffic or residue. |
-| 4 | done | 14.26 PWA monitor identity editing | `docs/specs/001-search-sources.md` | `feature/pwa-monitor-identity-editing` | Name and catalog URL editing on the same stopped, idle monitor passed the isolated live PWA/API/PostgreSQL gate; 160-character and invalid-URL rejection remain mutation-free, with active/non-terminal locks covered and no external traffic or residue. |
-| 5 | done | 14.27 Honest PWA command state | `docs/specs/001-search-sources.md`, `docs/development.md` | `fix/pwa-monitor-command-state` | One real double submit produced one `POST`/row while every monitor mutation control was locked; controlled post-`201`/`204` read failures preserved confirmed state and a held pre-archive source snapshot stayed discarded, with reload/PostgreSQL convergence and no external traffic or residue. |
+| 1 | done | 14.34.2 Recurring session-start baseline | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `feature/recurring-session-start-baseline` | Starting a recurring monitor calibrates, activates and persists its first later deadline without an immediate business run; the standalone contract is removed. Live PWA/API/PostgreSQL/Redis plus real scheduler/queue/consumer QA, full backend, Ruff and PWA gates passed without external traffic or residue. |
+| 2 | done | 14.34.3 Graceful monitor-session stop | `docs/specs/003-manual-run.md`, `docs/specs/008-scheduler.md` | `fix/session-stop-drain` | PostgreSQL-first stop, session-run drain, reserved-task fence while inactive and honest PWA locking passed the isolated real scheduler/queue/consumer/API/PWA gate, full backend, Ruff and PWA checks without external traffic or residue. |
+| 3 | done | 14.26 PWA monitor identity editing | `docs/specs/001-search-sources.md` | `feature/pwa-monitor-identity-editing` | Name and catalog URL editing on the same stopped, idle monitor passed the isolated live PWA/API/PostgreSQL gate; 160-character and invalid-URL rejection remain mutation-free, with active/non-terminal locks covered and no external traffic or residue. |
+| 4 | done | 14.27 Honest PWA command state | `docs/specs/001-search-sources.md`, `docs/development.md` | `fix/pwa-monitor-command-state` | One real double submit produced one `POST`/row while every monitor mutation control was locked; controlled post-`201`/`204` read failures preserved confirmed state and a held pre-archive source snapshot stayed discarded, with reload/PostgreSQL convergence and no external traffic or residue. |
+| 5 | done | 14.28 Independent PWA bootstrap surfaces | `docs/development.md` | `fix/pwa-bootstrap-isolation` | Runs, opportunities and proxies failed separately in the live PWA while the real monitor was already available before entering Monitores; each warning named its failed surface, API/PostgreSQL stayed unchanged and the isolated stack left no external traffic or residue. |
 
 ## Next
 
-These are user-facing improvements after the current local reliability block.
-
-| Status | Item | Owner | Outcome |
-| --- | --- | --- | --- |
-| not-started | 14.28 Independent PWA bootstrap surfaces | `docs/development.md` | A runs, opportunities or proxies failure cannot hide monitors that loaded successfully. |
+No user-facing development is currently queued. Select the next outcome by observed use rather than promoting conditional hardening automatically.
 
 ## Conditional hardening
 
@@ -82,6 +78,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.12.5 | done | Runtime/API/PWA canonical prepared-session eligibility, monitor-scoped safe reasons and one-shot expiry refresh passed the isolated live API/Playwright gate (10 tests) plus the isolated backend suite (510 passed, 2 opt-in skipped), with no external traffic or operational-state drift. |
 | 14.18 | done | The fixed scheduler/consumer identity canary passed twice in fresh PostgreSQL databases and Redis 15; occupied-Redis rejection and failed-test cleanup preserved operational PostgreSQL/Redis fingerprints, with no worker, provider or proxy traffic. |
 | 14.19 | done | Redis loss now makes the worker exit non-zero for Docker restart and lets the existing heartbeat/API/PWA contract converge unavailable. A disposable internal-network Redis/worker/API/Vite/Playwright gate passed 17 focused tests plus one live outage/recovery flow with unchanged operational fingerprints and no external traffic. |
+| 14.34.1 | done | Manual session start calibrates without opportunities, opens one active session and leaves later business runs to `Ejecutar ahora` until explicit stop; its real PWA/API/PostgreSQL/Redis gate and full checks passed without external traffic or residue. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

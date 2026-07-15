@@ -168,31 +168,49 @@ export function useDashboardController() {
 
   useEffect(() => {
     let disposed = false;
+    const failedSurfaces = new Set<string>();
+    const reportBootstrapFailure = (surface: string) => {
+      if (disposed) {
+        return;
+      }
+      failedSurfaces.add(surface);
+      setError(`Carga inicial incompleta: ${[...failedSurfaces].join(', ')}. Las demas secciones disponibles siguen operativas.`);
+    };
     sourceListRequestGenerationRef.current += 1;
     const sourceRequestGeneration = sourceListRequestGenerationRef.current;
-    Promise.all([
-      fetchSources(),
-      fetchOpportunities(),
-      fetchRuns(),
-      fetchProxyProfiles()
-    ])
-      .then(([sourceData, opportunityData, runData, proxyData]) => {
-        if (disposed) {
-          return;
-        }
-        if (sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+    void fetchSources()
+      .then((sourceData) => {
+        if (!disposed && sourceListRequestGenerationRef.current === sourceRequestGeneration) {
           setSources(sourceData);
           setSourceDrafts(buildSourceDrafts(sourceData));
         }
-        setOpportunityPage(opportunityData);
-        setRuns(runData);
-        setProxyProfiles(proxyData);
       })
-      .catch((caught: unknown) => {
-        if (!disposed) {
-          setError(caught instanceof Error ? caught.message : 'Error cargando datos');
+      .catch(() => {
+        if (sourceListRequestGenerationRef.current === sourceRequestGeneration) {
+          reportBootstrapFailure('monitores');
         }
       });
+    void fetchOpportunities()
+      .then((opportunityData) => {
+        if (!disposed) {
+          setOpportunityPage(opportunityData);
+        }
+      })
+      .catch(() => reportBootstrapFailure('oportunidades'));
+    void fetchRuns()
+      .then((runData) => {
+        if (!disposed) {
+          setRuns(runData);
+        }
+      })
+      .catch(() => reportBootstrapFailure('runs'));
+    void fetchProxyProfiles()
+      .then((proxyData) => {
+        if (!disposed) {
+          setProxyProfiles(proxyData);
+        }
+      })
+      .catch(() => reportBootstrapFailure('proxies'));
 
     void fetchScheduler()
       .then((schedulerData) => {

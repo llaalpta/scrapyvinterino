@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -49,6 +49,9 @@ $MonitorIdentityLiveTargets = @(
 $PwaMonitorCommandLiveTargets = @(
     "tests/test_pwa_monitor_command_state_live.py::test_live_pwa_monitor_command_state_contract"
 )
+$PwaBootstrapIsolationLiveTargets = @(
+    "tests/test_pwa_bootstrap_isolation_live.py::test_live_pwa_bootstrap_failures_do_not_hide_monitors"
+)
 $TestTargets = @{
     "identity" = @(
         "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
@@ -73,6 +76,7 @@ $TestTargets = @{
     "session-stop-drain" = @($SessionStopFocusedTargets + $SessionStopLiveTargets)
     "monitor-identity-edit" = @($MonitorIdentityFocusedTargets + $MonitorIdentityLiveTargets)
     "pwa-monitor-command-state" = @($PwaMonitorCommandLiveTargets)
+    "pwa-bootstrap-isolation" = @($PwaBootstrapIsolationLiveTargets)
     "full" = @("tests")
 }
 $ScenarioTargets = @($TestTargets[$Scenario])
@@ -463,7 +467,7 @@ function Get-OperationalRedisDigest {
 }
 
 function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
-    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MONITOR_IDENTITY_QA_|PWA_MONITOR_COMMAND_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
+    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MONITOR_IDENTITY_QA_|PWA_MONITOR_COMMAND_QA_|PWA_BOOTSTRAP_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
     $Saved = @{}
     $Entries = @(Get-ChildItem Env: | Where-Object { $_.Name -match $Pattern })
     foreach ($Entry in $Entries) {
@@ -513,6 +517,12 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["PWA_MONITOR_COMMAND_QA_API_URL"] = "http://127.0.0.1:8001"
             $Values["PWA_MONITOR_COMMAND_QA_PWA_URL"] = "http://127.0.0.1:5176"
             $Values["PWA_MONITOR_COMMAND_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
+        if ($Scenario -eq "pwa-bootstrap-isolation") {
+            $Values["PWA_BOOTSTRAP_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["PWA_BOOTSTRAP_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["PWA_BOOTSTRAP_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         if ($Scenario -eq "worker-redis-availability") {
@@ -588,6 +598,8 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "PREPARED_SESSION_QA_BROWSER_CHANNEL", "VITE_DEV_API_PROXY_TARGET",
         "MONITOR_IDENTITY_QA_API_URL", "MONITOR_IDENTITY_QA_PWA_URL",
         "MONITOR_IDENTITY_QA_BROWSER_CHANNEL",
+        "PWA_BOOTSTRAP_QA_API_URL", "PWA_BOOTSTRAP_QA_PWA_URL",
+        "PWA_BOOTSTRAP_QA_BROWSER_CHANNEL",
         "MANUAL_SESSION_QA_API_URL", "MANUAL_SESSION_QA_PWA_URL",
         "MANUAL_SESSION_QA_BROWSER_CHANNEL", "MANUAL_SESSION_QA_PROVIDER_STATE",
         "RECURRING_SESSION_QA_API_URL", "RECURRING_SESSION_QA_PWA_URL",
@@ -748,7 +760,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
+        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
