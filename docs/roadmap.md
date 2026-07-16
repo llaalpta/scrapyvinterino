@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | A bounded real 60-second session proves no immediate business run, the initial `60..66` deadline, three scheduler/queue/consumer executions, post-baseline opportunity semantics and complete restoration. |
+| 1 | blocked | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | The 2026-07-16 gate restored all QA state but its only positive start failed the required egress diagnostic before baseline. Retry the same bounded proof when that dependency is operational; do not relax country/DataDome readiness. |
 
 ## Next
 
