@@ -117,6 +117,8 @@ The 14.38 real recurring gate owns the complementary positive proof. It snapshot
 
 The bounded 2026-07-16 attempt produced no deduplication or opportunity evidence because required session preparation failed before baseline persistence. The accepted-JSON diagnostic probe did not override the missing egress-country/DataDome context, no recurring task was admitted and the test was stopped without retry. This proof therefore remains open rather than being inferred from focused or synthetic tests.
 
+The authorized retry later produced a real five-ID baseline with `5/0/0`, stored its marker and activated the recurring session without an immediate business run. The first real scheduler task reused that prepared session, but both catalog attempts failed before HTTP with curl code `5` because the worker could not resolve the proxy gateway. It was ACKed as one failed run with no reprepare, candidate work, item or opportunity. Therefore the baseline half is now evidenced, but the required later-ID opportunity and duplicate-free repetition remain open; no synthetic state, manual run, second start or fourth observation substitutes for them.
+
 ## Audit
 
 - Confirm the fast path has no hidden HTML catalog fallback.

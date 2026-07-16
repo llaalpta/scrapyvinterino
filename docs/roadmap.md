@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance-retry` | Base proxy connectivity recovered with one successful real PWA `Test IP`; repeat the bounded real 60-second gate, where geo/sticky/Vinted behavior, cadence and post-baseline opportunities must still prove themselves. |
+| 1 | blocked | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `ops/worker-proxy-dns-diagnostic` | The retry passed its real baseline and exact 60-second first deadline, but the worker's first scheduled catalog call exhausted both attempts resolving the proxy gateway with curl code 5. Restore and prove worker-container DNS/proxy connectivity before another bounded acceptance attempt. |
 
 ## Next
 
