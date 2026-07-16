@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | blocked | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance-retry` | The single real PWA `Test IP` also failed before IP with redacted `proxy_connect`; restore the configured proxy account/gateway/connectivity, then retry the unchanged recurring gate. |
+| 1 | planned | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance-retry` | Base proxy connectivity recovered with one successful real PWA `Test IP`; repeat the bounded real 60-second gate, where geo/sticky/Vinted behavior, cadence and post-baseline opportunities must still prove themselves. |
 
 ## Next
 
