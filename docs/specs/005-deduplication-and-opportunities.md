@@ -113,6 +113,10 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 
 The bounded 14.37 real acceptance observed five public catalog IDs during session start, persisted the marker plus five seen entries without items or opportunities, and immediately observed the same five IDs in the manual run as `items_new=0` and `opportunities_created=0`. The run reused the prepared anonymous session; no detail request or retry entry was needed. Exact source cleanup returned operational Redis to zero keys, created no item and left the pre-existing global item row present.
 
+The 14.38 real recurring gate owns the complementary positive proof. It snapshots hashes of the five baseline IDs, then lets exactly three real scheduler/queue/consumer tasks observe the live catalog. At least one opportunity must come from a later ID whose hash was absent from that baseline; baseline IDs must produce none, and the unique monitor/item contract must prevent duplicates across later runs. The gate is invalid if it needs a fourth run, manual execution, standalone preparation or synthetic provider state to obtain that evidence.
+
+The bounded 2026-07-16 attempt produced no deduplication or opportunity evidence because required session preparation failed before baseline persistence. The accepted-JSON diagnostic probe did not override the missing egress-country/DataDome context, no recurring task was admitted and the test was stopped without retry. This proof therefore remains open rather than being inferred from focused or synthetic tests.
+
 ## Audit
 
 - Confirm the fast path has no hidden HTML catalog fallback.

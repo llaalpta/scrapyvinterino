@@ -48,6 +48,18 @@ Antes y despues se comprueban fuentes activas, runs no terminales, sesiones abie
 
 El gate de 2026-07-15 completo `baseline 5/0/0 -> manual 5/0/0 -> stop -> 409`, reutilizo la sesion preparada y consumio seis operaciones logicas externas. El cleanup dejo Redis 0 vacio y cero filas QA, monitores activos, runs no terminales o sesiones abiertas. La autenticacion operativa de Vite usa `http://localhost:5173`; navegar por el bind `127.0.0.1:5173` no convierte ese origen en equivalente para CSRF/CORS.
 
+### Aceptacion recurrente real acotada
+
+La tarea 14.38 usa una fuente continua QA con intervalo `60` y jitter `10%`, el API/Vite ya operativos y worker/watchdog de Compose. Antes comprueba cero trabajo activo y Redis 0 vacio. El preflight compara config hashes, mounts y dependencias: si los ejecutores estan atrasados, se reconstruyen/recrean solo esos dos servicios desde el Compose vigente; no se reinician API, Vite, PostgreSQL, Redis ni frontend.
+
+Primero se habilita scheduler desde Ajustes mientras los ejecutores siguen detenidos y el heartbeat no esta disponible; un start autenticado debe devolver el rechazo local sin run, sesion, Redis ni trafico. Despues se arranca worker, se espera su healthcheck/heartbeat y solo entonces watchdog. La pasada positiva permite un start y tres vencimientos reales; exige baseline previo a activacion, primer deadline `60..66`, cero run inmediato, tres ACK, misma monitor/Vinted session sin reprepare, al menos una oportunidad posterior al baseline y stop antes de un cuarto vencimiento.
+
+El presupuesto duro es `45` operaciones externas logicas: una preparacion de seis operaciones en start y hasta `3 * (6 preparacion + 2 catalogo + 5 detalle)`. La trayectoria valida no debe re-preparar y normalmente queda por debajo de `30`; cualquier run fallido se detiene localmente sin esperar otro vencimiento. No se pulsa preparar sesion, probar proxy, ejecutar manualmente ni recargar oportunidades fuera de la PWA. El navegador bloquea todo host no loopback.
+
+El cleanup detiene watchdog antes que worker, deja que el ultimo heartbeat real caduque sin falsear su valor y mantiene los dos contenedores ya convergidos parados. Elimina por ownership el usuario/preauth, fuente, runs, eventos/outbox/publicaciones, errores, Vinted/monitor sessions, oportunidades, items nuevos que queden huerfanos y todas las claves Redis de fuente/cola. Conserva filas previas y la telemetria normal del proxy; API, PostgreSQL, Redis, Vite y frontend Docker vuelven a su snapshot inicial.
+
+La pasada de 2026-07-16 supero el rechazo local `503` y la convergencia/heartbeat de los ejecutores, pero no el baseline positivo: el diagnostico de egress requerido agoto su timeout de `15` segundos, el collector se omitio por contexto base incompleto y la probe `200 accepted_json` no pudo compensar la falta de pais validado y `datadome`. Se detuvieron los ejecutores tras tres operaciones logicas externas, sin retry ni vencimiento recurrente. El cleanup devolvio Redis y todos los contadores QA/activos a cero, con el item previo intacto. La aceptacion sigue bloqueada hasta una nueva pasada acotada con el diagnostico requerido operativo; no se relaja el contrato para obtener un verde.
+
 ### Bootstrap PWA por superficie
 
 Al montar el dashboard autenticado, las colecciones visibles de monitores, oportunidades y proxys empiezan en `loading` y se resuelven de forma independiente. Solo una respuesta valida, aunque contenga cero filas, confirma `ready`; si una coleccion nunca se ha confirmado y su lectura falla, queda `unavailable`. Los contadores y estados vacios se muestran solo en `ready`, y el aviso global identifica las cargas incompletas sin inutilizar las otras superficies.
