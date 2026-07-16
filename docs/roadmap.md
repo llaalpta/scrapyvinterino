@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | blocked | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance` | The 2026-07-16 gate restored all QA state but its only positive start failed the required egress diagnostic before baseline. Retry the same bounded proof when that dependency is operational; do not relax country/DataDome readiness. |
+| 1 | blocked | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance-retry` | Both authorized isolated geo endpoints failed with `ProxyError` before HTTP; restore or wait for the configured proxy service, then retry the unchanged recurring gate without relaxing country/DataDome readiness. |
 
 ## Next
 
