@@ -14,13 +14,11 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 Keep no more than five independently valuable tasks here.
 
-| Priority | Status | Item | Owner | Suggested branch | Outcome |
-| --- | --- | --- | --- | --- | --- |
-| 1 | ready | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance-final` | A current worker-boundary one-off resolved the gateway and completed one monitor-style sticky-proxy HTTPS diagnostic with valid ES context. No Compose/code/config difference was reproducible; run one final bounded recurring acceptance without adding DNS overrides or retries. |
+No task is active. The public manual/recurring monitoring MVP acceptance is closed; starting another outcome requires explicit user authorization.
 
 ## Next
 
-Do not promote another feature until 14.37-14.38 close the manual monitoring MVP acceptance. Telegram remains the first future candidate, subject to a new explicit product decision after that gate.
+Telegram opportunity alerts (`15.1`) are the first product candidate, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
 
 ## Conditional hardening
 
@@ -80,6 +78,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.35 | done | The operational database moved from `0018` to head `0019` by recreating only the API: exactly nine incompatible prepared sessions were removed, every non-session SQL/Redis fingerprint stayed identical, all six authenticated DB-backed surfaces returned `200`, and worker/watchdog remained stopped with no Vinted/proxy traffic or QA residue. |
 | 14.36 | done | Visible PWA collections now distinguish loading, confirmed empty and unavailable state, retain confirmed snapshots after refresh failures and lock only dependent mutations. The isolated API/Vite/auth/PostgreSQL Playwright gate, Ruff, frontend lint and production build passed with unchanged operational PostgreSQL/Redis fingerprints, worker/watchdog stopped and no external traffic or QA residue. |
 | 14.37 | done | A bounded live PWA/API/proxy/Vinted run proved baseline-before-activation and prepared-session reuse with `5/0/0 -> 5/0/0`, honest stop and local post-stop `409`. Six logical external operations stayed below the allowance of 19; exact SQL/Redis cleanup left no QA state or active work and kept worker/watchdog stopped. |
+| 14.38 | done | One bounded live PWA start produced a sessionless `5/0/0` baseline, three real scheduler/Redis/consumer successes with prepared-session use count `1 -> 4`, eight post-baseline opportunities, exact three-way enqueue/receive/ACK evidence and no fourth run after PWA stop. The 22 logical external operations stayed below 45; exact cleanup restored every stable SQL/Redis fingerprint and initial service owner while preserving ordinary proxy telemetry. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 
