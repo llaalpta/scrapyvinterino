@@ -119,6 +119,8 @@ The bounded 2026-07-16 attempt produced no deduplication or opportunity evidence
 
 The authorized retry later produced a real five-ID baseline with `5/0/0`, stored its marker and activated the recurring session without an immediate business run. The first real scheduler task reused that prepared session, but both catalog attempts failed before HTTP with curl code `5` because the worker could not resolve the proxy gateway. It was ACKed as one failed run with no reprepare, candidate work, item or opportunity. Therefore the baseline half is now evidenced, but the required later-ID opportunity and duplicate-free repetition remain open; no synthetic state, manual run, second start or fourth observation substitutes for them.
 
+The final bounded 2026-07-17 pass closes that proof. One five-ID real baseline produced no item or opportunity, then exactly three real scheduler/Redis/consumer runs reused the same prepared session and persisted eight unique opportunities whose keyed HMACs were all disjoint from the baseline set. Every opportunity belonged to one of those three runs, the monitor/item uniqueness contract held across repeated observations, and PWA stop prevented a fourth run. Exact cleanup removed the QA opportunities and their new orphan items while preserving the pre-existing item fingerprint and all other stable SQL/Redis state.
+
 ## Audit
 
 - Confirm the fast path has no hidden HTML catalog fallback.
