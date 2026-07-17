@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Priority | Status | Item | Owner | Suggested branch | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| 1 | blocked | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `ops/worker-proxy-dns-diagnostic` | The retry passed its real baseline and exact 60-second first deadline, but the worker's first scheduled catalog call exhausted both attempts resolving the proxy gateway with curl code 5. Restore and prove worker-container DNS/proxy connectivity before another bounded acceptance attempt. |
+| 1 | ready | 14.38 Real recurring-session acceptance | `docs/specs/005-deduplication-and-opportunities.md`, `docs/specs/008-scheduler.md` | `qa/live-recurring-session-acceptance-final` | A current worker-boundary one-off resolved the gateway and completed one monitor-style sticky-proxy HTTPS diagnostic with valid ES context. No Compose/code/config difference was reproducible; run one final bounded recurring acceptance without adding DNS overrides or retries. |
 
 ## Next
 
