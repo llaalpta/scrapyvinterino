@@ -14,7 +14,10 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 Keep no more than five independently valuable tasks here.
 
-No task is active. The public manual/recurring monitoring MVP acceptance is closed; starting another outcome requires explicit user authorization.
+| Status | Item | Outcome |
+| --- | --- | --- |
+| planned | 14.39 Catalog URL filter clarity | Distinguish URL-applied filters, application-controlled ordering/page and parameters with no runtime effect in the monitor detail. |
+| planned | 14.40 Monitor/session performance comparison | Show accumulated monitor metrics followed by the active session, or the latest closed session, with directly comparable results. |
 
 ## Next
 
