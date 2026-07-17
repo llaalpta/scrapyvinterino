@@ -90,6 +90,12 @@ El reintento acotado de 2026-07-16 partio con el gateway resolviendo dentro del 
 
 El cleanup elimino un usuario QA, su sesion autenticada y su preautenticacion revocada. Redis, filas QA, fuentes activas, runs no terminales y sesiones abiertas quedaron a cero; el item previo, el scheduler ausente, Vite y los servicios iniciales se conservaron, con worker/watchdog detenidos y sin Chrome headless residual. Este success retira el bloqueo de conectividad base para repetir 14.38, pero no demuestra pais, identidad sticky, DataDome ni Vinted: esas fronteras deben validarse en el gate real sin convertir este diagnostico en un fallback o retry de runtime.
 
+#### Diagnostico DNS/proxy desde el worker
+
+El gate posterior de 2026-07-17 uso un `docker compose run --rm --no-deps -T worker` con codigo efimero por stdin: comparte imagen, entorno, bind mount, red y resolver del worker, pero no inicia productor, consumidores ni heartbeat. Primero rechazo un hostname `.invalid` sin HTTP; despues resolvio el gateway configurado y completo un unico GET al diagnostico de egress mediante una identidad sticky nueva construida por el runtime. La respuesta fue 2xx, JSON, con IP y pais presentes, coincidencia ES, sin redirect ni cookies; no se imprimieron host, direcciones, credenciales, URL autenticada, payload, headers o excepcion raw.
+
+API y worker no mostraron diferencias de entorno, capas, red, resolver o construccion de URL que expliquen el curl code 5 anterior. No se fija DNS publico, no se agrega retry y no cambia `.env` ni producto: el episodio queda como fallo transitorio de Docker DNS/red. El one-off se elimino, Redis siguio vacio, el flujo no invoco escritores SQL/telemetria y worker/watchdog permanecieron detenidos. Una repeticion real de 14.38 sigue siendo obligatoria y debe detenerse ante el primer fallo; este diagnostico no sustituye Vinted, DataDome, tres runs ni la prueba de oportunidad posterior al baseline.
+
 ### Bootstrap PWA por superficie
 
 Al montar el dashboard autenticado, las colecciones visibles de monitores, oportunidades y proxys empiezan en `loading` y se resuelven de forma independiente. Solo una respuesta valida, aunque contenga cero filas, confirma `ready`; si una coleccion nunca se ha confirmado y su lectura falla, queda `unavailable`. Los contadores y estados vacios se muestran solo en `ready`, y el aviso global identifica las cargas incompletas sin inutilizar las otras superficies.
