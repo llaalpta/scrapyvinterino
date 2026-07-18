@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from threading import Event
 
@@ -899,24 +900,24 @@ def test_source_mutation_waits_for_archive_and_rejects_stale_state(
                 db.commit()
 
 
-def test_scheduler_api_updates_persisted_ui_gate() -> None:
+def test_scheduler_api_rejects_removed_ui_gate_without_mutating_settings() -> None:
     client = authenticated_test_client()
+    with SessionLocal() as db:
+        original = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+        original_exists = original is not None
+        original_value = deepcopy(original.value) if original is not None else None
 
-    try:
-        response = client.patch("/api/scheduler", json={"enabled": True})
+    response = client.patch("/api/scheduler", json={"enabled": True})
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["enabled"] is True
-        assert "runtime_enabled" in body
-        assert "effective_enabled" in body
+    assert response.status_code == 422
+    get_response = client.get("/api/scheduler")
+    assert get_response.status_code == 200
+    body = get_response.json()
+    assert "enabled" not in body
+    assert "runtime_enabled" in body
+    assert "effective_enabled" in body
 
-        get_response = client.get("/api/scheduler")
-        assert get_response.status_code == 200
-        assert get_response.json()["enabled"] is True
-    finally:
-        with SessionLocal() as db:
-            setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
-            if setting is not None:
-                db.delete(setting)
-                db.commit()
+    with SessionLocal() as db:
+        persisted = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+        assert (persisted is not None) is original_exists
+        assert (deepcopy(persisted.value) if persisted is not None else None) == original_value

@@ -63,7 +63,6 @@ from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
     SchedulerUnavailableError,
     update_scheduler_config,
-    update_scheduler_enabled,
 )
 from vinted_monitor.services.scheduler_liveness import SchedulerWorkerAvailability
 from vinted_monitor.services.search_sources import archive_source
@@ -2014,7 +2013,6 @@ def test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session(monke
             scheduler_config={},
         )
         db.add(source)
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
@@ -2133,7 +2131,6 @@ def test_recurring_monitor_start_baselines_then_opens_session_with_future_deadli
             scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": allowed_windows},
         )
         db.add(source)
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
@@ -2201,7 +2198,6 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
             update_scheduler_config(
                 db,
                 {
-                    "enabled": True,
                     "max_concurrent_runs": 1,
                     "allow_direct_without_proxy": True,
                     "direct_max_concurrent_runs": 1,
@@ -2326,7 +2322,6 @@ def test_recurring_monitor_start_preserves_successful_baseline_when_postflight_f
             scheduler_config={"interval_seconds": 60, "jitter_percent": 0, "allowed_windows": []},
         )
         db.add(source)
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 
@@ -2623,7 +2618,6 @@ def test_recurring_monitor_baseline_failure_leaves_session_inactive(monkeypatch:
             scheduler_config={"interval_seconds": 300, "jitter_percent": 0, "allowed_windows": []},
         )
         db.add(source)
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True))
         db.commit()
         source_id = source.id
 

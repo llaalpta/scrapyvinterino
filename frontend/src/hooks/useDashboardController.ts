@@ -92,7 +92,6 @@ export function useDashboardController() {
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [monitorCommand, setMonitorCommand] = useState<MonitorCommand | null>(null);
   const [pendingStopSourceIds, setPendingStopSourceIds] = useState<number[]>([]);
-  const [savingScheduler, setSavingScheduler] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [testingProxyIds, setTestingProxyIds] = useState<number[]>([]);
   const [proxyActionMessages, setProxyActionMessages] = useState<Record<number, string>>({});
@@ -790,7 +789,7 @@ export function useDashboardController() {
           return;
         }
         if (!schedulerData.effective_enabled) {
-          setError('El scheduler no esta operativo. Revisa los ajustes de interfaz, despliegue y capacidad.');
+          setError('El scheduler no esta operativo. Revisa el despliegue y la capacidad.');
           return;
         }
       }
@@ -903,27 +902,8 @@ export function useDashboardController() {
     }
   }
 
-  async function onToggleScheduler() {
-    if (!scheduler) {
-      return;
-    }
-    setError(null);
-    setSavingScheduler(true);
-    try {
-      setScheduler(await updateScheduler({ enabled: !scheduler.enabled }));
-      setSchedulerAvailabilityError(null);
-    } catch (caught) {
-      setScheduler(null);
-      setSchedulerAvailabilityError('No se pudo confirmar el estado del scheduler.');
-      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el scheduler');
-    } finally {
-      setSavingScheduler(false);
-    }
-  }
-
   async function onUpdateSchedulerConfig(payload: SchedulerUpdate) {
     setError(null);
-    setSavingScheduler(true);
     try {
       setScheduler(await updateScheduler(payload));
       setSchedulerAvailabilityError(null);
@@ -931,8 +911,6 @@ export function useDashboardController() {
       setScheduler(null);
       setSchedulerAvailabilityError('No se pudo confirmar el estado del scheduler.');
       setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el scheduler');
-    } finally {
-      setSavingScheduler(false);
     }
   }
 
@@ -1148,7 +1126,6 @@ export function useDashboardController() {
     onStopMonitor,
     onTestProxy,
     onToggleProxy,
-    onToggleScheduler,
     onUpdateSchedulerConfig,
     monitorStatsBySource,
     monitorStatsRangeBySource,
@@ -1171,7 +1148,6 @@ export function useDashboardController() {
     opportunitiesPageSize,
     runningSessionId,
     savingProxy,
-    savingScheduler,
     savingSourceId,
     scheduler,
     schedulerAvailabilityError,

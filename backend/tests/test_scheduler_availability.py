@@ -72,7 +72,7 @@ def test_scheduler_state_requires_fresh_producer_heartbeat() -> None:
     settings = _settings()
     now = datetime.now(UTC)
     with SessionLocal() as db:
-        update_scheduler_config(db, {"enabled": True, "allow_direct_without_proxy": True}, settings)
+        update_scheduler_config(db, {"allow_direct_without_proxy": True}, settings)
 
         missing = get_scheduler_state(db, settings, now=now)
         assert missing.worker_available is False
@@ -107,11 +107,13 @@ def test_scheduler_state_requires_fresh_producer_heartbeat() -> None:
             assert unavailable.last_seen_at is None
 
 
-def test_scheduler_runner_writes_heartbeat_while_scheduler_is_disabled() -> None:
-    settings = _settings()
+def test_scheduler_runner_writes_heartbeat_while_deployment_gate_is_disabled() -> None:
+    settings = Settings(
+        _env_file=None,
+        scheduler_enabled=False,
+        vinted_direct_catalog_enabled=True,
+    )
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
-    with SessionLocal() as db:
-        update_scheduler_config(db, {"enabled": False}, settings)
 
     runner = SchedulerRunner(settings)
     assert runner.run_once(now=now) == []
@@ -168,7 +170,7 @@ def test_recurring_start_returns_503_without_producer_heartbeat(monkeypatch: pyt
         lambda *_args, **_kwargs: pytest.fail("egress selection must not run without a producer heartbeat"),
     )
     with SessionLocal() as db:
-        update_scheduler_config(db, {"enabled": True, "allow_direct_without_proxy": True}, settings)
+        update_scheduler_config(db, {"allow_direct_without_proxy": True}, settings)
         source = SearchSource(
             name="pytest scheduler availability unavailable",
             url="https://www.vinted.es/catalog?search_text=scheduler-availability",

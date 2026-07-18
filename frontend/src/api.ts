@@ -147,7 +147,6 @@ export type SourceSchedulerConfig = {
 };
 
 export type SchedulerState = {
-  enabled: boolean;
   runtime_enabled: boolean;
   effective_enabled: boolean;
   worker_available: boolean;
@@ -462,7 +461,6 @@ export function fetchScheduler(): Promise<SchedulerState> {
 }
 
 export type SchedulerUpdate = Partial<{
-  enabled: boolean;
   max_concurrent_runs: number;
   allow_direct_without_proxy: boolean;
   direct_max_concurrent_runs: number;

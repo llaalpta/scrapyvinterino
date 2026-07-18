@@ -247,7 +247,6 @@ def _enabled_scheduler_runtime(settings):
         update_scheduler_config(
             db,
             {
-                "enabled": True,
                 "max_concurrent_runs": 1,
                 "allow_direct_without_proxy": False,
             },
@@ -846,7 +845,6 @@ def test_egress_selection_fences_only_one_usable_candidate_and_preserves_direct_
             update_scheduler_config(
                 db,
                 {
-                    "enabled": True,
                     "max_concurrent_runs": 3,
                     "allow_direct_without_proxy": True,
                 },

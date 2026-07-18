@@ -80,14 +80,12 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onCreateProxy={dashboard.onCreateProxy}
           onTestProxy={(profileId) => void dashboard.onTestProxy(profileId)}
           onToggleProxy={(profile) => void dashboard.onToggleProxy(profile)}
-          onToggleScheduler={() => void dashboard.onToggleScheduler()}
           onUpdateSchedulerConfig={(payload) => void dashboard.onUpdateSchedulerConfig(payload)}
           proxyDraft={dashboard.proxyDraft}
           proxyActionMessages={dashboard.proxyActionMessages}
           proxyCollectionState={dashboard.proxyCollectionState}
           proxyProfiles={dashboard.proxyProfiles}
           savingProxy={dashboard.savingProxy}
-          savingScheduler={dashboard.savingScheduler}
           scheduler={dashboard.scheduler}
           schedulerAvailabilityError={dashboard.schedulerAvailabilityError}
           setProxyDraft={dashboard.setProxyDraft}

@@ -18,6 +18,20 @@ Excluded: API-wide readiness, explicit heartbeat deletion, queue/drain redesign,
 
 Verification: 17 focused scheduler/supervisor tests and one live Playwright outage/recovery case passed against a migrated disposable PostgreSQL database plus disposable Redis/worker containers on an internal Docker network. The real worker exited non-zero, Docker restarted it, the heartbeat stopped advancing, API/PWA became unavailable after timeout and recovered after Redis returned. Cleanup left no QA containers, networks, roles, databases, Redis keys, ports or logs; operational PostgreSQL/Redis fingerprints and service state were unchanged. No Vinted, proxy or Telegram traffic was allowed.
 
+## 14.46 Single scheduler deployment gate
+
+Status: `done`. The redundant global PWA switch and `app_settings.scheduler.enabled` contract are removed. Docker alone owns process lifecycle, `SCHEDULER_ENABLED` is the deployment kill-switch, and each monitor owns recurrence through `Iniciar sesion`/`Detener sesion`. The scheduler remains idle when no recurring session is active.
+
+Acceptance criteria:
+
+1. Settings exposes scheduler status, heartbeat, capacity and tuning without a global enable/disable action; `GET /api/scheduler` omits `enabled` and `PATCH {"enabled": ...}` returns `422` without mutating PostgreSQL.
+2. `effective_enabled` depends only on the deployment gate, live worker heartbeat and effective egress capacity. A recurrent start works with those conditions and remains fail-stop when `.env` blocks runtime or the worker is unavailable.
+3. Alembic 0021 removes only `app_settings.scheduler.enabled`, preserving every other scheduler setting and `scheduler_worker_heartbeat`; no compatibility reader or invented downgrade value remains.
+
+Representative integration: the isolated authenticated PWA/API/PostgreSQL/Redis scenario uses a real `SchedulerRunner`, queue reservation/ACK and `TaskConsumer`, with a controlled loopback provider only at the external boundary. It verifies the missing buttons and API field, rejects the legacy PATCH, then starts a recurring session, persists its later deadline and completes the same/new/repeated candidate trajectory. Focused negatives cover `.env` disabled and missing heartbeat. Cleanup restores operational fingerprints and service ownership; Vinted/proxy/Telegram allowance is zero.
+
+Verification passed the nine-case isolated scenario including live Playwright (`9 passed`), the disposable PostgreSQL `0020 -> 0021` probe, Ruff, frontend lint/build and the complete isolated backend gate (`525 passed`, `9 skipped`, plus `3 passed` loopback-only). The operational idle database reached 0021 with the old key absent before the API restarted; no active monitor, run, session or queued task existed.
+
 ## Planned 14.34 session program
 
 Status: `done`. Slices 14.34.1, 14.34.2 and 14.34.3 are implemented and verified. Their current clauses replace the temporary calibration/stop contracts across specs 001, 003, 005, 008 and 010 plus architecture/data-model prose.
@@ -78,7 +92,7 @@ Verification passed the isolated `session-stop-drain` gate (`6` focused plus `1`
 
 Status: `done` on `qa/live-recurring-session-acceptance-final` after `ops/worker-proxy-dns-diagnostic`. The bounded 2026-07-16 attempts remain useful failure evidence, while the final 2026-07-17 pass satisfies all three positive criteria without a scheduler redesign, DNS override or runtime retry. It used one temporary continuous monitor with interval `60`, jitter `10%`, the existing live API/PWA/PostgreSQL/Redis, one eligible ES proxy, and the real Compose worker producer/consumers plus scheduler-watchdog.
 
-Before external traffic there must be no active monitor, non-terminal run, open monitor session or Redis key. The operational scheduler row is initially absent, so the gate enables it through the PWA while the worker remains unavailable. The worker-unavailable rejection was already accepted twice on 2026-07-16; the final pass deliberately reused that evidence instead of adding another start command. It then started worker, required two advancing heartbeats, started watchdog and issued exactly one positive PWA `start`.
+Before external traffic there must be no active monitor, non-terminal run, open monitor session or Redis key. The deployment gate is enabled while the worker remains unavailable. The worker-unavailable rejection was already accepted twice on 2026-07-16; the final pass deliberately reused that evidence instead of adding another start command. It then started worker, required two advancing heartbeats, started watchdog and issued exactly one positive PWA `start`.
 
 Acceptance has three criteria:
 
@@ -90,11 +104,11 @@ No standalone prepare/proxy test, manual override, fourth run, detail retry run 
 
 With `catalog_per_page=5`, detail limit `5`, one catalog retry and serial detail mode, the hard allowance is `45` logical external operations: one six-operation baseline preparation plus, conservatively, one six-operation reprepare, two catalog attempts and five detail requests for each of three scheduler tasks. Any reprepare or terminal failed run fails the gate and triggers an immediate local stop; the larger allowance only contains traffic already initiated before that observation. Redirect hops are not logical operations: Vinted calls have the provider's explicit redirect bound, while egress/DataDome library redirects remain a declared transport residual.
 
-The 2026-07-16 negative path passed: with worker/watchdog stopped, the PWA enabled the scheduler and start returned `503` with zero run, prepared session, Redis key or provider phase. After rebuilding only the stale executors, the worker became healthy, two heartbeats advanced and watchdog remained running. The single allowed positive start then created one failed baseline run after three logical external operations: the required isolated egress diagnostic exhausted its `15`-second timeout, so `egress_country_code` was unavailable; the DataDome collector correctly skipped with `base_context_incomplete`, and the subsequent diagnostic catalog probe returned `200 accepted_json` but could not make the context reusable without `datadome`. The session was persisted `incomplete` and start failed with `VintedSessionRequiredError`. Per the predeclared fail-stop rule, watchdog and worker were stopped immediately and no second provider attempt or scheduler run was allowed. Consequently none of the three positive criteria is accepted and no scheduler-cadence conclusion can be drawn from this attempt.
+The 2026-07-16 negative path passed: with the deployment gate enabled and worker/watchdog stopped, start returned `503` with zero run, prepared session, Redis key or provider phase. After rebuilding only the stale executors, the worker became healthy, two heartbeats advanced and watchdog remained running. The single allowed positive start then created one failed baseline run after three logical external operations: the required isolated egress diagnostic exhausted its `15`-second timeout, so `egress_country_code` was unavailable; the DataDome collector correctly skipped with `base_context_incomplete`, and the subsequent diagnostic catalog probe returned `200 accepted_json` but could not make the context reusable without `datadome`. The session was persisted `incomplete` and start failed with `VintedSessionRequiredError`. Per the predeclared fail-stop rule, watchdog and worker were stopped immediately and no second provider attempt or scheduler run was allowed. Consequently none of the three positive criteria is accepted and no scheduler-cadence conclusion can be drawn from this attempt.
 
 Cleanup removed the one failed run, `18` events/outbox rows, one error, one incomplete Vinted session, the QA source/user and four owned browser sessions. Redis 0 returned to zero keys; active sources, non-terminal runs, open monitor sessions and every QA SQL count returned to zero; the pre-existing item count remained one and the initially absent scheduler setting was removed. API, PostgreSQL, Redis and the existing Vite process were not restarted. The later base `Test IP` success permitted one bounded retry, but its real start still had to fail-stop if any required transport or context was unavailable; relaxing country or DataDome readiness was not an acceptance workaround.
 
-The authorized retry repeated the negative path with worker/watchdog stopped. The PWA enabled the scheduler and visibly blocked its start before POST because `worker_available=false`; one authenticated same-origin POST then returned `503`. It created no run, monitor session, Vinted session, event, error, Redis key or provider phase. After the current worker became healthy, two heartbeats advanced five seconds apart; watchdog stayed running with no critical log and no inactive-source work.
+The authorized retry repeated the negative path with worker/watchdog stopped and the deployment gate enabled. The PWA visibly blocked its start before POST because `worker_available=false`; one authenticated same-origin POST then returned `503`. It created no run, monitor session, Vinted session, event, error, Redis key or provider phase. After the current worker became healthy, two heartbeats advanced five seconds apart; watchdog stayed running with no critical log and no inactive-source work.
 
 Before that representative scenario, an invalid comparison between the container label and `docker compose config --hash` caused one unnecessary no-build API recreation. A Compose dry run corrected the classification; the API became healthy and every SQL fingerprint, Redis zero state and the existing Vite PID were unchanged before the gate began. No QA/provider action occurred during that setup mistake, but it remains an avoidable verification deviation rather than acceptance evidence.
 
@@ -102,9 +116,9 @@ The single positive PWA start then passed criterion 1. Its sessionless baseline 
 
 The first due task was submitted, received and ACKed exactly once, with no requeue, dead letter or queue residue. It reused the same prepared session and advanced its request count to `2`, but both allowed catalog attempts ended before HTTP after `8.007 s` and `8.005 s`: the worker recorded curl code `5` while resolving the proxy gateway. Redacted events contained neither raw username, password nor authenticated proxy URL. The run ended failed at `0/0/0`; there was no reprepare, detail work or opportunity, and the gate stopped without another start or scheduler retry after seven total logical operations. Consequently criteria 2 and 3 remain unaccepted and this run cannot establish three-run cadence or post-baseline deduplication.
 
-The fail-stop harness stopped watchdog and worker immediately; its in-context emergency click did not complete, so one corrective PWA `Detener sesion` then cleared the still-future deadline and closed the session as `stopped` while both executors were already down. Cleanup removed seven monitor-owned Redis keys, two runs, `44` events, `44` publications, one error, one prepared session, one monitor session/source, four authenticated QA sessions, one revoked preauth session, one QA user and the scheduler UI row. All pre-existing non-telemetry SQL fingerprints returned exactly, including the single prior item; Redis returned to zero, worker/watchdog/frontend containers remained stopped, Vite kept its PID and API/PostgreSQL/Redis remained healthy. The real heartbeat was allowed to expire and the proxy's ordinary failure/cooldown/last-used telemetry was preserved. The later worker-boundary diagnostic below removes this prerequisite block but does not accept criteria 2 or 3.
+The fail-stop harness stopped watchdog and worker immediately; its in-context emergency click did not complete, so one corrective PWA `Detener sesion` then cleared the still-future deadline and closed the session as `stopped` while both executors were already down. Cleanup removed seven monitor-owned Redis keys, two runs, `44` events, `44` publications, one error, one prepared session, one monitor session/source, four authenticated QA sessions, one revoked preauth session, one QA user and the scheduler runtime-settings row. All pre-existing non-telemetry SQL fingerprints returned exactly, including the single prior item; Redis returned to zero, worker/watchdog/frontend containers remained stopped, Vite kept its PID and API/PostgreSQL/Redis remained healthy. The real heartbeat was allowed to expire and the proxy's ordinary failure/cooldown/last-used telemetry was preserved. The later worker-boundary diagnostic below removes this prerequisite block but does not accept criteria 2 or 3.
 
-The final 2026-07-17 pass captured deterministic fingerprints before traffic, enabled the scheduler through the live PWA and observed two advancing worker heartbeats before starting watchdog. Its only positive `POST /start` completed a sessionless `5/0/0` baseline, opened one monitor session and persisted the first deadline exactly `60.0` seconds after activation with no immediate business run or queue entry. The five baseline IDs remained in memory and were represented only by keyed HMAC evidence.
+The final 2026-07-17 pass captured deterministic fingerprints before traffic, confirmed scheduler availability through the live PWA and observed two advancing worker heartbeats before starting watchdog. Its only positive `POST /start` completed a sessionless `5/0/0` baseline, opened one monitor session and persisted the first deadline exactly `60.0` seconds after activation with no immediate business run or queue entry. The five baseline IDs remained in memory and were represented only by keyed HMAC evidence.
 
 Exactly three later scheduler runs completed `success` in that monitor session. The same prepared Vinted session remained `ready`, was never re-prepared and advanced `request_count` from `1` after baseline to `2`, `3` and `4`. Worker logs and Redis state matched exactly three scheduler enqueues, three consumer receives and three ACKs, with no requeue, coalescing, dead letter, recovery or queue residue. Eight unique opportunities referenced IDs disjoint from the baseline and belonged to those scheduler runs; no baseline or repeated ID produced a duplicate. The complete trajectory used `22` logical external operations, below the allowance of `45`.
 
@@ -173,17 +187,16 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - Redis seen cache client;
   - isolated provider/session factory.
 - API/PWA:
-  - scheduler settings persisted in `app_settings`;
+  - scheduler limits and egress settings persisted in `app_settings`;
   - monitor inactive/start/stop/archive controls;
   - monitor configuration save control separated from launch;
   - monitor historical stats endpoint for active monitor performance cards;
-  - global proxy pool and scheduler runtime controls.
+  - global proxy pool and scheduler tuning controls; the PWA does not own process lifecycle or a global scheduler gate.
 - Configuration:
   - ownership rule: `.env` owns deployment, secrets, worker and anti-bot defaults; UI `app_settings` owns daily operation only;
   - deployment scheduler enable flag in `.env` as an operational gate;
   - deployment-owned producer heartbeat interval and timeout; the scheduler producer refreshes its own heartbeat while waiting between polls;
   - deployment-owned watchdog poll interval and startup grace, both bounded against the producer heartbeat contract;
-  - UI scheduler enable flag in `app_settings`;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
   - direct-without-proxy UI enable flag and direct concurrency limit;
@@ -223,7 +236,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 
 ## Acceptance Criteria
 
-- Scheduler can be disabled completely.
+- Scheduler can be disabled completely through the deployment gate `SCHEDULER_ENABLED`; the PWA has no redundant global enable switch.
 - A monitor can be stopped without deleting it.
 - A new monitor is inactive until launched.
 - Manual start creates one sessionless baseline and opens one active session only after success; later explicit runs reuse that session until stop or fail-stop.
@@ -245,7 +258,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Active monitor configuration is read-only; after stop, both PWA and direct `PATCH` remain blocked until every `running/finalizing` run is terminal.
 - Launching a recurring monitor is rejected when the effective scheduler is disabled or no scheduler capacity is available.
 - Recurring activation requires a fresh heartbeat written by the scheduler producer itself. Missing, malformed, naive, implausibly future, or expired heartbeat state returns `503` and leaves the source, deadline, monitor session and runs unchanged.
-- `GET /api/scheduler` exposes `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is false unless UI/deployment gates, capacity and the live producer are all available.
+- `GET /api/scheduler` exposes no persisted `enabled` field. It exposes `runtime_enabled`, `worker_available` and nullable UTC `worker_last_seen_at`; `effective_enabled` is true only when the deployment gate, capacity and the live producer are all available. `PATCH /api/scheduler` rejects the removed `enabled` input while retaining the other tuning fields.
 - The PWA treats scheduler refresh failure as unavailable/unknown, discards any previously usable scheduler state, and blocks recurring launch. It never labels missing producer availability as a degraded operating mode.
 - Invalid deployment scheduler configuration terminates worker startup. Once started, the worker supervisor terminates the process when its Redis probe fails or its own producer heartbeat expires; Compose owns restart and reports heartbeat health. Redis loss does not add another public readiness field: process exit stops heartbeat renewal and the existing timeout makes API/PWA availability false.
 - The scheduler watchdog starts only after API health confirms API-owned migrations are complete. After its startup grace, an expired producer heartbeat locks active non-manual sources and rechecks liveness before changing them.
