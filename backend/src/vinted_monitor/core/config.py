@@ -3,7 +3,7 @@ from string import Formatter
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AnyHttpUrl, Field, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 VINTED_DETAIL_FIELD_ALLOWLIST = frozenset(
@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     backend_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5176"
     local_auth_preauth_ttl_minutes: int = Field(default=10, ge=1, le=60)
     local_auth_session_ttl_hours: int = Field(default=168, ge=1, le=720)
+    local_dev_user_email: str | None = None
+    local_dev_user_password: SecretStr | None = Field(default=None, repr=False)
     redis_url: str = "redis://redis:6379/0"
     seen_cache_ttl_seconds: int = 86400
     seen_processing_ttl_seconds: int = 120
@@ -108,6 +110,21 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_proxy_sticky_template(self) -> "Settings":
         validate_proxy_sticky_username_template(self.proxy_sticky_username_template)
+        return self
+
+    @model_validator(mode="after")
+    def validate_local_development_user(self) -> "Settings":
+        email = (self.local_dev_user_email or "").strip()
+        password = self.local_dev_user_password.get_secret_value() if self.local_dev_user_password is not None else ""
+        if not email and not password:
+            self.local_dev_user_email = None
+            self.local_dev_user_password = None
+            return self
+        if not email or not password:
+            raise ValueError("LOCAL_DEV_USER_EMAIL and LOCAL_DEV_USER_PASSWORD must be configured together")
+        if self.app_env.strip().lower() != "development":
+            raise ValueError("LOCAL_DEV_USER_EMAIL and LOCAL_DEV_USER_PASSWORD are allowed only in development")
+        self.local_dev_user_email = email
         return self
 
     @model_validator(mode="after")

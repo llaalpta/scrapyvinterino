@@ -54,6 +54,15 @@ class LocalUserPrincipal:
 
 
 @dataclass(frozen=True)
+class LocalUserProvisioningResult:
+    user_id: int
+    email: str
+    created: bool
+    password_updated: bool
+    reactivated: bool
+
+
+@dataclass(frozen=True)
 class LocalSessionGrant:
     raw_token: str
     expires_at: datetime
@@ -90,6 +99,45 @@ def create_local_user(db: Session, *, email: str, password: str) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+
+def ensure_local_user(db: Session, *, email: str, password: str) -> LocalUserProvisioningResult:
+    normalized_email = normalize_local_email(email)
+    validated_password = validate_local_password(password)
+    user = db.scalar(select(User).where(User.email == normalized_email))
+    if user is None:
+        user = User(
+            email=normalized_email,
+            password_hash=_PASSWORD_HASH.hash(validated_password),
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return LocalUserProvisioningResult(
+            user_id=user.id,
+            email=user.email,
+            created=True,
+            password_updated=False,
+            reactivated=False,
+        )
+
+    password_updated = not _PASSWORD_HASH.verify(validated_password, user.password_hash)
+    reactivated = not user.is_active
+    if password_updated:
+        user.password_hash = _PASSWORD_HASH.hash(validated_password)
+    if reactivated:
+        user.is_active = True
+    if password_updated or reactivated:
+        db.commit()
+        db.refresh(user)
+    return LocalUserProvisioningResult(
+        user_id=user.id,
+        email=user.email,
+        created=False,
+        password_updated=password_updated,
+        reactivated=reactivated,
+    )
 
 
 def bootstrap_local_session(

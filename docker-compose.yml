@@ -31,7 +31,7 @@ services:
   api:
     build:
       context: ./backend
-    command: sh -c "alembic upgrade head && uvicorn vinted_monitor.api.main:app --host 0.0.0.0 --port 8000 --reload"
+    command: sh -c "alembic upgrade head && python -m vinted_monitor.cli.ensure_development_user && uvicorn vinted_monitor.api.main:app --host 0.0.0.0 --port 8000 --reload"
     env_file:
       - .env
     environment:

@@ -15,10 +15,9 @@ El entorno local no depende de Traefik ni del servidor remoto.
 copy .env.example .env
 docker compose up -d --build postgres redis api
 docker compose ps
-docker compose exec api python -m vinted_monitor.cli.create_user --email admin@example.local
 ```
 
-Este es el arranque local seguro de infraestructura/API: no inicia ningun ejecutor. El comando de usuario solicita password y confirmacion sin mostrarlas ni pasarlas por argumentos. Para usar el frontend Docker, si `5173` esta libre, ejecuta `docker compose up -d frontend` y autentica en la PWA.
+Este es el arranque local seguro de infraestructura/API: no inicia ningun ejecutor. Si el `.env` local contiene juntas `LOCAL_DEV_USER_EMAIL` y `LOCAL_DEV_USER_PASSWORD`, la API garantiza ese usuario despues de migrar y antes de servir; el par es idempotente, no se imprime y no es valido fuera de `development`. Sin esas variables, crea el usuario manualmente con `docker compose exec api python -m vinted_monitor.cli.create_user --email admin@example.local`, que solicita password y confirmacion sin mostrarlas. Para usar el frontend Docker, si `5173` esta libre, ejecuta `docker compose up -d frontend` y autentica en la PWA.
 
 No hay perfiles Compose. `docker compose up` sin lista arranca tambien worker y `scheduler-watchdog`; el worker recupera reservas Redis y crea consumidores incluso si el scheduler esta deshabilitado, por lo que puede reanudar trafico persistido. Antes de habilitar ejecucion operativa comprueba monitores activos, runs, ready/processing y presupuesto de trafico. Arranca primero `worker`, verifica heartbeat/colas y despues `scheduler-watchdog`.
 
