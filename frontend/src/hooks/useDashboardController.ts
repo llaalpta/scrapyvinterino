@@ -12,8 +12,6 @@ import {
   fetchScheduler,
   fetchSources,
   monitorEventsStreamUrl,
-  prepareMonitorVintedSession,
-  probeMonitorItemDetail,
   revalidateLocalAuthentication,
   runMonitor,
   startMonitor,
@@ -65,11 +63,9 @@ const STOP_MONITOR_STATE_REFRESH_ERROR = 'La sesion se detuvo, pero no se pudo c
 const CREATE_MONITOR_STATE_REFRESH_ERROR = 'El monitor se creo, pero no se pudieron cargar sus estadisticas; recarga Monitores';
 const START_MONITOR_STATE_REFRESH_ERROR = 'La sesion se inicio, pero no se pudo actualizar por completo su estado; recarga Monitores';
 const RUN_MONITOR_STATE_REFRESH_ERROR = 'La ejecucion termino, pero no se pudo actualizar por completo su estado; recarga Monitores';
-const PREPARE_MONITOR_STATE_REFRESH_ERROR = 'La sesion Vinted se preparo, pero no se pudo actualizar por completo su estado; recarga Monitores';
-const PROBE_MONITOR_STATE_REFRESH_ERROR = 'La prueba de detalle termino, pero no se pudo actualizar por completo su estado; recarga Monitores';
 const ARCHIVE_MONITOR_STATE_REFRESH_ERROR = 'El monitor se archivo, pero no se pudieron actualizar por completo los datos derivados; recarga la PWA';
 
-type MonitorCommandKind = 'create' | 'save' | 'prepare' | 'probe' | 'start' | 'run' | 'stop' | 'archive';
+type MonitorCommandKind = 'create' | 'save' | 'start' | 'run' | 'stop' | 'archive';
 
 type MonitorCommand = {
   kind: MonitorCommandKind;
@@ -89,8 +85,6 @@ export function useDashboardController() {
   const [monitorHiddenEventIdsBySource, setMonitorHiddenEventIdsBySource] = useState<Record<number, number[]>>({});
   const [monitorStatsBySource, setMonitorStatsBySource] = useState<Record<number, MonitorStats>>({});
   const [monitorStatsRangeBySource, setMonitorStatsRangeBySource] = useState<Record<number, MonitorStatsRange>>({});
-  const [detailProbeRefs, setDetailProbeRefs] = useState<Record<number, string>>({});
-  const [detailProbeMessages, setDetailProbeMessages] = useState<Record<number, string>>({});
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [schedulerAvailabilityError, setSchedulerAvailabilityError] = useState<string | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
@@ -878,113 +872,11 @@ export function useDashboardController() {
       && refreshResults.every((result) => result.status === 'fulfilled');
   }
 
-  async function refreshDiagnosticCommandResult(sourceId: number, run: Run): Promise<boolean> {
-    recordMonitorRun(sourceId, run);
-    sourceListRequestGenerationRef.current += 1;
-    const sourceRequestGeneration = sourceListRequestGenerationRef.current;
-    const [sourceResult, proxyResult, statsResult, eventsResult] = await Promise.all([
-      settlePromise(fetchSources()),
-      settlePromise(fetchProxyProfiles()),
-      settlePromise(loadMonitorStats(sourceId)),
-      settlePromise(loadMonitorEvents(sourceId))
-    ]);
-    if (
-      sourceResult.status === 'fulfilled'
-      && sourceListRequestGenerationRef.current === sourceRequestGeneration
-    ) {
-      setSources(sourceResult.value);
-      setSourceDrafts(buildSourceDrafts(sourceResult.value));
-      setSourceCollectionState('ready');
-    } else if (
-      sourceResult.status === 'rejected'
-      && sourceListRequestGenerationRef.current === sourceRequestGeneration
-    ) {
-      setSourceCollectionState(markCollectionUnavailable);
-    }
-    if (proxyResult.status === 'fulfilled') {
-      setProxyProfiles(proxyResult.value);
-      setProxyCollectionState('ready');
-    } else {
-      setProxyCollectionState(markCollectionUnavailable);
-    }
-    return [sourceResult, proxyResult, statsResult, eventsResult]
-      .every((result) => result.status === 'fulfilled');
-  }
-
   function recordMonitorRun(sourceId: number, run: Run) {
     setMonitorRunsBySource((current) => ({
       ...current,
       [sourceId]: [run, ...(current[sourceId] ?? []).filter((entry) => entry.id !== run.id)].slice(0, MONITOR_RUN_HISTORY_LIMIT)
     }));
-  }
-
-  async function onPrepareVintedSession(source: SearchSource) {
-    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    const command = beginMonitorCommand('prepare', source.id);
-    if (!command) {
-      return;
-    }
-    setError(null);
-    try {
-      if (sourceDraftHasChanges(source, draft)) {
-        setError('Guarda los cambios antes de preparar la sesion Vinted');
-        return;
-      }
-      if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
-        setError('Corrige los filtros de URL no soportados antes de preparar la sesion Vinted');
-        return;
-      }
-      const run = await prepareMonitorVintedSession(source.id);
-      const refreshComplete = await refreshDiagnosticCommandResult(source.id, run);
-      if (run.status !== 'success') {
-        setError(run.error_message || 'No se pudo preparar la sesion Vinted');
-      } else if (!refreshComplete) {
-        setError(PREPARE_MONITOR_STATE_REFRESH_ERROR);
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'No se pudo preparar la sesion Vinted');
-    } finally {
-      finishMonitorCommand(command);
-    }
-  }
-
-  async function onProbeItemDetail(source: SearchSource) {
-    const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    const itemRef = (detailProbeRefs[source.id] ?? '').trim();
-    const command = beginMonitorCommand('probe', source.id);
-    if (!command) {
-      return;
-    }
-    setError(null);
-    try {
-      if (sourceDraftHasChanges(source, draft)) {
-        setError('Guarda los cambios antes de probar el detalle de un item');
-        return;
-      }
-      if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
-        setError('Corrige los filtros de URL no soportados antes de probar el detalle de un item');
-        return;
-      }
-      if (!itemRef) {
-        setError('Introduce un ID o URL de item Vinted para probar el detalle');
-        return;
-      }
-      setDetailProbeMessages((current) => ({ ...current, [source.id]: 'Probando detalle...' }));
-      const probe = await probeMonitorItemDetail(source.id, itemRef);
-      setDetailProbeMessages((current) => ({ ...current, [source.id]: detailProbeMessage(probe.result) }));
-      const refreshComplete = await refreshDiagnosticCommandResult(source.id, probe.run);
-      if (probe.run.status !== 'success') {
-        setError(probe.run.error_message || 'No se pudo probar el detalle del item');
-      } else if (!refreshComplete) {
-        setError(PROBE_MONITOR_STATE_REFRESH_ERROR);
-      }
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'No se pudo probar el detalle del item';
-      setError(message);
-      setDetailProbeMessages((current) => ({ ...current, [source.id]: message }));
-    } finally {
-      finishMonitorCommand(command);
-    }
   }
 
   async function onStopMonitor(sourceId: number) {
@@ -1104,8 +996,6 @@ export function useDashboardController() {
     setMonitorEventsBySource((current) => withoutSource(current, sourceId));
     setMonitorEventHistoryLoadedBySource((current) => withoutSource(current, sourceId));
     setMonitorHiddenEventIdsBySource((current) => withoutSource(current, sourceId));
-    setDetailProbeRefs((current) => withoutSource(current, sourceId));
-    setDetailProbeMessages((current) => withoutSource(current, sourceId));
     setPendingStopSourceIds((current) => current.filter((pendingSourceId) => pendingSourceId !== sourceId));
     pendingTerminalEventsRef.current.delete(sourceId);
     monitorRunsRequestGenerationRef.current.delete(sourceId);
@@ -1131,18 +1021,6 @@ export function useDashboardController() {
         [field]: value
       }
     }));
-  }
-
-  function updateDetailProbeRef(sourceId: number, value: string) {
-    setDetailProbeRefs((current) => ({ ...current, [sourceId]: value }));
-    setDetailProbeMessages((current) => {
-      if (!current[sourceId]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[sourceId];
-      return next;
-    });
   }
 
   function updateOpportunityFilter(field: keyof OpportunityFilters, value: string) {
@@ -1251,8 +1129,6 @@ export function useDashboardController() {
     changeResultsPageSize,
     clearOpportunityFilters,
     creatingSource: monitorCommand?.kind === 'create',
-    detailProbeMessages,
-    detailProbeRefs,
     error,
     getSourceName,
     loadOpportunities,
@@ -1267,8 +1143,6 @@ export function useDashboardController() {
     onAppendMonitorEvent: appendMonitorEvent,
     onClearMonitorEventsView: clearMonitorEventsView,
     onSaveSourceSchedule,
-    onPrepareVintedSession,
-    onProbeItemDetail,
     onRunNow,
     onStartSession,
     onStopMonitor,
@@ -1313,7 +1187,6 @@ export function useDashboardController() {
     sourceUrl,
     testingProxyIds,
     updateOpportunityFilter,
-    updateDetailProbeRef,
     updateSourceDraft
   };
 
@@ -1364,46 +1237,6 @@ function markPreparedSessionsExpired(sourceData: SearchSource[], expiryThreshold
     });
     return changed ? { ...source, prepared_sessions: preparedSessions } : source;
   });
-}
-
-function detailProbeMessage(result: Record<string, unknown>): string {
-  const outcome = typeof result.outcome === 'string' ? result.outcome : 'unknown';
-  const status = typeof result.status_code === 'number' ? `status=${result.status_code}` : null;
-  const duration = typeof result.duration_ms === 'number' ? `ms=${result.duration_ms}` : null;
-  const summary = recordValue(result.detail_summary);
-  const photos = numberOrString(summary?.photo_count);
-  const description = numberOrString(summary?.description_length);
-  const parser = typeof summary?.parser_version === 'string' ? `parser=${summary.parser_version}` : null;
-  const availability = typeof summary?.availability_state === 'string' ? `availability=${summary.availability_state}` : null;
-  const missing = Array.isArray(summary?.missing_required)
-    ? summary.missing_required.filter((field): field is string => typeof field === 'string').join(',')
-    : '';
-  const tokens = [
-    status,
-    duration,
-    parser,
-    photos ? `photos=${photos}` : null,
-    description ? `description_chars=${description}` : null,
-    availability,
-    missing ? `missing=${missing}` : null
-  ]
-    .filter(Boolean)
-    .join(' ');
-  return tokens ? `Detalle ${outcome}: ${tokens}` : `Detalle ${outcome}`;
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
-function numberOrString(value: unknown): string | null {
-  if (typeof value === 'number' || typeof value === 'string') {
-    return String(value);
-  }
-  return null;
 }
 
 function addId(current: number[], id: number): number[] {

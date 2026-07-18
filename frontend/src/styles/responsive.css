@@ -169,7 +169,6 @@
   .source-identity-editor,
   .source-schedule,
   .source-schedule.compact,
-  .detail-probe-controls,
   .settings-grid,
   .settings-summary-grid,
   .proxy-form,
@@ -251,7 +250,6 @@
 
   .source-actions button,
   .monitor-config-actions button,
-  .detail-probe-controls button,
   .confirm-dialog-actions button,
   .proxy-row button {
     width: 100%;

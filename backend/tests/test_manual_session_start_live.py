@@ -243,7 +243,8 @@ def _start_session(page: Page, source_id: int, *, assert_busy: bool = False) -> 
         page.get_by_role("button", name="Iniciar sesion", exact=True).click()
         if assert_busy:
             expect(page.get_by_role("button", name="Iniciando...", exact=True)).to_be_disabled()
-            expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_disabled()
+            expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_have_count(0)
+            expect(page.get_by_role("button", name="Probar detalle", exact=True)).to_have_count(0)
     return _response_json(info.value, path)
 
 

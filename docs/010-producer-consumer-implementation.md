@@ -129,9 +129,9 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 
 - A monitor-owned Vinted session is reusable only after strict cookie/token context is present and country, locale, `Accept-Language`, viewport and `x-screen=catalog` match. Runtime, API and PWA now share that eligibility decision; the monitor response reports one canonical row per proxy with a safe current verdict instead of treating the latest durable `ready` label as truth.
 - Session preparation may still call the catalog API probe after a failed DataDome collector to collect diagnostics, but a successful JSON probe no longer overrides missing `datadome` or `__cf_bm`; the saved row remains `incomplete` and the run fails clearly.
-- Runtime provider selection, explicit `Preparar sesion` and item detail probes share the strict prepared-session requirement. Detail rotations mark context for persistence, but ordinary catalog/probe rotations can still leave stale encrypted context; 14.12.4 owns that durability gap.
+- Runtime provider selection plus the authenticated direct preparation and item-detail diagnostic endpoints share the strict prepared-session requirement. The PWA does not expose those diagnostics. Detail rotations mark context for persistence, but ordinary catalog/probe rotations can still leave stale encrypted context; 14.12.4 owns that durability gap.
 - The provider receives the configured human pacing bounds from settings instead of hardcoded defaults.
-- A session-start baseline reuses the accepted JSON payload from the preparation probe when the run had to prepare a new session, avoiding an immediate duplicate catalog API request. The explicit `Preparar sesion` action remains non-business: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
+- `Iniciar sesion` is the only normal PWA entrypoint. Its baseline reuses the accepted JSON payload when automatic preparation had to probe the catalog, avoiding an immediate duplicate request. The direct preparation endpoint remains a non-business authenticated diagnostic: it does not touch Redis seen state, baseline snapshots, items, opportunities or monitor metrics.
 
 ## Vinted API Kit Detail Research 2026-07-09
 

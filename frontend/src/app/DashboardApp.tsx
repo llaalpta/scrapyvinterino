@@ -42,8 +42,6 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
         <SourcesView
           key={dashboard.sources.map((source) => source.id).sort((left, right) => left - right).join(':')}
           creatingSource={dashboard.creatingSource}
-          detailProbeMessages={dashboard.detailProbeMessages}
-          detailProbeRefs={dashboard.detailProbeRefs}
           monitorEventHistoryLoadedBySource={dashboard.monitorEventHistoryLoadedBySource}
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
@@ -58,8 +56,6 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onLoadMonitorEvents={dashboard.loadMonitorEvents}
           onLoadMonitorStats={(sourceId, range) => void dashboard.loadMonitorStats(sourceId, range)}
           onLoadMonitorRuns={dashboard.loadMonitorRuns}
-          onPrepareVintedSession={(source) => void dashboard.onPrepareVintedSession(source)}
-          onProbeItemDetail={(source) => void dashboard.onProbeItemDetail(source)}
           onRunNow={(source) => void dashboard.onRunNow(source)}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
@@ -75,7 +71,6 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           streamReady={dashboard.monitorStreamReady}
           setSourceName={dashboard.setSourceName}
           setSourceUrl={dashboard.setSourceUrl}
-          updateDetailProbeRef={dashboard.updateDetailProbeRef}
           updateSourceDraft={dashboard.updateSourceDraft}
         />
       ) : null}
