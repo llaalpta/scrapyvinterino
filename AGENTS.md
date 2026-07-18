@@ -107,7 +107,7 @@ Update existing owners instead of creating overlapping documents. Remove superse
 
 ## Safety
 
-- Never commit or print secrets, raw cookies, tokens, addresses, payment data or personal Vinted session details.
+- Never commit secrets or credentials, including the temporary login and password for the local PWA development user. Never print secrets, raw cookies, tokens, addresses, payment data, personal Vinted session details or credentials; the only exception is that you may print that local user's temporary login and password.
 - MVP scraping uses local PWA login plus public anonymous Vinted context, not an authenticated Vinted account.
 - Future authenticated actions must be feature-flagged and audited; purchases require explicit confirmation and validation.
 - Do not broaden anti-bot/captcha behavior beyond the active spec and authorized task.
