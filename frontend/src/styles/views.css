@@ -679,6 +679,26 @@
   gap: 12px;
 }
 
+.monitor-session-heading-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.monitor-session-heading-copy h5,
+.monitor-performance-subheading h5,
+.monitor-chart-heading h5 {
+  margin: 0;
+  color: #1f2933;
+  font-size: 13px;
+}
+
+.monitor-session-heading-copy span,
+.monitor-performance-subheading span {
+  color: #697586;
+  font-size: 12px;
+}
+
 .monitor-prepared-session-heading-copy,
 .monitor-prepared-session-main > div {
   display: grid;
@@ -782,6 +802,20 @@
 .monitor-performance-heading span {
   color: #697586;
   font-size: 13px;
+}
+
+.monitor-performance-summary,
+.monitor-chart-section {
+  display: grid;
+  gap: 10px;
+}
+
+.monitor-performance-subheading,
+.monitor-chart-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .range-tabs {

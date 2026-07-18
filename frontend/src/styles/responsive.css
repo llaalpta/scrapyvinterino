@@ -263,7 +263,9 @@
   }
 
   .monitor-config-heading,
-  .monitor-session-heading {
+  .monitor-session-heading,
+  .monitor-performance-subheading,
+  .monitor-chart-heading {
     flex-direction: column;
   }
 
