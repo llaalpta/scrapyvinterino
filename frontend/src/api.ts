@@ -253,22 +253,6 @@ export type Run = {
   runtime_metadata: Record<string, unknown>;
 };
 
-export type ItemDetailProbePayload = Record<string, unknown> & {
-  outcome?: string;
-  item_id?: string;
-  detail_document_url?: string;
-  status_code?: number | null;
-  duration_ms?: number | null;
-  detail_summary?: Record<string, unknown>;
-  missing_required?: string[];
-  error?: string | null;
-};
-
-export type ItemDetailProbeResult = {
-  run: Run;
-  result: ItemDetailProbePayload;
-};
-
 export type MonitorStatsRange = 'minutes' | 'hours' | 'days' | 'month' | 'all';
 
 export type MonitorStatsSummary = {
@@ -535,14 +519,6 @@ export function stopMonitor(sourceId: number): Promise<SearchSource> {
 
 export function runMonitor(sourceId: number): Promise<Run> {
   return postJson<Run>(`/api/monitors/${sourceId}/runs`);
-}
-
-export function prepareMonitorVintedSession(sourceId: number): Promise<Run> {
-  return postJson<Run>(`/api/monitors/${sourceId}/vinted-session/prepare`);
-}
-
-export function probeMonitorItemDetail(sourceId: number, itemRef: string): Promise<ItemDetailProbeResult> {
-  return postJson<ItemDetailProbeResult>(`/api/monitors/${sourceId}/items/detail-probe`, { item_ref: itemRef });
 }
 
 export function fetchOpportunities(query: OpportunityQuery = {}): Promise<Page<OpportunityResult>> {

@@ -699,7 +699,7 @@ def _assert_draining_controls(page: Page, scenario: Scenario) -> None:
     expect(page.get_by_text("Deteniendo la sesion; espera a que termine la ejecucion.", exact=True)).to_be_visible()
     expect(page.get_by_role("combobox", name="Modo", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Guardar", exact=True)).to_be_disabled()
-    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_have_count(0)
     expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Archivar monitor", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Detener sesion", exact=True)).to_have_count(0)
@@ -716,10 +716,10 @@ def _assert_unknown_run_state_blocks_controls(page: Page, scenario: Scenario) ->
     ).to_be_visible()
     expect(page.get_by_role("combobox", name="Modo", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Guardar", exact=True)).to_be_disabled()
-    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_have_count(0)
     expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Archivar monitor", exact=True)).to_be_disabled()
-    expect(page.get_by_label("ID o URL de item para probar detalle", exact=True)).to_be_disabled()
+    expect(page.get_by_label("ID o URL de item para probar detalle", exact=True)).to_have_count(0)
 
 
 def _assert_terminal_unlocks_controls(page: Page, scenario: Scenario) -> None:
@@ -738,7 +738,8 @@ def _assert_terminal_unlocks_controls(page: Page, scenario: Scenario) -> None:
         )
     ).to_have_count(0)
     expect(page.get_by_role("combobox", name="Modo", exact=True)).to_be_enabled()
-    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Probar detalle", exact=True)).to_have_count(0)
     expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Archivar monitor", exact=True)).to_be_enabled()
 
