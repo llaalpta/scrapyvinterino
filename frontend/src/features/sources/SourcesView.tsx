@@ -266,10 +266,12 @@ export function SourcesView({
 function MonitorPerformancePanel({
   onRangeChange,
   range,
+  source,
   stats
 }: {
   onRangeChange: (range: MonitorStatsRange) => void;
   range: MonitorStatsRange;
+  source: SearchSource;
   stats: MonitorStats | null;
 }) {
   const baseChartData = (stats?.chart_points ?? []).map((point) => ({
@@ -298,52 +300,65 @@ function MonitorPerformancePanel({
       <div className="monitor-performance-heading">
         <div>
           <h4>Rendimiento del monitor</h4>
-          <span>{hasAnySession ? 'Historico acumulado y resultados por intervalo' : 'Sin sesiones registradas'}</span>
-        </div>
-        <div className="range-tabs" aria-label="Rango de grafica">
-          {rangeOptions.map((option) => (
-            <button
-              className={range === option.value ? 'active' : ''}
-              key={option.value}
-              type="button"
-              onClick={() => onRangeChange(option.value)}
-            >
-              {option.label}
-            </button>
-          ))}
+          <span>{hasAnySession ? 'Acumulado y sesion comparable' : 'Sin sesiones registradas'}</span>
         </div>
       </div>
 
       {hasAnySession ? (
         <>
-          <dl className="monitor-accumulated-strip">
-            <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
-            <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
-            <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
-            <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
-            <Metric label="Nuevos" value={String(historical?.items_new ?? 0)} />
-            <Metric label="Descartados" value={String(historical?.items_discarded_by_filters ?? 0)} />
-            <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
-            <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
-          </dl>
+          <section className="monitor-performance-summary" aria-label="Acumulado del monitor">
+            <div className="monitor-performance-subheading">
+              <h5>Acumulado del monitor</h5>
+              <span>Incluye todas las sesiones{stats?.active_session ? ', incluida la activa' : ''}.</span>
+            </div>
+            <dl className="monitor-accumulated-strip">
+              <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
+              <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
+              <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
+              <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
+              <Metric label="Nuevos" value={String(historical?.items_new ?? 0)} />
+              <Metric label="Descartados" value={String(historical?.items_discarded_by_filters ?? 0)} />
+              <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
+              <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
+            </dl>
+          </section>
 
-          <div className="monitor-chart">
-            {chartData.length === 0 ? (
-              <p className="empty-inline compact">Sin datos historicos para graficar.</p>
-            ) : (
-              <ChartErrorBoundary key={range}>
-                <Suspense fallback={<div className="monitor-chart-loading" aria-hidden="true" />}>
-                  <MonitorPerformanceChart
-                    chartData={chartData}
-                    chartDomain={chartDomain}
-                    chartRange={chartRange}
-                    range={range}
-                    sessionStartedAtMs={activeSessionMs}
-                  />
-                </Suspense>
-              </ChartErrorBoundary>
-            )}
-          </div>
+          <MonitorSessionOverview source={source} stats={stats} />
+
+          <section className="monitor-chart-section" aria-label="Historico acumulado por intervalo">
+            <div className="monitor-chart-heading">
+              <h5>Historico acumulado por intervalo</h5>
+              <div className="range-tabs" aria-label="Rango de grafica">
+                {rangeOptions.map((option) => (
+                  <button
+                    className={range === option.value ? 'active' : ''}
+                    key={option.value}
+                    type="button"
+                    onClick={() => onRangeChange(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="monitor-chart">
+              {chartData.length === 0 ? (
+                <p className="empty-inline compact">Sin datos historicos para graficar.</p>
+              ) : (
+                <ChartErrorBoundary key={range}>
+                  <Suspense fallback={<div className="monitor-chart-loading" aria-hidden="true" />}>
+                    <MonitorPerformanceChart
+                      chartData={chartData}
+                      chartDomain={chartDomain}
+                      chartRange={chartRange}
+                      range={range}
+                      sessionStartedAtMs={activeSessionMs}
+                    />
+                  </Suspense>
+                </ChartErrorBoundary>
+              )}
+            </div>
+          </section>
         </>
       ) : null}
     </section>
@@ -359,22 +374,26 @@ function MonitorSessionOverview({ source, stats }: { source: SearchSource; stats
   }
 
   const isActiveSession = Boolean(stats?.active_session);
-  const endLabel = isActiveSession ? 'Duracion activa' : 'Fin';
-  const endValue = isActiveSession ? formatSeconds(session.duration_seconds) : session.stopped_at ? formatDate(session.stopped_at) : '-';
+  const timing = isActiveSession
+    ? `Inicio ${formatDate(session.started_at)} · Duracion ${formatSeconds(session.duration_seconds)}`
+    : `Inicio ${formatDate(session.started_at)} · Fin ${session.stopped_at ? formatDate(session.stopped_at) : '-'} · Duracion ${formatSeconds(session.duration_seconds)}`;
 
   return (
-    <section className="monitor-session-panel" aria-label={isActiveSession ? 'Sesion activa' : 'Ultima sesion'}>
+    <section className="monitor-session-panel" aria-label={isActiveSession ? 'Sesion activa' : 'Ultima sesion cerrada'}>
       <div className="monitor-session-heading">
-        <h4>{isActiveSession ? 'Sesion activa' : 'Ultima sesion'}</h4>
-        {source.next_run_at ? <span>Proxima {formatDate(source.next_run_at)}</span> : null}
+        <div className="monitor-session-heading-copy">
+          <h5>{isActiveSession ? 'Sesion activa' : 'Ultima sesion cerrada'}</h5>
+          <span>{timing}</span>
+        </div>
+        {isActiveSession && source.next_run_at ? <span>Proxima {formatDate(source.next_run_at)}</span> : null}
       </div>
       <dl className="monitor-session-strip">
-        <Metric label="Inicio" value={formatDate(session.started_at)} />
-        <Metric label={endLabel} value={endValue} />
         <Metric label="Ejecuciones" value={String(summary?.runs_count ?? 0)} />
         <Metric label="Encontrados" value={String(summary?.items_found ?? 0)} />
+        <Metric label="Nuevos" value={String(summary?.items_new ?? 0)} />
+        <Metric label="Descartados" value={String(summary?.items_discarded_by_filters ?? 0)} />
         <Metric label="Oportunidades" value={String(summary?.opportunities_created ?? 0)} />
-        <Metric label="Errores" value={String(summary?.failed_runs ?? 0)} />
+        <Metric label="Fallos" value={String(summary?.failed_runs ?? 0)} />
       </dl>
     </section>
   );
@@ -808,7 +827,12 @@ function MonitorDetail({
         </div>
       </div>
 
-      <MonitorSessionOverview source={source} stats={stats} />
+      <MonitorPerformancePanel
+        range={statsRange}
+        source={source}
+        stats={stats}
+        onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
+      />
 
       <PreparedSessionsPanel sessions={source.prepared_sessions} />
 
@@ -943,12 +967,6 @@ function MonitorDetail({
           )}
         </div>
       </section>
-
-      <MonitorPerformancePanel
-        range={statsRange}
-        stats={stats}
-        onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
-      />
 
       <section className="monitor-logs" aria-label="Logs acumulados">
         <div className="monitor-logs-header">
