@@ -16,7 +16,6 @@ Keep no more than five independently valuable tasks here.
 
 | Status | Item | Outcome |
 | --- | --- | --- |
-| planned | 14.39 Catalog URL filter clarity | Distinguish URL-applied filters, application-controlled ordering/page and parameters with no runtime effect in the monitor detail. |
 | planned | 14.40 Monitor/session performance comparison | Show accumulated monitor metrics followed by the active session, or the latest closed session, with directly comparable results. |
 
 ## Next
@@ -82,6 +81,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.36 | done | Visible PWA collections now distinguish loading, confirmed empty and unavailable state, retain confirmed snapshots after refresh failures and lock only dependent mutations. The isolated API/Vite/auth/PostgreSQL Playwright gate, Ruff, frontend lint and production build passed with unchanged operational PostgreSQL/Redis fingerprints, worker/watchdog stopped and no external traffic or QA residue. |
 | 14.37 | done | A bounded live PWA/API/proxy/Vinted run proved baseline-before-activation and prepared-session reuse with `5/0/0 -> 5/0/0`, honest stop and local post-stop `409`. Six logical external operations stayed below the allowance of 19; exact SQL/Redis cleanup left no QA state or active work and kept worker/watchdog stopped. |
 | 14.38 | done | One bounded live PWA start produced a sessionless `5/0/0` baseline, three real scheduler/Redis/consumer successes with prepared-session use count `1 -> 4`, eight post-baseline opportunities, exact three-way enqueue/receive/ACK evidence and no fourth run after PWA stop. The 22 logical external operations stayed below 45; exact cleanup restored every stable SQL/Redis fingerprint and initial service owner while preserving ordinary proxy telemetry. |
+| 14.39 | done | The live PWA now distinguishes URL-applied filters, effective application-controlled order/page, no-effect parameters and blockers. Four focused parser tests, frontend lint/build and desktop/mobile Playwright against the real API/PostgreSQL path passed with zero external requests and zero QA residue. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

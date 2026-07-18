@@ -312,7 +312,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - The performance chart draws a vertical marker for the active session start when it falls inside the visible range.
 - Idle inactive monitors appear after active or draining monitors in the compact monitor table; selecting an inactive monitor shows editable configuration and launch/archive controls only when no run is non-terminal, plus historical performance and archive confirmation without implying the monitor is running.
 - The PWA can receive monitor log updates from the existing SSE stream.
-- The PWA monitor detail shows supported, ignored, and unsupported URL filters; unsupported filters block session start and other traffic-producing actions.
+- The PWA monitor detail follows the catalog URL contract in spec 001: it distinguishes URL-applied filters, effective application-controlled order/page, parameters with no runtime effect and unsupported filters; only the unsupported group blocks session start and other traffic-producing actions.
 - Redis hits avoid DB item lookups and detail fetches for already seen monitor candidates.
 - Candidates with an already existing opportunity for the same monitor are marked seen and skipped before filter/detail work if Redis lost that seen state.
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
