@@ -18,13 +18,15 @@ El backend aplica la frontera local descrita en `docs/specs/011-local-pwa-access
 
 Produccion fija `BACKEND_CORS_ORIGINS=https://${APP_HOST}` desde Compose. La configuracion fuera de development/test rechaza origenes vacios, wildcard, no HTTPS o con path. La cookie host-only usa `Path=/api`, `SameSite=Strict`, `HttpOnly` y `Secure`; no se comparte por subdominios ni se admite un modo cross-origin alternativo.
 
-Las migraciones no siembran credenciales. Tras aplicar Alembic, crea el primer usuario con entrada interactiva dentro de la red del despliegue:
+Las migraciones no siembran credenciales. En produccion, tras aplicar Alembic, crea el primer usuario con entrada interactiva dentro de la red del despliegue:
 
 ```powershell
 docker compose exec api python -m vinted_monitor.cli.create_user --email admin@example.local
 ```
 
 Para un despliegue nuevo cuyo API aun no este iniciado, ejecuta el mismo modulo mediante un `docker compose run --rm` despues de migrar. La password nunca se pasa como argumento o variable versionada. Sin usuario activo, salud puede responder pero login y toda operacion permanecen cerrados.
+
+Solo en desarrollo, un `.env` local puede definir juntas `LOCAL_DEV_USER_EMAIL` y `LOCAL_DEV_USER_PASSWORD`. El comando Compose de API ejecuta `ensure_development_user` despues de Alembic y antes de Uvicorn: crea el usuario si falta, conserva su ID al reiniciar, reactiva una fila desactivada y actualiza el hash si cambia la password. No imprime la password. Omitir ambas variables mantiene el aprovisionamiento interactivo; definir solo una o usarlas fuera de `development` hace fallar el arranque.
 
 ## Configuracion Runtime
 

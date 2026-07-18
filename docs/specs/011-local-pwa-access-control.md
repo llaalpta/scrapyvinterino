@@ -26,7 +26,7 @@ Todas las demas rutas `/api`, incluidas lecturas, mutaciones, SSE, acciones desh
 - La preautenticacion dura 10 minutos por defecto. Una sesion autenticada dura 168 horas por defecto y no se desliza por uso.
 - Login correcto revoca la sesion anterior y emite otro token, incluso si la cookie anterior ya estaba autenticada. Credenciales invalidas, usuario ausente e inactivo devuelven el mismo error.
 - Logout requiere sesion, `Origin` y CSRF, revoca el estado servidor y elimina la cookie. La cookie capturada no vuelve a ser valida, tampoco tras reiniciar la API.
-- Los passwords nuevos se validan y se guardan con Argon2 mediante `pwdlib`; no se siembran en migraciones, argumentos, variables versionadas ni logs. El aprovisionamiento es un comando interactivo sin registro publico.
+- Los passwords nuevos se validan y se guardan con Argon2 mediante `pwdlib`; no se siembran en migraciones, argumentos, variables versionadas ni logs. El aprovisionamiento productivo es un comando interactivo sin registro publico. En `development`, `LOCAL_DEV_USER_EMAIL` y `LOCAL_DEV_USER_PASSWORD` pueden vivir juntas solo en el `.env` no versionado: tras Alembic, Compose crea, reactiva o actualiza idempotentemente ese usuario antes de iniciar Uvicorn. Configurar cualquiera de las dos fuera de `development` bloquea el arranque.
 
 La cookie se llama `vinted_monitor_session`, es host-only, `HttpOnly`, `SameSite=Strict`, `Path=/api` y no declara `Domain`. Usa `Secure` fuera de development/test. Login y logout emiten `Cache-Control: no-store`; el resto de respuestas `/api` tambien es no-store salvo el contrato SSE explicito `no-cache, no-transform`.
 
@@ -51,7 +51,7 @@ La cookie se llama `vinted_monitor_session`, es host-only, `HttpOnly`, `SameSite
 - Desarrollo publica PostgreSQL, Redis, API y Vite solo en `127.0.0.1`.
 - El ejemplo productivo no publica puertos de contenedor: Traefik expone el frontend y `/api` bajo el mismo `APP_HOST`; `/health` permanece interno.
 - Produccion deriva el unico origen permitido de `https://${APP_HOST}`. Una allowlist vacia, wildcard o no HTTPS es configuracion invalida fuera de development/test.
-- No existe `AUTH_ENABLED` ni bypass de test. Una instalacion sin usuario activo queda cerrada y se aprovisiona por CLI antes de operar.
+- No existe `AUTH_ENABLED` ni bypass de test. Una instalacion sin usuario activo queda cerrada; produccion se aprovisiona por CLI y desarrollo puede usar el bootstrap local explicito anterior.
 
 ## Criterios de aceptacion
 

@@ -21,6 +21,7 @@ from vinted_monitor.services.local_auth import (
     LOCAL_SESSION_COOKIE_NAME,
     LocalSessionGrant,
     create_local_user,
+    ensure_local_user,
 )
 
 TEST_PASSWORD = "local-auth-test-password-14-12-1"
@@ -86,6 +87,45 @@ def test_local_user_password_is_argon2_and_bootstrap_cookie_is_opaque(local_user
         assert session is not None
         assert session.user_id is None
         assert session.token_hash != raw_token
+
+
+def test_ensure_local_user_is_idempotent_and_restores_configured_access(local_user) -> None:
+    replacement_password = "replacement-development-password"
+    with SessionLocal() as db:
+        first = ensure_local_user(db, email=local_user["email"], password=local_user["password"])
+        first_hash = db.get(User, local_user["id"]).password_hash
+        user = db.get(User, local_user["id"])
+        assert user is not None
+        user.is_active = False
+        db.commit()
+
+    with SessionLocal() as db:
+        restored = ensure_local_user(db, email=local_user["email"], password=local_user["password"])
+        restored_hash = db.get(User, local_user["id"]).password_hash
+        updated = ensure_local_user(db, email=local_user["email"], password=replacement_password)
+        updated_hash = db.get(User, local_user["id"]).password_hash
+
+    assert first.user_id == local_user["id"]
+    assert first.created is False
+    assert first.password_updated is False
+    assert restored.user_id == local_user["id"]
+    assert restored.reactivated is True
+    assert restored.password_updated is False
+    assert first_hash == restored_hash
+    assert updated.user_id == local_user["id"]
+    assert updated.password_updated is True
+    assert updated_hash != restored_hash
+
+    client = TestClient(app)
+    bootstrap = client.get("/api/auth/session").json()
+    local_user["track_client_token"](client)
+    login = client.post(
+        "/api/auth/login",
+        headers={"Origin": _origin(), LOCAL_CSRF_HEADER_NAME: bootstrap["csrf_token"]},
+        json={"email": local_user["email"], "password": replacement_password},
+    )
+    assert login.status_code == 200
+    local_user["track_client_token"](client)
 
 
 @pytest.mark.real_auth

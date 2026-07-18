@@ -52,6 +52,23 @@ def test_production_accepts_non_placeholder_app_secret_key() -> None:
     assert settings.app_env == "production"
 
 
+def test_local_development_user_requires_email_and_password_together() -> None:
+    with pytest.raises(ValidationError, match="must be configured together"):
+        Settings(_env_file=None, local_dev_user_email="operator@example.local")
+
+
+def test_local_development_user_is_rejected_outside_development() -> None:
+    with pytest.raises(ValidationError, match="allowed only in development"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            app_secret_key="x" * 32,
+            backend_cors_origins="https://monitor.example.test",
+            local_dev_user_email="operator@example.local",
+            local_dev_user_password="development-password",
+        )
+
+
 @pytest.mark.parametrize(
     "origins",
     [
