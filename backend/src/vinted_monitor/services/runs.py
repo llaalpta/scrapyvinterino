@@ -241,7 +241,6 @@ def execute_monitor_baseline(
         status=RUNNING,
         trigger=BASELINE_TRIGGER,
         items_found=0,
-        items_new=0,
         items_filter_passed=0,
         items_discarded_by_filters=0,
         items_filter_pending=0,
@@ -448,8 +447,7 @@ def execute_monitor_baseline(
         cache.mark_baseline(source.id, policy_hash)
         run.status = SUCCESS
         run.finished_at = datetime.now(UTC)
-        run.items_found = len(result.items)
-        run.items_new = 0
+        run.items_found = 0
         run.items_filter_passed = 0
         run.items_discarded_by_filters = 0
         run.items_filter_pending = 0
@@ -498,7 +496,6 @@ def execute_monitor_baseline(
                 "baseline_run": True,
                 "baseline_reason": baseline_reason,
                 "items_found": run.items_found,
-                "items_new": run.items_new,
                 "items_filter_passed": run.items_filter_passed,
                 "items_discarded_by_filters": run.items_discarded_by_filters,
                 "items_filter_pending": run.items_filter_pending,
@@ -556,7 +553,6 @@ def execute_monitor_session_prepare(
         status=RUNNING,
         trigger=SESSION_PREPARE_TRIGGER,
         items_found=0,
-        items_new=0,
         items_filter_passed=0,
         items_discarded_by_filters=0,
         items_filter_pending=0,
@@ -778,7 +774,6 @@ def execute_monitor_item_detail_probe(
         status=RUNNING,
         trigger=DETAIL_PROBE_TRIGGER,
         items_found=0,
-        items_new=0,
         items_filter_passed=0,
         items_discarded_by_filters=0,
         items_filter_pending=0,
@@ -1036,7 +1031,6 @@ def execute_monitor_run(
         status=RUNNING,
         trigger=trigger,
         items_found=0,
-        items_new=0,
         items_filter_passed=0,
         items_discarded_by_filters=0,
         items_filter_pending=0,
@@ -1338,6 +1332,7 @@ def execute_monitor_run(
 
     claimed_ids: set[str] = set()
     claimed_work_items: list[DetailWorkItem] = []
+    found_count = 0
     try:
         unique_candidates = _deduplicate_candidates(result.items)
         record_run_event(
@@ -1387,6 +1382,10 @@ def execute_monitor_run(
             source,
             [work_item.candidate for work_item in claimed_work_items],
         )
+        found_count = sum(
+            candidate.vinted_item_id not in existing_opportunity_ids for candidate in monitor_new_candidates
+        )
+        run.items_found = found_count
         if existing_opportunity_ids:
             already_claimed_existing_ids = [
                 work_item.candidate.vinted_item_id
@@ -1470,8 +1469,7 @@ def execute_monitor_run(
         candidate_state_update = DetailCandidateStateUpdate(terminal_ids=monitor_result.terminal_ids)
         run.status = FINALIZING
         run.finished_at = None
-        run.items_found = len(result.items)
-        run.items_new = len(monitor_new_candidates)
+        run.items_found = found_count
         run.items_filter_passed = monitor_result.passed
         run.items_discarded_by_filters = monitor_result.discarded
         run.items_filter_pending = monitor_result.pending
@@ -1569,6 +1567,7 @@ def execute_monitor_run(
         if run is None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise_(exc)
+        run.items_found = found_count
         failed_run = _record_failed_run(
             db,
             run,
@@ -1594,6 +1593,7 @@ def execute_monitor_run(
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
         try:
+            run.items_found = found_count
             failure_kind = _catalog_terminal_failure_kind(exc)
             failed_run = _record_failed_run(db, run, source, exc, kind=failure_kind, penalize_proxy=False)
             release_error: SeenCacheUnavailableError | None = None
@@ -1653,6 +1653,7 @@ def execute_monitor_run(
         if run is None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
+        run.items_found = found_count
         failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=False)
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
@@ -2361,7 +2362,6 @@ def _complete_finalizing_run(
         auth_mode="public_anonymous",
         details={
             "items_found": run.items_found,
-            "items_new": run.items_new,
             "items_filter_passed": run.items_filter_passed,
             "items_discarded_by_filters": run.items_discarded_by_filters,
             "items_filter_pending": run.items_filter_pending,

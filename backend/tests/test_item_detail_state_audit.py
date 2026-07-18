@@ -596,6 +596,7 @@ def test_transient_release_failure_after_challenge_keeps_terminal_run_and_discar
     assert run is not None
     assert returned_run.id == run.id
     assert returned_run.status == FAILED
+    assert run.items_found == 1
     assert run.status == FAILED
     assert phases.count("run_failed") == 1
     assert item_id not in cache.seen
@@ -630,6 +631,7 @@ def test_release_failure_does_not_mask_primary_run_error(
 
     assert persisted is not None
     assert persisted.status == FAILED
+    assert persisted.items_found == 1
     assert persisted.error_message == "primary evaluation failure"
     assert phases.count("run_failed") == 1
     assert cache.processing == set()
@@ -679,7 +681,6 @@ def test_stale_running_run_is_closed_before_monitor_continues(source_id: int, au
             started_at=datetime.now(UTC) - timedelta(hours=24),
             finished_at=None,
             items_found=0,
-            items_new=0,
             items_filter_passed=0,
             items_discarded_by_filters=0,
             items_filter_pending=0,
@@ -728,7 +729,6 @@ def test_non_reconciling_actions_reject_finalizing_run(
                 status=FINALIZING,
                 trigger="scheduler",
                 items_found=1,
-                items_new=1,
                 items_filter_passed=1,
                 items_discarded_by_filters=0,
                 items_filter_pending=0,

@@ -339,7 +339,6 @@ class RunRead(BaseModel):
     started_at: datetime
     finished_at: datetime | None
     items_found: int
-    items_new: int
     items_filter_passed: int
     items_discarded_by_filters: int
     items_filter_pending: int
@@ -372,7 +371,6 @@ class MonitorSummaryRead(BaseModel):
     runs_count: int
     failed_runs: int
     items_found: int
-    items_new: int
     items_discarded_by_filters: int
     opportunities_created: int
 

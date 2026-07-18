@@ -301,8 +301,6 @@ function MonitorPerformancePanel({
               <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
               <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
               <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
-              <Metric label="Nuevos" value={String(historical?.items_new ?? 0)} />
-              <Metric label="Descartados" value={String(historical?.items_discarded_by_filters ?? 0)} />
               <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
               <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
             </dl>
@@ -375,8 +373,6 @@ function MonitorSessionOverview({ source, stats }: { source: SearchSource; stats
       <dl className="monitor-session-strip">
         <Metric label="Ejecuciones" value={String(summary?.runs_count ?? 0)} />
         <Metric label="Encontrados" value={String(summary?.items_found ?? 0)} />
-        <Metric label="Nuevos" value={String(summary?.items_new ?? 0)} />
-        <Metric label="Descartados" value={String(summary?.items_discarded_by_filters ?? 0)} />
         <Metric label="Oportunidades" value={String(summary?.opportunities_created ?? 0)} />
         <Metric label="Fallos" value={String(summary?.failed_runs ?? 0)} />
       </dl>

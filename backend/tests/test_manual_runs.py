@@ -625,10 +625,12 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
 
         assert run.status == SUCCESS
         assert run.items_found == 2
-        assert run.items_new == 2
         assert run.opportunities_created == 2
         assert item_count == 2
         assert opportunity_count == 2
+        terminal_event = next(event for event in events if event.phase == "run_succeeded")
+        assert terminal_event.details["items_found"] == 2
+        assert "items_new" not in terminal_event.details
         assert sorted(cache.marked_seen) == ["pytest-run-item-0", "pytest-run-item-1"]
         assert "run_config_resolved" in phases
         assert "egress_selected" in phases
@@ -1583,8 +1585,7 @@ def test_internal_baseline_marks_visible_items_without_opportunities(source_id: 
         assert run.status == SUCCESS
         assert run.trigger == "baseline"
         assert run.runtime_metadata["baseline_reason"] == "internal_snapshot"
-        assert run.items_found == 2
-        assert run.items_new == 0
+        assert run.items_found == 0
         assert run.opportunities_created == 0
         assert item_count == 0
         assert opportunity_count == 0
@@ -1659,7 +1660,7 @@ def test_internal_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.Monk
             )
 
             assert run.status == SUCCESS
-            assert run.items_found == 2
+            assert run.items_found == 0
             assert sorted(cache.marked_seen) == ["9100000001", "9100000002"]
             assert success_event.details["provider"]["reused_prepare_probe"] is True
             assert session is not None
@@ -1722,7 +1723,7 @@ def test_monitor_run_skips_existing_opportunity_before_filters(source_id: int) -
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == second_run.id).order_by(RunEvent.id.asc())))
 
         assert first_run.opportunities_created == 1
-        assert second_run.items_new == 0
+        assert second_run.items_found == 0
         assert second_run.opportunities_created == 0
         assert any(event.phase == "candidate_existing_opportunity_skipped" for event in events)
         assert all(event.phase != "filter_passed" for event in events)
@@ -2028,8 +2029,8 @@ def test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session(monke
         body = response.json()
         assert body["status"] == SUCCESS
         assert body["trigger"] == "baseline"
-        assert body["items_found"] == 1
-        assert body["items_new"] == 0
+        assert body["items_found"] == 0
+        assert "items_new" not in body
         assert body["opportunities_created"] == 0
         assert body["monitor_session_id"] is None
         second_response = client.post(f"/api/monitors/{source_id}/start")
@@ -2355,7 +2356,7 @@ def test_recurring_monitor_start_preserves_successful_baseline_when_postflight_f
             assert len(runs) == 1
             assert runs[0].trigger == "baseline"
             assert runs[0].status == SUCCESS
-            assert runs[0].items_found == 2
+            assert runs[0].items_found == 0
             assert runs[0].opportunities_created == 0
             assert runs[0].monitor_session_id is None
             assert cache.baseline_ready is True
@@ -2676,8 +2677,7 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
                     trigger="baseline",
                     started_at=datetime(2026, 7, 4, 8, 5, tzinfo=UTC),
                     finished_at=datetime(2026, 7, 4, 8, 6, tzinfo=UTC),
-                    items_found=100,
-                    items_new=0,
+                    items_found=0,
                     items_filter_passed=0,
                     items_discarded_by_filters=0,
                     items_filter_pending=0,
@@ -2691,8 +2691,7 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
                     trigger="manual",
                     started_at=datetime(2026, 7, 4, 8, 15, tzinfo=UTC),
                     finished_at=datetime(2026, 7, 4, 8, 16, tzinfo=UTC),
-                    items_found=3,
-                    items_new=2,
+                    items_found=2,
                     items_filter_passed=2,
                     items_discarded_by_filters=1,
                     items_filter_pending=0,
@@ -2706,8 +2705,7 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
                     trigger="scheduler",
                     started_at=datetime(2026, 7, 4, 9, 5, tzinfo=UTC),
                     finished_at=datetime(2026, 7, 4, 9, 6, tzinfo=UTC),
-                    items_found=4,
-                    items_new=1,
+                    items_found=1,
                     items_filter_passed=1,
                     items_discarded_by_filters=0,
                     items_filter_pending=0,
@@ -2728,14 +2726,14 @@ def test_monitor_stats_aggregates_sessions_and_chart_points() -> None:
         assert stats.latest_session.id == stats.active_session.id
         assert stats.session_summary.sessions_count == 1
         assert stats.session_summary.runs_count == 2
-        assert stats.session_summary.items_found == 7
+        assert stats.session_summary.items_found == 3
         assert stats.historical_summary.runs_count == 2
-        assert stats.historical_summary.items_found == 7
+        assert stats.historical_summary.items_found == 3
         assert stats.historical_summary.opportunities_created == 3
         assert stats.bucket_label == "1 h"
         assert stats.bucket_seconds == 3600
         chart_hits = [point for point in stats.chart_points if point.items_found > 0]
-        assert [point.items_found for point in chart_hits] == [3, 4]
+        assert [point.items_found for point in chart_hits] == [2, 1]
     finally:
         cleanup_source(source_id)
 
@@ -2811,7 +2809,6 @@ def test_monitor_stats_range_bucket_granularity() -> None:
                     started_at=now - timedelta(minutes=10),
                     finished_at=now - timedelta(minutes=9),
                     items_found=3,
-                    items_new=3,
                     items_filter_passed=3,
                     items_discarded_by_filters=0,
                     items_filter_pending=0,
@@ -2878,7 +2875,6 @@ def test_monitor_stats_all_range_chooses_automatic_bucket(
                     started_at=now - age,
                     finished_at=now - age + timedelta(minutes=1),
                     items_found=1,
-                    items_new=1,
                     items_filter_passed=1,
                     items_discarded_by_filters=0,
                     items_filter_pending=0,
@@ -2935,7 +2931,6 @@ def test_monitor_stats_uses_latest_closed_session_when_inactive() -> None:
                     started_at=datetime(2026, 7, 4, 8, 0, tzinfo=UTC),
                     finished_at=datetime(2026, 7, 4, 8, 1, tzinfo=UTC),
                     items_found=2,
-                    items_new=2,
                     items_filter_passed=2,
                     items_discarded_by_filters=0,
                     items_filter_pending=0,
@@ -2949,8 +2944,7 @@ def test_monitor_stats_uses_latest_closed_session_when_inactive() -> None:
                     trigger="manual",
                     started_at=datetime(2026, 7, 4, 9, 0, tzinfo=UTC),
                     finished_at=datetime(2026, 7, 4, 9, 2, tzinfo=UTC),
-                    items_found=5,
-                    items_new=1,
+                    items_found=1,
                     items_filter_passed=1,
                     items_discarded_by_filters=0,
                     items_filter_pending=0,
@@ -2976,9 +2970,10 @@ def test_monitor_stats_uses_latest_closed_session_when_inactive() -> None:
         assert body["latest_session"]["stop_reason"] == "completed"
         assert body["session_summary"]["sessions_count"] == 1
         assert body["session_summary"]["runs_count"] == 1
-        assert body["session_summary"]["items_found"] == 5
+        assert body["session_summary"]["items_found"] == 1
+        assert "items_new" not in body["session_summary"]
         assert body["historical_summary"]["sessions_count"] == 2
-        assert body["historical_summary"]["items_found"] == 7
+        assert body["historical_summary"]["items_found"] == 3
     finally:
         cleanup_source(source_id)
 
@@ -2992,7 +2987,7 @@ def test_seen_cache_hit_skips_detail_and_database_writes(source_id: int) -> None
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
 
         assert run.status == SUCCESS
-        assert run.items_new == 0
+        assert run.items_found == 0
         assert run.opportunities_created == 0
         assert item_count == 0
         assert provider.detail_calls == []
@@ -3013,6 +3008,7 @@ def test_discarded_item_is_not_persisted(source_id: int) -> None:
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
 
+        assert run.items_found == 1
         assert run.items_discarded_by_filters == 1
         assert run.opportunities_created == 0
         assert item_count == 0
@@ -3109,6 +3105,7 @@ def test_detail_failure_retries_once_in_run_then_closes_candidate(
             select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "detail_fetch_error").order_by(RunEvent.id.desc())
         )
 
+        assert run.items_found == 1
         assert run.opportunities_created == 0
         assert run.items_filter_pending == 1
         assert opportunity is None
@@ -3233,6 +3230,7 @@ def test_datadome_mid_batch_rolls_back_and_discards_claimed_work(source_id: int)
 
     assert opportunity_count == 0
     assert run.status == FAILED
+    assert run.items_found == 3
     assert (run.runtime_metadata or {}).get("failure_kind") == "datadome_challenge"
     assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-1"]
     assert cache.seen == set()
@@ -3268,6 +3266,7 @@ def test_detail_session_context_failure_is_fail_stop_without_retry(
         )
 
     assert run.status == FAILED
+    assert run.items_found == 1
     assert (run.runtime_metadata or {}).get("failure_kind") == "catalog_session_context_invalid"
     assert provider.detail_calls == ["pytest-run-item-0"]
     assert sleep_calls == []

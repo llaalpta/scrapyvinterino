@@ -122,18 +122,18 @@ def _exercise_live_stack(
             assert page.get_by_role("button", name="Recalibrar listado inicial", exact=True).count() == 0
 
             first_baseline = _start_session(page, scenario.source_id, assert_busy=True)
-            _assert_run(first_baseline, trigger="baseline", status="success", found=3, new=0, opportunities=0)
+            _assert_run(first_baseline, trigger="baseline", status="success", found=0, opportunities=0)
             first_session_id = _assert_first_baseline_state(scenario, first_baseline, cache)
             _assert_active_manual_ui(page, scenario.source_name)
 
             same_run = _run_now(page, scenario.source_id, assert_busy=True)
-            _assert_run(same_run, trigger="manual", status="success", found=3, new=0, opportunities=0)
+            _assert_run(same_run, trigger="manual", status="success", found=0, opportunities=0)
             assert same_run["monitor_session_id"] == first_session_id
             _assert_single_opportunity(scenario, expected_item_id=None)
 
             _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCD"])
             new_run = _run_now(page, scenario.source_id)
-            _assert_run(new_run, trigger="manual", status="success", found=4, new=1, opportunities=1)
+            _assert_run(new_run, trigger="manual", status="success", found=1, opportunities=1)
             assert new_run["monitor_session_id"] == first_session_id
             _assert_single_opportunity(scenario, expected_item_id=scenario.item_ids["D"])
             opportunity_page = _get_json(
@@ -145,14 +145,15 @@ def _exercise_live_stack(
             assert opportunity_page["items"][0]["item"]["vinted_item_id"] == scenario.item_ids["D"]
 
             duplicate_run = _run_now(page, scenario.source_id)
-            _assert_run(duplicate_run, trigger="manual", status="success", found=4, new=0, opportunities=0)
+            _assert_run(duplicate_run, trigger="manual", status="success", found=0, opportunities=0)
             assert duplicate_run["monitor_session_id"] == first_session_id
             _assert_single_opportunity(scenario, expected_item_id=scenario.item_ids["D"])
+            _assert_honest_metrics_ui(page, found=1, opportunities=1)
 
             marker_key = _baseline_key(scenario.source_id)
             assert cache.client.delete(marker_key) == 1
             missing_marker_run = _run_now(page, scenario.source_id)
-            _assert_run(missing_marker_run, trigger="manual", status="failed", found=0, new=0, opportunities=0)
+            _assert_run(missing_marker_run, trigger="manual", status="failed", found=0, opportunities=0)
             assert missing_marker_run["monitor_session_id"] == first_session_id
             assert "La foto inicial ya no esta disponible" in (missing_marker_run["error_message"] or "")
             assert "inicia una nueva sesion" in (missing_marker_run["error_message"] or "")
@@ -162,7 +163,7 @@ def _exercise_live_stack(
 
             _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCDE"])
             second_baseline = _start_session(page, scenario.source_id)
-            _assert_run(second_baseline, trigger="baseline", status="success", found=5, new=0, opportunities=0)
+            _assert_run(second_baseline, trigger="baseline", status="success", found=0, opportunities=0)
             second_session_id = _assert_restart_baseline_state(scenario, first_session_id, cache)
             assert second_baseline["monitor_session_id"] is None
             _assert_active_manual_ui(page, scenario.source_name)
@@ -177,7 +178,7 @@ def _exercise_live_stack(
             _write_state(state_path, mode="fail", ids=[], delay_ms=800)
             _select_monitor(page, scenario.failure_source_name, active=False)
             failed_baseline = _start_session(page, scenario.failure_source_id, assert_busy=True)
-            _assert_run(failed_baseline, trigger="baseline", status="failed", found=0, new=0, opportunities=0)
+            _assert_run(failed_baseline, trigger="baseline", status="failed", found=0, opportunities=0)
             assert failed_baseline["monitor_session_id"] is None
             assert "QA catalog provider forced failure" in (failed_baseline["error_message"] or "")
             expect(page.locator(".notice")).to_contain_text("QA catalog provider forced failure")
@@ -277,13 +278,12 @@ def _assert_run(
     trigger: str,
     status: str,
     found: int,
-    new: int,
     opportunities: int,
 ) -> None:
     assert payload["trigger"] == trigger
     assert payload["status"] == status
     assert payload["items_found"] == found
-    assert payload["items_new"] == new
+    assert "items_new" not in payload
     assert payload["opportunities_created"] == opportunities
 
 
@@ -296,6 +296,20 @@ def _assert_active_manual_ui(page: Page, source_name: str) -> None:
     config_controls = page.locator(".monitor-config-editor input, .monitor-config-editor select, .monitor-config-editor textarea")
     assert config_controls.count() > 0
     assert all(config_controls.nth(index).is_disabled() for index in range(config_controls.count()))
+
+
+def _assert_honest_metrics_ui(page: Page, *, found: int, opportunities: int) -> None:
+    accumulated = page.locator('section[aria-label="Acumulado del monitor"]')
+    active_session = page.locator('section[aria-label="Sesion activa"]')
+    expect(accumulated).to_be_visible()
+    expect(active_session).to_be_visible()
+    for section in (accumulated, active_session):
+        expect(section.get_by_text("Encontrados", exact=True).locator("..").locator("dd")).to_have_text(str(found))
+        expect(section.get_by_text("Oportunidades", exact=True).locator("..").locator("dd")).to_have_text(
+            str(opportunities)
+        )
+        for obsolete_label in ("Nuevos", "Nuevos monitor", "Pasan", "Descartados", "Sin detalle"):
+            expect(section.get_by_text(obsolete_label, exact=True)).to_have_count(0)
 
 
 def _assert_first_baseline_state(scenario: Scenario, run_payload: dict, cache: RedisSeenCache) -> int:

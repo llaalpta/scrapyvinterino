@@ -46,8 +46,8 @@ def seed_browser_data() -> dict[str, int]:
         db.add_all([source_a, source_b])
         db.flush()
 
-        run_a = Run(source_id=source_a.id, status="success", trigger="manual", items_found=1, items_new=1, opportunities_created=1)
-        run_b = Run(source_id=source_b.id, status="success", trigger="manual", items_found=1, items_new=1, opportunities_created=1)
+        run_a = Run(source_id=source_a.id, status="success", trigger="manual", items_found=1, opportunities_created=1)
+        run_b = Run(source_id=source_b.id, status="success", trigger="manual", items_found=1, opportunities_created=1)
         db.add_all([run_a, run_b])
         db.flush()
 

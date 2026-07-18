@@ -58,6 +58,8 @@ $TestTargets = @{
     )
     "catalog-fail-stop" = @(
         "tests/test_catalog_failstop_integration.py::test_catalog_terminal_response_fails_once_invalidates_session_and_acks",
+        "tests/test_migrations.py::test_honest_found_metrics_migration_removes_historical_event_field",
+        "tests/test_manual_runs.py::test_detail_failure_retries_once_in_run_then_closes_candidate",
         "tests/test_manual_runs.py::test_datadome_mid_batch_rolls_back_and_discards_claimed_work",
         "tests/test_manual_runs.py::test_detail_session_context_failure_is_fail_stop_without_retry",
         "tests/test_manual_runs.py::test_gone_detail_is_terminal_without_retry",

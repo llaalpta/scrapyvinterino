@@ -259,7 +259,7 @@ def _exercise_live_stack(
             assert page.get_by_text("Snapshot inicial", exact=False).count() == 0
 
             baseline_response = _start_session(page, scenario.source_id)
-            _assert_run(baseline_response, trigger="baseline", found=5, new=0, opportunities=0)
+            _assert_run(baseline_response, trigger="baseline", found=0, opportunities=0)
             session_id, activated_at, first_due = _assert_started_state(scenario, baseline_response)
             assert 60 <= (first_due - activated_at).total_seconds() <= 66
             _assert_queue_empty(queue_client, settings.worker_task_queue_key, scenario.source_id)
@@ -286,7 +286,7 @@ def _exercise_live_stack(
                 runner=runner,
                 settings=settings,
             )
-            _assert_run(same_run, trigger="scheduler", found=5, new=0, opportunities=0)
+            _assert_run(same_run, trigger="scheduler", found=0, opportunities=0)
             assert same_run["monitor_session_id"] == session_id
 
             _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCDEF"])
@@ -296,7 +296,7 @@ def _exercise_live_stack(
                 runner=runner,
                 settings=settings,
             )
-            _assert_run(new_run, trigger="scheduler", found=6, new=1, opportunities=1)
+            _assert_run(new_run, trigger="scheduler", found=1, opportunities=1)
             assert new_run["monitor_session_id"] == session_id
             _assert_one_opportunity(scenario)
             logs = page.locator("details.monitor-logs")
@@ -313,7 +313,7 @@ def _exercise_live_stack(
                 runner=runner,
                 settings=settings,
             )
-            _assert_run(duplicate_run, trigger="scheduler", found=6, new=0, opportunities=0)
+            _assert_run(duplicate_run, trigger="scheduler", found=0, opportunities=0)
             assert duplicate_run["monitor_session_id"] == session_id
             _assert_one_opportunity(scenario)
 
@@ -380,7 +380,7 @@ def _exercise_live_session_stop(
             _select_monitor(page, scenario.source_name, active=False)
 
             first_baseline = _start_session(page, scenario.source_id)
-            _assert_run(first_baseline, trigger="baseline", found=5, new=0, opportunities=0)
+            _assert_run(first_baseline, trigger="baseline", found=0, opportunities=0)
             first_session_id, _, first_due = _assert_started_state(scenario, first_baseline)
             first_reservation = _schedule_and_reserve_due(
                 scenario,
@@ -472,7 +472,7 @@ def _exercise_live_session_stop(
             _assert_terminal_unlocks_controls(page, scenario)
 
             second_baseline = _start_session(page, scenario.source_id)
-            _assert_run(second_baseline, trigger="baseline", found=5, new=0, opportunities=0)
+            _assert_run(second_baseline, trigger="baseline", found=0, opportunities=0)
             second_session_id, second_due = _assert_restarted_state(scenario, second_baseline)
             second_reservation = _schedule_and_reserve_due(
                 scenario,
@@ -823,7 +823,7 @@ def _assert_drained_terminal_state(scenario: Scenario, session_id: int, task_id:
         run = runs[0]
         assert run.status == "success" and run.finished_at is not None
         assert run.monitor_session_id == session_id
-        assert run.items_found == 5 and run.items_new == 0 and run.opportunities_created == 0
+        assert run.items_found == 0 and run.opportunities_created == 0
         assert session is not None and session.stop_reason == "stopped"
         assert session.stopped_at == run.finished_at
         closure_events = list(
@@ -960,11 +960,11 @@ def _assert_ephemeral_detail_retry(
     assert list(cache.client.scan_iter(match="detail-retry-index:*")) == []
 
 
-def _assert_run(payload: dict, *, trigger: str, found: int, new: int, opportunities: int) -> None:
+def _assert_run(payload: dict, *, trigger: str, found: int, opportunities: int) -> None:
     assert payload["trigger"] == trigger, payload
     assert payload["status"] == "success", payload
     assert payload["items_found"] == found, payload
-    assert payload["items_new"] == new, payload
+    assert "items_new" not in payload, payload
     assert payload["opportunities_created"] == opportunities, payload
 
 
@@ -974,7 +974,6 @@ def _run_payload(run: Run) -> dict:
         "trigger": run.trigger,
         "status": run.status,
         "items_found": run.items_found,
-        "items_new": run.items_new,
         "items_filter_passed": run.items_filter_passed,
         "items_discarded_by_filters": run.items_discarded_by_filters,
         "items_filter_pending": run.items_filter_pending,

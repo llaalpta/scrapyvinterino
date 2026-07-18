@@ -17,3 +17,9 @@ def test_status_normalization_migration_cleans_existing_invalidated_rows() -> No
 
     assert "WHERE status = 'invalidated'" in migration
     assert "SET status = 'invalid'," in migration
+
+
+def test_honest_found_metrics_migration_removes_historical_event_field() -> None:
+    migration = (BACKEND_ROOT / "alembic/versions/0020_honest_found_metrics.py").read_text(encoding="utf-8")
+
+    assert "details = details - 'items_new'" in migration
