@@ -53,7 +53,7 @@ def test_worker_redis_loss_exits_restarts_and_updates_live_pwa() -> None:
         create_local_user(db, email=email, password=PASSWORD)
         update_scheduler_config(
             db,
-            {"enabled": True, "allow_direct_without_proxy": True},
+            {"allow_direct_without_proxy": True},
             settings,
         )
         assert db.scalar(select(func.count()).select_from(SearchSource)) == 0

@@ -178,7 +178,6 @@ class SearchSourceUpdate(BaseModel):
 class SchedulerUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool | None = None
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=20)
     allow_direct_without_proxy: bool | None = None
     direct_max_concurrent_runs: int | None = Field(default=None, ge=0, le=10)
@@ -192,7 +191,6 @@ class SchedulerUpdate(BaseModel):
 class SchedulerStateRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    enabled: bool
     runtime_enabled: bool
     effective_enabled: bool
     worker_available: bool

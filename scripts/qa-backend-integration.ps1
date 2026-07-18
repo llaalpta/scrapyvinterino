@@ -75,7 +75,15 @@ $TestTargets = @{
         "tests/test_manual_session_start_live.py::test_live_manual_session_start_baseline_lifecycle"
     )
     "recurring-session-start-baseline" = @(
-        "tests/test_recurring_session_start_live.py::test_live_recurring_session_start_baseline_and_real_consumer"
+        "tests/test_recurring_session_start_live.py::test_live_recurring_session_start_baseline_and_real_consumer",
+        "tests/test_migrations.py::test_scheduler_ui_gate_migration_removes_persisted_enabled_field",
+        "tests/test_scheduler.py::test_scheduler_state_uses_deployment_gate_and_runtime_dependencies",
+        "tests/test_scheduler.py::test_scheduler_api_does_not_expose_removed_runtime_fields",
+        "tests/test_scheduler.py::test_scheduler_config_rejects_unknown_persisted_runtime_fields",
+        "tests/test_scheduler_availability.py::test_scheduler_state_requires_fresh_producer_heartbeat",
+        "tests/test_scheduler_availability.py::test_scheduler_runner_writes_heartbeat_while_deployment_gate_is_disabled",
+        "tests/test_scheduler_availability.py::test_recurring_start_returns_503_without_producer_heartbeat",
+        "tests/test_search_sources.py::test_scheduler_api_rejects_removed_ui_gate_without_mutating_settings"
     )
     "session-stop-drain" = @($SessionStopFocusedTargets + $SessionStopLiveTargets)
     "monitor-identity-edit" = @($MonitorIdentityFocusedTargets + $MonitorIdentityLiveTargets)

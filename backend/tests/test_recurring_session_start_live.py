@@ -41,7 +41,7 @@ from vinted_monitor.db.models import (
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.catalog import CatalogSearchResult, CatalogSource
 from vinted_monitor.services.local_auth import create_local_user
-from vinted_monitor.services.scheduler import update_scheduler_config
+from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, update_scheduler_config
 from vinted_monitor.services.seen_cache import RedisSeenCache, get_seen_cache
 from vinted_monitor.services.task_queue import (
     TaskReservation,
@@ -254,6 +254,24 @@ def _exercise_live_stack(
             page.route("**/*", guard)
             page.on("websocket", lambda socket: _assert_loopback(socket.url))
             csrf_token = _login(page, scenario, pwa_url)
+            page.get_by_role("button", name="Ajustes", exact=True).click()
+            expect(page.get_by_role("heading", name="Estado del scheduler", exact=True)).to_be_visible()
+            expect(page.get_by_text("Scheduler activo", exact=True)).to_be_visible()
+            assert page.get_by_role("button", name="Habilitar scheduler", exact=True).count() == 0
+            assert page.get_by_role("button", name="Deshabilitar scheduler", exact=True).count() == 0
+            scheduler_payload = _get_json(context, f"{api_url}/api/scheduler", pwa_url)
+            assert "enabled" not in scheduler_payload
+            removed_gate = context.request.patch(
+                f"{api_url}/api/scheduler",
+                headers={"Origin": pwa_url, "X-CSRF-Token": csrf_token},
+                data={"enabled": True},
+            )
+            assert removed_gate.status == 422
+            with SessionLocal() as db:
+                scheduler_setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
+                assert scheduler_setting is not None
+                assert "enabled" not in (scheduler_setting.value or {})
+            page.get_by_role("button", name="Monitores", exact=True).click()
             _select_monitor(page, scenario.source_name, active=False)
             assert page.get_by_role("button", name="Recalibrar listado inicial", exact=True).count() == 0
             assert page.get_by_text("Snapshot inicial", exact=False).count() == 0
@@ -628,7 +646,6 @@ def _seed(token: str) -> Scenario:
         update_scheduler_config(
             db,
             {
-                "enabled": True,
                 "allow_direct_without_proxy": True,
                 "direct_max_concurrent_runs": 1,
                 "max_concurrent_runs": 1,

@@ -38,6 +38,8 @@ api healthy         -> frontend Nginx (ejemplo de produccion)
 
 `depends_on` solo ordena el arranque. Una dependencia que cae despues no detiene ni reinicia sus consumidores. Los comandos `docker compose stop` o `kill` son acciones manuales y dejan el servicio detenido; `unless-stopped` actua cuando el proceso sale por un fallo no solicitado.
 
+La PWA no controla Docker. El productor scheduler vive dentro de `worker`, `scheduler-watchdog` solo vigila su heartbeat y el unico bloqueo global es `SCHEDULER_ENABLED` en `.env`. Ajustes conserva limites/capacidad operativa, mientras `Iniciar sesion` y `Detener sesion` son los unicos controles de recurrencia por monitor. `effective_enabled` combina el gate de despliegue, heartbeat reciente y capacidad de salida; no existe un gate global persistido en la UI.
+
 La propiedad de Alembic no pertenece al `backend/Dockerfile`: su `CMD` generico arranca Uvicorn sin migrar. Solo los comandos de ambos archivos Compose establecen `alembic upgrade head && uvicorn`; un reload de codigo en desarrollo tampoco repite migraciones.
 
 ## Modulos backend

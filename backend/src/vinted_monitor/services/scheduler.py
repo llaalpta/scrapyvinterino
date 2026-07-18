@@ -30,7 +30,6 @@ SUPPORTED_SOURCE_CONFIG_KEYS = {
     "stop_after_vinted_session_uses",
 }
 RUNTIME_CONFIG_KEYS = {
-    "enabled",
     "max_concurrent_runs",
     "allow_direct_without_proxy",
     "direct_max_concurrent_runs",
@@ -73,7 +72,6 @@ class SourceSchedulerConfig:
 
 @dataclass(frozen=True)
 class SchedulerRuntimeConfig:
-    enabled: bool
     max_concurrent_runs: int
     allow_direct_without_proxy: bool
     direct_max_concurrent_runs: int
@@ -87,7 +85,6 @@ class SchedulerRuntimeConfig:
 
 @dataclass(frozen=True)
 class SchedulerState:
-    enabled: bool
     runtime_enabled: bool
     effective_enabled: bool
     worker_available: bool
@@ -141,9 +138,8 @@ def get_scheduler_state(
     effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity + direct_capacity)
     worker = scheduler_worker_availability(db, settings, now=now)
     return SchedulerState(
-        enabled=runtime_config.enabled,
         runtime_enabled=runtime_enabled,
-        effective_enabled=runtime_config.enabled and runtime_enabled and effective_capacity > 0 and worker.available,
+        effective_enabled=runtime_enabled and effective_capacity > 0 and worker.available,
         worker_available=worker.available,
         worker_last_seen_at=worker.last_seen_at,
         max_concurrent_runs=runtime_config.max_concurrent_runs,
@@ -173,7 +169,6 @@ def get_scheduler_runtime_config(db: Session, settings: Settings) -> SchedulerRu
 def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Settings) -> SchedulerRuntimeConfig:
     _validate_scheduler_runtime_keys(value)
     return SchedulerRuntimeConfig(
-        enabled=bool(value.get("enabled", False)),
         max_concurrent_runs=_validate_int(
             value.get("max_concurrent_runs", settings.scheduler_max_concurrent_runs),
             "max_concurrent_runs",
@@ -221,16 +216,10 @@ def update_scheduler_config(db: Session, payload: dict[str, Any], settings: Sett
     return get_scheduler_state(db, settings or get_settings())
 
 
-def update_scheduler_enabled(db: Session, enabled: bool, settings: Settings | None = None) -> SchedulerState:
-    return update_scheduler_config(db, {"enabled": enabled}, settings)
-
-
 def ensure_scheduler_can_activate(db: Session, settings: Settings, *, source_id: int | None = None) -> None:
     state = get_scheduler_state(db, settings)
     if not state.runtime_enabled:
         raise SchedulerCapacityError("Scheduler runtime is disabled")
-    if not state.enabled:
-        raise SchedulerCapacityError("Scheduler is disabled in settings")
     if not state.worker_available:
         raise SchedulerUnavailableError("Scheduler worker is unavailable")
     if state.effective_capacity <= 0:
@@ -423,10 +412,6 @@ def get_scheduler_timezone(settings: Settings) -> ZoneInfo:
         return ZoneInfo(settings.scheduler_timezone)
     except ZoneInfoNotFoundError as exc:
         raise SchedulerConfigError(f"Invalid scheduler timezone: {settings.scheduler_timezone}") from exc
-
-
-def _read_scheduler_enabled(db: Session) -> bool:
-    return bool(_read_scheduler_value(db).get("enabled", False))
 
 
 def _read_scheduler_value(db: Session) -> dict[str, Any]:

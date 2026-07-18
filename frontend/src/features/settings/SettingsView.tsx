@@ -1,4 +1,4 @@
-import { Info, Pause, Play, Power, Save } from 'lucide-react';
+import { Info, Pause, Play, Save } from 'lucide-react';
 import type { FormEvent } from 'react';
 import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
 import type { CollectionLoadState } from '../../app/collectionLoadState';
@@ -7,14 +7,12 @@ export function SettingsView({
   onCreateProxy,
   onTestProxy,
   onToggleProxy,
-  onToggleScheduler,
   onUpdateSchedulerConfig,
   proxyDraft,
   proxyActionMessages,
   proxyCollectionState,
   proxyProfiles,
   savingProxy,
-  savingScheduler,
   scheduler,
   schedulerAvailabilityError,
   setProxyDraft,
@@ -23,14 +21,12 @@ export function SettingsView({
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
   onTestProxy: (profileId: number) => void;
   onToggleProxy: (profile: ProxyProfile) => void;
-  onToggleScheduler: () => void;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
   proxyDraft: ProxyDraft;
   proxyActionMessages: Record<number, string>;
   proxyCollectionState: CollectionLoadState;
   proxyProfiles: ProxyProfile[];
   savingProxy: boolean;
-  savingScheduler: boolean;
   scheduler: SchedulerState | null;
   schedulerAvailabilityError: string | null;
   setProxyDraft: (draft: ProxyDraft) => void;
@@ -58,13 +54,8 @@ export function SettingsView({
                 <h4>Estado del scheduler</h4>
                 <p>{schedulerStatus?.description}</p>
               </div>
-              <button type="button" disabled={savingScheduler} onClick={onToggleScheduler}>
-                <Power size={17} />
-                {scheduler.enabled ? 'Deshabilitar scheduler' : 'Habilitar scheduler'}
-              </button>
             </div>
             <div className="settings-summary-grid">
-              <SummaryItem label="Scheduler" value={scheduler.enabled ? 'Habilitado en la UI' : 'Deshabilitado en la UI'} />
               <SummaryItem label="Runtime" value={scheduler.runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
               <SummaryItem label="Worker" value={getWorkerStatus(scheduler)} />
               <SummaryItem label="Capacidad" value={`${scheduler.active_periodic_monitors}/${scheduler.effective_capacity} monitores activos`} />
@@ -457,28 +448,25 @@ function getSchedulerStatus(scheduler: SchedulerState) {
       description: 'El productor esta disponible para ejecutar monitores periodicos.'
     };
   }
-  if (scheduler.enabled && scheduler.runtime_enabled && !scheduler.worker_available) {
+  if (scheduler.runtime_enabled && !scheduler.worker_available) {
     return {
       label: 'Scheduler no disponible',
       description: 'El productor no esta disponible: no se pueden iniciar ni ejecutar monitores periodicos.'
     };
   }
-  if (scheduler.enabled && !scheduler.runtime_enabled) {
+  if (!scheduler.runtime_enabled) {
     return {
       label: 'Scheduler bloqueado',
-      description: 'La interfaz lo habilita, pero el despliegue lo bloquea mediante .env.'
+      description: 'El despliegue bloquea las sesiones periodicas mediante .env.'
     };
   }
-  if (scheduler.enabled && scheduler.runtime_enabled) {
+  if (scheduler.runtime_enabled) {
     return {
       label: 'Scheduler sin capacidad',
       description: 'El productor esta disponible, pero falta capacidad de salida para monitores periodicos.'
     };
   }
-  return {
-    label: 'Scheduler parado',
-    description: 'Habilitalo en la interfaz para permitir monitores periodicos.'
-  };
+  return { label: 'Scheduler no disponible', description: 'No se pudo determinar su disponibilidad.' };
 }
 
 function getWorkerStatus(scheduler: SchedulerState) {

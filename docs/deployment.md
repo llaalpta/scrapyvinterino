@@ -35,10 +35,12 @@ La configuracion no debe tener dos fuentes de verdad activas:
 | Dueño | Uso |
 | --- | --- |
 | `.env` | Infraestructura, secretos, auth local, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS exacto, `APP_SECRET_KEY`, TTL absoluto de pre-auth/auth, `SCHEDULER_ENABLED`, heartbeat del productor, intervalo/gracia del watchdog, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
-| PWA | Operacion diaria: habilitar scheduler en app, runs simultaneos, salida directa, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. |
+| PWA | Operacion diaria: iniciar/detener sesiones por monitor, runs simultaneos, salida directa, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. No arranca contenedores ni mantiene un gate global del scheduler. |
 | Backend | Limites duros de validacion y defaults seguros cuando no hay override operativo. |
 
 Algunos valores `.env` tambien sirven como defaults cuando aun no existe override operativo en `app_settings.scheduler`; por ejemplo `VINTED_REQUEST_TIMEOUT_MS`. Una vez guardado desde la PWA, el valor persistido en DB es la fuente de verdad operativa.
+
+`SCHEDULER_ENABLED` es el unico kill-switch global. El worker contiene tanto el productor scheduler como los consumidores y debe estar levantado por Compose; la PWA solo muestra su heartbeat/capacidad y controla cada sesion recurrente. La migracion 0021 elimina el antiguo `app_settings.scheduler.enabled`, y el API ya no lo expone ni acepta.
 
 Redis conserva AOF en un volumen Docker tanto en desarrollo como en el ejemplo de produccion. El worker se despliega como una unica instancia con varios consumidores internos: recupera las listas `vinted:task_queue:processing*` antes de iniciar scheduler y consumidores, y no se deben arrancar replicas independientes hasta incorporar ownership/visibility timeout distribuido.
 

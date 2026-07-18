@@ -22,7 +22,6 @@ from vinted_monitor.services.scheduler import (
     next_run_after,
     normalize_scheduler_config,
     update_scheduler_config,
-    update_scheduler_enabled,
     validate_proxy_settings,
 )
 from vinted_monitor.services.scheduler_liveness import (
@@ -92,13 +91,12 @@ def preserve_scheduler_settings():
         db.commit()
 
 
-def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
+def test_scheduler_state_uses_deployment_gate_and_runtime_dependencies() -> None:
     settings = Settings(scheduler_enabled=False)
 
     with SessionLocal() as db:
-        state = update_scheduler_enabled(db, True, settings)
+        state = get_scheduler_state(db, settings)
 
-        assert state.enabled is True
         assert state.runtime_enabled is False
         assert state.effective_enabled is False
 
@@ -108,7 +106,6 @@ def test_scheduler_state_combines_ui_and_runtime_gate() -> None:
         db.commit()
         state = get_scheduler_state(db, enabled_settings)
 
-        assert state.enabled is True
         assert state.worker_available is True
         assert state.effective_enabled is True
 
@@ -122,6 +119,7 @@ def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:
     payload = response.json()
     assert "worker_available" in payload
     assert "worker_last_seen_at" in payload
+    assert "enabled" not in payload
     assert "max_runs_per_proxy" not in payload
     assert "request_retries" not in payload
 
@@ -148,7 +146,7 @@ def test_scheduler_config_rejects_unknown_persisted_runtime_fields() -> None:
         db.add(setting)
         db.commit()
 
-        with pytest.raises(SchedulerConfigError, match="unsupported scheduler fields: max_runs_per_proxy, request_retries"):
+        with pytest.raises(SchedulerConfigError, match="unsupported scheduler fields: enabled, max_runs_per_proxy, request_retries"):
             update_scheduler_config(db, {"direct_max_concurrent_runs": 2}, Settings(scheduler_enabled=True))
 
 
@@ -164,7 +162,7 @@ def test_scheduler_proxy_capacity_uses_proxy_profile_limits() -> None:
             )
         update_scheduler_config(
             db,
-            {"enabled": True, "max_concurrent_runs": 20, "allow_direct_without_proxy": False},
+            {"max_concurrent_runs": 20, "allow_direct_without_proxy": False},
             Settings(scheduler_enabled=True),
         )
         for index, limit in enumerate((3, 2)):
@@ -275,7 +273,6 @@ def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(monkeyp
             if active_source is not None:
                 active_source.is_active = False
 
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest scheduler window source",
             url="https://www.vinted.es/catalog?search_text=",
@@ -333,7 +330,6 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
                 synchronize_session=False,
             )
 
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest due producer source",
             url="https://www.vinted.es/catalog?search_text=nike",
@@ -405,7 +401,6 @@ def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(mo
                 {SearchSource.is_active: False},
                 synchronize_session=False,
             )
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest persisted activation deadline",
             url="https://www.vinted.es/catalog?search_text=persisted-deadline",
@@ -453,7 +448,6 @@ def test_scheduler_runner_rechecks_persisted_deadline_after_lock(monkeypatch: py
                 {SearchSource.is_active: False},
                 synchronize_session=False,
             )
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest locked deadline recheck",
             url="https://www.vinted.es/catalog?search_text=locked-deadline",
@@ -507,7 +501,6 @@ def test_scheduler_window_deferral_survives_cache_failure(monkeypatch: pytest.Mo
                 {SearchSource.is_active: False},
                 synchronize_session=False,
             )
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         source = SearchSource(
             name="pytest durable window deferral",
             url="https://www.vinted.es/catalog?search_text=durable-window",
@@ -567,7 +560,6 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
                 synchronize_session=False,
             )
 
-        update_scheduler_enabled(db, True, Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
         for index in range(2):
             source = SearchSource(
                 name=f"pytest due capacity source {index}",
@@ -645,7 +637,6 @@ def test_archive_cancels_scheduler_task_that_is_still_ready(monkeypatch: pytest.
                 {ProxyProfile.is_active: False},
                 synchronize_session=False,
             )
-        update_scheduler_enabled(db, True, settings)
         source = SearchSource(
             name="pytest archive queued source",
             url="https://www.vinted.es/catalog?search_text=archive-queued",
@@ -731,7 +722,6 @@ def test_scheduler_revalidates_source_after_archive_commits_during_initial_snaps
                 {ProxyProfile.is_active: False},
                 synchronize_session=False,
             )
-        update_scheduler_enabled(db, True, settings)
         source = SearchSource(
             name="pytest archive snapshot source",
             url="https://www.vinted.es/catalog?search_text=archive-snapshot",
