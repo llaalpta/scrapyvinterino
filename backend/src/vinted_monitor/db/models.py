@@ -120,7 +120,6 @@ class Run(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     items_found: Mapped[int] = mapped_column(Integer, default=0)
-    items_new: Mapped[int] = mapped_column(Integer, default=0)
     items_filter_passed: Mapped[int] = mapped_column(Integer, default=0)
     items_discarded_by_filters: Mapped[int] = mapped_column(Integer, default=0)
     items_filter_pending: Mapped[int] = mapped_column(Integer, default=0)

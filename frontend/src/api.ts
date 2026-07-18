@@ -244,7 +244,6 @@ export type Run = {
   started_at: string;
   finished_at: string | null;
   items_found: number;
-  items_new: number;
   items_filter_passed: number;
   items_discarded_by_filters: number;
   items_filter_pending: number;
@@ -261,7 +260,6 @@ export type MonitorStatsSummary = {
   runs_count: number;
   failed_runs: number;
   items_found: number;
-  items_new: number;
   items_discarded_by_filters: number;
   opportunities_created: number;
 };

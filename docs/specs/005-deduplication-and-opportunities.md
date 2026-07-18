@@ -19,7 +19,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Store the initial snapshot marker in Redis by monitor and evaluation policy hash with the same TTL as seen keys.
 - Use short-lived Redis processing locks to avoid concurrent duplicate work for the same monitor/item.
 - Use `items.vinted_item_id` as normalized catalog identity only for items that become opportunities.
-- Count `items_new` as candidates newly claimed by Redis for that monitor/policy in that run.
+- Count `items_found` as unique candidates newly claimed by Redis for that monitor/policy in that run, after excluding an already-persisted opportunity. Raw catalog rows remain event diagnostics and are not a second product metric.
+- A session-start baseline seeds visible IDs but reports zero `items_found`; it calibrates the starting point and is excluded from monitor/session performance statistics.
 - Fetch item detail for every Redis-new candidate before filter evaluation and opportunity creation, bounded by the configured per-run limit.
 - Parse the public item document's JSON-LD and structurally discovered Next/React Flight records; do not depend on dynamic Flight record ids or the Cloudflare-challenged direct detail API.
 - Anchor every Flight section to the requested item id. Recommendations or unrelated products in the same record must never contribute plugins, photos, availability, shipping, or pricing.
@@ -72,6 +73,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Changing the monitor URL or monitor-owned filter definition changes the policy hash and can reevaluate visible items.
 - Changing the monitor URL or monitor-owned filter definition requires the next session start to seed the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
+- `items_found` is fixed immediately after Redis claim and durable-opportunity exclusion. It counts every monitor-new candidate admitted to detail evaluation, whether the run later succeeds, fails on a provider/session challenge, creates an opportunity, matches a blacklist, lacks valid detail or exceeds the per-run detail budget. Seen/processing hits and an already-existing monitor opportunity count zero.
+- `opportunities_created` counts only new monitor opportunities committed by that run. The API exposes no redundant `items_new` field, and the PWA presents only `Encontrados` and `Oportunidades` as item-result metrics; filter outcomes remain available in technical events.
 - Details are fetched for monitor-new candidates before opportunity creation and are bounded by the configured per-run limit.
 - An ordinary detail transport, non-terminal HTTP or parser failure receives exactly one retry after two seconds in the same run. A second failure creates no opportunity, counts as pending diagnostics and is marked seen. Genuine `404/410`, valid incomplete detail, a rate-limited concurrent-wave deferral and candidates beyond the per-run detail budget are terminal without delayed work.
 - A Cloudflare/DataDome detail challenge or classified prepared-session/context failure terminates the whole task on its first response, closes the monitor session and releases the claimed processing locks. It never waits, preserves or replays that candidate batch.
@@ -103,7 +106,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Confirm manual and recurring ordinary runs without a marker fail before candidate work, preserve their configured mode, close/stop and ask for a new session start.
 - Run the same fixture twice and confirm no duplicate opportunity or repeated filter work.
 - Run the same item under two monitors and confirm each monitor can count the item once without duplicating alerts inside either monitor.
-- Confirm `items_found`, `items_new`, and `opportunities_created` reflect catalog results, monitor-new items, and created opportunities.
+- Confirm `items_found` and `opportunities_created` reflect monitor-new candidates and committed opportunities, while raw catalog count remains confined to run events.
 - Confirm Redis unavailable fails the run and does not create opportunities.
 - Confirm discarded candidates are not inserted into `items`.
 - Inject failure before/after the PostgreSQL commit and during Redis finalize; confirm the `finalizing` run converges to one item/opportunity and terminal Redis state before any new catalog run.
@@ -111,7 +114,7 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Expire and reacquire a processing lock, then confirm a stale release cannot remove the new owner's lock.
 - Process the same item concurrently under two monitors and confirm one global item plus one opportunity per monitor.
 
-The bounded 14.37 real acceptance observed five public catalog IDs during session start, persisted the marker plus five seen entries without items or opportunities, and immediately observed the same five IDs in the manual run as `items_new=0` and `opportunities_created=0`. The run reused the prepared anonymous session; no detail request or retry entry was needed. Exact source cleanup returned operational Redis to zero keys, created no item and left the pre-existing global item row present.
+The bounded 14.37 real acceptance observed five public catalog IDs during session start, persisted the marker plus five seen entries without items or opportunities, and immediately observed the same five IDs in the manual run as `items_found=0` and `opportunities_created=0`. The run reused the prepared anonymous session; no detail request or retry entry was needed. Exact source cleanup returned operational Redis to zero keys, created no item and left the pre-existing global item row present.
 
 The 14.38 real recurring gate owns the complementary positive proof. It snapshots hashes of the five baseline IDs, then lets exactly three real scheduler/queue/consumer tasks observe the live catalog. At least one opportunity must come from a later ID whose hash was absent from that baseline; baseline IDs must produce none, and the unique monitor/item contract must prevent duplicates across later runs. The gate is invalid if it needs a fourth run, manual execution, standalone preparation or synthetic provider state to obtain that evidence.
 

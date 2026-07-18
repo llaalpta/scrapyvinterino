@@ -378,7 +378,6 @@ class TaskConsumer:
                 run_id=run.id,
                 status=run.status,
                 items_found=run.items_found,
-                items_new=run.items_new,
                 attempt=attempt,
             )
             return run

@@ -27,7 +27,6 @@ class MonitorSummary:
     runs_count: int
     failed_runs: int
     items_found: int
-    items_new: int
     items_discarded_by_filters: int
     opportunities_created: int
 
@@ -120,7 +119,6 @@ def _summary(*, sessions: list[MonitorSession | None], runs: list[Run], now: dat
         runs_count=len(runs),
         failed_runs=sum(1 for run in runs if run.status == "failed"),
         items_found=sum(run.items_found or 0 for run in runs),
-        items_new=sum(run.items_new or 0 for run in runs),
         items_discarded_by_filters=sum(run.items_discarded_by_filters or 0 for run in runs),
         opportunities_created=sum(run.opportunities_created or 0 for run in runs),
     )

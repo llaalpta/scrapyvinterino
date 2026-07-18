@@ -71,22 +71,6 @@ export function RunActivityList({
                 <dd>{run.items_found}</dd>
               </div>
               <div>
-                <dt>Nuevos monitor</dt>
-                <dd>{run.items_new}</dd>
-              </div>
-              <div>
-                <dt>Pasan</dt>
-                <dd>{run.items_filter_passed}</dd>
-              </div>
-              <div>
-                <dt>Descartados</dt>
-                <dd>{run.items_discarded_by_filters}</dd>
-              </div>
-              <div>
-                <dt>Sin detalle</dt>
-                <dd>{run.items_filter_pending}</dd>
-              </div>
-              <div>
                 <dt>Oportunidades</dt>
                 <dd>{run.opportunities_created}</dd>
               </div>

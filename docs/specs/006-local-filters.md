@@ -55,6 +55,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 - Public availability is informational and never authorizes an authenticated action. A future purchase must revalidate price, currency, availability, shipping, payment, and user confirmation against the authenticated session.
 - Public availability never acts as an exclusion rule; non-buyable and unknown states may create opportunities and must be represented honestly.
 - Opportunity creation is idempotent for monitor + item in the monitor flow.
+- `items_found` is fixed before filter evaluation from the monitor-new, post-deduplication candidate set. A discarded or detail-pending candidate remains found but never becomes an opportunity.
 - `opportunities_created`, `items_filter_passed`, `items_discarded_by_filters`, and `items_filter_pending` reflect the monitor run.
 - The API does not accept legacy `filter_rule_ids` or monitor `is_active` patch payloads.
 

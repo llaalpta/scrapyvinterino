@@ -13,7 +13,7 @@ This spec is historical. Current monitor execution persists `items` only for can
 - Update `last_seen_at` when an opportunity item appears again.
 - Keep `first_seen_at` stable.
 - Persist items only when they are needed for opportunity display.
-- Later monitor specs reinterpret `items_new` as Redis-new monitor candidates; this spec only owns idempotent `items` upsert behavior.
+- Spec 005 owns the run-level `items_found` counter for Redis-new monitor candidates; this spec only owns idempotent `items` upsert behavior.
 
 ## Out of Scope
 
@@ -40,7 +40,7 @@ This spec is historical. Current monitor execution persists `items` only for can
 - Missing optional fields do not fail persistence.
 - Raw payload is stored only if sanitized.
 - URLs are preserved for opening Vinted item pages.
-- Monitor runs update `items_found`; monitor specs own the final `items_new` meaning.
+- Monitor runs update the canonical `items_found` counter; raw catalog rows are diagnostics rather than persisted product results.
 - Running the same result twice does not duplicate items.
 - PWA displays persisted items through opportunities after a run.
 
