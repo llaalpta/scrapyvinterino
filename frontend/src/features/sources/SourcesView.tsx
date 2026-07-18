@@ -1,5 +1,5 @@
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Eraser, FileText, KeyRound, Play, RefreshCw, Save, Search, Square, Trash2 } from 'lucide-react';
+import { ChevronDown, Eraser, FileText, KeyRound, Play, RefreshCw, Save, Search, Square, Trash2 } from 'lucide-react';
 import {
   type MonitorStats,
   type MonitorStatsRange,
@@ -968,32 +968,41 @@ function MonitorDetail({
         </div>
       </section>
 
-      <section className="monitor-logs" aria-label="Logs acumulados">
-        <div className="monitor-logs-header">
+      <details className="monitor-logs" key={source.id}>
+        <summary className="monitor-logs-header">
           <div className="monitor-logs-title">
             <FileText size={15} />
             <h4>Logs acumulados</h4>
             <span>{historicalRunCountLabel}</span>
           </div>
-          <button
-            type="button"
-            disabled={!canClearLogView}
-            title="Oculta los logs visibles sin borrar eventos guardados"
-            onClick={() => onClearMonitorEventsView(source.id, visibleMonitorEvents.map((event) => event.id))}
-          >
-            <Eraser size={15} />
-            Limpiar vista
-          </button>
+          <span className="monitor-logs-toggle" aria-hidden="true">
+            <span className="monitor-logs-toggle-closed">Mostrar</span>
+            <span className="monitor-logs-toggle-open">Ocultar</span>
+            <ChevronDown size={17} />
+          </span>
+        </summary>
+        <div className="monitor-logs-body">
+          <div className="monitor-logs-actions">
+            <p className="monitor-log-note">Solo oculta eventos en esta pantalla; el historico permanece guardado.</p>
+            <button
+              type="button"
+              disabled={!canClearLogView}
+              title="Oculta los logs visibles sin borrar eventos guardados"
+              onClick={() => onClearMonitorEventsView(source.id, visibleMonitorEvents.map((event) => event.id))}
+            >
+              <Eraser size={15} />
+              Limpiar vista
+            </button>
+          </div>
+          <MonitorEventTimeline
+            key={source.id}
+            events={visibleMonitorEvents}
+            loading={loadingMonitorEvents}
+            streamStatus={source.is_active || isDraining ? streamStatus : null}
+            viewCleared={logViewCleared}
+          />
         </div>
-        <p className="monitor-log-note">Solo oculta eventos en esta pantalla; el historico permanece guardado.</p>
-        <MonitorEventTimeline
-          key={source.id}
-          events={visibleMonitorEvents}
-          loading={loadingMonitorEvents}
-          streamStatus={source.is_active || isDraining ? streamStatus : null}
-          viewCleared={logViewCleared}
-        />
-      </section>
+      </details>
 
       {archiveSource ? (
         <div className="confirm-dialog-backdrop" role="presentation" onClick={() => setArchiveSource(null)}>

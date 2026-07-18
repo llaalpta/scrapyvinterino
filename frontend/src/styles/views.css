@@ -979,8 +979,6 @@
 }
 
 .monitor-logs {
-  display: grid;
-  gap: 10px;
   border-top: 1px solid #e5eaf0;
   padding-top: 12px;
 }
@@ -991,6 +989,23 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px 12px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.monitor-logs-header::-webkit-details-marker {
+  display: none;
+}
+
+.monitor-logs-header:hover {
+  background: #f8fafc;
+}
+
+.monitor-logs-header:focus-visible {
+  outline: 2px solid #1f6feb;
+  outline-offset: 2px;
 }
 
 .monitor-logs-title {
@@ -1019,11 +1034,56 @@
   background: #edf2f7;
 }
 
-.monitor-logs-header button {
+.monitor-logs-toggle,
+.monitor-logs-actions button {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
   gap: 6px;
+}
+
+.monitor-logs-toggle {
+  min-height: 32px;
+  color: #52606d;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.monitor-logs-toggle-open {
+  display: none;
+}
+
+.monitor-logs[open] .monitor-logs-toggle-closed {
+  display: none;
+}
+
+.monitor-logs[open] .monitor-logs-toggle-open {
+  display: inline;
+}
+
+.monitor-logs-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.monitor-logs[open] .monitor-logs-toggle svg {
+  transform: rotate(180deg);
+}
+
+.monitor-logs-body {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.monitor-logs-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.monitor-logs-actions button {
   min-height: 32px;
   padding: 6px 10px;
 }
