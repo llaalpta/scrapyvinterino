@@ -16,7 +16,7 @@ Keep no more than five independently valuable tasks here.
 
 | Status | Item | Outcome |
 | --- | --- | --- |
-| - | No current implementation task | Select the next product outcome explicitly before opening another branch. |
+| queued | 14.45 Honest found/opportunity metrics | Make post-deduplication candidates the single `Encontrados` metric and show only `Encontrados`/`Oportunidades` as item outcomes throughout the PWA. |
 
 ## Next
 
@@ -86,6 +86,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.41 | done | Accumulated monitor logs now start collapsed, retain the complete timeline and controls on expansion, and reset closed when selecting another monitor. Frontend lint/build and live desktop/mobile Playwright passed with keyboard operation, persisted-event consistency, zero browser external requests and zero QA residue. |
 | 14.42 | done | The development API now guarantees one configured local user after migrations without weakening production auth. Fresh-database migration/provisioning passed twice with stable ID/count, the real Compose restart reported the existing user without exposing its password, live PWA login survived reload with zero external requests, and the isolated backend gate passed `528` normal plus `3` loopback-only tests with operational PostgreSQL/Redis unchanged and no QA session residue. |
 | 14.43 | done | `Iniciar sesion` is now the only normal PWA entrypoint; standalone preparation and detail-probe UI/state/API clients/CSS were removed while authenticated backend diagnostics remain direct-only. Frontend lint/build and live PWA login/monitor selection proved both controls absent plus the unsaved-draft start guard, with one login POST, zero external requests and zero QA residue. |
+| 14.44 | done | Detail candidates now receive at most one two-second retry inside their observing run and close as terminal seen or discarded work; the durable Redis retry payload/index and its settings were removed. The real recurring PWA/API/PostgreSQL/Redis/scheduler/consumer gate proved fail-once/succeed-once, current log narration and later dedupe with no retry/processing residue, and the isolated backend gate passed 521 normal plus 3 loopback-only cases with unchanged operational fingerprints. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

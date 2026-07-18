@@ -58,9 +58,11 @@ $TestTargets = @{
     )
     "catalog-fail-stop" = @(
         "tests/test_catalog_failstop_integration.py::test_catalog_terminal_response_fails_once_invalidates_session_and_acks",
-        "tests/test_manual_runs.py::test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate",
-        "tests/test_item_detail_state_audit.py::test_transient_failure_while_preserving_challenge_keeps_terminal_run_and_retry",
-        "tests/test_item_detail_state_audit.py::test_challenge_attempt_counter_only_advances_for_failing_candidate"
+        "tests/test_manual_runs.py::test_datadome_mid_batch_rolls_back_and_discards_claimed_work",
+        "tests/test_manual_runs.py::test_detail_session_context_failure_is_fail_stop_without_retry",
+        "tests/test_manual_runs.py::test_gone_detail_is_terminal_without_retry",
+        "tests/test_item_detail_state_audit.py::test_transient_release_failure_after_challenge_keeps_terminal_run_and_discards_work",
+        "tests/test_item_detail_state_audit.py::test_release_failure_does_not_mask_primary_run_error"
     )
     "prepared-session-read-model" = @(
         "tests/test_prepared_session_read_model.py",

@@ -27,9 +27,9 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Preserve the catalog `favourite_count` and optional non-negative `view_count` on the opportunity item when exposed by the same catalog response. Missing views remain null and never trigger another Vinted request.
 - Validate a configurable required-field allowlist before filter evaluation. The default clothing policy requires title, observed description (which may be empty), brand, size, physical status, base price/currency, and at least one photo.
 - Persist signed Vinted CDN photo URLs only; image bytes are loaded directly by the PWA and never through the residential Vinted proxy.
-- Keep recoverable detail failures in a bounded Redis retry queue so an item is not lost after leaving the top-five catalog window.
-- Preserve the normalized public catalog identity across detail retries, including seller login and country; retry payloads still exclude source `raw`, cookies, tokens and HTML.
-- Make candidate state transitions recoverable across PostgreSQL commits, Redis failures, process crashes, and processing-lock expiry. A later run must converge without losing a candidate or duplicating an opportunity.
+- Keep candidate detail work inside the run that observed it. An ordinary transport, response or parser failure waits two seconds and receives one immediate retry; a second failure closes the candidate without an opportunity.
+- Never persist a candidate payload or delayed detail retry in Redis. A process crash may leave only the short owner-checked processing lock; expiry permits a later catalog observation, and manual session relaunch remains the accepted recovery.
+- Keep terminal candidate transitions recoverable across the PostgreSQL commit and Redis finalize boundary so a `finalizing` run converges without emitting a contradictory terminal event.
 - Leave opportunity creation behavior to local filter evaluation in spec 006.
 
 ## Out of Scope
@@ -51,7 +51,6 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Redis runtime:
   - required seen cache by monitor, policy hash, and `vinted_item_id`;
   - required processing lock by monitor, policy hash, and `vinted_item_id`;
-  - due-time detail retry entries containing only a sanitized catalog candidate, attempt count, failure kind, and next attempt time;
   - configurable TTL and per-monitor cap.
 - Database:
   - `items` for opportunity items only;
@@ -74,16 +73,16 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Changing the monitor URL or monitor-owned filter definition requires the next session start to seed the new policy hash.
 - Non-opportunity candidates are not persisted as `items`.
 - Details are fetched for monitor-new candidates before opportunity creation and are bounded by the configured per-run limit.
-- Ordinary detail transport, response or parser failures do not create opportunities and remain retryable for three total attempts. A Cloudflare/DataDome detail challenge instead terminates the whole task on its first response while preserving claimed candidates for a future new task; candidates skipped by the per-run detail budget are queued without consuming an attempt.
+- An ordinary detail transport, non-terminal HTTP or parser failure receives exactly one retry after two seconds in the same run. A second failure creates no opportunity, counts as pending diagnostics and is marked seen. Genuine `404/410`, valid incomplete detail, a rate-limited concurrent-wave deferral and candidates beyond the per-run detail budget are terminal without delayed work.
+- A Cloudflare/DataDome detail challenge or classified prepared-session/context failure terminates the whole task on its first response, closes the monitor session and releases the claimed processing locks. It never waits, preserves or replays that candidate batch.
 - Valid detail that lacks a configured required field is a terminal `detail_incomplete` outcome, names the missing fields, creates no opportunity, and is marked seen.
 - Optional fields absent from a valid document remain null and do not block an opportunity. An observed empty description is valid and contributes no blacklist text.
 - Money amount and currency are selected from the same source and must be finite, non-negative, and internally consistent. Invalid optional prices remain null with a validation warning.
 - Public availability is conservative: any observed blocking signal wins, and `buyable` is emitted only when every required positive signal is explicit and no reservation, stock, visibility, processing, permission, or shipping blocker is present.
-- Redis seen state is marked only after a terminal outcome; pending retries retain their sanitized candidate even if the item leaves the catalog window.
-- A candidate rehydrated from the detail retry queue retains its public seller login and country for later item/opportunity persistence.
+- Redis seen state is marked only after a terminal outcome. A candidate that exhausts its immediate retry is terminal even though it creates no opportunity.
 - Processing locks have an owner token. Expiry allows retry, while a stale worker cannot release a lock reacquired by another worker.
 - Detail requests remain sequential by default. Experimental concurrency is limited to two isolated persistent HTTP lanes cloned from the same prepared context and sticky proxy; PostgreSQL, Redis and persisted events stay on the caller thread.
-- Concurrent scheduling uses strict waves, preserves retry-first input order and does not persist a cookie branch until all results are joined. The selected context is the lane of the last logical successful request, never completion order, and canary mode validates it against the catalog before commit.
+- Concurrent scheduling uses strict waves, preserves catalog input order and does not persist a cookie branch until all results are joined. The selected context is the lane of the last logical successful request, never completion order, and canary mode validates it against the catalog before commit. An ordinary failed prefetched result may retry once through the reconciled provider in the same run.
 - Blacklist head inspection is observational in shadow mode. It may terminate a response only when the canonical item id matches, a safely isolated description suffix proves exclusion, and enforced mode is enabled; a partial no-match never passes an item.
 - Blacklist evaluation uses the public item description only. Catalog title, brand, size, status, seller, color, category and badges never contribute filter text.
 - Enforced head rejection may inspect only a description suffix safely separated from an exact catalog-title prefix. Ambiguous metadata, a missing/mismatched canonical, or a partial no-match continues the same HTTP response to EOF; it never starts a second detail request.
@@ -107,7 +106,8 @@ Detect public Vinted items as fast as possible, use Redis to decide whether each
 - Confirm `items_found`, `items_new`, and `opportunities_created` reflect catalog results, monitor-new items, and created opportunities.
 - Confirm Redis unavailable fails the run and does not create opportunities.
 - Confirm discarded candidates are not inserted into `items`.
-- Inject failure before/after the PostgreSQL commit and during Redis finalize; confirm the next run converges to one item/opportunity and a terminal or retry Redis state.
+- Inject failure before/after the PostgreSQL commit and during Redis finalize; confirm the `finalizing` run converges to one item/opportunity and terminal Redis state before any new catalog run.
+- Make the first ordinary detail attempt fail and the second succeed after a two-second wait; confirm one run, one opportunity, two requests and no Redis candidate payload. Repeat with both attempts failing and confirm a terminal seen candidate with no opportunity.
 - Expire and reacquire a processing lock, then confirm a stale release cannot remove the new owner's lock.
 - Process the same item concurrently under two monitors and confirm one global item plus one opportunity per monitor.
 
@@ -128,9 +128,9 @@ The final bounded 2026-07-17 pass closes that proof. One five-ID real baseline p
 - Confirm no cookies, tokens, checkout payloads, addresses, payment data, or pickup point data are persisted.
 - Confirm detail fetches are bounded by configurable limits and concurrency.
 - Confirm configured concurrency does not activate while detail fetch mode is `serial`, and that canary mode never exceeds two in-flight documents.
-- Confirm a five-item wave returns decisions in retry/catalog order even when HTTP completion order differs, and that SQL/Redis/event writes occur only on the caller thread.
+- Confirm a five-item wave returns decisions in catalog order even when HTTP completion order differs, and that SQL/Redis/event writes occur only on the caller thread.
 - Confirm early-filter shadow mode never changes persistence, while enforced early discard produces the same terminal Redis/filter result as a complete matching detail.
 - Confirm terms present only outside the description never discard, and an ambiguous head falls through to the full-description decision on the same request.
 - Keep `enforced` as the default only while every isolatable audit sample has normalized meta suffix equal to the normalized Flight description and early matches remain a subset of final description matches; any counterexample returns the default to `shadow`.
-- Confirm `view_count` accepts zero and a non-negative integer from catalog JSON, remains null when absent/invalid, and survives Redis detail retries without extra traffic.
+- Confirm `view_count` accepts zero and a non-negative integer from catalog JSON and remains null when absent/invalid.
 - Confirm overlapping monitors cannot duplicate alerts within one monitor but can independently alert on the same catalog item.

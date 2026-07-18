@@ -257,6 +257,10 @@ const PHASE_NARRATIVES: Record<string, EventNarrative> = {
   detail_fetch_error: { area: 'detail', action: 'fetching', result: 'failed', tone: 'error' },
   detail_fetch_skipped: { area: 'detail', action: 'fetching', result: 'skipped', tone: 'warning' },
   detail_fetch_early_discard: { area: 'filters', action: 'rejecting_from_head', result: 'discarded', tone: 'warning' },
+  detail_candidates_claimed: { area: 'detail', action: 'claiming_candidates', result: 'ok', tone: 'success' },
+  detail_candidate_batch_closed: { area: 'detail', action: 'closing_batch', result: 'discarded', tone: 'warning' },
+  detail_candidate_lock_expiry_pending: { area: 'detail', action: 'waiting_lock_expiry', result: 'pending', tone: 'error' },
+  // Historical-only phases remain readable in accumulated logs persisted before task 14.44.
   detail_candidate_recovery_staged: { area: 'detail', action: 'staging_recovery', result: 'ok', tone: 'success' },
   detail_retry_claimed: { area: 'detail', action: 'claiming_retry', result: 'ok', tone: 'success' },
   detail_retry_scheduled: { area: 'detail', action: 'scheduling_retry', result: 'ok', tone: 'warning' },
@@ -572,6 +576,12 @@ function eventLineTokens(event: RunEvent, showRunId: boolean): string[] {
     appendNumberToken(parts, 'items', event.details, 'candidate_count');
     appendNumberToken(parts, 'unique', event.details, 'unique_candidate_count');
     appendNumberToken(parts, 'total', event.details, 'total_entries');
+  }
+  if (event.phase === 'detail_candidates_claimed') {
+    appendNumberToken(parts, 'candidates', event.details, 'candidate_count');
+  }
+  if (event.phase === 'detail_candidate_batch_closed' || event.phase === 'detail_candidate_lock_expiry_pending') {
+    appendNumberToken(parts, 'discarded', event.details, 'discarded_candidate_count');
   }
   const directItems = detailString(event.details, 'items_count') || detailString(event.details, 'item_count');
   if (directItems) {
@@ -972,6 +982,9 @@ function eventLabel(phase: string): string {
     detail_fetch_error: 'Error obteniendo detalle',
     detail_fetch_skipped: 'Detalle omitido',
     detail_fetch_early_discard: 'Detalle descartado por prefiltro',
+    detail_candidates_claimed: 'Candidatos de detalle reclamados',
+    detail_candidate_batch_closed: 'Lote de detalle descartado',
+    detail_candidate_lock_expiry_pending: 'Locks de detalle pendientes de expirar',
     detail_candidate_recovery_staged: 'Recuperacion de detalle preparada',
     detail_retry_claimed: 'Reintento de detalle reclamado',
     detail_retry_scheduled: 'Reintento de detalle programado',

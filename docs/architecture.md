@@ -7,7 +7,7 @@
 - `worker`: un proceso con el productor recurrente (scheduler) y consumidores de Redis para runs de monitor, scraping, deduplicacion y filtros.
 - `scheduler-watchdog`: proceso fail-stop separado que detiene en PostgreSQL solo monitores recurrentes cuando expira el heartbeat del productor y despues intenta retirar su tarea ready de Redis.
 - `postgres`: persistencia.
-- `redis`: cola fiable de tareas con reserva/ACK, cache de vistos/procesamiento y reintentos de detalle por monitor/politica.
+- `redis`: cola fiable de tareas con reserva/ACK y cache de vistos/procesamiento por monitor/politica; no conserva candidatos de detalle entre runs.
 
 ## Mapa de ciclo de vida de servicios
 
@@ -164,7 +164,7 @@ ready -> seleccionar + incrementar uso -> cargar mismo jar/sticky -> catalogo/de
       -> rotacion detectada en detalle -> actualizar la misma fila y renovar TTL
       -> rotacion ordinaria en catalogo/probe -> puede no persistirse (14.12.4)
       -> primer challenge/rechazo/429 de catalogo -> run failed + invalid + payload cifrado vacio
-      -> challenge de detalle -> mismo fail-stop; candidatos reclamados quedan para una tarea futura
+      -> challenge de detalle -> mismo fail-stop; se descarta el lote reclamado y se liberan sus locks
       -> TTL o presupuesto agotado -> no seleccionable; hoy conserva status ready y payload cifrado
 
 archivar monitor -> invalidar todas sus filas + sustituir cada payload por un objeto vacio
@@ -172,7 +172,7 @@ archivar monitor -> invalidar todas sus filas + sustituir cada payload por un ob
 
 La preparacion explicita siempre crea otra fila y no retira una `ready` anterior. Como no hay unicidad, el evaluador escoge la fila canonica con el orden LRU anterior y, solo si ninguna fila supera los metadatos, conserva el intento creado mas recientemente como diagnostico. La PWA refresca el read model al entrar en Monitores, tras los terminales/preparacion existentes y una vez en el vencimiento utilizable mas cercano; no mantiene polling ni duplica el EventSource.
 
-No hay recuperacion provocada por una respuesta anti-bot: el primer Cloudflare, DataDome, rechazo de sesion o `429` de catalogo registra el fallo, invalida el contexto y termina la entrega. El consumer confirma la reserva sin segunda llamada, espera, refresh, escalada ni requeue. Los candidatos de detalle ya reclamados se conservan para una tarea futura, no para repetir la actual. Las cookies que rotan en una respuesta ordinaria de detalle marcan el contexto para persistencia; catalogo/probe pueden perder una rotacion. Esa durabilidad 14.12.4 queda condicional a evidencia de fallos repetidos.
+No hay recuperacion provocada por una respuesta anti-bot: el primer Cloudflare, DataDome, rechazo de sesion o `429` de catalogo registra el fallo, invalida el contexto y termina la entrega. El consumer confirma la reserva sin segunda llamada, espera, refresh, escalada ni requeue. Un challenge de detalle descarta el lote ya reclamado y libera sus locks; no deja candidatos para otra tarea o sesion. Las cookies que rotan en una respuesta ordinaria de detalle marcan el contexto para persistencia; catalogo/probe pueden perder una rotacion. Esa durabilidad 14.12.4 queda condicional a evidencia de fallos repetidos.
 
 `incomplete`, caducidad, agotamiento y el limite de usos detienen o excluyen trabajo, pero no purgan por si mismos el contexto cifrado. Solo la invalidacion explicita y el archivo lo sustituyen por `{}`. En el MVP local se acepta esa retencion mientras el crecimiento sea pequeno; 14.12.11 solo se promueve si las filas muestran crecimiento relevante. `ready` es estado durable historico, no una afirmacion de usabilidad actual.
 
@@ -188,9 +188,9 @@ No hay recuperacion provocada por una respuesta anti-bot: el primer Cloudflare, 
 8. Se diagnostica egress con la misma IP/proxy y se valida pais, locale, viewport, Vinted `x-screen=catalog`, CSRF, anon id, `access_token_web`, `v_udt`, `__cf_bm` y DataDome. La validacion de IP/pais puede reutilizarse brevemente para la misma sesion/sticky id; un contexto preparado incompleto nunca se reutiliza.
 9. Si falta contexto base o el probe no acepta JSON, el run falla antes de pedir `/api/v2/catalog/items` para el scraping.
 10. Con el mismo proxy sticky y el contexto anonimo guardado, se pide el catalogo JSON.
-11. Se reclaman primero los reintentos de detalle vencidos y despues los candidatos nuevos deduplicados contra Redis.
-12. Cada candidato reclamado navega su documento publico `/items/...?...referrer=catalog`; el modo estable es secuencial y el canario permite ondas sobre dos lanes HTTP persistentes clonados desde el mismo contexto/sticky id. La red y el parser pueden ejecutarse en paralelo, pero PostgreSQL, Redis y los eventos persistidos se resuelven en orden en el hilo principal.
-13. Solo un detalle que cumple la politica de campos requeridos pasa por la blacklist de descripcion y puede persistir item/oportunidad. El mismo GET puede cerrarse si una descripcion aislada de forma segura ya coincide; cualquier caso ambiguo continua hasta EOF. Fallos recuperables quedan en Redis con backoff sin marcar `seen`; resultados terminales actualizan `seen` despues del commit PostgreSQL.
+11. Se reclaman los candidatos nuevos deduplicados contra Redis; no existe una cola de detalle entre runs.
+12. Cada candidato reclamado navega su documento publico `/items/...?...referrer=catalog`; el modo estable es secuencial y el canario permite ondas sobre dos lanes HTTP persistentes clonados desde el mismo contexto/sticky id. La red y el parser pueden ejecutarse en paralelo, pero PostgreSQL, Redis y los eventos persistidos se resuelven en orden en el hilo principal. Un fallo ordinario espera dos segundos y repite una sola vez dentro del mismo run.
+13. Solo un detalle que cumple la politica de campos requeridos pasa por la blacklist de descripcion y puede persistir item/oportunidad. El mismo GET puede cerrarse si una descripcion aislada de forma segura ya coincide; cualquier caso ambiguo continua hasta EOF. El segundo fallo, `404/410`, detalle incompleto, limite de candidatos o deferral de una wave son terminales sin oportunidad; `seen` se actualiza despues del commit PostgreSQL.
 14. Se guardan todas las URL firmadas de fotos publicas, no sus bytes. La PWA descarga las imagenes directamente desde el CDN de Vinted y muestra precios y disponibilidad publica.
 15. La sesion Vinted del monitor se conserva cifrada para usos posteriores hasta caducar, agotar contador, alcanzar el limite opcional de usos del monitor o invalidarse por rechazo/challenge.
 16. La PWA muestra oportunidades, estado de ejecucion y diagnosticos saneados de sesion en los logs del monitor.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -96,6 +97,7 @@ def test_live_recurring_session_start_baseline_and_real_consumer(
 
     token = uuid4().hex
     queue_client = redis_client_from_url(settings.redis_url, decode_responses=False, socket_timeout=3)
+    detail_call_times: dict[str, list[float]] = {}
     try:
         scenario = _seed(token)
         first_now = datetime.now(UTC)
@@ -104,9 +106,27 @@ def test_live_recurring_session_start_baseline_and_real_consumer(
 
         from manual_session_qa_app import ControlledManualSessionProvider
 
+        class FailOnceDetailProvider(ControlledManualSessionProvider):
+            def fetch_detail(
+                self,
+                candidate,
+                *,
+                referer_url: str | None = None,
+                early_filter_terms: tuple[str, ...] = (),
+            ):
+                calls = detail_call_times.setdefault(candidate.vinted_item_id, [])
+                calls.append(time.monotonic())
+                if candidate.vinted_item_id == scenario.item_ids["F"] and len(calls) == 1:
+                    raise RuntimeError("QA detail provider forced one transient failure")
+                return super().fetch_detail(
+                    candidate,
+                    referer_url=referer_url,
+                    early_filter_terms=early_filter_terms,
+                )
+
         monkeypatch.setattr(
             "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
-            ControlledManualSessionProvider,
+            FailOnceDetailProvider,
         )
         _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCDE"], delay_ms=500)
         _exercise_live_stack(
@@ -119,6 +139,7 @@ def test_live_recurring_session_start_baseline_and_real_consumer(
             settings=settings,
             state_path=state_path,
         )
+        _assert_ephemeral_detail_retry(scenario, cache, detail_call_times)
     finally:
         _cleanup(token, cache, settings.worker_task_queue_key)
         assert _redis_keys(cache) == initial_redis_keys
@@ -278,6 +299,13 @@ def _exercise_live_stack(
             _assert_run(new_run, trigger="scheduler", found=6, new=1, opportunities=1)
             assert new_run["monitor_session_id"] == session_id
             _assert_one_opportunity(scenario)
+            logs = page.locator("details.monitor-logs")
+            logs.locator("summary").click()
+            claimed_entry = logs.locator(".run-event-entry").filter(
+                has_text="Candidatos de detalle reclamados"
+            ).last
+            expect(claimed_entry).to_be_visible(timeout=10000)
+            expect(claimed_entry).to_contain_text("candidates=1")
 
             duplicate_run = _consume_next_due(
                 scenario,
@@ -873,6 +901,63 @@ def _assert_one_opportunity(scenario: Scenario) -> None:
         assert len(opportunities) == 1 and len(items) == 1
         assert items[0].vinted_item_id == scenario.item_ids["F"]
         assert opportunities[0].item_id == items[0].id
+
+
+def _assert_ephemeral_detail_retry(
+    scenario: Scenario,
+    cache: RedisSeenCache,
+    detail_call_times: dict[str, list[float]],
+) -> None:
+    calls = detail_call_times.get(scenario.item_ids["F"], [])
+    assert len(calls) == 2
+    assert calls[1] - calls[0] >= 1.9
+
+    with SessionLocal() as db:
+        item = db.scalar(select(Item).where(Item.vinted_item_id == scenario.item_ids["F"]))
+        assert item is not None
+        opportunity = db.scalar(
+            select(Opportunity).where(
+                Opportunity.source_id == scenario.source_id,
+                Opportunity.item_id == item.id,
+            )
+        )
+        assert opportunity is not None and opportunity.last_run_id is not None
+        retry_events = list(
+            db.scalars(
+                select(RunEvent).where(
+                    RunEvent.run_id == opportunity.last_run_id,
+                    RunEvent.phase == "detail_retry_scheduled",
+                )
+            )
+        )
+        success_events = list(
+            db.scalars(
+                select(RunEvent).where(
+                    RunEvent.run_id == opportunity.last_run_id,
+                    RunEvent.phase == "detail_fetch_success",
+                )
+            )
+        )
+        exhausted_events = list(
+            db.scalars(
+                select(RunEvent).where(
+                    RunEvent.run_id == opportunity.last_run_id,
+                    RunEvent.phase == "detail_retry_exhausted",
+                )
+            )
+        )
+        assert len(retry_events) == 1
+        assert retry_events[0].details["delay_seconds"] == 2.0
+        assert retry_events[0].details["attempt_count"] == 1
+        assert len(success_events) == 1 and success_events[0].details["attempt"] == 2
+        assert exhausted_events == []
+
+    seen_pattern = f"seen:monitor:{scenario.source_id}:*:item:{scenario.item_ids['F']}"
+    processing_pattern = f"processing:monitor:{scenario.source_id}:*:item:{scenario.item_ids['F']}"
+    assert len(list(cache.client.scan_iter(match=seen_pattern))) == 1
+    assert list(cache.client.scan_iter(match=processing_pattern)) == []
+    assert list(cache.client.scan_iter(match="detail-retry:*")) == []
+    assert list(cache.client.scan_iter(match="detail-retry-index:*")) == []
 
 
 def _assert_run(payload: dict, *, trigger: str, found: int, new: int, opportunities: int) -> None:
