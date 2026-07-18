@@ -1100,18 +1100,32 @@ function CatalogFilterCompatibilityStatus({ source }: { source: SearchSource }) 
     return null;
   }
   const supported = Object.entries(compatibility.supported);
-  const ignored = Object.entries(compatibility.ignored);
+  const ignored = Object.entries(compatibility.ignored).filter(([key]) => key !== 'order' && key !== 'page');
   const unsupported = Object.entries(compatibility.unsupported);
+  const applicationControlled = ['order', 'page']
+    .map((key) => [key, compatibility.api_params[key]] as const)
+    .filter((entry): entry is readonly [string, string | number] => typeof entry[1] === 'string' || typeof entry[1] === 'number');
   return (
     <div className={`catalog-filter-status ${compatibility.compatible ? 'ready' : 'blocked'}`}>
       <div className="catalog-filter-status-title">
         <span>{compatibility.compatible ? 'Filtros URL compatibles' : 'Filtros URL no soportados'}</span>
       </div>
-      {supported.length > 0 ? <span>Aplicados: {formatFilterEntries(supported)}</span> : <span>Sin filtros URL aplicados.</span>}
-      {ignored.length > 0 ? <span>Ignorados: {formatFilterEntries(ignored)}</span> : null}
+      {supported.length > 0 ? (
+        <span>Aplicados desde la URL: {formatFilterEntries(supported)}</span>
+      ) : (
+        <span>Sin filtros de producto aplicados desde la URL.</span>
+      )}
+      {applicationControlled.length > 0 ? (
+        <span>Controlados por la aplicacion: {formatCatalogApiParams(applicationControlled)}</span>
+      ) : null}
+      {ignored.length > 0 ? <span>Sin efecto desde la URL: {formatFilterEntries(ignored)}</span> : null}
       {unsupported.length > 0 ? <strong>Bloquean: {formatFilterEntries(unsupported)}</strong> : null}
     </div>
   );
+}
+
+function formatCatalogApiParams(entries: ReadonlyArray<readonly [string, string | number]>): string {
+  return entries.map(([key, value]) => `${key}=${value}`).join(' · ');
 }
 
 function formatFilterEntries(entries: Array<[string, string[]]>): string {

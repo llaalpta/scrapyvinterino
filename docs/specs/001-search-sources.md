@@ -53,6 +53,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - Non-empty `search_by_image_uuid` or `search_by_image_id` values are rejected because image-search filters are not translated to the fast catalog API.
 - Any other query parameter is rejected with a clear validation error before saving.
 - URL validation must not call Vinted and must not trigger scraping.
+- The PWA compatibility summary separates product filters applied from the URL, the effective application-controlled `order=newest_first` and `page=1`, URL parameters with no runtime effect, and unsupported parameters that block execution.
 
 ## Identity Rules
 
