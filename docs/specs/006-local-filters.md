@@ -12,7 +12,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 - Fetch item detail for every Redis-new monitor candidate before filter evaluation and opportunity creation.
 - Create opportunities for monitor candidates unless a configured exclusion filter discards them.
 - Create opportunities even when no local filters are configured, marked as `passed_without_filters`.
-- Do not create opportunities when detail cannot be fetched or parsed; record the candidate as pending and retry it without marking it seen.
+- Do not create opportunities when detail cannot be fetched or parsed. Retry an ordinary failure once after two seconds in the same run; if it still fails, record pending diagnostics and mark the candidate seen without deferred work.
 - Create an opportunity when the required public detail is complete even if public availability is reserved, hidden, processing, closed, shipping-unavailable, or otherwise not currently buyable; persist the state and reason codes honestly.
 - Prevent duplicate opportunities for the same item within the same monitor.
 - Allow an item known from another monitor to become an opportunity if this monitor sees it.
@@ -51,7 +51,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 - If blacklist terms match, the item is marked discarded and no opportunity is created.
 - Discarded items are not persisted as `items`; the run stores only aggregate discarded counters.
 - If no filters are configured, an opportunity is created with evaluation status `passed_without_filters`.
-- If detail is unavailable or not parseable, no item or opportunity is persisted, the run counts the candidate as pending, and Redis retains it for the configured retry schedule.
+- If detail is unavailable or not parseable after the immediate retry, no item or opportunity is persisted, the run counts the candidate as pending, and Redis stores only terminal seen state.
 - Public availability is informational and never authorizes an authenticated action. A future purchase must revalidate price, currency, availability, shipping, payment, and user confirmation against the authenticated session.
 - Public availability never acts as an exclusion rule; non-buyable and unknown states may create opportunities and must be represented honestly.
 - Opportunity creation is idempotent for monitor + item in the monitor flow.
@@ -64,7 +64,7 @@ Create monitor-scoped opportunities from public Vinted monitors while applying o
 - Unit tests proving terms in title, brand, size, status, seller, color, category and badges do not discard when absent from the description.
 - Run test with no filters creating `passed_without_filters`.
 - Run test with detail blacklist discarding an item.
-- Run test with detail failure creating no item or opportunity, recording a pending outcome and preserving a Redis retry without marking the item seen.
+- Run test with two detail failures creating no item or opportunity, recording a pending outcome and marking the item seen without Redis retry state.
 - Run the same item twice in the same monitor/policy and confirm no duplicate opportunity or repeated filter work.
 - Run an existing global item in a different monitor and confirm a new monitor opportunity can be created.
 - Run a matching blacklist fixture and confirm no `items` row is created for the discarded candidate.

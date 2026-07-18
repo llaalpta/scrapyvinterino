@@ -36,6 +36,7 @@ from vinted_monitor.providers.vinted_catalog import (
     DetailBatchResult,
     DetailFetchOutcome,
     PreparedCatalogSession,
+    VintedCatalogSessionContextError,
     VintedItemDetailHTTPError,
     extract_vinted_item_id,
 )
@@ -68,7 +69,6 @@ from vinted_monitor.services.scheduler_liveness import SchedulerWorkerAvailabili
 from vinted_monitor.services.search_sources import archive_source
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
-    DetailRetryRecord,
     SeenCacheUnavailableError,
 )
 from vinted_monitor.services.task_queue import TaskQueueError
@@ -88,7 +88,6 @@ class FakeSeenCache:
         self.seen = set(initially_seen or set())
         self.processing: set[str] = set()
         self.marked_seen: list[str] = []
-        self.detail_retries: dict[str, DetailRetryRecord] = {}
         self.baseline_ready = baseline_ready
         self.marked_baseline: list[tuple[int, str]] = []
 
@@ -101,32 +100,9 @@ class FakeSeenCache:
         claimed = {
             item_id
             for item_id in vinted_item_ids
-            if item_id not in self.seen and item_id not in self.processing and item_id not in self.detail_retries
+            if item_id not in self.seen and item_id not in self.processing
         }
         self.processing.update(claimed)
-        return claimed
-
-    def claim_unseen_with_recovery(
-        self,
-        monitor_id: int,
-        policy_hash: str,
-        candidates: list[CatalogItemCandidate],
-    ) -> set[str]:
-        claimed = self.claim_unseen(
-            monitor_id,
-            policy_hash,
-            [candidate.vinted_item_id for candidate in candidates],
-        )
-        now = datetime.now(UTC)
-        self.stage_candidate_retries(
-            monitor_id,
-            policy_hash,
-            tuple(
-                DetailRetryRecord(candidate, 0, now, "detail_claim_recovery")
-                for candidate in candidates
-                if candidate.vinted_item_id in claimed
-            ),
-        )
         return claimed
 
     def mark_seen(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
@@ -134,41 +110,9 @@ class FakeSeenCache:
         self.seen.update(vinted_item_ids)
         self.marked_seen.extend(vinted_item_ids)
         self.processing.difference_update(vinted_item_ids)
-        for item_id in vinted_item_ids:
-            self.detail_retries.pop(item_id, None)
 
     def release_processing(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
         self.processing.difference_update(vinted_item_ids)
-
-    def claim_due_detail_retries(
-        self,
-        monitor_id: int,
-        policy_hash: str,
-        *,
-        due_at: datetime,
-        limit: int,
-    ) -> list[DetailRetryRecord]:
-        self.require_available()
-        due = sorted(
-            (
-                retry
-                for item_id, retry in self.detail_retries.items()
-                if retry.next_attempt_at <= due_at and item_id not in self.processing and item_id not in self.seen
-            ),
-            key=lambda retry: retry.next_attempt_at,
-        )[:limit]
-        self.processing.update(retry.candidate.vinted_item_id for retry in due)
-        return due
-
-    def stage_candidate_retries(
-        self,
-        monitor_id: int,
-        policy_hash: str,
-        retries: tuple[DetailRetryRecord, ...],
-    ) -> None:
-        self.require_available()
-        for retry in retries:
-            self.detail_retries[retry.candidate.vinted_item_id] = retry
 
     def finalize_candidate_states(
         self,
@@ -178,10 +122,6 @@ class FakeSeenCache:
     ) -> None:
         self.require_available()
         self.mark_seen(monitor_id, policy_hash, list(update.terminal_ids))
-        for retry in update.retries:
-            item_id = retry.candidate.vinted_item_id
-            self.detail_retries[item_id] = retry
-            self.processing.discard(item_id)
 
     def has_baseline(self, monitor_id: int, policy_hash: str) -> bool:
         self.require_available()
@@ -3141,7 +3081,10 @@ def test_only_description_filters_and_optional_decision_data_do_not_block_opport
         assert filter_event.details["match_count"] == 0
 
 
-def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) -> None:
+def test_detail_failure_retries_once_in_run_then_closes_candidate(
+    source_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with SessionLocal() as db:
         source = db.get(SearchSource, source_id)
         assert source is not None
@@ -3149,6 +3092,8 @@ def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) ->
         db.commit()
 
     cache = FakeSeenCache()
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("vinted_monitor.services.runs.time.sleep", sleep_calls.append)
     with SessionLocal() as db:
         provider = FakeFailingDetailProvider(item_count=1)
         run = execute_monitor_run(
@@ -3168,56 +3113,61 @@ def test_detail_failure_skips_opportunity_with_redacted_error(source_id: int) ->
         assert run.items_filter_pending == 1
         assert opportunity is None
         assert item is None
-        assert provider.detail_calls == ["pytest-run-item-0"]
+        assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-0"]
+        assert sleep_calls == [2.0]
         assert error_event is not None
         assert "session-secret" not in (error_event.message or "")
-        assert "pytest-run-item-0" not in cache.seen
-        assert cache.detail_retries["pytest-run-item-0"].attempt_count == 1
-        assert cache.detail_retries["pytest-run-item-0"].failure_kind == "detail_transport_or_parser_error"
+        assert error_event.details["attempt"] == 2
+        assert error_event.details["retry_exhausted"] is True
+        assert "pytest-run-item-0" in cache.seen
+        assert cache.processing == set()
 
 
-def test_due_detail_retry_creates_opportunity_after_item_leaves_catalog_window(source_id: int) -> None:
+def test_detail_retry_can_create_opportunity_in_the_same_run(
+    source_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailOnceProvider(FakeSuccessProvider):
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            if not self.detail_calls:
+                self.detail_calls.append(candidate.vinted_item_id)
+                raise RuntimeError("temporary detail failure")
+            return super().fetch_detail(candidate, referer_url=referer_url)
+
     cache = FakeSeenCache()
-    failing_provider = FakeFailingDetailProvider(item_count=1)
+    provider = FailOnceProvider(item_count=1)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("vinted_monitor.services.runs.time.sleep", sleep_calls.append)
 
     with SessionLocal() as db:
-        first_run = execute_monitor_run(
+        run = execute_monitor_run(
             db,
             source_id,
-            provider=failing_provider,
+            provider=provider,
             seen_cache=cache,
             egress=_test_direct_egress(),
-        )
-
-    queued = cache.detail_retries["pytest-run-item-0"]
-    cache.detail_retries["pytest-run-item-0"] = replace(
-        queued,
-        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
-    )
-    recovery_provider = FakeSuccessProvider(item_count=0)
-
-    with SessionLocal() as db:
-        second_run = execute_monitor_run(
-            db,
-            source_id,
-            provider=recovery_provider,
-            seen_cache=cache,
-            egress=_test_direct_egress(),
-            require_active=False,
         )
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
+        retry_event = db.scalar(
+            select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "detail_retry_scheduled")
+        )
 
-        assert first_run.items_filter_pending == 1
-        assert second_run.items_found == 0
-        assert second_run.items_new == 0
-        assert second_run.opportunities_created == 1
+        assert run.items_filter_pending == 0
+        assert run.opportunities_created == 1
         assert opportunity is not None
-        assert recovery_provider.detail_calls == ["pytest-run-item-0"]
+        assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-0"]
+        assert sleep_calls == [2.0]
+        assert retry_event is not None
+        assert retry_event.details["delay_seconds"] == 2.0
         assert "pytest-run-item-0" in cache.seen
-        assert "pytest-run-item-0" not in cache.detail_retries
 
 
-def test_detail_budget_defers_candidate_without_consuming_attempt(
+def test_detail_budget_closes_candidate_without_deferred_work(
     source_id: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3246,44 +3196,11 @@ def test_detail_budget_defers_candidate_without_consuming_attempt(
     assert run.items_filter_pending == 1
     assert provider.detail_calls == ["pytest-run-item-0"]
     assert "pytest-run-item-0" in cache.seen
-    assert cache.detail_retries["pytest-run-item-1"].attempt_count == 0
-    assert cache.detail_retries["pytest-run-item-1"].failure_kind == "detail_budget_deferred"
+    assert "pytest-run-item-1" in cache.seen
+    assert cache.processing == set()
 
 
-def test_third_detail_failure_exhausts_retry_and_marks_candidate_seen(source_id: int) -> None:
-    cache = FakeSeenCache()
-    candidate = FakeSuccessProvider(item_count=1).search(SimpleNamespace(url="https://www.vinted.es/catalog")).items[0]
-    cache.detail_retries[candidate.vinted_item_id] = DetailRetryRecord(
-        candidate=candidate,
-        attempt_count=2,
-        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
-        failure_kind="detail_timeout",
-    )
-
-    with SessionLocal() as db:
-        run = execute_monitor_run(
-            db,
-            source_id,
-            provider=FakeFailingDetailProvider(item_count=0),
-            seen_cache=cache,
-            egress=_test_direct_egress(),
-        )
-        exhausted_event = db.scalar(
-            select(RunEvent).where(
-                RunEvent.run_id == run.id,
-                RunEvent.phase == "detail_retry_exhausted",
-            )
-        )
-
-        assert run.items_new == 0
-        assert run.items_filter_pending == 1
-        assert run.opportunities_created == 0
-        assert exhausted_event is not None
-        assert candidate.vinted_item_id in cache.seen
-        assert candidate.vinted_item_id not in cache.detail_retries
-
-
-def test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate(source_id: int) -> None:
+def test_datadome_mid_batch_rolls_back_and_discards_claimed_work(source_id: int) -> None:
     class MidBatchChallengeProvider(FakeSuccessProvider):
         def fetch_detail(
             self,
@@ -3318,11 +3235,44 @@ def test_datadome_mid_batch_rolls_back_and_queues_every_claimed_candidate(source
     assert run.status == FAILED
     assert (run.runtime_metadata or {}).get("failure_kind") == "datadome_challenge"
     assert provider.detail_calls == ["pytest-run-item-0", "pytest-run-item-1"]
-    assert set(cache.detail_retries) == {"pytest-run-item-0", "pytest-run-item-1", "pytest-run-item-2"}
-    assert cache.detail_retries["pytest-run-item-0"].attempt_count == 0
-    assert cache.detail_retries["pytest-run-item-1"].attempt_count == 1
-    assert cache.detail_retries["pytest-run-item-2"].attempt_count == 0
     assert cache.seen == set()
+    assert cache.processing == set()
+
+
+def test_detail_session_context_failure_is_fail_stop_without_retry(
+    source_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InvalidSessionProvider(FakeSuccessProvider):
+        def fetch_detail(
+            self,
+            candidate: CatalogItemCandidate,
+            *,
+            referer_url: str | None = None,
+        ) -> CatalogItemDetail:
+            self.detail_calls.append(candidate.vinted_item_id)
+            raise VintedCatalogSessionContextError("prepared detail context became invalid")
+
+    cache = FakeSeenCache()
+    provider = InvalidSessionProvider(item_count=1)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("vinted_monitor.services.runs.time.sleep", sleep_calls.append)
+
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=provider,
+            seen_cache=cache,
+            egress=_test_direct_egress(),
+        )
+
+    assert run.status == FAILED
+    assert (run.runtime_metadata or {}).get("failure_kind") == "catalog_session_context_invalid"
+    assert provider.detail_calls == ["pytest-run-item-0"]
+    assert sleep_calls == []
+    assert cache.seen == set()
+    assert cache.processing == set()
 
 
 def test_observed_empty_description_is_valid_detail(source_id: int) -> None:
@@ -3394,10 +3344,14 @@ def test_missing_required_detail_is_terminal_without_opportunity(source_id: int)
         assert incomplete_event is not None
         assert incomplete_event.details["missing_required"] == ["description"]
         assert "pytest-run-item-0" in cache.seen
-        assert cache.detail_retries == {}
 
 
-def test_gone_detail_is_terminal_without_retry(source_id: int) -> None:
+@pytest.mark.parametrize("status_code", [404, 410])
+def test_gone_detail_is_terminal_without_retry(
+    source_id: int,
+    status_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class GoneDetailProvider(FakeSuccessProvider):
         def fetch_detail(
             self,
@@ -3406,22 +3360,33 @@ def test_gone_detail_is_terminal_without_retry(source_id: int) -> None:
             referer_url: str | None = None,
         ) -> CatalogItemDetail:
             self.detail_calls.append(candidate.vinted_item_id)
-            raise VintedItemDetailHTTPError(candidate.vinted_item_id, 410)
+            raise VintedItemDetailHTTPError(candidate.vinted_item_id, status_code)
 
     cache = FakeSeenCache()
+    provider = GoneDetailProvider(item_count=1)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("vinted_monitor.services.runs.time.sleep", sleep_calls.append)
     with SessionLocal() as db:
         run = execute_monitor_run(
             db,
             source_id,
-            provider=GoneDetailProvider(item_count=1),
+            provider=provider,
             seen_cache=cache,
             egress=_test_direct_egress(),
+        )
+        retry_event = db.scalar(
+            select(RunEvent).where(
+                RunEvent.run_id == run.id,
+                RunEvent.phase == "detail_retry_scheduled",
+            )
         )
 
         assert run.items_filter_pending == 1
         assert run.opportunities_created == 0
+        assert provider.detail_calls == ["pytest-run-item-0"]
+        assert sleep_calls == []
+        assert retry_event is None
         assert "pytest-run-item-0" in cache.seen
-        assert cache.detail_retries == {}
 
 
 def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:

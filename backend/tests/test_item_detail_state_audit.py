@@ -42,7 +42,6 @@ from vinted_monitor.services.runs import (
 from vinted_monitor.services.scheduler import RunEgress
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
-    DetailRetryRecord,
     RedisSeenCache,
     SeenCacheOwnershipError,
     SeenCacheUnavailableError,
@@ -60,15 +59,11 @@ class AuditSeenCache:
     def __init__(
         self,
         *,
-        due_retries: list[DetailRetryRecord] | None = None,
         finalize_failures: int = 0,
         release_failures: int = 0,
     ) -> None:
         self.processing: set[str] = set()
         self.seen: set[str] = set()
-        self.detail_retries = {
-            retry.candidate.vinted_item_id: retry for retry in (due_retries or [])
-        }
         self.finalize_failures = finalize_failures
         self.release_failures = release_failures
         self.finalize_calls: list[DetailCandidateStateUpdate] = []
@@ -83,53 +78,13 @@ class AuditSeenCache:
         return None
 
     def claim_unseen(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> set[str]:
-        pending_ids = set(self.detail_retries)
         claimed = {
             item_id
             for item_id in vinted_item_ids
-            if item_id not in self.seen and item_id not in self.processing and item_id not in pending_ids
+            if item_id not in self.seen and item_id not in self.processing
         }
         self.processing.update(claimed)
         return claimed
-
-    def claim_unseen_with_recovery(
-        self,
-        monitor_id: int,
-        policy_hash: str,
-        candidates: list[CatalogItemCandidate],
-    ) -> set[str]:
-        claimed = self.claim_unseen(
-            monitor_id,
-            policy_hash,
-            [candidate.vinted_item_id for candidate in candidates],
-        )
-        now = datetime.now(UTC)
-        self.stage_candidate_retries(
-            monitor_id,
-            policy_hash,
-            tuple(
-                DetailRetryRecord(candidate, 0, now, "detail_claim_recovery")
-                for candidate in candidates
-                if candidate.vinted_item_id in claimed
-            ),
-        )
-        return claimed
-
-    def claim_due_detail_retries(
-        self,
-        monitor_id: int,
-        policy_hash: str,
-        *,
-        due_at: datetime,
-        limit: int,
-    ) -> list[DetailRetryRecord]:
-        due = [
-            retry
-            for retry in self.detail_retries.values()
-            if retry.next_attempt_at <= due_at and retry.candidate.vinted_item_id not in self.processing
-        ][:limit]
-        self.processing.update(retry.candidate.vinted_item_id for retry in due)
-        return due
 
     def mark_seen(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
         self.finalize_candidate_states(
@@ -137,15 +92,6 @@ class AuditSeenCache:
             policy_hash,
             DetailCandidateStateUpdate(terminal_ids=tuple(vinted_item_ids)),
         )
-
-    def stage_candidate_retries(
-        self,
-        monitor_id: int,
-        policy_hash: str,
-        retries: tuple[DetailRetryRecord, ...],
-    ) -> None:
-        for retry in retries:
-            self.detail_retries[retry.candidate.vinted_item_id] = retry
 
     def finalize_candidate_states(
         self,
@@ -159,11 +105,6 @@ class AuditSeenCache:
             raise SeenCacheUnavailableError("transient finalize failure")
         for item_id in update.terminal_ids:
             self.seen.add(item_id)
-            self.detail_retries.pop(item_id, None)
-            self.processing.discard(item_id)
-        for retry in update.retries:
-            item_id = retry.candidate.vinted_item_id
-            self.detail_retries[item_id] = retry
             self.processing.discard(item_id)
 
     def release_processing(self, monitor_id: int, policy_hash: str, vinted_item_ids: list[str]) -> None:
@@ -236,8 +177,6 @@ class LockRedis:
 class AuditProvider:
     settings = SimpleNamespace(
         vinted_detail_max_candidates_per_run=5,
-        vinted_detail_max_attempts=3,
-        vinted_detail_retry_backoffs_seconds=(30, 120),
     )
 
     def __init__(self, *, item_count: int = 1, challenge_on: str | None = None) -> None:
@@ -424,8 +363,7 @@ def test_real_redis_owner_transition_survives_stale_release() -> None:
     client = _reachable_real_redis()
     monitor_id = 2_000_000_000
     policy_hash = f"audit-{uuid4().hex}"
-    candidate = _candidate(uuid4().hex)
-    item_id = candidate.vinted_item_id
+    item_id = _candidate(uuid4().hex).vinted_item_id
     first_worker = RedisSeenCache(client, 300, 30, 100)
     second_worker = RedisSeenCache(client, 300, 30, 100)
     processing_key = first_worker._processing_key(monitor_id, policy_hash, item_id)
@@ -434,26 +372,16 @@ def test_real_redis_owner_transition_survives_stale_release() -> None:
         processing_key,
         seen_key,
         first_worker._seen_index_key(monitor_id, policy_hash),
-        first_worker._detail_retry_key(monitor_id, policy_hash, item_id),
-        first_worker._detail_retry_index_key(monitor_id, policy_hash),
     )
 
     try:
-        assert first_worker.claim_unseen_with_recovery(monitor_id, policy_hash, [candidate]) == {item_id}
-        assert client.exists(first_worker._detail_retry_key(monitor_id, policy_hash, item_id)) == 1
+        assert first_worker.claim_unseen(monitor_id, policy_hash, [item_id]) == {item_id}
         client.delete(processing_key)
-        claimed_retries = second_worker.claim_due_detail_retries(
-            monitor_id,
-            policy_hash,
-            due_at=datetime.now(UTC),
-            limit=1,
-        )
-        assert [retry.candidate.vinted_item_id for retry in claimed_retries] == [item_id]
+        assert second_worker.claim_unseen(monitor_id, policy_hash, [item_id]) == {item_id}
 
         first_worker.release_processing(monitor_id, policy_hash, [item_id])
 
         assert client.get(processing_key) == second_worker.owner_token
-        assert client.exists(second_worker._detail_retry_key(monitor_id, policy_hash, item_id)) == 1
         second_worker.finalize_candidate_states(
             monitor_id,
             policy_hash,
@@ -470,32 +398,21 @@ def test_real_redis_stale_worker_cannot_finalize_another_workers_claim() -> None
     client = _reachable_real_redis()
     monitor_id = 2_000_000_001
     policy_hash = f"audit-{uuid4().hex}"
-    candidate = _candidate(uuid4().hex)
-    item_id = candidate.vinted_item_id
+    item_id = _candidate(uuid4().hex).vinted_item_id
     first_worker = RedisSeenCache(client, 300, 30, 100)
     second_worker = RedisSeenCache(client, 300, 30, 100)
     processing_key = first_worker._processing_key(monitor_id, policy_hash, item_id)
     seen_key = first_worker._seen_key(monitor_id, policy_hash, item_id)
-    retry_key = first_worker._detail_retry_key(monitor_id, policy_hash, item_id)
-    retry_index_key = first_worker._detail_retry_index_key(monitor_id, policy_hash)
     keys_to_clean = (
         processing_key,
         seen_key,
         first_worker._seen_index_key(monitor_id, policy_hash),
-        retry_key,
-        retry_index_key,
     )
 
     try:
-        assert first_worker.claim_unseen_with_recovery(monitor_id, policy_hash, [candidate]) == {item_id}
+        assert first_worker.claim_unseen(monitor_id, policy_hash, [item_id]) == {item_id}
         client.delete(processing_key)
-        claimed = second_worker.claim_due_detail_retries(
-            monitor_id,
-            policy_hash,
-            due_at=datetime.now(UTC),
-            limit=1,
-        )
-        assert [retry.candidate.vinted_item_id for retry in claimed] == [item_id]
+        assert second_worker.claim_unseen(monitor_id, policy_hash, [item_id]) == {item_id}
 
         with pytest.raises(SeenCacheOwnershipError, match="owned by another worker"):
             first_worker.finalize_candidate_states(
@@ -505,89 +422,9 @@ def test_real_redis_stale_worker_cannot_finalize_another_workers_claim() -> None
             )
 
         assert client.exists(seen_key) == 0
-        assert client.exists(retry_key) == 1
         assert client.get(processing_key) == second_worker.owner_token
-        assert item_id in client.zrange(retry_index_key, 0, -1)
     finally:
         client.delete(*keys_to_clean)
-        client.close()
-
-
-def test_real_redis_due_retry_claim_is_atomic_with_terminal_transition() -> None:
-    client = _reachable_real_redis()
-    monitor_id = 2_000_000_002
-    first_worker = RedisSeenCache(client, 300, 30, 100)
-    second_worker = RedisSeenCache(client, 300, 30, 100)
-
-    try:
-        for _ in range(20):
-            policy_hash = f"audit-{uuid4().hex}"
-            candidate = _candidate(uuid4().hex)
-            item_id = candidate.vinted_item_id
-            retry = DetailRetryRecord(
-                candidate=candidate,
-                attempt_count=1,
-                next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
-                failure_kind="detail_timeout",
-            )
-            first_worker.stage_candidate_retries(monitor_id, policy_hash, (retry,))
-            barrier = Barrier(2)
-
-            def finalize_terminal(
-                race_barrier: Barrier = barrier,
-                race_policy_hash: str = policy_hash,
-                race_item_id: str = item_id,
-            ) -> str:
-                race_barrier.wait(timeout=5)
-                try:
-                    first_worker.finalize_candidate_states(
-                        monitor_id,
-                        race_policy_hash,
-                        DetailCandidateStateUpdate(terminal_ids=(race_item_id,)),
-                    )
-                    return "terminal"
-                except SeenCacheOwnershipError:
-                    return "owned"
-
-            def claim_retry(
-                race_barrier: Barrier = barrier,
-                race_policy_hash: str = policy_hash,
-            ) -> list[DetailRetryRecord]:
-                race_barrier.wait(timeout=5)
-                return second_worker.claim_due_detail_retries(
-                    monitor_id,
-                    race_policy_hash,
-                    due_at=datetime.now(UTC),
-                    limit=1,
-                )
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                terminal_future = executor.submit(finalize_terminal)
-                claim_future = executor.submit(claim_retry)
-                terminal_outcome = terminal_future.result(timeout=5)
-                claimed = claim_future.result(timeout=5)
-
-            seen_key = first_worker._seen_key(monitor_id, policy_hash, item_id)
-            retry_key = first_worker._detail_retry_key(monitor_id, policy_hash, item_id)
-            processing_key = first_worker._processing_key(monitor_id, policy_hash, item_id)
-            if claimed:
-                assert terminal_outcome == "owned"
-                assert client.exists(seen_key) == 0
-                assert client.exists(retry_key) == 1
-                assert client.get(processing_key) == second_worker.owner_token
-            else:
-                assert terminal_outcome == "terminal"
-                assert client.exists(seen_key) == 1
-                assert client.exists(retry_key) == 0
-                assert client.exists(processing_key) == 0
-            client.delete(
-                seen_key,
-                retry_key,
-                processing_key,
-                first_worker._seen_index_key(monitor_id, policy_hash),
-                first_worker._detail_retry_index_key(monitor_id, policy_hash),
-            )
-    finally:
         client.close()
 
 
@@ -613,15 +450,10 @@ def test_finalize_failure_keeps_sql_and_terminal_status_consistent(source_id: in
         )
 
     assert persisted is not None
-    assert persisted.status in {SUCCESS, FAILED}
-    if persisted.status == SUCCESS:
-        assert opportunity_count == 1
-        assert phases.count("run_succeeded") == 1
-        assert "run_failed" not in phases
-    else:
-        assert opportunity_count == 0
-        assert phases.count("run_failed") == 1
-        assert "run_succeeded" not in phases
+    assert persisted.status == SUCCESS
+    assert opportunity_count == 1
+    assert phases.count("run_succeeded") == 1
+    assert "run_failed" not in phases
     assert cache.processing == set()
 
 
@@ -710,7 +542,7 @@ def test_persistent_finalize_failure_converges_before_next_catalog_run(
     assert opportunity_count == 1
     assert "run_succeeded" not in pending_phases
     assert "run_failed" not in pending_phases
-    assert item_id in cache.detail_retries
+    assert item_id in cache.processing
 
     with audit_session_factory() as db:
         next_run = execute_monitor_run(
@@ -737,16 +569,15 @@ def test_persistent_finalize_failure_converges_before_next_catalog_run(
     assert "redis_candidate_state_reconciled" in reconciled_phases
     assert final_opportunity_count == 1
     assert item_id in cache.seen
-    assert item_id not in cache.detail_retries
     assert cache.processing == set()
 
 
-def test_transient_failure_while_preserving_challenge_keeps_terminal_run_and_retry(
+def test_transient_release_failure_after_challenge_keeps_terminal_run_and_discards_work(
     source_id: int,
     audit_session_factory,
 ) -> None:
     item_id = f"{PREFIX}-0"
-    cache = AuditSeenCache(finalize_failures=1)
+    cache = AuditSeenCache(release_failures=1)
     provider = AuditProvider(challenge_on=item_id)
 
     with audit_session_factory() as db:
@@ -767,9 +598,8 @@ def test_transient_failure_while_preserving_challenge_keeps_terminal_run_and_ret
     assert returned_run.status == FAILED
     assert run.status == FAILED
     assert phases.count("run_failed") == 1
-    assert item_id in cache.detail_retries
-    assert cache.detail_retries[item_id].attempt_count == 1
-    assert cache.detail_retries[item_id].failure_kind == "detail_antibot_challenge"
+    assert item_id not in cache.seen
+    assert "detail_candidate_batch_closed" in phases
     assert cache.processing == set()
 
 
@@ -811,7 +641,7 @@ def test_owned_provider_close_failure_is_best_effort() -> None:
     _close_owned_provider(provider, owned_provider=True)
 
 
-def test_process_crash_immediately_after_claim_has_durable_candidate_recovery(
+def test_process_crash_after_claim_leaves_only_the_short_processing_lock(
     source_id: int,
     audit_session_factory,
     monkeypatch: pytest.MonkeyPatch,
@@ -836,39 +666,8 @@ def test_process_crash_immediately_after_claim_has_durable_candidate_recovery(
             egress=_direct_egress(),
         )
 
-    assert item_id in cache.detail_retries
-    assert cache.detail_retries[item_id].attempt_count == 0
-    assert cache.detail_retries[item_id].failure_kind == "detail_claim_recovery"
-
-
-def test_challenge_attempt_counter_only_advances_for_failing_candidate(source_id: int, audit_session_factory) -> None:
-    first = _candidate("retry-first")
-    failing = _candidate("retry-failing")
-    due_at = datetime.now(UTC) - timedelta(seconds=1)
-    cache = AuditSeenCache(
-        due_retries=[
-            DetailRetryRecord(first, attempt_count=1, next_attempt_at=due_at, failure_kind="detail_timeout"),
-            DetailRetryRecord(failing, attempt_count=1, next_attempt_at=due_at, failure_kind="detail_timeout"),
-        ]
-    )
-    provider = AuditProvider(item_count=0, challenge_on=failing.vinted_item_id)
-
-    with audit_session_factory() as db:
-        run = execute_monitor_run(
-            db,
-            source_id,
-            provider=provider,
-            seen_cache=cache,
-            egress=_direct_egress(),
-        )
-
-    assert run.status == FAILED
-    assert provider.detail_calls == [first.vinted_item_id, failing.vinted_item_id]
-    assert cache.detail_retries[first.vinted_item_id].attempt_count == 1
-    assert cache.detail_retries[first.vinted_item_id].failure_kind == "detail_run_aborted_before_commit"
-    assert cache.detail_retries[failing.vinted_item_id].attempt_count == 2
-    assert cache.detail_retries[failing.vinted_item_id].failure_kind == "detail_antibot_challenge"
-    assert cache.processing == set()
+    assert item_id in cache.processing
+    assert item_id not in cache.seen
 
 
 def test_stale_running_run_is_closed_before_monitor_continues(source_id: int, audit_session_factory) -> None:

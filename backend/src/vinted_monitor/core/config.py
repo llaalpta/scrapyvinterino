@@ -60,8 +60,6 @@ class Settings(BaseSettings):
     vinted_detail_early_filter_mode: Literal["off", "shadow", "enforced"] = "enforced"
     vinted_detail_head_max_bytes: int = Field(default=131072, ge=16384, le=1048576)
     vinted_detail_required_fields: str = "title,description,brand,size,status,price_amount,currency,photos"
-    vinted_detail_max_attempts: int = Field(default=3, ge=1, le=10)
-    vinted_detail_retry_backoffs_seconds: tuple[int, ...] = (30, 120)
 
     # Worker consumer (Producer-Consumer pattern)
     worker_consumer_count: int = Field(default=2, ge=1, le=32)
@@ -128,7 +126,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def validate_detail_retry_config(self) -> "Settings":
+    def validate_detail_required_fields(self) -> "Settings":
         required_fields = {
             field.strip() for field in self.vinted_detail_required_fields.split(",") if field.strip()
         }
@@ -140,10 +138,6 @@ class Settings(BaseSettings):
                 "VINTED_DETAIL_REQUIRED_FIELDS contains unsupported fields: "
                 + ", ".join(sorted(unknown_fields))
             )
-        if len(self.vinted_detail_retry_backoffs_seconds) != self.vinted_detail_max_attempts - 1:
-            raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS must contain one delay per retry")
-        if any(delay < 0 for delay in self.vinted_detail_retry_backoffs_seconds):
-            raise ValueError("VINTED_DETAIL_RETRY_BACKOFFS_SECONDS cannot contain negative delays")
         return self
 
     @model_validator(mode="after")

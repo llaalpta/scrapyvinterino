@@ -5,7 +5,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -70,7 +70,6 @@ from vinted_monitor.services.search_sources import (
 )
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
-    DetailRetryRecord,
     SeenCache,
     SeenCacheUnavailableError,
     deserialize_candidate_state_update,
@@ -110,13 +109,12 @@ DEFAULT_DETAIL_REQUIRED_FIELDS = frozenset(
     {"title", "description", "brand", "size", "status", "price_amount", "currency", "photos"}
 )
 STALE_RUN_AFTER = timedelta(minutes=30)
+DETAIL_RETRY_DELAY_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
 class DetailWorkItem:
     candidate: CatalogItemCandidate
-    attempt_count: int = 0
-    origin: Literal["catalog", "retry"] = "catalog"
 
 
 @dataclass(frozen=True)
@@ -126,7 +124,6 @@ class MonitorEvaluationResult:
     pending: int
     opportunities_created: int
     terminal_ids: tuple[str, ...]
-    retries: tuple[DetailRetryRecord, ...]
 
 
 class ManualRunProvider(Protocol):
@@ -1360,45 +1357,22 @@ def execute_monitor_run(
             },
         )
         max_detail_candidates = _detail_candidate_limit(run, run_provider)
-        due_retries = cache.claim_due_detail_retries(
+        catalog_claimed_ids = cache.claim_unseen(
             source.id,
             policy_hash,
-            due_at=datetime.now(UTC),
-            limit=max_detail_candidates,
-        )
-        if due_retries:
-            record_run_event(
-                db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="detail_retry_claimed",
-                proxy_profile_id=proxy_profile_id,
-                message="Due detail retries claimed before current catalog candidates",
-                details={
-                    "retry_count": len(due_retries),
-                    "sample_vinted_item_ids": [retry.candidate.vinted_item_id for retry in due_retries[:10]],
-                    "attempt_counts": [retry.attempt_count for retry in due_retries[:10]],
-                },
-            )
-        catalog_claimed_ids = cache.claim_unseen_with_recovery(
-            source.id,
-            policy_hash,
-            unique_candidates,
+            [candidate.vinted_item_id for candidate in unique_candidates],
         )
         monitor_new_candidates = [
             candidate for candidate in unique_candidates if candidate.vinted_item_id in catalog_claimed_ids
         ]
-        claimed_work_items = [
-            DetailWorkItem(candidate=retry.candidate, attempt_count=retry.attempt_count, origin="retry")
-            for retry in due_retries
-        ] + [DetailWorkItem(candidate=candidate) for candidate in monitor_new_candidates]
+        claimed_work_items = [DetailWorkItem(candidate=candidate) for candidate in monitor_new_candidates]
         claimed_ids = {work_item.candidate.vinted_item_id for work_item in claimed_work_items}
         if claimed_work_items:
             record_run_event(
                 db,
                 run_id=run.id,
                 source_id=source.id,
-                phase="detail_candidate_recovery_staged",
+                phase="detail_candidates_claimed",
                 proxy_profile_id=proxy_profile_id,
                 details={
                     "candidate_count": len(claimed_work_items),
@@ -1459,7 +1433,7 @@ def execute_monitor_run(
                 phase="candidate_seen_skipped",
                 level="debug",
                 proxy_profile_id=proxy_profile_id,
-                message="Catalog candidates already seen, processing, or queued for retry were skipped",
+                message="Catalog candidates already seen or processing were skipped",
                 details={
                     "seen_or_pending_count": len(unavailable_catalog_candidates),
                     "sample_vinted_item_ids": [
@@ -1480,7 +1454,6 @@ def execute_monitor_run(
                 "unique_candidate_count": len(unique_candidates),
                 "seen_hit_count": len(unique_candidates) - len(monitor_new_candidates),
                 "seen_miss_count": len(monitor_new_candidates),
-                "detail_retry_due_count": len(due_retries),
                 "policy_hash": policy_hash,
             },
         )
@@ -1494,10 +1467,7 @@ def execute_monitor_run(
             max_detail_candidates=max_detail_candidates,
         )
         _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
-        candidate_state_update = DetailCandidateStateUpdate(
-            terminal_ids=monitor_result.terminal_ids,
-            retries=monitor_result.retries,
-        )
+        candidate_state_update = DetailCandidateStateUpdate(terminal_ids=monitor_result.terminal_ids)
         run.status = FINALIZING
         run.finished_at = None
         run.items_found = len(result.items)
@@ -1524,7 +1494,6 @@ def execute_monitor_run(
             proxy_profile_id=proxy_profile_id,
             details={
                 "marked_seen_count": len(monitor_result.terminal_ids),
-                "retry_scheduled_count": len(monitor_result.retries),
                 "policy_hash": policy_hash,
             },
         )
@@ -1542,11 +1511,7 @@ def execute_monitor_run(
             proxy_profile_id=proxy_profile_id,
             details={
                 "marked_seen_count": len(monitor_result.terminal_ids),
-                "retry_scheduled_count": len(monitor_result.retries),
                 "sample_seen_vinted_item_ids": list(monitor_result.terminal_ids[:10]),
-                "sample_retry_vinted_item_ids": [
-                    retry.candidate.vinted_item_id for retry in monitor_result.retries[:10]
-                ],
                 "policy_hash": policy_hash,
             },
         )
@@ -1616,44 +1581,46 @@ def execute_monitor_run(
         )
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
-    except (DataDomeChallengeError, VintedCatalogChallengeError) as exc:
+    except (
+        DataDomeChallengeError,
+        VintedCatalogChallengeError,
+        VintedCatalogRateLimitError,
+        VintedCatalogSessionContextError,
+        VintedCatalogSessionError,
+    ) as exc:
         db.rollback()
         run = db.get(Run, run.id)
         if run is None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
         try:
-            challenge_kind = "cloudflare_challenge" if isinstance(exc, VintedCatalogChallengeError) else "datadome_challenge"
-            failed_run = _record_failed_run(db, run, source, exc, kind=challenge_kind, penalize_proxy=False)
-            aborted_states = _aborted_detail_candidate_states(
-                claimed_work_items,
-                failing_item_id=getattr(exc, "detail_candidate_id", None),
-            )
-            preservation_error: SeenCacheUnavailableError | None = None
-            for _ in range(2):
-                try:
-                    cache.finalize_candidate_states(source.id, policy_hash, aborted_states)
-                    preservation_error = None
-                    break
-                except SeenCacheUnavailableError as retry_exc:
-                    preservation_error = retry_exc
+            failure_kind = _catalog_terminal_failure_kind(exc)
+            failed_run = _record_failed_run(db, run, source, exc, kind=failure_kind, penalize_proxy=False)
+            release_error: SeenCacheUnavailableError | None = None
+            if claimed_ids:
+                for _ in range(2):
+                    try:
+                        cache.release_processing(source.id, policy_hash, list(claimed_ids))
+                        release_error = None
+                        break
+                    except SeenCacheUnavailableError as retry_exc:
+                        release_error = retry_exc
             record_run_event(
                 db,
                 run_id=run.id,
                 source_id=source.id,
-                phase="detail_retry_batch_preserved" if preservation_error is None else "detail_retry_preservation_pending",
-                level="warning" if preservation_error is None else "error",
+                phase="detail_candidate_batch_closed" if release_error is None else "detail_candidate_lock_expiry_pending",
+                level="warning" if release_error is None else "error",
                 proxy_profile_id=proxy_profile_id,
                 message=(
-                    "Claimed candidates preserved after anti-bot challenge rolled back the run"
-                    if preservation_error is None
-                    else "Staged candidate recovery remains pending after anti-bot challenge"
+                    "Claimed candidate work was discarded after the terminal provider failure stopped the session"
+                    if release_error is None
+                    else "Claimed candidate locks will expire after the terminal provider failure stopped the session"
                 ),
                 details={
-                    "challenge_kind": challenge_kind,
-                    "retry_scheduled_count": len(aborted_states.retries),
-                    "retry_exhausted_count": len(aborted_states.terminal_ids),
-                    "recovery_pending": preservation_error is not None,
+                    "failure_kind": failure_kind,
+                    "discarded_candidate_count": len(claimed_ids),
+                    "lock_expiry_pending": release_error is not None,
                 },
             )
             db.commit()
@@ -2281,7 +2248,6 @@ def _apply_pending_candidate_state_transition(
         proxy_profile_id=(run.runtime_metadata or {}).get("proxy_profile_id"),
         details={
             "marked_seen_count": len(update.terminal_ids),
-            "retry_scheduled_count": len(update.retries),
             "policy_hash": policy_hash,
             "reconciled": reconciled,
         },
@@ -2771,44 +2737,27 @@ def _detail_failure_kind(exc: Exception) -> str:
     return "detail_transport_or_parser_error"
 
 
-def _detail_retry_delay(backoffs: tuple[int, ...], consumed_attempts: int) -> int:
-    if not backoffs:
-        return 0
-    index = min(max(consumed_attempts - 1, 0), len(backoffs) - 1)
-    return max(int(backoffs[index]), 0)
-
-
-def _aborted_detail_candidate_states(
-    work_items: list[DetailWorkItem],
+def _fetch_monitor_candidate_detail(
+    provider: ManualRunProvider,
+    candidate: CatalogItemCandidate,
     *,
-    failing_item_id: str | None,
-) -> DetailCandidateStateUpdate:
-    settings = get_settings()
-    now = datetime.now(UTC)
-    terminal_ids: list[str] = []
-    retries: list[DetailRetryRecord] = []
-    for work_item in work_items:
-        candidate = work_item.candidate
-        if candidate.vinted_item_id == failing_item_id:
-            attempt_count = work_item.attempt_count + 1
-            if attempt_count >= settings.vinted_detail_max_attempts:
-                terminal_ids.append(candidate.vinted_item_id)
-                continue
-            delay = _detail_retry_delay(settings.vinted_detail_retry_backoffs_seconds, attempt_count)
-            failure_kind = "detail_antibot_challenge"
-        else:
-            attempt_count = work_item.attempt_count
-            delay = 0
-            failure_kind = "detail_run_aborted_before_commit"
-        retries.append(
-            DetailRetryRecord(
-                candidate=candidate,
-                attempt_count=attempt_count,
-                next_attempt_at=now + timedelta(seconds=delay),
-                failure_kind=failure_kind,
-            )
+    referer_url: str,
+    early_filter_terms: tuple[str, ...],
+    prefetched_outcome: DetailFetchOutcome | None,
+) -> CatalogItemDetail:
+    if prefetched_outcome is not None:
+        if prefetched_outcome.error is not None:
+            raise prefetched_outcome.error
+        if prefetched_outcome.detail is None:
+            raise ValueError("Prefetched detail outcome omitted both detail and error")
+        return prefetched_outcome.detail
+    if isinstance(provider, CurlCffiVintedCatalogProvider):
+        return provider.fetch_detail(
+            candidate,
+            referer_url=referer_url,
+            early_filter_terms=early_filter_terms,
         )
-    return DetailCandidateStateUpdate(terminal_ids=tuple(terminal_ids), retries=tuple(retries))
+    return provider.fetch_detail(candidate, referer_url=referer_url)
 
 
 def _evaluate_monitor_candidates(
@@ -2822,14 +2771,13 @@ def _evaluate_monitor_candidates(
     max_detail_candidates: int | None = None,
 ) -> MonitorEvaluationResult:
     if not work_items:
-        return MonitorEvaluationResult(0, 0, 0, 0, (), ())
+        return MonitorEvaluationResult(0, 0, 0, 0, ())
 
     passed = 0
     discarded = 0
     pending = 0
     opportunities_created = 0
     terminal_ids: list[str] = []
-    retry_records: list[DetailRetryRecord] = []
     filter_duration_total_ms = 0.0
     persistence_duration_total_ms = 0.0
     resolved_detail_limit = (
@@ -2837,10 +2785,6 @@ def _evaluate_monitor_candidates(
     )
     settings = get_settings()
     provider_settings = getattr(provider, "settings", settings)
-    max_attempts = int(getattr(provider_settings, "vinted_detail_max_attempts", settings.vinted_detail_max_attempts))
-    retry_backoffs = tuple(
-        getattr(provider_settings, "vinted_detail_retry_backoffs_seconds", settings.vinted_detail_retry_backoffs_seconds)
-    )
     required_fields = _detail_required_fields(provider_settings, settings)
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
     detail_attempts = 0
@@ -2878,7 +2822,6 @@ def _evaluate_monitor_candidates(
 
     for work_item in work_items:
         candidate = work_item.candidate
-        attempt_number = work_item.attempt_count + 1
         record_run_event(
             db,
             run_id=run.id,
@@ -2895,8 +2838,6 @@ def _evaluate_monitor_candidates(
                 "brand": candidate.brand,
                 "size": candidate.size,
                 "filter_count": filter_snapshot_term_count(filters),
-                "origin": work_item.origin,
-                "previous_detail_attempts": work_item.attempt_count,
             },
         )
         transient_item = build_transient_catalog_item(candidate)
@@ -2917,239 +2858,224 @@ def _evaluate_monitor_candidates(
                 proxy_profile_id=proxy_profile_id,
                 details={
                     "vinted_item_id": candidate.vinted_item_id,
-                    "attempt": attempt_number,
                     "request_position": detail_attempts,
                     "max_detail_candidates": resolved_detail_limit,
                     "reason": "filters_configured" if filters else "opportunity_enrichment",
-                    "origin": work_item.origin,
                 },
             )
-            record_run_event(
-                db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="detail_fetch_joined" if prefetched_outcome is not None else "detail_fetch_start",
-                method="GET",
-                url=candidate.url,
-                proxy_profile_id=proxy_profile_id,
-                user_agent=None,
-                auth_mode="public_anonymous",
-                details={
-                    "vinted_item_id": candidate.vinted_item_id,
-                    "attempt": attempt_number,
-                    "referer_url": source.url,
-                    "origin": work_item.origin,
-                    "prefetched": prefetched_outcome is not None,
-                },
-            )
-            detail_started_at = time.perf_counter()
-            detail_duration_ms = prefetched_outcome.duration_ms if prefetched_outcome is not None else None
-            try:
-                if prefetched_outcome is not None:
-                    if prefetched_outcome.error is not None:
-                        raise prefetched_outcome.error
-                    detail = prefetched_outcome.detail
-                    if detail is None:
-                        raise ValueError("Prefetched detail outcome omitted both detail and error")
-                elif isinstance(provider, CurlCffiVintedCatalogProvider):
-                    detail = provider.fetch_detail(
+            for attempt_number in (1, 2):
+                attempt_prefetched_outcome = prefetched_outcome if attempt_number == 1 else None
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="detail_fetch_joined" if attempt_prefetched_outcome is not None else "detail_fetch_start",
+                    method="GET",
+                    url=candidate.url,
+                    proxy_profile_id=proxy_profile_id,
+                    user_agent=None,
+                    auth_mode="public_anonymous",
+                    details={
+                        "vinted_item_id": candidate.vinted_item_id,
+                        "attempt": attempt_number,
+                        "referer_url": source.url,
+                        "prefetched": attempt_prefetched_outcome is not None,
+                    },
+                )
+                detail_started_at = time.perf_counter()
+                detail_duration_ms = (
+                    attempt_prefetched_outcome.duration_ms if attempt_prefetched_outcome is not None else None
+                )
+                try:
+                    detail = _fetch_monitor_candidate_detail(
+                        provider,
                         candidate,
                         referer_url=source.url,
                         early_filter_terms=early_filter_terms,
+                        prefetched_outcome=attempt_prefetched_outcome,
                     )
-                else:
-                    detail = provider.fetch_detail(candidate, referer_url=source.url)
-                if detail.vinted_item_id != candidate.vinted_item_id:
-                    raise ValueError(
-                        f"Detail item id {detail.vinted_item_id} does not match requested item {candidate.vinted_item_id}"
+                    if detail.vinted_item_id != candidate.vinted_item_id:
+                        raise ValueError(
+                            f"Detail item id {detail.vinted_item_id} does not match requested item {candidate.vinted_item_id}"
+                        )
+                    detail_error = None
+                    apply_item_detail_data(transient_item, detail)
+                    missing_required = _missing_required_detail_fields(transient_item, required_fields)
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_fetch_success",
+                        method="GET",
+                        url=candidate.url,
+                        duration_ms=(
+                            detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                        ),
+                        proxy_profile_id=proxy_profile_id,
+                        user_agent=None,
+                        auth_mode="public_anonymous",
+                        details={
+                            "vinted_item_id": candidate.vinted_item_id,
+                            "attempt": attempt_number,
+                            "description_observed": detail.description is not None
+                            or "description" in detail.observed_fields,
+                            "photo_count": len(detail.photos),
+                            "has_total_price": detail.total_price_amount is not None,
+                            "availability_state": detail.availability_flags.get("state"),
+                            "missing_required": missing_required,
+                            "field_sources": detail.field_sources,
+                        },
                     )
-                apply_item_detail_data(transient_item, detail)
-                missing_required = _missing_required_detail_fields(transient_item, required_fields)
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_success",
-                    method="GET",
-                    url=candidate.url,
-                    duration_ms=(
-                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
-                    ),
-                    proxy_profile_id=proxy_profile_id,
-                    user_agent=None,
-                    auth_mode="public_anonymous",
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "attempt": attempt_number,
-                        "description_observed": detail.description is not None
-                        or "description" in detail.observed_fields,
-                        "photo_count": len(detail.photos),
-                        "has_total_price": detail.total_price_amount is not None,
-                        "availability_state": detail.availability_flags.get("state"),
-                        "missing_required": missing_required,
-                        "field_sources": detail.field_sources,
-                    },
-                )
-                if missing_required:
+                    if missing_required:
+                        pending += 1
+                        evaluation_status = SESSION_ITEM_DETAIL_ERROR
+                        terminal_ids.append(candidate.vinted_item_id)
+                        record_run_event(
+                            db,
+                            run_id=run.id,
+                            source_id=source.id,
+                            phase="detail_incomplete",
+                            level="warning",
+                            url=candidate.url,
+                            proxy_profile_id=proxy_profile_id,
+                            message="Valid item document is missing configured required detail fields",
+                            details={
+                                "vinted_item_id": candidate.vinted_item_id,
+                                "missing_required": missing_required,
+                                "required_fields": sorted(required_fields),
+                                "terminal": True,
+                            },
+                        )
+                    break
+                except VintedDetailDeferred as exc:
                     pending += 1
-                    evaluation_status = SESSION_ITEM_DETAIL_ERROR
+                    evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
+                    detail_error = str(exc)
                     terminal_ids.append(candidate.vinted_item_id)
                     record_run_event(
                         db,
                         run_id=run.id,
                         source_id=source.id,
-                        phase="detail_incomplete",
+                        phase="detail_fetch_skipped",
                         level="warning",
                         url=candidate.url,
                         proxy_profile_id=proxy_profile_id,
-                        message="Valid item document is missing configured required detail fields",
+                        message="Detail skipped after a concurrent wave was rate limited",
                         details={
                             "vinted_item_id": candidate.vinted_item_id,
-                            "missing_required": missing_required,
-                            "required_fields": sorted(required_fields),
+                            "attempt": attempt_number,
                             "terminal": True,
+                            "reason": str(exc),
                         },
                     )
-            except VintedDetailDeferred as exc:
-                pending += 1
-                evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
-                detail_error = str(exc)
-                retry_records.append(
-                    DetailRetryRecord(
-                        candidate=candidate,
-                        attempt_count=work_item.attempt_count,
-                        next_attempt_at=datetime.now(UTC),
-                        failure_kind=str(exc),
-                    )
-                )
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_skipped",
-                    level="warning",
-                    url=candidate.url,
-                    proxy_profile_id=proxy_profile_id,
-                    message="Detail deferred because a concurrent wave was rate limited",
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "attempt_count": work_item.attempt_count,
-                        "terminal": False,
-                        "reason": str(exc),
-                    },
-                )
-            except VintedItemEarlyDiscard as exc:
-                evaluation_status = SESSION_ITEM_DISCARDED
-                matched_terms = exc.matched_terms
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_early_discard",
-                    method="GET",
-                    url=candidate.url,
-                    duration_ms=(
-                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
-                    ),
-                    proxy_profile_id=proxy_profile_id,
-                    auth_mode="public_anonymous",
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "attempt": attempt_number,
-                        "filter_scope": "description",
-                        "match_count": len(matched_terms),
-                    },
-                )
-            except (DataDomeChallengeError, VintedCatalogChallengeError) as exc:
-                exc.detail_candidate_id = candidate.vinted_item_id
-                challenge_kind = (
-                    "cloudflare_challenge" if isinstance(exc, VintedCatalogChallengeError) else "datadome_challenge"
-                )
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_error",
-                    method="GET",
-                    url=candidate.url,
-                    duration_ms=(
-                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
-                    ),
-                    level="error",
-                    proxy_profile_id=proxy_profile_id,
-                    user_agent=None,
-                    auth_mode="public_anonymous",
-                    message=redact_sensitive_text(str(exc)),
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "attempt": attempt_number,
-                        "kind": challenge_kind,
-                    },
-                )
-                raise
-            except Exception as exc:
-                pending += 1
-                evaluation_status = SESSION_ITEM_DETAIL_ERROR
-                detail_error = redact_sensitive_text(str(exc))
-                consumed_attempts = attempt_number
-                status_code = getattr(exc, "status_code", None)
-                terminal_http_error = status_code in {404, 410}
-                retry_exhausted = consumed_attempts >= max_attempts
-                failure_kind = _detail_failure_kind(exc)
-                if terminal_http_error or retry_exhausted:
-                    terminal_ids.append(candidate.vinted_item_id)
-                else:
-                    retry_records.append(
-                        DetailRetryRecord(
-                            candidate=candidate,
-                            attempt_count=consumed_attempts,
-                            next_attempt_at=datetime.now(UTC)
-                            + timedelta(seconds=_detail_retry_delay(retry_backoffs, consumed_attempts)),
-                            failure_kind=failure_kind,
-                        )
-                    )
-                record_run_event(
-                    db,
-                    run_id=run.id,
-                    source_id=source.id,
-                    phase="detail_fetch_error",
-                    method="GET",
-                    url=candidate.url,
-                    duration_ms=(
-                        detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
-                    ),
-                    level="error",
-                    proxy_profile_id=proxy_profile_id,
-                    user_agent=None,
-                    auth_mode="public_anonymous",
-                    message=detail_error,
-                    details={
-                        "vinted_item_id": candidate.vinted_item_id,
-                        "attempt": attempt_number,
-                        "kind": failure_kind,
-                        "status_code": status_code,
-                        "terminal": terminal_http_error or retry_exhausted,
-                        "retry_exhausted": retry_exhausted,
-                    },
-                )
-                if retry_exhausted:
+                    break
+                except VintedItemEarlyDiscard as exc:
+                    evaluation_status = SESSION_ITEM_DISCARDED
+                    matched_terms = exc.matched_terms
                     record_run_event(
                         db,
                         run_id=run.id,
                         source_id=source.id,
-                        phase="detail_retry_exhausted",
-                        level="error",
+                        phase="detail_fetch_early_discard",
+                        method="GET",
                         url=candidate.url,
+                        duration_ms=(
+                            detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                        ),
                         proxy_profile_id=proxy_profile_id,
-                        message="Detail retry budget exhausted; candidate will be marked seen",
+                        auth_mode="public_anonymous",
                         details={
                             "vinted_item_id": candidate.vinted_item_id,
-                            "attempt_count": consumed_attempts,
-                            "failure_kind": failure_kind,
+                            "attempt": attempt_number,
+                            "filter_scope": "description",
+                            "match_count": len(matched_terms),
                         },
                     )
-                elif not terminal_http_error:
-                    scheduled = retry_records[-1]
+                    break
+                except (
+                    DataDomeChallengeError,
+                    VintedCatalogChallengeError,
+                    VintedCatalogRateLimitError,
+                    VintedCatalogSessionContextError,
+                    VintedCatalogSessionError,
+                ) as exc:
+                    exc.detail_candidate_id = candidate.vinted_item_id
+                    failure_kind = _catalog_terminal_failure_kind(exc)
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_fetch_error",
+                        method="GET",
+                        url=candidate.url,
+                        duration_ms=(
+                            detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                        ),
+                        level="error",
+                        proxy_profile_id=proxy_profile_id,
+                        user_agent=None,
+                        auth_mode="public_anonymous",
+                        message=redact_sensitive_text(str(exc)),
+                        details={
+                            "vinted_item_id": candidate.vinted_item_id,
+                            "attempt": attempt_number,
+                            "kind": failure_kind,
+                        },
+                    )
+                    raise
+                except Exception as exc:
+                    detail = None
+                    detail_error = redact_sensitive_text(str(exc))
+                    status_code = getattr(exc, "status_code", None)
+                    terminal_http_error = status_code in {404, 410}
+                    retry_exhausted = attempt_number == 2
+                    failure_kind = _detail_failure_kind(exc)
+                    terminal = terminal_http_error or retry_exhausted
+                    record_run_event(
+                        db,
+                        run_id=run.id,
+                        source_id=source.id,
+                        phase="detail_fetch_error",
+                        method="GET",
+                        url=candidate.url,
+                        duration_ms=(
+                            detail_duration_ms if detail_duration_ms is not None else _elapsed_ms(detail_started_at)
+                        ),
+                        level="error",
+                        proxy_profile_id=proxy_profile_id,
+                        user_agent=None,
+                        auth_mode="public_anonymous",
+                        message=detail_error,
+                        details={
+                            "vinted_item_id": candidate.vinted_item_id,
+                            "attempt": attempt_number,
+                            "kind": failure_kind,
+                            "status_code": status_code,
+                            "terminal": terminal,
+                            "retry_exhausted": retry_exhausted,
+                        },
+                    )
+                    if terminal:
+                        pending += 1
+                        evaluation_status = SESSION_ITEM_DETAIL_ERROR
+                        terminal_ids.append(candidate.vinted_item_id)
+                        if retry_exhausted:
+                            record_run_event(
+                                db,
+                                run_id=run.id,
+                                source_id=source.id,
+                                phase="detail_retry_exhausted",
+                                level="error",
+                                url=candidate.url,
+                                proxy_profile_id=proxy_profile_id,
+                                message="Immediate detail retry exhausted; candidate will be marked seen",
+                                details={
+                                    "vinted_item_id": candidate.vinted_item_id,
+                                    "attempt_count": attempt_number,
+                                    "failure_kind": failure_kind,
+                                },
+                            )
+                        break
                     record_run_event(
                         db,
                         run_id=run.id,
@@ -3158,25 +3084,19 @@ def _evaluate_monitor_candidates(
                         level="warning",
                         url=candidate.url,
                         proxy_profile_id=proxy_profile_id,
-                        message="Recoverable detail failure scheduled for a later monitor run",
+                        message="Recoverable detail failure will retry once in the current run",
                         details={
                             "vinted_item_id": candidate.vinted_item_id,
-                            "attempt_count": scheduled.attempt_count,
-                            "next_attempt_at": scheduled.next_attempt_at.isoformat(),
-                            "failure_kind": scheduled.failure_kind,
+                            "attempt_count": attempt_number,
+                            "delay_seconds": DETAIL_RETRY_DELAY_SECONDS,
+                            "failure_kind": failure_kind,
                         },
                     )
+                    time.sleep(DETAIL_RETRY_DELAY_SECONDS)
         else:
             pending += 1
             evaluation_status = SESSION_ITEM_PASSED_WITHOUT_DETAIL
-            retry_records.append(
-                DetailRetryRecord(
-                    candidate=candidate,
-                    attempt_count=work_item.attempt_count,
-                    next_attempt_at=datetime.now(UTC),
-                    failure_kind="detail_budget_deferred",
-                )
-            )
+            terminal_ids.append(candidate.vinted_item_id)
             record_run_event(
                 db,
                 run_id=run.id,
@@ -3185,12 +3105,11 @@ def _evaluate_monitor_candidates(
                 level="warning",
                 url=candidate.url,
                 proxy_profile_id=proxy_profile_id,
-                message="Detail fetch limit reached; candidate queued without consuming an attempt",
+                message="Detail fetch limit reached; candidate closed without deferred work",
                 details={
                     "vinted_item_id": candidate.vinted_item_id,
                     "max_detail_candidates": resolved_detail_limit,
-                    "attempt_count": work_item.attempt_count,
-                    "terminal": False,
+                    "terminal": True,
                 },
             )
 
@@ -3366,7 +3285,6 @@ def _evaluate_monitor_candidates(
         pending=pending,
         opportunities_created=opportunities_created,
         terminal_ids=tuple(dict.fromkeys(terminal_ids)),
-        retries=tuple(retry_records),
     )
 
 

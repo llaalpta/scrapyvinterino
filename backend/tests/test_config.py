@@ -23,11 +23,6 @@ def test_detail_required_fields_reject_unknown_field() -> None:
         Settings(vinted_detail_required_fields="title,seller_password")
 
 
-def test_detail_retry_backoffs_match_attempt_budget() -> None:
-    with pytest.raises(ValidationError, match="one delay per retry"):
-        Settings(vinted_detail_max_attempts=3, vinted_detail_retry_backoffs_seconds=(30,))
-
-
 @pytest.mark.parametrize(
     "secret_key",
     [
