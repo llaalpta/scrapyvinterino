@@ -236,6 +236,13 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - every persisted monitor event creates indexed outbox work in its own transaction; publication assigns the durable cursor and removes that work atomically without rescanning event history;
   - the SSE stream announces `stream_ready` with its initial cursor in both `id:` and JSON data plus a three-second reconnect delay, drains complete 100-event backlog batches without polling pauses, and emits both a transport comment and named cursor-neutral `stream_heartbeat` every 15 seconds while idle;
   - the SSE response disables intermediary caching/transformation and proxy buffering, and closes promptly after client disconnect while preserving the run-event redaction contract.
+- Run telemetry:
+  - total run duration is derived from persisted `started_at` and `finished_at` and is never duplicated as mutable state;
+  - `runs.runtime_metadata` keeps the detail-fetch elapsed time plus the existing aggregate filter and persistence/opportunity timings;
+  - proxied terminal HTTP events carry numeric curl transfer observations only, and the run aggregates them under `proxy_traffic_estimate` as observed request, upload-body, response-header and raw download-body bytes;
+  - `total_observed_bytes` is the sum of those four curl counters. It is always labelled as an estimate because CONNECT/TLS framing, HTTP/2 header representation and provider accounting are outside the application boundary;
+  - manual redirect hops are counted once each, transport failures without a response increase `unobserved_attempts`, direct runs declare no proxy consumption, and historical proxied runs without telemetry remain `not measured` rather than zero;
+  - the runtime does not call a proxy vendor usage API and does not derive money from a hard-coded tariff. Provider usage remains the billing authority and may be reconciled separately.
 - Database:
   - `app_settings`;
   - `search_sources.scheduler_config`;
@@ -318,6 +325,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Every `open`, `error`, `stream_ready`, `stream_heartbeat` and `monitor_event` callback is scoped to the `EventSource` instance that registered it. Once replaced or closed, stale callbacks are inert: they cannot change status/readiness, advance the cursor, append events, close the current stream or schedule another reconnect.
 - Run logs show `baseline_snapshot_seeded` when session start seeds the initial catalog snapshot and `baseline_required` when an ordinary run is blocked because that snapshot no longer exists.
 - Run configuration logs identify the evaluation contract, policy hash, description-only filter scope, detail mode, early-filter mode and head byte limit. Detail/filter logs expose received bytes, match counts and durations without response content.
+- Run cards expose total duration, detail-fetch elapsed time, filter time, combined item/detail persistence plus opportunity time, and estimated proxy traffic. The combined persistence label must not imply that opportunity creation alone took the whole interval.
 - Rejected HTTP responses use a safe body observation containing lengths and type flags; response body snippets are never persisted or returned.
 - The PWA Monitors view renders selected monitor accumulated logs as a non-interactive operational checklist: one wrapped multi-line block per event with run id, exact time, state, label, method, URL, status, ms, recovered/missing context, safe cookie flags, API parameters, and failure/skip reason when available, whether the monitor is active or stopped.
 - Redacted JSON `run_events.details` remains available through API/database for technical audit, but the main PWA log timeline does not render expandable JSON details.
@@ -393,6 +401,8 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Confirm scheduler capacity reflects active proxy capacity plus allowed direct capacity.
 - Confirm periodic activation is blocked when scheduler is disabled or capacity is exhausted.
 - Confirm run metadata records `egress_mode=proxy` with proxy details when a proxy is selected and `egress_mode=direct` when direct fallback is used.
+- Confirm a proxied run aggregates each completed curl response once, preserves upload/download/header/request components and category totals, marks response-less failures as partial, and never treats direct or historical unmeasured runs as zero proxy traffic.
+- Confirm the PWA run card renders total and stage durations plus compact estimated proxy bytes without exposing raw transfer details or credentials; the API, PostgreSQL row and visible value agree.
 - Confirm provider requests use the deterministic order `egress diagnostic` when configured, saved `/catalog?...` document URL, then `/api/v2/catalog/items`.
 - Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.
 - Confirm Redis miss plus existing monitor opportunity is skipped before filters and logged as `candidate_existing_opportunity_skipped`.

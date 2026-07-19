@@ -3,6 +3,8 @@ import type { Run, RunEvent } from '../../api';
 import { formatDate } from '../../utils/format';
 import { type RunActivityController, useRunActivity } from './runActivity';
 
+const noRunEvents = async (): Promise<RunEvent[]> => [];
+
 export function RunsView({
   getSourceName,
   runs,
@@ -25,17 +27,43 @@ export function RunsView({
   );
 }
 
+export function RunTelemetryList({
+  emptyText = 'Sin ejecuciones registradas.',
+  getSourceName,
+  runs,
+  variant = 'inline'
+}: {
+  emptyText?: string;
+  getSourceName: (sourceId: number) => string;
+  runs: Run[];
+  variant?: 'cards' | 'inline';
+}) {
+  const activity = useRunActivity(runs, noRunEvents);
+  return (
+    <RunActivityList
+      activity={activity}
+      emptyText={emptyText}
+      getSourceName={getSourceName}
+      runs={runs}
+      showLogs={false}
+      variant={variant}
+    />
+  );
+}
+
 export function RunActivityList({
   activity,
   emptyText = 'Sin ejecuciones registradas.',
   getSourceName,
   runs,
+  showLogs = true,
   variant = 'cards'
 }: {
   activity: RunActivityController;
   emptyText?: string;
   getSourceName: (sourceId: number) => string;
   runs: Run[];
+  showLogs?: boolean;
   variant?: 'cards' | 'inline';
 }) {
   if (runs.length === 0) {
@@ -46,6 +74,8 @@ export function RunActivityList({
     <div className={variant === 'inline' ? 'monitor-activity-list' : 'monitor-grid'}>
       {runs.map((run) => {
         const events = activity.eventsByRunId[run.id] ?? [];
+        const proxyTraffic = proxyTrafficView(run.runtime_metadata);
+        const timingSegments = runTimingSegments(run.runtime_metadata);
         return (
           <article className={variant === 'inline' ? 'monitor-activity-row' : 'monitor-card'} key={run.id}>
             <div className="monitor-card-header">
@@ -74,18 +104,31 @@ export function RunActivityList({
                 <dt>Oportunidades</dt>
                 <dd>{run.opportunities_created}</dd>
               </div>
+              <div>
+                <dt>Tráfico proxy</dt>
+                <dd>{proxyTraffic.totalLabel}</dd>
+              </div>
             </dl>
             <div className="runtime-line">
               <span>Proxy: {proxyLabel(run.runtime_metadata)}</span>
               <span>Auth: {String(run.runtime_metadata.auth_mode ?? 'public_anonymous')}</span>
               <span>Filtros: {String(run.runtime_metadata.filter_count ?? 0)}</span>
+              {proxyTraffic.detailLabel ? <span>{proxyTraffic.detailLabel}</span> : null}
             </div>
+            {proxyTraffic.categoryLabels.length > 0 || timingSegments.length > 0 ? (
+              <div className="runtime-line">
+                {proxyTraffic.categoryLabels.map((label) => <span key={label}>{label}</span>)}
+                {timingSegments.map((label) => <span key={label}>{label}</span>)}
+              </div>
+            ) : null}
             {run.error_message ? <p className="run-error">{run.error_message}</p> : null}
-            <button type="button" onClick={() => void activity.toggleLogs(run.id)}>
-              <FileText size={16} />
-              {activity.openRunId === run.id ? 'Cerrar logs' : 'Abrir logs'}
-            </button>
-            {activity.openRunId === run.id ? (
+            {showLogs ? (
+              <button type="button" onClick={() => void activity.toggleLogs(run.id)}>
+                <FileText size={16} />
+                {activity.openRunId === run.id ? 'Cerrar logs' : 'Abrir logs'}
+              </button>
+            ) : null}
+            {showLogs && activity.openRunId === run.id ? (
               <div className="run-events">
                 {activity.loadingRunId === run.id ? <p>Cargando logs...</p> : null}
                 {!activity.loadingRunId && events.length === 0 ? <p>Sin eventos para este run.</p> : null}
@@ -1009,6 +1052,103 @@ function proxyLabel(metadata: Record<string, unknown>): string {
     return `Perfil #${metadata.proxy_profile_id}`;
   }
   return metadata.egress_mode === 'direct' ? 'Directo' : 'Sin egress registrado';
+}
+
+function proxyTrafficView(metadata: Record<string, unknown>): {
+  totalLabel: string;
+  detailLabel: string | null;
+  categoryLabels: string[];
+} {
+  if (metadata.egress_mode === 'direct') {
+    return { totalLabel: 'No aplica', detailLabel: null, categoryLabels: [] };
+  }
+  const estimate = recordValue(metadata.proxy_traffic_estimate);
+  if (!estimate) {
+    return { totalLabel: 'No medido', detailLabel: null, categoryLabels: [] };
+  }
+  const total = numberValue(estimate.total_observed_bytes);
+  const observedRequests = numberValue(estimate.observed_requests);
+  const unobservedAttempts = numberValue(estimate.unobserved_attempts);
+  const uploaded = numberValue(estimate.request_size_bytes) + numberValue(estimate.upload_size_bytes);
+  const downloaded = numberValue(estimate.header_size_bytes) + numberValue(estimate.download_size_bytes);
+  const detailParts = [
+    `${observedRequests} pet. observadas`,
+    `subida ${formatBytes(uploaded)}`,
+    `bajada ${formatBytes(downloaded)}`,
+    unobservedAttempts > 0 ? `${unobservedAttempts} intento${unobservedAttempts === 1 ? '' : 's'} sin medir` : null
+  ].filter((value): value is string => Boolean(value));
+  const byCategory = recordValue(estimate.by_category);
+  const categoryLabels = [
+    ['Salida', 'egress'],
+    ['Sesión', 'session_setup'],
+    ['Catálogo', 'catalog'],
+    ['Detalle', 'detail']
+  ].flatMap(([label, key]) => {
+    const category = byCategory ? recordValue(byCategory[key]) : null;
+    const categoryTotal = category ? numberValue(category.total_observed_bytes) : 0;
+    return categoryTotal > 0 ? [`${label}: ${formatBytes(categoryTotal)}`] : [];
+  });
+  return {
+    totalLabel: `${formatBytes(total)}${unobservedAttempts > 0 ? ' (parcial)' : ''}`,
+    detailLabel: `Estimación local: ${detailParts.join(' · ')}`,
+    categoryLabels
+  };
+}
+
+function runTimingSegments(metadata: Record<string, unknown>): string[] {
+  const detailElapsed = optionalNumberValue(metadata.detail_fetch_elapsed_ms);
+  const detailTotal = optionalNumberValue(metadata.detail_fetch_request_duration_total_ms);
+  const detailAttempts = optionalNumberValue(metadata.detail_fetch_attempts);
+  const filterTotal = optionalNumberValue(metadata.filter_duration_total_ms);
+  const persistenceTotal = optionalNumberValue(metadata.persistence_duration_total_ms);
+  const segments: string[] = [];
+  if (detailElapsed !== null) {
+    const requestTotal = detailTotal !== null && detailTotal !== detailElapsed
+      ? ` / ${formatMilliseconds(detailTotal)} acumulados`
+      : '';
+    const attempts = detailAttempts !== null ? ` (${detailAttempts} pet.)` : '';
+    segments.push(`Detalle: ${formatMilliseconds(detailElapsed)}${requestTotal}${attempts}`);
+  }
+  if (filterTotal !== null) {
+    segments.push(`Filtros: ${formatMilliseconds(filterTotal)}`);
+  }
+  if (persistenceTotal !== null) {
+    segments.push(`Persistencia + oportunidad: ${formatMilliseconds(persistenceTotal)}`);
+  }
+  return segments;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function optionalNumberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function numberValue(value: unknown): number {
+  return optionalNumberValue(value) ?? 0;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1000) {
+    return `${Math.round(bytes)} B`;
+  }
+  const units = ['kB', 'MB', 'GB'];
+  let value = bytes / 1000;
+  let unitIndex = 0;
+  while (value >= 1000 && unitIndex < units.length - 1) {
+    value /= 1000;
+    unitIndex += 1;
+  }
+  return `${value.toLocaleString('es-ES', { maximumFractionDigits: value < 10 ? 2 : 1 })} ${units[unitIndex]}`;
+}
+
+function formatMilliseconds(milliseconds: number): string {
+  if (milliseconds < 1000) {
+    return `${milliseconds.toLocaleString('es-ES', { maximumFractionDigits: 1 })} ms`;
+  }
+  return `${(milliseconds / 1000).toLocaleString('es-ES', { maximumFractionDigits: 2 })} s`;
 }
 
 function formatDuration(startedAt: string, finishedAt: string | null): string {

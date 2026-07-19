@@ -35,6 +35,14 @@ from vinted_monitor.providers.datadome import (
     is_datadome_challenge,
 )
 from vinted_monitor.providers.item_head import EarlyFilterBodyCollector, inspect_item_head
+from vinted_monitor.providers.transfer_metrics import (
+    PROXY_TRANSFER_DETAIL_KEY,
+    attach_transfer_observation,
+    merge_transfer_observations,
+    response_transfer_observation,
+    transfer_observation_from_exception,
+    transfer_observation_from_response,
+)
 
 NEXT_FLIGHT_CHUNK_PATTERN = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.DOTALL)
 JSON_LD_PATTERN = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
@@ -42,6 +50,7 @@ NEXT_FLIGHT_RECORD_ID_PATTERN = re.compile(r"^[0-9A-Za-z]+$")
 VINTED_IMAGE_HOST_PATTERN = re.compile(r"^images\d*\.vinted\.net$", re.IGNORECASE)
 VINTED_ITEM_PATH_PATTERN = re.compile(r"^/items/(\d+)(?:-[^/]+)?/?$")
 DETAIL_PARSER_VERSION = "next_flight_v3"
+DETAIL_BATCH_TELEMETRY_ATTR = "detail_batch_telemetry"
 CSRF_TOKEN_PATTERNS = (
     re.compile(r'"CSRF_TOKEN"\s*:\s*"([^"]+)"'),
     re.compile(r'\\"CSRF_TOKEN\\"\s*:\s*\\"([^"\\]+)\\"'),
@@ -462,6 +471,7 @@ class CurlCffiVintedCatalogProvider:
                 "final_url": final_url,
                 "redirect_count": redirect_count,
                 "body_bytes_received": len(response_text.encode("utf-8")),
+                **self._proxy_transfer_details(response=response, category="detail"),
             }
             if is_cloudflare_challenge(response.status_code, dict(response.headers)):
                 self._emit_event(
@@ -501,9 +511,15 @@ class CurlCffiVintedCatalogProvider:
                 raise VintedItemDetailHTTPError(candidate.vinted_item_id, response.status_code)
             content_type = _header_value(response.headers, "content-type")
             if content_type and "text/html" not in content_type.lower():
-                raise VintedCatalogProviderError(
+                exc = VintedCatalogProviderError(
                     f"Vinted detail request returned non-HTML content for {candidate.vinted_item_id}"
                 )
+                if self.proxy_url:
+                    attach_transfer_observation(
+                        exc,
+                        transfer_observation_from_response(response, category="detail"),
+                    )
+                raise exc
             if early_matched_terms:
                 self._emit_event(
                     phase="detail_early_filter_enforced",
@@ -583,7 +599,11 @@ class CurlCffiVintedCatalogProvider:
         except VintedItemEarlyDiscard:
             raise
         except Exception as exc:
-            if not isinstance(exc, VintedCatalogProviderError):
+            attached_transfer = getattr(exc, "proxy_transfer_observation", None)
+            should_emit_terminal = not isinstance(exc, VintedCatalogProviderError) or isinstance(
+                attached_transfer, Mapping
+            )
+            if should_emit_terminal:
                 safe_error = redact_sensitive_text(str(exc))
                 self._emit_event(
                     phase="detail_http_request_error",
@@ -599,8 +619,10 @@ class CurlCffiVintedCatalogProvider:
                         "request_headers": safe_headers(headers),
                         "cookies_after": self._cookie_markers(),
                         "default_headers": False,
+                        **self._proxy_transfer_details(exc=exc, category="detail"),
                     },
                 )
+            if not isinstance(exc, VintedCatalogProviderError):
                 raise VintedCatalogProviderError(
                     f"Vinted detail request failed for {candidate.vinted_item_id}: {safe_error}"
                 ) from exc
@@ -669,6 +691,14 @@ class CurlCffiVintedCatalogProvider:
                 error = challenge_result.outcome.error
                 assert error is not None
                 error.detail_candidate_id = challenge_result.outcome.candidate.vinted_item_id
+                setattr(
+                    error,
+                    DETAIL_BATCH_TELEMETRY_ATTR,
+                    _detail_batch_telemetry(
+                        batch_started_at,
+                        [*outcomes, *(result.outcome for result in lane_results)],
+                    ),
+                )
                 self._close_detail_lanes(lanes)
                 raise error
 
@@ -725,9 +755,15 @@ class CurlCffiVintedCatalogProvider:
                         "divergent_cookie_names": sorted(divergent_cookie_names),
                     },
                 )
-                raise VintedCatalogSessionContextError(
+                error = VintedCatalogSessionContextError(
                     f"Concurrent detail context validation failed: {validation_outcome}"
                 )
+                setattr(
+                    error,
+                    DETAIL_BATCH_TELEMETRY_ATTR,
+                    _detail_batch_telemetry(batch_started_at, outcomes),
+                )
+                raise error
 
         makespan_ms = _elapsed_ms(batch_started_at)
         summed_duration_ms = sum(outcome.duration_ms for outcome in outcomes)
@@ -859,6 +895,7 @@ class CurlCffiVintedCatalogProvider:
     ) -> tuple[Any, str, int, str, list[str]]:
         assert self._session is not None
         current_url = detail_url
+        transfer_observation: Mapping[str, Any] | None = None
         for redirect_count in range(4):
             _validate_item_detail_url(current_url, expected_item_id=item_id)
             collector: EarlyFilterBodyCollector | None = None
@@ -890,12 +927,30 @@ class CurlCffiVintedCatalogProvider:
                     or exc.code != int(CurlECode.WRITE_ERROR)
                     or exc.response is None
                 ):
+                    if self.proxy_url:
+                        observation = transfer_observation_from_exception(exc, category="detail")
+                        attach_transfer_observation(
+                            exc,
+                            merge_transfer_observations(transfer_observation, observation, category="detail"),
+                        )
                     raise
                 response = exc.response
+            if self.proxy_url:
+                transfer_observation = merge_transfer_observations(
+                    transfer_observation,
+                    response_transfer_observation(response, category="detail"),
+                    category="detail",
+                )
+                attach_transfer_observation(response, transfer_observation)
             response_text = collector.decoded_body() if collector is not None else response.text
             early_matched_terms = collector.matched_terms if collector is not None else []
             effective_url = str(getattr(response, "url", None) or current_url)
-            _validate_item_detail_url(effective_url, expected_item_id=item_id)
+            try:
+                _validate_item_detail_url(effective_url, expected_item_id=item_id)
+            except Exception as exc:
+                if transfer_observation is not None:
+                    attach_transfer_observation(exc, transfer_observation)
+                raise
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response, effective_url, redirect_count, response_text, early_matched_terms
             if is_cloudflare_challenge(response.status_code, dict(response.headers)) or is_datadome_challenge(
@@ -906,11 +961,22 @@ class CurlCffiVintedCatalogProvider:
                 return response, effective_url, redirect_count, response_text, early_matched_terms
             location = _header_value(response.headers, "location")
             if not location:
-                raise VintedCatalogProviderError("Vinted item detail redirect omitted Location")
+                exc = VintedCatalogProviderError("Vinted item detail redirect omitted Location")
+                if transfer_observation is not None:
+                    attach_transfer_observation(exc, transfer_observation)
+                raise exc
             next_url = urljoin(effective_url, location)
-            _validate_item_detail_url(next_url, expected_item_id=item_id)
+            try:
+                _validate_item_detail_url(next_url, expected_item_id=item_id)
+            except Exception as exc:
+                if transfer_observation is not None:
+                    attach_transfer_observation(exc, transfer_observation)
+                raise
             current_url = build_item_detail_navigation_url(next_url)
-        raise VintedCatalogProviderError("Vinted item detail redirect limit exceeded")
+        exc = VintedCatalogProviderError("Vinted item detail redirect limit exceeded")
+        if transfer_observation is not None:
+            attach_transfer_observation(exc, transfer_observation)
+        raise exc
 
     def _emit_early_filter_shadow(
         self,
@@ -956,23 +1022,46 @@ class CurlCffiVintedCatalogProvider:
         headers: Mapping[str, str],
         *,
         expected_path: str,
+        transfer_category: str,
         params: Mapping[str, Any] | None = None,
     ) -> tuple[Any, str, int]:
         assert self._session is not None
         current_url = url
         current_params = params
+        transfer_observation: Mapping[str, Any] | None = None
         for redirect_count in range(4):
             _validate_vinted_response_url(current_url, expected_path=expected_path)
-            response = self._session.get(
-                current_url,
-                params=current_params,
-                headers=dict(headers),
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
-                allow_redirects=False,
-            )
+            try:
+                response = self._session.get(
+                    current_url,
+                    params=current_params,
+                    headers=dict(headers),
+                    timeout=self.timeout_ms / 1000,
+                    default_headers=False,
+                    allow_redirects=False,
+                )
+            except Exception as exc:
+                if self.proxy_url:
+                    observation = transfer_observation_from_exception(exc, category=transfer_category)
+                    attach_transfer_observation(
+                        exc,
+                        merge_transfer_observations(transfer_observation, observation, category=transfer_category),
+                    )
+                raise
+            if self.proxy_url:
+                transfer_observation = merge_transfer_observations(
+                    transfer_observation,
+                    response_transfer_observation(response, category=transfer_category),
+                    category=transfer_category,
+                )
+                attach_transfer_observation(response, transfer_observation)
             effective_url = str(getattr(response, "url", None) or current_url)
-            _validate_vinted_response_url(effective_url, expected_path=expected_path)
+            try:
+                _validate_vinted_response_url(effective_url, expected_path=expected_path)
+            except Exception as exc:
+                if transfer_observation is not None:
+                    attach_transfer_observation(exc, transfer_observation)
+                raise
             if response.status_code not in {301, 302, 303, 307, 308}:
                 return response, effective_url, redirect_count
             if is_cloudflare_challenge(response.status_code, dict(response.headers)) or is_datadome_challenge(
@@ -983,12 +1072,23 @@ class CurlCffiVintedCatalogProvider:
                 return response, effective_url, redirect_count
             location = _header_value(response.headers, "location")
             if not location:
-                raise VintedCatalogProviderError("Vinted redirect omitted Location")
+                exc = VintedCatalogProviderError("Vinted redirect omitted Location")
+                if transfer_observation is not None:
+                    attach_transfer_observation(exc, transfer_observation)
+                raise exc
             next_url = urljoin(effective_url, location)
-            _validate_vinted_response_url(next_url, expected_path=expected_path)
+            try:
+                _validate_vinted_response_url(next_url, expected_path=expected_path)
+            except Exception as exc:
+                if transfer_observation is not None:
+                    attach_transfer_observation(exc, transfer_observation)
+                raise
             current_url = next_url
             current_params = None
-        raise VintedCatalogProviderError("Vinted redirect limit exceeded")
+        exc = VintedCatalogProviderError("Vinted redirect limit exceeded")
+        if transfer_observation is not None:
+            attach_transfer_observation(exc, transfer_observation)
+        raise exc
 
     def close(self) -> None:
         """Discard the session, cookies, and proxy connection."""
@@ -1134,6 +1234,7 @@ class CurlCffiVintedCatalogProvider:
                 url,
                 headers,
                 expected_path="/api/v2/catalog/items",
+                transfer_category="catalog",
                 params=params,
             )
         except Exception as exc:
@@ -1150,10 +1251,12 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "request_headers": safe_headers(headers),
                     "cookies_after": self._cookie_markers(),
+                    **self._proxy_transfer_details(exc=exc, category="catalog"),
                 },
             )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
 
+        transfer_details = self._proxy_transfer_details(response=response, category="catalog")
         if is_cloudflare_challenge(response.status_code, dict(response.headers)):
             self._emit_event(
                 phase="cloudflare_challenge_detected",
@@ -1171,6 +1274,7 @@ class CurlCffiVintedCatalogProvider:
                     "cookies_after": self._cookie_markers(),
                     "final_url": final_url,
                     "redirect_count": redirect_count,
+                    **transfer_details,
                 },
             )
             raise VintedCatalogChallengeError("Cloudflare challenge detected on catalog API request")
@@ -1191,6 +1295,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise DataDomeChallengeError("DataDome challenge detected on catalog API request")
@@ -1212,6 +1317,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise VintedCatalogRateLimitError(
@@ -1234,6 +1340,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise VintedCatalogSessionError(f"Vinted catalog API session rejected with status {response.status_code}")
@@ -1252,6 +1359,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise VintedCatalogProviderError(f"Vinted catalog API request failed: HTTP {response.status_code}")
@@ -1272,11 +1380,32 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise VintedCatalogSessionError("Vinted catalog API returned a non-JSON response")
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except Exception as exc:
+            safe_error = redact_sensitive_text(str(exc))
+            self._emit_event(
+                phase="catalog_api_parse_error",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level="error",
+                message=safe_error,
+                details={
+                    "attempt": attempt,
+                    "http_session": self._session_marker(),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "cookies_after": self._cookie_markers(),
+                    **transfer_details,
+                },
+            )
+            raise VintedCatalogProviderError("Vinted catalog API response was not valid JSON") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
             self._emit_event(
                 phase="catalog_api_parse_error",
@@ -1291,6 +1420,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise VintedCatalogProviderError("Vinted catalog API response did not contain items")
@@ -1314,6 +1444,7 @@ class CurlCffiVintedCatalogProvider:
                 "cookie_flags": _cookie_flags_from_values(self._cookie_values()),
                 "final_url": final_url,
                 "redirect_count": redirect_count,
+                **transfer_details,
             },
         )
         return payload
@@ -1368,6 +1499,7 @@ class CurlCffiVintedCatalogProvider:
                 url,
                 headers,
                 expected_path="/api/v2/catalog/items",
+                transfer_category="session_setup",
                 params=params,
             )
         except Exception as exc:
@@ -1386,6 +1518,7 @@ class CurlCffiVintedCatalogProvider:
                     "context": context_report,
                     "request_headers": safe_headers(headers),
                     "cookies_after": self._cookie_markers(),
+                    **self._proxy_transfer_details(exc=exc, category="session_setup"),
                 },
             )
             return {
@@ -1470,6 +1603,7 @@ class CurlCffiVintedCatalogProvider:
                 "response": response_details,
                 "cookies_after": self._cookie_markers(),
                 "error": error,
+                **self._proxy_transfer_details(response=response, category="session_setup"),
             },
         )
         result = {
@@ -1523,6 +1657,7 @@ class CurlCffiVintedCatalogProvider:
                 bootstrap_url,
                 headers,
                 expected_path=urlparse(bootstrap_url).path,
+                transfer_category="session_setup",
             )
         except Exception as exc:
             self._emit_event(
@@ -1539,10 +1674,12 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "request_headers": safe_headers(headers),
                     "cookies_after": self._cookie_markers(),
+                    **self._proxy_transfer_details(exc=exc, category="session_setup"),
                 },
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
 
+        transfer_details = self._proxy_transfer_details(response=response, category="session_setup")
         if is_cloudflare_challenge(response.status_code, dict(response.headers)):
             self._emit_event(
                 phase="cloudflare_challenge_detected",
@@ -1561,6 +1698,7 @@ class CurlCffiVintedCatalogProvider:
                     "cookies_after": self._cookie_markers(),
                     "final_url": final_url,
                     "redirect_count": redirect_count,
+                    **transfer_details,
                 },
             )
             raise VintedCatalogChallengeError("Cloudflare challenge detected during bootstrap")
@@ -1581,6 +1719,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise DataDomeChallengeError("DataDome challenge detected during bootstrap")
@@ -1601,6 +1740,7 @@ class CurlCffiVintedCatalogProvider:
                     "http_session": self._session_marker(),
                     "response_headers": safe_headers(dict(response.headers)),
                     "cookies_after": self._cookie_markers(),
+                    **transfer_details,
                 },
             )
             raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: HTTP {response.status_code}")
@@ -1634,6 +1774,7 @@ class CurlCffiVintedCatalogProvider:
                 **response_summary,
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
+                **transfer_details,
             },
         )
 
@@ -1758,6 +1899,7 @@ class CurlCffiVintedCatalogProvider:
             default_ddv=self.settings.vinted_datadome_collector_default_ddv,
             configured_client_key=datadome_client_key,
             event_sink=self._emit_event,
+            proxy_traffic_enabled=bool(self.proxy_url),
         ).collect()
         if result.success:
             self._catalog_session_context.datadome = result.datadome_cookie or self._cookie_value("datadome")
@@ -1816,6 +1958,7 @@ class CurlCffiVintedCatalogProvider:
             },
         )
         started_at = time.perf_counter()
+        response: Any | None = None
         try:
             response = self._session.get(
                 tags_url,
@@ -1834,6 +1977,11 @@ class CurlCffiVintedCatalogProvider:
                 details={
                     "request_headers": safe_headers(headers),
                     "cookies_after": self._cookie_markers(),
+                    **(
+                        self._proxy_transfer_details(response=response, category="session_setup")
+                        if response is not None
+                        else self._proxy_transfer_details(exc=exc, category="session_setup")
+                    ),
                 },
             )
             return None
@@ -1856,6 +2004,7 @@ class CurlCffiVintedCatalogProvider:
                 "request_headers": safe_headers(headers),
                 "response_headers": safe_headers(dict(response.headers)),
                 "cookies_after": self._cookie_markers(),
+                **self._proxy_transfer_details(response=response, category="session_setup"),
             },
         )
         return ddk if response.status_code < 400 else None
@@ -1992,6 +2141,22 @@ class CurlCffiVintedCatalogProvider:
             details=details,
         )
 
+    def _proxy_transfer_details(
+        self,
+        *,
+        category: str,
+        response: Any | None = None,
+        exc: Exception | None = None,
+    ) -> dict[str, Any]:
+        if not self.proxy_url:
+            return {}
+        observation = (
+            transfer_observation_from_response(response, category=category)
+            if response is not None
+            else transfer_observation_from_exception(exc or RuntimeError("unobserved"), category=category)
+        )
+        return {PROXY_TRANSFER_DETAIL_KEY: observation}
+
     def _diagnose_egress(self, *, attempt: int) -> None:
         if self._egress_diagnosed or not self.settings.egress_diagnostic_url:
             return
@@ -2036,6 +2201,7 @@ class CurlCffiVintedCatalogProvider:
             },
         )
         started_at = time.perf_counter()
+        response: Any | None = None
         try:
             response = diagnostic_session.get(
                 url,
@@ -2067,6 +2233,7 @@ class CurlCffiVintedCatalogProvider:
                 "vinted_cookies_after": self._cookie_markers(),
                 "cookies_sent": False,
                 "default_headers": False,
+                **self._proxy_transfer_details(response=response, category="egress"),
             }
             self._emit_event(
                 phase="egress_diagnostic_success" if response.status_code < 400 else "egress_diagnostic_error",
@@ -2095,6 +2262,11 @@ class CurlCffiVintedCatalogProvider:
                     "proxy_session": self.proxy_session_marker,
                     "cookies_sent": False,
                     "default_headers": False,
+                    **(
+                        self._proxy_transfer_details(response=response, category="egress")
+                        if response is not None
+                        else self._proxy_transfer_details(exc=exc, category="egress")
+                    ),
                 },
             )
         finally:
@@ -2430,6 +2602,14 @@ def _retry_after_seconds(value: str | None, *, now: datetime | None = None) -> t
 
 def _elapsed_ms(started_at: float) -> int:
     return max(round((time.perf_counter() - started_at) * 1000), 0)
+
+
+def _detail_batch_telemetry(started_at: float, outcomes: list[DetailFetchOutcome]) -> dict[str, int]:
+    return {
+        "detail_fetch_elapsed_ms": _elapsed_ms(started_at),
+        "detail_fetch_request_duration_total_ms": sum(outcome.duration_ms for outcome in outcomes),
+        "detail_fetch_attempts": sum(1 for outcome in outcomes if not isinstance(outcome.error, VintedDetailDeferred)),
+    }
 
 
 def _egress_validation_is_fresh(

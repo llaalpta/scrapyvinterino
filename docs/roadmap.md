@@ -14,7 +14,7 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 Keep no more than five independently valuable tasks here.
 
-No implementation item is queued. Starting Telegram alerts requires the explicit product decision described below.
+- No implementation item is queued. Starting Telegram alerts requires the explicit product decision described below.
 
 ## Next
 
@@ -88,6 +88,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.45 | done | `Encontrados` now counts only monitor-new candidates after Redis/durable-opportunity deduplication, including claimed batches that later fail-stop; baseline and repeats count zero, while `Oportunidades` counts only newly committed passing results. Migration 0020 remapped historical counters and removed `items_new` from rows and event details; the live manual PWA/API/PostgreSQL/Redis path, historical migration probe, Ruff, frontend lint/build and isolated backend gate (`523` normal plus `3` loopback-only) passed with no external traffic or QA residue. |
 | 14.46 | done | The redundant scheduler UI gate and persisted `app_settings.scheduler.enabled` were removed. `.env`, live worker heartbeat and capacity now determine availability, while per-monitor start/stop owns recurrence. Migration 0021, the nine-case live PWA/scheduler/queue gate and the complete isolated backend suite (`525` normal plus `3` loopback-only) passed without external traffic or QA residue. |
 | 14.47 | done | The selected-monitor detail now separates a compact action-first read mode from guarded stopped/idle editing, preserves accumulated/session performance and collapses proxy-bound HTTP contexts plus logs as diagnosis. The isolated authenticated API/PostgreSQL/Vite/Playwright gate passed `8` focused plus `1` live case on desktop/mobile with no external traffic, QA residue or operational PostgreSQL/Redis drift; Ruff and frontend lint/build passed. |
+| 14.48 | done | Run cards now expose total and phase timings plus curl-observed proxy bytes, category totals and explicit partial/direct/historical states. Eighteen initial focused checks plus eleven finding-specific rechecks, Ruff, frontend lint/build and local PostgreSQL/API/PWA Playwright passed; one bounded real PWA start crossed the proxy/Vinted path and DataImpulse independently reported `3` requests / `830343` bytes for its billing window, without runtime vendor integration. Exact cleanup left no QA rows or queued work. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

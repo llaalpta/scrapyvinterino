@@ -12,7 +12,7 @@ import {
 import type { CollectionLoadState } from '../../app/collectionLoadState';
 import { formatDate } from '../../utils/format';
 import { eventSearchText } from '../runs/runEventSearch';
-import { RunEventEntry } from '../runs/RunsView';
+import { RunEventEntry, RunTelemetryList } from '../runs/RunsView';
 import { buildSourceDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
@@ -922,6 +922,20 @@ function MonitorDetail({
         stats={stats}
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
+
+      <section className="monitor-performance monitor-run-telemetry" aria-label="Tiempo y trafico por ejecucion">
+        <div className="monitor-performance-heading">
+          <div>
+            <h4>Tiempo y trafico por ejecucion</h4>
+            <span>Estimacion local de las cinco ejecuciones mas recientes.</span>
+          </div>
+        </div>
+        <RunTelemetryList
+          emptyText="Sin ejecuciones registradas."
+          getSourceName={() => source.name}
+          runs={monitorRuns.slice(0, 5)}
+        />
+      </section>
 
       <PreparedSessionsPanel key={`contexts-${source.id}`} sessions={source.prepared_sessions} />
 

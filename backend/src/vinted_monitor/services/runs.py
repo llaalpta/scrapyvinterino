@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -17,7 +18,13 @@ from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, 
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
+from vinted_monitor.providers.transfer_metrics import (
+    PROXY_TRAFFIC_METADATA_KEY,
+    PROXY_TRANSFER_DETAIL_KEY,
+    aggregate_proxy_traffic_estimate,
+)
 from vinted_monitor.providers.vinted_catalog import (
+    DETAIL_BATCH_TELEMETRY_ATTR,
     CurlCffiVintedCatalogProvider,
     DetailFetchOutcome,
     VintedCatalogChallengeError,
@@ -1525,9 +1532,12 @@ def execute_monitor_run(
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return run
     except SeenCacheUnavailableError as exc:
+        observability_metadata = _run_observability_metadata(run)
         db.rollback()
         run = db.get(Run, run.id)
         source = db.get(SearchSource, source.id) or source
+        if run is not None:
+            _merge_run_metadata(run, observability_metadata)
         if run is not None and run.status == FINALIZING:
             try:
                 _apply_pending_candidate_state_transition(db, run, source, cache, reconciled=True)
@@ -1587,11 +1597,13 @@ def execute_monitor_run(
         VintedCatalogSessionContextError,
         VintedCatalogSessionError,
     ) as exc:
+        observability_metadata = _run_observability_metadata(run)
         db.rollback()
         run = db.get(Run, run.id)
         if run is None:
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
+        _merge_run_metadata(run, observability_metadata)
         try:
             run.items_found = found_count
             failure_kind = _catalog_terminal_failure_kind(exc)
@@ -1629,8 +1641,11 @@ def execute_monitor_run(
             _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
     except Exception as exc:
+        observability_metadata = _run_observability_metadata(run)
         db.rollback()
         run = db.get(Run, run.id)
+        if run is not None:
+            _merge_run_metadata(run, observability_metadata)
         if run is not None and run.status == FINALIZING:
             try:
                 _apply_pending_candidate_state_transition(db, run, source, cache, reconciled=True)
@@ -2091,6 +2106,22 @@ def _merge_run_metadata(run: Run, metadata: dict[str, Any]) -> None:
     run.runtime_metadata = {**(run.runtime_metadata or {}), **metadata}
 
 
+_RUN_OBSERVABILITY_METADATA_KEYS = (
+    PROXY_TRAFFIC_METADATA_KEY,
+    "detail_fetch_mode",
+    "detail_fetch_elapsed_ms",
+    "detail_fetch_request_duration_total_ms",
+    "detail_fetch_attempts",
+    "filter_duration_total_ms",
+    "persistence_duration_total_ms",
+)
+
+
+def _run_observability_metadata(run: Run) -> dict[str, Any]:
+    metadata = run.runtime_metadata or {}
+    return {key: metadata[key] for key in _RUN_OBSERVABILITY_METADATA_KEYS if key in metadata}
+
+
 def _build_provider_event_sink(
     db: Session,
     run: Run | None,
@@ -2111,6 +2142,21 @@ def _build_provider_event_sink(
         message: str | None = None,
         details: dict | None = None,
     ) -> None:
+        event_details = details or {}
+        transfer_observation = event_details.get(PROXY_TRANSFER_DETAIL_KEY)
+        if (run.runtime_metadata or {}).get("egress_mode") == "proxy" and isinstance(
+            transfer_observation, Mapping
+        ):
+            current_estimate = (run.runtime_metadata or {}).get(PROXY_TRAFFIC_METADATA_KEY)
+            _merge_run_metadata(
+                run,
+                {
+                    PROXY_TRAFFIC_METADATA_KEY: aggregate_proxy_traffic_estimate(
+                        current_estimate if isinstance(current_estimate, Mapping) else None,
+                        transfer_observation,
+                    )
+                },
+            )
         record_run_event(
             db,
             run_id=run.id,
@@ -2125,7 +2171,7 @@ def _build_provider_event_sink(
             user_agent=None,
             auth_mode="public_anonymous",
             message=message,
-            details=details,
+            details=event_details,
         )
 
     return sink
@@ -2778,6 +2824,9 @@ def _evaluate_monitor_candidates(
     pending = 0
     opportunities_created = 0
     terminal_ids: list[str] = []
+    detail_fetch_elapsed_ms = 0
+    detail_fetch_request_duration_total_ms = 0
+    detail_fetch_attempts = 0
     filter_duration_total_ms = 0.0
     persistence_duration_total_ms = 0.0
     resolved_detail_limit = (
@@ -2797,16 +2846,38 @@ def _evaluate_monitor_candidates(
         and resolved_detail_limit > 0
     ):
         batch_candidates = [work_item.candidate for work_item in work_items[:resolved_detail_limit]]
-        batch_result = provider.fetch_detail_batch(
-            batch_candidates,
-            referer_url=source.url,
-            early_filter_terms=early_filter_terms,
-            concurrency=int(getattr(provider_settings, "vinted_detail_concurrency", 1)),
-            canary=detail_fetch_mode == "canary",
-        )
+        try:
+            batch_result = provider.fetch_detail_batch(
+                batch_candidates,
+                referer_url=source.url,
+                early_filter_terms=early_filter_terms,
+                concurrency=int(getattr(provider_settings, "vinted_detail_concurrency", 1)),
+                canary=detail_fetch_mode == "canary",
+            )
+        except Exception as exc:
+            batch_telemetry = getattr(exc, DETAIL_BATCH_TELEMETRY_ATTR, None)
+            if isinstance(batch_telemetry, Mapping):
+                timing_metadata = {
+                    key: value
+                    for key in (
+                        "detail_fetch_elapsed_ms",
+                        "detail_fetch_request_duration_total_ms",
+                        "detail_fetch_attempts",
+                    )
+                    if isinstance((value := batch_telemetry.get(key)), int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                }
+                _merge_run_metadata(run, {"detail_fetch_mode": detail_fetch_mode, **timing_metadata})
+            raise
         prefetched_outcomes = {
             outcome.candidate.vinted_item_id: outcome for outcome in batch_result.outcomes
         }
+        detail_fetch_elapsed_ms = batch_result.makespan_ms
+        detail_fetch_request_duration_total_ms = batch_result.summed_duration_ms
+        detail_fetch_attempts = sum(
+            1 for outcome in batch_result.outcomes if not isinstance(outcome.error, VintedDetailDeferred)
+        )
         _merge_run_metadata(
             run,
             {
@@ -2887,13 +2958,27 @@ def _evaluate_monitor_candidates(
                     attempt_prefetched_outcome.duration_ms if attempt_prefetched_outcome is not None else None
                 )
                 try:
-                    detail = _fetch_monitor_candidate_detail(
-                        provider,
-                        candidate,
-                        referer_url=source.url,
-                        early_filter_terms=early_filter_terms,
-                        prefetched_outcome=attempt_prefetched_outcome,
-                    )
+                    try:
+                        detail = _fetch_monitor_candidate_detail(
+                            provider,
+                            candidate,
+                            referer_url=source.url,
+                            early_filter_terms=early_filter_terms,
+                            prefetched_outcome=attempt_prefetched_outcome,
+                        )
+                    except Exception:
+                        if attempt_prefetched_outcome is None:
+                            measured_duration_ms = _elapsed_ms(detail_started_at)
+                            detail_fetch_elapsed_ms += measured_duration_ms
+                            detail_fetch_request_duration_total_ms += measured_duration_ms
+                            detail_fetch_attempts += 1
+                        raise
+                    else:
+                        if attempt_prefetched_outcome is None:
+                            measured_duration_ms = _elapsed_ms(detail_started_at)
+                            detail_fetch_elapsed_ms += measured_duration_ms
+                            detail_fetch_request_duration_total_ms += measured_duration_ms
+                            detail_fetch_attempts += 1
                     if detail.vinted_item_id != candidate.vinted_item_id:
                         raise ValueError(
                             f"Detail item id {detail.vinted_item_id} does not match requested item {candidate.vinted_item_id}"
@@ -2999,6 +3084,17 @@ def _evaluate_monitor_candidates(
                     VintedCatalogSessionContextError,
                     VintedCatalogSessionError,
                 ) as exc:
+                    _merge_run_metadata(
+                        run,
+                        {
+                            "detail_fetch_mode": detail_fetch_mode,
+                            "detail_fetch_elapsed_ms": detail_fetch_elapsed_ms,
+                            "detail_fetch_request_duration_total_ms": detail_fetch_request_duration_total_ms,
+                            "detail_fetch_attempts": detail_fetch_attempts,
+                            "filter_duration_total_ms": round(filter_duration_total_ms, 3),
+                            "persistence_duration_total_ms": round(persistence_duration_total_ms, 3),
+                        },
+                    )
                     exc.detail_candidate_id = candidate.vinted_item_id
                     failure_kind = _catalog_terminal_failure_kind(exc)
                     record_run_event(
@@ -3092,6 +3188,7 @@ def _evaluate_monitor_candidates(
                             "failure_kind": failure_kind,
                         },
                     )
+                    detail_fetch_elapsed_ms += round(DETAIL_RETRY_DELAY_SECONDS * 1000)
                     time.sleep(DETAIL_RETRY_DELAY_SECONDS)
         else:
             pending += 1
@@ -3275,6 +3372,9 @@ def _evaluate_monitor_candidates(
         run,
         {
             "detail_fetch_mode": detail_fetch_mode,
+            "detail_fetch_elapsed_ms": detail_fetch_elapsed_ms,
+            "detail_fetch_request_duration_total_ms": detail_fetch_request_duration_total_ms,
+            "detail_fetch_attempts": detail_fetch_attempts,
             "filter_duration_total_ms": round(filter_duration_total_ms, 3),
             "persistence_duration_total_ms": round(persistence_duration_total_ms, 3),
         },

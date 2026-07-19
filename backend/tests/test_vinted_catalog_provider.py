@@ -64,12 +64,22 @@ class FakeResponse:
         json_data: dict | None = None,
         headers: dict | None = None,
         url: str | None = None,
+        request_size: int = 0,
+        upload_size: int = 0,
+        header_size: int = 0,
+        download_size: int = 0,
+        redirect_count: int = 0,
     ) -> None:
         self.status_code = status_code
         self.text = text
         self._json_data = json_data
         self.headers = headers or {}
         self.url = url
+        self.request_size = request_size
+        self.upload_size = upload_size
+        self.header_size = header_size
+        self.download_size = download_size
+        self.redirect_count = redirect_count
 
     def json(self) -> dict:
         return self._json_data or {}
@@ -700,6 +710,10 @@ def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers()
                 200,
                 json_data={"ip": "203.0.113.10", "country": "Spain", "country_code": "ES", "connection": {"asn": 64500, "org": "Test ISP"}},
                 headers={"content-type": "application/json", "set-cookie": "diagnostic_cookie=diag-secret-value; Path=/;"},
+                request_size=100,
+                upload_size=20,
+                header_size=40,
+                download_size=840,
             )
         if path(call) == "/catalog":
             assert "diagnostic_cookie" not in call["cookies"]
@@ -717,10 +731,20 @@ def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers()
                     "x-user-iso-locale": "ES",
                     "x-screen": "catalog",
                 },
+                request_size=200,
+                header_size=100,
+                download_size=1700,
             )
         if path(call) == "/api/v2/catalog/items":
             assert call["cookies"]["access_token_web"] == "anonymous-secret-value"
-            return FakeResponse(200, json_data=load_fixture(), headers={"content-type": "application/json"})
+            return FakeResponse(
+                200,
+                json_data=load_fixture(),
+                headers={"content-type": "application/json"},
+                request_size=300,
+                header_size=120,
+                download_size=2580,
+            )
         return FakeResponse(404)
 
     proxy_session = {
@@ -733,6 +757,7 @@ def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers()
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
         session_factory=fake_session_factory(handler, calls),
+        proxy_url="http://proxy.example:8000",
         proxy_session_marker=proxy_session,
         event_sink=lambda **event: events.append(event),
     )
@@ -753,6 +778,22 @@ def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers()
     assert egress_event["details"]["proxy_session"] == proxy_session
     assert egress_event["details"]["diagnostic_session"] == "isolated"
     assert egress_event["details"]["cookies_sent"] is False
+    assert egress_event["details"]["proxy_transfer"] == {
+        "category": "egress",
+        "observed_requests": 1,
+        "unobserved_attempts": 0,
+        "request_size_bytes": 100,
+        "upload_size_bytes": 20,
+        "header_size_bytes": 40,
+        "download_size_bytes": 840,
+        "total_observed_bytes": 1000,
+    }
+    bootstrap_event = next(event for event in events if event["phase"] == "anonymous_session_bootstrap_success")
+    assert bootstrap_event["details"]["proxy_transfer"]["category"] == "session_setup"
+    assert bootstrap_event["details"]["proxy_transfer"]["total_observed_bytes"] == 2000
+    catalog_event = next(event for event in events if event["phase"] == "catalog_api_request_success")
+    assert catalog_event["details"]["proxy_transfer"]["category"] == "catalog"
+    assert catalog_event["details"]["proxy_transfer"]["total_observed_bytes"] == 3000
     assert "diag-secret-value" not in json.dumps(events)
     assert "anonymous-secret-value" not in json.dumps(events)
     assert "csrf-secret-value" not in json.dumps(events)
@@ -991,12 +1032,17 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
                 200,
                 json_data={"status": 200, "cookie": "datadome=dd-cookie-secret; Path=/; Secure; SameSite=Lax"},
                 headers={"content-type": "application/json"},
+                request_size=10,
+                upload_size=10,
+                header_size=10,
+                download_size=70,
             )
         return FakeResponse(404)
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
         session_factory=fake_session_factory(handler, calls),
+        proxy_url="http://proxy.example:8000",
         event_sink=lambda **event: events.append(event),
     )
 
@@ -1015,6 +1061,10 @@ def test_curl_provider_preflight_collector_marks_session_ready_when_cookie_retur
     assert "datadome_collector_attempt_start" in phases
     assert "datadome_collector_attempt_success" in phases
     assert phases[-1] == "datadome_collector_success"
+    collector_attempts = [event for event in events if event["phase"] == "datadome_collector_attempt_success"]
+    assert len(collector_attempts) == 2
+    assert all(event["details"]["proxy_transfer"]["category"] == "session_setup" for event in collector_attempts)
+    assert all(event["details"]["proxy_transfer"]["total_observed_bytes"] == 100 for event in collector_attempts)
     serialized_events = json.dumps(events)
     assert "dd-cookie-secret" not in serialized_events
     assert "TESTDATADOMEKEY1234567890" not in serialized_events
@@ -1329,18 +1379,34 @@ def test_curl_provider_fetch_detail_uses_html_document_with_referer() -> None:
 
 def test_curl_provider_fetch_detail_follows_only_same_item_vinted_redirects() -> None:
     calls: list[dict] = []
+    events: list[dict] = []
     candidate = map_catalog_item(load_fixture()["items"][0])
     html = build_item_detail_flight_html()
 
     def handler(call: dict) -> FakeResponse:
         assert call["allow_redirects"] is False
         if len(calls) == 1:
-            return FakeResponse(302, headers={"location": f"/items/{candidate.vinted_item_id}-canonical"})
-        return FakeResponse(200, text=html, headers={"content-type": "text/html"})
+            return FakeResponse(
+                302,
+                headers={"location": f"/items/{candidate.vinted_item_id}-canonical"},
+                request_size=100,
+                header_size=50,
+                download_size=50,
+            )
+        return FakeResponse(
+            200,
+            text=html,
+            headers={"content-type": "text/html"},
+            request_size=200,
+            header_size=100,
+            download_size=1500,
+        )
 
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(handler, calls),
+        proxy_url="http://proxy.example:8000",
+        event_sink=lambda **event: events.append(event),
     )
 
     detail = provider.fetch_detail(candidate)
@@ -1348,6 +1414,10 @@ def test_curl_provider_fetch_detail_follows_only_same_item_vinted_redirects() ->
     assert detail.vinted_item_id == candidate.vinted_item_id
     assert len(calls) == 2
     assert calls[1]["url"].endswith(f"/items/{candidate.vinted_item_id}-canonical?referrer=catalog")
+    success = next(event for event in events if event["phase"] == "detail_http_request_success")
+    assert success["details"]["proxy_transfer"]["category"] == "detail"
+    assert success["details"]["proxy_transfer"]["observed_requests"] == 2
+    assert success["details"]["proxy_transfer"]["total_observed_bytes"] == 2000
 
 
 @pytest.mark.parametrize(
@@ -1362,19 +1432,32 @@ def test_curl_provider_fetch_detail_follows_only_same_item_vinted_redirects() ->
 )
 def test_curl_provider_fetch_detail_rejects_unsafe_redirect_before_following(location: str) -> None:
     calls: list[dict] = []
+    events: list[dict] = []
     candidate = map_catalog_item(load_fixture()["items"][0])
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=fake_session_factory(
-            lambda _call: FakeResponse(302, headers={"location": location}),
+            lambda _call: FakeResponse(
+                302,
+                headers={"location": location},
+                request_size=100,
+                header_size=50,
+                download_size=50,
+            ),
             calls,
         ),
+        proxy_url="http://proxy.example:8000",
+        event_sink=lambda **event: events.append(event),
     )
 
     with pytest.raises(VintedCatalogProviderError, match="detail request failed"):
         provider.fetch_detail(candidate)
 
     assert len(calls) == 1
+    terminal = next(event for event in events if event["phase"] == "detail_http_request_error")
+    assert terminal["details"]["proxy_transfer"]["observed_requests"] == 1
+    assert terminal["details"]["proxy_transfer"]["unobserved_attempts"] == 0
+    assert terminal["details"]["proxy_transfer"]["total_observed_bytes"] == 200
 
 
 def test_curl_provider_fetch_detail_rejects_unsafe_effective_response_url() -> None:
@@ -1395,6 +1478,61 @@ def test_curl_provider_fetch_detail_rejects_unsafe_effective_response_url() -> N
 
     with pytest.raises(VintedCatalogProviderError, match="detail request failed"):
         provider.fetch_detail(candidate)
+
+
+def test_curl_provider_fetch_detail_counts_redirect_without_location_once() -> None:
+    events: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(302, request_size=100, header_size=50, download_size=50),
+            [],
+        ),
+        proxy_url="http://proxy.example:8000",
+        event_sink=lambda **event: events.append(event),
+    )
+
+    with pytest.raises(VintedCatalogProviderError, match="redirect omitted Location"):
+        provider.fetch_detail(candidate)
+
+    terminal_events = [event for event in events if event["phase"] == "detail_http_request_error"]
+    assert len(terminal_events) == 1
+    transfer = terminal_events[0]["details"]["proxy_transfer"]
+    assert transfer["observed_requests"] == 1
+    assert transfer["unobserved_attempts"] == 0
+    assert transfer["total_observed_bytes"] == 200
+
+
+def test_curl_provider_fetch_detail_counts_non_html_response_once() -> None:
+    events: list[dict] = []
+    candidate = map_catalog_item(load_fixture()["items"][0])
+    provider = CurlCffiVintedCatalogProvider(
+        settings=Settings(egress_diagnostic_url=None),
+        session_factory=fake_session_factory(
+            lambda _call: FakeResponse(
+                200,
+                text='{"item":"unexpected"}',
+                headers={"content-type": "application/json"},
+                request_size=120,
+                header_size=80,
+                download_size=300,
+            ),
+            [],
+        ),
+        proxy_url="http://proxy.example:8000",
+        event_sink=lambda **event: events.append(event),
+    )
+
+    with pytest.raises(VintedCatalogProviderError, match="non-HTML content"):
+        provider.fetch_detail(candidate)
+
+    terminal_events = [event for event in events if event["phase"] == "detail_http_request_error"]
+    assert len(terminal_events) == 1
+    transfer = terminal_events[0]["details"]["proxy_transfer"]
+    assert transfer["observed_requests"] == 1
+    assert transfer["unobserved_attempts"] == 0
+    assert transfer["total_observed_bytes"] == 500
 
 
 def test_curl_provider_fetch_detail_types_cloudflare_challenge() -> None:
@@ -2474,6 +2612,9 @@ def test_detail_batch_aborts_all_lanes_on_challenge() -> None:
         provider.fetch_detail_batch(candidates, referer_url=source().url, concurrency=2)
 
     assert captured.value.detail_candidate_id == candidates[0].vinted_item_id
+    assert captured.value.detail_batch_telemetry["detail_fetch_elapsed_ms"] >= 0
+    assert captured.value.detail_batch_telemetry["detail_fetch_request_duration_total_ms"] >= 0
+    assert captured.value.detail_batch_telemetry["detail_fetch_attempts"] == 2
 
 
 def test_detail_batch_stops_new_waves_after_429_without_consuming_deferred_attempt() -> None:
