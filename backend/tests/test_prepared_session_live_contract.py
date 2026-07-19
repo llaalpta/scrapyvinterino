@@ -204,10 +204,12 @@ def _exercise_live_stack(scenario: Scenario, *, api_url: str, pwa_url: str) -> N
 
             page.get_by_role("button", name="Monitores", exact=True).click()
             page.get_by_role("button", name=f"{scenario.source_name}, inactivo", exact=True).click()
-            panel = page.get_by_role("region", name="Sesiones Vinted preparadas para este monitor")
-            expect(panel.get_by_text(f"Sesion #{scenario.canonical_id}", exact=False)).to_be_visible()
-            expect(panel.get_by_text("Utilizable ahora", exact=True)).to_be_visible()
-            assert panel.get_by_text(f"Sesion #{scenario.incompatible_id}", exact=False).count() == 0
+            panel = page.get_by_role("group", name="Contextos HTTP preparados para este monitor")
+            expect(panel).not_to_have_attribute("open", "")
+            panel.locator("summary").click()
+            expect(panel.get_by_text(f"Contexto #{scenario.canonical_id}", exact=False)).to_be_visible()
+            expect(panel.get_by_text("Reutilizable", exact=True)).to_be_visible()
+            assert panel.get_by_text(f"Contexto #{scenario.incompatible_id}", exact=False).count() == 0
 
             page.get_by_role("button", name="Ajustes", exact=True).click()
             expect(page.get_by_text(scenario.proxy_name, exact=True)).to_be_visible()
@@ -221,11 +223,12 @@ def _exercise_live_stack(scenario: Scenario, *, api_url: str, pwa_url: str) -> N
             with page.expect_response(lambda response: urlsplit(response.url).path == "/api/monitors", timeout=10_000):
                 page.get_by_role("button", name="Monitores", exact=True).click()
             page.get_by_role("button", name=f"{scenario.expiry_source_name}, inactivo", exact=True).click()
-            panel = page.get_by_role("region", name="Sesiones Vinted preparadas para este monitor")
-            expect(panel.get_by_text("Utilizable ahora", exact=True)).to_be_visible()
+            panel = page.get_by_role("group", name="Contextos HTTP preparados para este monitor")
+            panel.locator("summary").click()
+            expect(panel.get_by_text("Reutilizable", exact=True)).to_be_visible()
             page.wait_for_timeout(400)
             reads_before = len(monitor_reads)
-            expect(panel.get_by_text("La sesion ha expirado.", exact=True)).to_be_visible(timeout=12_000)
+            expect(panel.get_by_text("El contexto ha expirado.", exact=True)).to_be_visible(timeout=12_000)
             reads_after = len(monitor_reads)
             assert 1 <= reads_after - reads_before <= 2
             assert len(navigations) == 1

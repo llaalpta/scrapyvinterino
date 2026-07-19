@@ -72,6 +72,10 @@ type MonitorCommand = {
   sourceId: number | null;
 };
 
+type PendingSourceNavigation =
+  | { kind: 'monitor'; sourceId: number }
+  | { kind: 'section'; section: string };
+
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
@@ -88,6 +92,9 @@ export function useDashboardController() {
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null);
   const [schedulerAvailabilityError, setSchedulerAvailabilityError] = useState<string | null>(null);
   const [sourceDrafts, setSourceDrafts] = useState<Record<number, SourceDraft>>({});
+  const [requestedSelectedMonitorId, setRequestedSelectedMonitorId] = useState<number | null>(null);
+  const [editingSourceId, setEditingSourceId] = useState<number | null>(null);
+  const [pendingSourceNavigation, setPendingSourceNavigation] = useState<PendingSourceNavigation | null>(null);
   const [opportunityFilters, setOpportunityFilters] = useState<OpportunityFilters>(defaultOpportunityFilters);
   const [opportunitiesPageSize, setOpportunitiesPageSize] = useState(25);
   const [monitorCommand, setMonitorCommand] = useState<MonitorCommand | null>(null);
@@ -629,6 +636,30 @@ export function useDashboardController() {
     };
   }, []);
 
+  useEffect(() => {
+    if (editingSourceId === null) {
+      return;
+    }
+    const source = sources.find((entry) => entry.id === editingSourceId);
+    const runs = monitorRunsBySource[editingSourceId] ?? [];
+    const editBecameUnavailable = !source
+      || source.is_active
+      || pendingStopSourceIds.includes(editingSourceId)
+      || runs.some((run) => run.status === 'running' || run.status === 'finalizing');
+    if (!editBecameUnavailable) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (source) {
+        setSourceDrafts((current) => ({ ...current, [source.id]: buildSourceDraft(source) }));
+      }
+      setEditingSourceId(null);
+      setPendingSourceNavigation(null);
+      setError('La edicion se cerro porque el monitor dejo de estar detenido e inactivo');
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [editingSourceId, monitorRunsBySource, pendingStopSourceIds, sources]);
+
   const refreshRuntime = useCallback(async (sourceData = sources) => {
     await fetchOpportunityCollection();
     await refreshLoadedMonitorStats(sourceData);
@@ -955,6 +986,8 @@ export function useDashboardController() {
           sessionDurationMinutes: (current[updated.id] ?? draft).sessionDurationMinutes
         }
       }));
+      setEditingSourceId(null);
+      setPendingSourceNavigation(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'No se pudo guardar el monitor');
     } finally {
@@ -979,6 +1012,88 @@ export function useDashboardController() {
     monitorRunsRequestGenerationRef.current.delete(sourceId);
     monitorStatsRequestGenerationRef.current.delete(sourceId);
     monitorEventsRequestGenerationRef.current.delete(sourceId);
+    if (editingSourceId === sourceId) {
+      setEditingSourceId(null);
+      setPendingSourceNavigation(null);
+    }
+    if (requestedSelectedMonitorId === sourceId) {
+      setRequestedSelectedMonitorId(null);
+    }
+  }
+
+  function beginSourceEdit(source: SearchSource) {
+    const runs = monitorRunsBySource[source.id];
+    const hasNonTerminalRun = runs?.some((run) => run.status === 'running' || run.status === 'finalizing') ?? false;
+    const isDraining = pendingStopSourceIds.includes(source.id) || hasNonTerminalSessionRun(runs ?? []);
+    if (monitorCommandRef.current || source.is_active || isDraining || runs === undefined || hasNonTerminalRun) {
+      setError('La configuracion solo se puede modificar con el monitor detenido y sin ejecuciones pendientes');
+      return;
+    }
+    setError(null);
+    setSourceDrafts((current) => ({ ...current, [source.id]: buildSourceDraft(source) }));
+    setRequestedSelectedMonitorId(source.id);
+    setPendingSourceNavigation(null);
+    setEditingSourceId(source.id);
+  }
+
+  function cancelSourceEdit() {
+    resetSourceEditDraft();
+    setEditingSourceId(null);
+    setPendingSourceNavigation(null);
+  }
+
+  function requestMonitorSelection(sourceId: number) {
+    if (editingSourceId === sourceId) {
+      setRequestedSelectedMonitorId(sourceId);
+      return;
+    }
+    if (monitorCommandRef.current?.kind === 'save') {
+      setError('Espera a que termine el guardado antes de cambiar de monitor');
+      return;
+    }
+    if (sourceEditHasChanges()) {
+      setPendingSourceNavigation({ kind: 'monitor', sourceId });
+      return;
+    }
+    resetSourceEditDraft();
+    setEditingSourceId(null);
+    setPendingSourceNavigation(null);
+    setRequestedSelectedMonitorId(sourceId);
+  }
+
+  function confirmDiscardSourceEdit() {
+    const pending = pendingSourceNavigation;
+    resetSourceEditDraft();
+    setEditingSourceId(null);
+    setPendingSourceNavigation(null);
+    if (pending?.kind === 'monitor') {
+      setRequestedSelectedMonitorId(pending.sourceId);
+    } else if (pending?.kind === 'section') {
+      activateSection(pending.section);
+    }
+  }
+
+  function keepSourceEditing() {
+    setPendingSourceNavigation(null);
+  }
+
+  function sourceEditHasChanges(): boolean {
+    if (editingSourceId === null) {
+      return false;
+    }
+    const source = sources.find((entry) => entry.id === editingSourceId);
+    const draft = sourceDrafts[editingSourceId];
+    return Boolean(source && draft && sourceDraftHasChanges(source, draft));
+  }
+
+  function resetSourceEditDraft() {
+    if (editingSourceId === null) {
+      return;
+    }
+    const source = sources.find((entry) => entry.id === editingSourceId);
+    if (source) {
+      setSourceDrafts((current) => ({ ...current, [source.id]: buildSourceDraft(source) }));
+    }
   }
 
   function updateSourceDraft(sourceId: number, field: keyof SourceDraft, value: string) {
@@ -991,6 +1106,7 @@ export function useDashboardController() {
           monitorMode: 'manual',
           intervalSeconds: '300',
           jitterPercent: '20',
+          stopAfterVintedSessionUses: '',
           windowStart: '',
           windowEnd: '',
           sessionDurationMinutes: '60',
@@ -1096,6 +1212,26 @@ export function useDashboardController() {
   }
 
   function selectSection(section: string) {
+    if (section === activeSection) {
+      return;
+    }
+    if (activeSection === 'sources' && editingSourceId !== null) {
+      if (monitorCommandRef.current?.kind === 'save') {
+        setError('Espera a que termine el guardado antes de salir de Monitores');
+        return;
+      }
+      if (sourceEditHasChanges()) {
+        setPendingSourceNavigation({ kind: 'section', section });
+        return;
+      }
+      resetSourceEditDraft();
+      setEditingSourceId(null);
+      setPendingSourceNavigation(null);
+    }
+    activateSection(section);
+  }
+
+  function activateSection(section: string) {
     setActiveSection(section);
     window.setTimeout(() => window.scrollTo({ top: 0, left: 0 }), 0);
   }
@@ -1107,6 +1243,7 @@ export function useDashboardController() {
     changeResultsPageSize,
     clearOpportunityFilters,
     creatingSource: monitorCommand?.kind === 'create',
+    editingSourceId,
     error,
     getSourceName,
     loadOpportunities,
@@ -1120,6 +1257,11 @@ export function useDashboardController() {
     onDeleteSource,
     onAppendMonitorEvent: appendMonitorEvent,
     onClearMonitorEventsView: clearMonitorEventsView,
+    onBeginSourceEdit: beginSourceEdit,
+    onCancelSourceEdit: cancelSourceEdit,
+    onConfirmDiscardSourceEdit: confirmDiscardSourceEdit,
+    onKeepSourceEditing: keepSourceEditing,
+    onSelectMonitor: requestMonitorSelection,
     onSaveSourceSchedule,
     onRunNow,
     onStartSession,
@@ -1139,6 +1281,7 @@ export function useDashboardController() {
     opportunityCollectionState,
     opportunityPage,
     pendingStopSourceIds,
+    pendingSourceNavigation,
     proxyDraft,
     proxyCollectionState,
     proxyProfiles,
@@ -1147,6 +1290,7 @@ export function useDashboardController() {
     opportunityFilters,
     opportunitiesPageSize,
     runningSessionId,
+    requestedSelectedMonitorId,
     savingProxy,
     savingSourceId,
     scheduler,
@@ -1217,6 +1361,12 @@ function markPreparedSessionsExpired(sourceData: SearchSource[], expiryThreshold
 
 function addId(current: number[], id: number): number[] {
   return current.includes(id) ? current : [...current, id];
+}
+
+function hasNonTerminalSessionRun(runs: Run[]): boolean {
+  return runs.some(
+    (run) => run.monitor_session_id !== null && (run.status === 'running' || run.status === 'finalizing')
+  );
 }
 
 function mergeMissingSourceDrafts(

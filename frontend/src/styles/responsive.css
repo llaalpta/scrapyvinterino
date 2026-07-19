@@ -165,7 +165,6 @@
   }
 
   .source-row,
-  .source-card-header,
   .source-identity-editor,
   .source-schedule,
   .source-schedule.compact,
@@ -234,14 +233,22 @@
     white-space: normal;
   }
 
-  .source-card-header,
   .monitor-card-header {
     flex-direction: column;
   }
 
+  .monitor-detail-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .monitor-catalog-link {
+    justify-content: center;
+    width: 100%;
+  }
+
   .source-actions,
   .monitor-config-actions,
-  .source-badges,
   .proxy-row,
   .filter-rule-row {
     align-items: stretch;
@@ -253,6 +260,10 @@
   .confirm-dialog-actions button,
   .proxy-row button {
     width: 100%;
+  }
+
+  .monitor-primary-actions .monitor-archive-action {
+    margin-left: 0;
   }
 
   .monitor-performance-heading {

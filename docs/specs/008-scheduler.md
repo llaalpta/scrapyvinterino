@@ -32,6 +32,20 @@ Representative integration: the isolated authenticated PWA/API/PostgreSQL/Redis 
 
 Verification passed the nine-case isolated scenario including live Playwright (`9 passed`), the disposable PostgreSQL `0020 -> 0021` probe, Ruff, frontend lint/build and the complete isolated backend gate (`525 passed`, `9 skipped`, plus `3 passed` loopback-only). The operational idle database reached 0021 with the old key absent before the API restarted; no active monitor, run, session or queued task existed.
 
+## 14.47 Compact monitor detail and guarded editing
+
+Status: `done`. The monitor table remains a compact selector rather than a second command surface. The selected detail starts with persisted identity, effective catalog filters and state-valid actions; editing is an explicit stopped/idle mode, and performance remains grouped by monitor session rather than by reusable HTTP context.
+
+Acceptance criteria:
+
+1. In normal mode, inactive monitors expose start/edit/archive, active manual monitors expose run/stop, and active recurring monitors expose only stop. Raw URL and configuration inputs are not duplicated outside edit mode.
+2. Dirty edit navigation to another monitor or PWA section requires an in-app discard decision. Save success exits editing with the persisted response, save rejection keeps the draft, and cancel/discard restores the persisted source without traffic.
+3. Accumulated monitor metrics and active/latest-session metrics remain unchanged and precede collapsed `Contextos HTTP preparados` plus collapsed logs. Responsive layout has no horizontal overflow.
+
+The representative real gate is the existing isolated monitor-identity PWA/API/PostgreSQL scenario with a second source, a local HTTP-context diagnostic row and desktop/mobile Playwright. Worker/watchdog and all external destinations remain unavailable; cleanup restores the initial operational fingerprints and service ownership.
+
+Verification passed `8` focused cases plus `1` live Playwright case. The live PWA kept the table selector command-free, enforced read/edit and dirty-navigation boundaries, presented the active manual action set, retained performance before two independently collapsed diagnostic sections and had no horizontal overflow at `390x844`. No external request was allowed or observed; cleanup removed all isolated resources and preserved operational PostgreSQL/Redis fingerprints. Ruff and frontend lint/build passed.
+
 ## Planned 14.34 session program
 
 Status: `done`. Slices 14.34.1, 14.34.2 and 14.34.3 are implemented and verified. Their current clauses replace the temporary calibration/stop contracts across specs 001, 003, 005, 008 and 010 plus architecture/data-model prose.
