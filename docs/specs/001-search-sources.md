@@ -34,7 +34,7 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - PWA:
   - monitor creation form;
   - monitor count and visible monitor table with a selected monitor detail panel;
-  - editing of name, original catalog URL, filters, cadence, window/duration, and execution mode while stopped and without a local command/run in progress;
+  - action-first selected detail with an explicit edit mode for name, original catalog URL, filters, cadence, window/duration, and execution mode while stopped and without a local command/run in progress;
   - archive/delete action with confirmation.
 - Database:
   - `search_sources`.
@@ -60,6 +60,18 @@ Allow the user to configure Vinted catalog search URLs from the private app and 
 - The saved display name is trimmed, must contain at least one non-whitespace character and must not exceed the PostgreSQL `varchar(160)` limit after trimming. Create and PATCH apply the same validation before mutation.
 - The original catalog URL follows the local URL rules above. A valid edit trims only surrounding whitespace, recomputes `normalized_query` and keeps the monitor ID and all historical ownership unchanged.
 - The PWA edits name and URL in the existing stopped-monitor configuration draft and saves them in the same PATCH as the other changed configuration. A rejected name or URL remains visible for correction while the persisted source is unchanged.
+
+### 14.47 compact selected-monitor detail
+
+Status: `done` on `feat/14-47-compact-monitor-detail`.
+
+1. The normal selected-monitor detail has one name/status heading, an `Abrir catalogo` link, the effective URL-filter summary and only the actions valid for the current monitor state before accumulated/session performance. It does not repeat the raw URL or render the edit form.
+2. `Modificar` is available only while stopped and idle. It replaces normal actions with `Guardar`/`Cancelar`; invalid save remains editable, cancel restores persisted values, and changing monitor or section with a dirty draft requires an in-app discard confirmation.
+3. Proxy-bound anonymous Vinted state is labelled `Contextos HTTP preparados`, remains separate from monitor-session metrics and is collapsed with accumulated logs. Desktop and mobile retain accessible actions and no horizontal overflow.
+
+Representative integration: extend the isolated authenticated monitor-identity PWA/API/PostgreSQL scenario with a second inactive source and one locally seeded diagnostic HTTP context. Prove valid same-ID save, mutation-free invalid save, cancel/discard across monitor and section navigation, active-state action/edit boundaries, DOM order and collapsed diagnosis on desktop and mobile. Worker and watchdog stay stopped, every browser destination is loopback-only, `Abrir catalogo` is not followed, and the complete QA graph is removed.
+
+Verification passed `8` focused cases plus `1` live authenticated Playwright case against a migrated isolated PostgreSQL database, API and strict Vite. It proved valid same-ID persistence, visible mutation-free rejection, cancel/discard decisions across monitor and section navigation, active/manual action boundaries, unique closed diagnosis after selection changes and mobile no-overflow. Browser traffic was loopback-only, the diagnostic context and full QA graph were removed, operational PostgreSQL/Redis fingerprints stayed unchanged, and Ruff plus frontend lint/build passed.
 
 ### 14.26 task contract
 
@@ -105,7 +117,7 @@ Verification passed one live Playwright case against an authenticated API, migra
 - Saved monitors are visible after refresh.
 - Multiple saved monitors are shown in one compact selectable table with active monitors first, status chips/styles per row, and one selected monitor detail visible at a time.
 - The monitor detail updates when a different monitor row is selected.
-- The selected monitor detail shows name, URL, session state when available, configuration editable while stopped and idle, performance chart, and active logs in that order.
+- The selected monitor detail shows one compact persisted identity/filter summary and state-valid actions first. Its configuration form exists only in explicit stopped/idle edit mode; accumulated/session performance follows, then collapsed HTTP-context diagnosis and accumulated logs.
 - Archived monitors are hidden from the default monitor list and cannot be scheduled or launched.
 - Archiving a monitor prevents new scheduler admission, closes its open monitor session, and preserves historical rows for audit and result traceability.
 - Archiving invalidates every prepared Vinted session owned by the monitor and purges its encrypted cookie/token payload while preserving safe session metadata.

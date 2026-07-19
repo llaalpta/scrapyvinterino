@@ -1,5 +1,5 @@
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ChevronDown, Eraser, FileText, Play, RefreshCw, Save, Square, Trash2 } from 'lucide-react';
+import { ChevronDown, Eraser, ExternalLink, FileText, Pencil, Play, RefreshCw, Save, Square, Trash2, X } from 'lucide-react';
 import {
   type MonitorStats,
   type MonitorStatsRange,
@@ -13,31 +13,39 @@ import type { CollectionLoadState } from '../../app/collectionLoadState';
 import { formatDate } from '../../utils/format';
 import { eventSearchText } from '../runs/runEventSearch';
 import { RunEventEntry } from '../runs/RunsView';
-import { buildSourceDraft, filterTermLabelFromDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
+import { buildSourceDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
 
 export function SourcesView({
   creatingSource,
+  editingSourceId,
   monitorEventHistoryLoadedBySource,
   monitorEventsBySource,
   monitorHiddenEventIdsBySource,
   monitorCommandPending,
   monitorRunsBySource,
   pendingStopSourceIds,
+  pendingSourceNavigation,
   monitorStatsBySource,
   monitorStatsRangeBySource,
   onClearMonitorEventsView,
+  onBeginSourceEdit,
+  onCancelSourceEdit,
+  onConfirmDiscardSourceEdit,
   onCreateSource,
   onDeleteSource,
   onLoadMonitorEvents,
   onLoadMonitorRuns,
   onLoadMonitorStats,
+  onKeepSourceEditing,
   onRunNow,
+  onSelectMonitor,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
   runningSessionId,
+  requestedSelectedMonitorId,
   savingSourceId,
   sourceDrafts,
   sourceCollectionState,
@@ -51,25 +59,33 @@ export function SourcesView({
   updateSourceDraft,
 }: {
   creatingSource: boolean;
+  editingSourceId: number | null;
   monitorEventHistoryLoadedBySource: Record<number, boolean>;
   monitorEventsBySource: Record<number, RunEvent[]>;
   monitorHiddenEventIdsBySource: Record<number, number[]>;
   monitorCommandPending: boolean;
   monitorRunsBySource: Record<number, Run[]>;
   pendingStopSourceIds: number[];
+  pendingSourceNavigation: { kind: 'monitor'; sourceId: number } | { kind: 'section'; section: string } | null;
   monitorStatsBySource: Record<number, MonitorStats>;
   monitorStatsRangeBySource: Record<number, MonitorStatsRange>;
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
+  onBeginSourceEdit: (source: SearchSource) => void;
+  onCancelSourceEdit: () => void;
+  onConfirmDiscardSourceEdit: () => void;
   onCreateSource: (event: FormEvent<HTMLFormElement>) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorEvents: (sourceId: number) => Promise<void>;
   onLoadMonitorRuns: (sourceId: number) => Promise<void>;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
+  onKeepSourceEditing: () => void;
   onRunNow: (source: SearchSource) => void;
+  onSelectMonitor: (sourceId: number) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
   runningSessionId: number | null;
+  requestedSelectedMonitorId: number | null;
   savingSourceId: number | null;
   sourceDrafts: Record<number, SourceDraft>;
   sourceCollectionState: CollectionLoadState;
@@ -103,7 +119,6 @@ export function SourcesView({
   );
   const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
-  const [requestedSelectedMonitorId, setSelectedMonitorId] = useState<number | null>(null);
   const selectedMonitorId = sources.some((source) => source.id === requestedSelectedMonitorId)
     ? requestedSelectedMonitorId
     : defaultSelectedMonitorId;
@@ -205,21 +220,12 @@ export function SourcesView({
         selectedMonitorId={selectedMonitorId}
         sourceCollectionState={sourceCollectionState}
         sources={orderedSources}
-        sourceDrafts={sourceDrafts}
-        onSelectMonitor={setSelectedMonitorId}
+        onSelectMonitor={onSelectMonitor}
       />
 
       <section className="monitor-page-card monitor-detail-shell" ref={detailRef} aria-label="Detalle del monitor seleccionado" hidden={!sourceCollectionReady}>
-        <div className="monitor-section-heading compact">
-          <div>
-            <h3>Detalle del monitor seleccionado</h3>
-            <p>{selectedSource ? 'Configuracion, rendimiento y logs acumulados.' : 'Selecciona un monitor del listado para ver su detalle.'}</p>
-          </div>
-          {selectedSource ? (
-            <span>{drainingSourceIds.has(selectedSource.id) ? 'Deteniendo...' : selectedSource.is_active ? 'Activo' : 'Inactivo'}</span>
-          ) : <span>Sin seleccion</span>}
-        </div>
         <MonitorDetail
+          editingSourceId={editingSourceId}
           hiddenEventIds={selectedSource ? (monitorHiddenEventIdsBySource[selectedSource.id] ?? []) : []}
           isDraining={selectedSource ? drainingSourceIds.has(selectedSource.id) : false}
           loadingMonitorEvents={selectedSource ? Boolean(loadingMonitorEventsBySource[selectedSource.id]) : false}
@@ -227,6 +233,8 @@ export function SourcesView({
           monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
           monitorRunStateKnown={selectedSource ? Object.hasOwn(monitorRunsBySource, selectedSource.id) : false}
           monitorCommandPending={monitorCommandPending}
+          onBeginSourceEdit={onBeginSourceEdit}
+          onCancelSourceEdit={onCancelSourceEdit}
           onClearMonitorEventsView={onClearMonitorEventsView}
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
@@ -244,6 +252,12 @@ export function SourcesView({
           updateSourceDraft={updateSourceDraft}
         />
       </section>
+      {pendingSourceNavigation ? (
+        <DiscardSourceEditDialog
+          onConfirm={onConfirmDiscardSourceEdit}
+          onKeepEditing={onKeepSourceEditing}
+        />
+      ) : null}
     </section>
   );
 }
@@ -567,8 +581,7 @@ function MonitorTable({
   onSelectMonitor,
   selectedMonitorId,
   sourceCollectionState,
-  sources,
-  sourceDrafts
+  sources
 }: {
   drainingSourceIds: Set<number>;
   monitorStatsBySource: Record<number, MonitorStats>;
@@ -576,7 +589,6 @@ function MonitorTable({
   selectedMonitorId: number | null;
   sourceCollectionState: CollectionLoadState;
   sources: SearchSource[];
-  sourceDrafts: Record<number, SourceDraft>;
 }) {
   return (
     <section className="monitor-page-card monitor-table-panel" aria-label="Monitores configurados">
@@ -611,9 +623,8 @@ function MonitorTable({
             <span>Metricas</span>
           </div>
           {sources.map((source) => {
-            const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
             const isDraining = drainingSourceIds.has(source.id);
-            const summary = source.is_active || isDraining ? monitorSummary(source) : draftSummary(source, draft);
+            const summary = monitorSummary(source);
             return (
               <MonitorTableRow
                 isDraining={isDraining}
@@ -704,6 +715,7 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
+  editingSourceId,
   hiddenEventIds,
   isDraining,
   loadingMonitorEvents,
@@ -711,6 +723,8 @@ function MonitorDetail({
   monitorRuns,
   monitorRunStateKnown,
   monitorCommandPending,
+  onBeginSourceEdit,
+  onCancelSourceEdit,
   onClearMonitorEventsView,
   onDeleteSource,
   onLoadMonitorStats,
@@ -727,6 +741,7 @@ function MonitorDetail({
   streamStatus,
   updateSourceDraft
 }: {
+  editingSourceId: number | null;
   hiddenEventIds: number[];
   isDraining: boolean;
   loadingMonitorEvents: boolean;
@@ -734,6 +749,8 @@ function MonitorDetail({
   monitorRuns: Run[];
   monitorRunStateKnown: boolean;
   monitorCommandPending: boolean;
+  onBeginSourceEdit: (source: SearchSource) => void;
+  onCancelSourceEdit: () => void;
   onClearMonitorEventsView: (sourceId: number, visibleEventIds: number[]) => void;
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
@@ -780,22 +797,124 @@ function MonitorDetail({
   const hasNonTerminalRun = monitorRuns.some((run) => run.status === 'running' || run.status === 'finalizing');
   const isRunStateUnknown = !source.is_active && !monitorRunStateKnown;
   const hasCommandInFlight = monitorCommandPending || hasNonTerminalRun || isRunStateUnknown;
+  const isEditing = editingSourceId === source.id && !source.is_active && !isDraining;
 
   return (
     <div className={`monitor-detail-content${source.is_active || isDraining ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
-      <div className="source-card-header">
-        <div className="source-main">
-          <strong>{source.name}</strong>
-          <a href={source.url} target="_blank" rel="noreferrer">
-            {source.url}
+      <header className="monitor-detail-header">
+        <div className="monitor-detail-heading-copy">
+          <div className="monitor-detail-title-line">
+            <h3>{source.name}</h3>
+            <span className={source.is_active || isDraining ? 'status running' : 'status'}>
+              {isDraining ? 'Deteniendo...' : source.is_active ? 'Activo' : 'Inactivo'}
+            </span>
+          </div>
+          <p>
+            {isEditing
+              ? 'Modifica la configuracion persistida de este monitor.'
+              : 'Consulta efectiva y acciones disponibles para este monitor.'}
+          </p>
+        </div>
+        {!isEditing ? (
+          <a className="monitor-catalog-link" href={source.url} target="_blank" rel="noreferrer" title={source.url}>
+            <ExternalLink size={16} />
+            Abrir catalogo
           </a>
-        </div>
-        <div className="source-badges">
-          <span className={source.is_active || isDraining ? 'status running' : 'status'}>
-            {isDraining ? 'Deteniendo...' : source.is_active ? 'Activo' : 'Inactivo'}
-          </span>
-        </div>
+        ) : null}
+      </header>
+
+      <div className="monitor-config-actions monitor-primary-actions" aria-label="Acciones del monitor seleccionado">
+        {isEditing ? (
+          <>
+            <button
+              type="button"
+              disabled={savingSourceId === source.id || hasCommandInFlight || !hasUnsavedChanges}
+              title="Guardar configuracion"
+              onClick={() => onSaveSourceSchedule(source)}
+            >
+              <Save size={16} />
+              {savingSourceId === source.id ? 'Guardando...' : 'Guardar'}
+            </button>
+            <button type="button" disabled={monitorCommandPending} onClick={onCancelSourceEdit}>
+              <X size={16} />
+              Cancelar
+            </button>
+            {hasUnsavedChanges ? <span className="monitor-config-dirty">Cambios sin guardar</span> : null}
+          </>
+        ) : source.is_active ? (
+          <>
+            {isManual ? (
+              <button type="button" disabled={savingSourceId === source.id || hasCommandInFlight} onClick={() => onRunNow(source)}>
+                <Play size={16} />
+                {runningSessionId === source.id ? 'Ejecutando...' : 'Ejecutar ahora'}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={monitorCommandPending}
+              title={monitorCommandPending ? 'Hay un comando de monitor en curso' : 'Detener sesion'}
+              onClick={() => onStopMonitor(source.id)}
+            >
+              <Square size={16} />
+              Detener sesion
+            </button>
+          </>
+        ) : isDraining ? (
+          <button type="button" disabled>
+            <Square size={16} />
+            Deteniendo sesion...
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={hasCommandInFlight || savingSourceId === source.id || launchBlockedByFilters}
+              title={
+                launchBlockedByFilters
+                  ? 'Corrige los filtros de URL no soportados antes de ejecutar este monitor'
+                  : isManual
+                    ? 'Iniciar sesion y calibrar el listado actual'
+                    : 'Iniciar sesion periodica y calibrar el listado actual'
+              }
+              onClick={() => onStartSession(source)}
+            >
+              <Play size={17} />
+              {runningSessionId === source.id ? 'Iniciando...' : 'Iniciar sesion'}
+            </button>
+            <button type="button" disabled={hasCommandInFlight} onClick={() => onBeginSourceEdit(source)}>
+              <Pencil size={16} />
+              Modificar
+            </button>
+            <button
+              className="danger-button monitor-archive-action"
+              type="button"
+              disabled={savingSourceId === source.id || hasCommandInFlight}
+              title="Archivar monitor"
+              onClick={() => setArchiveSource(source)}
+            >
+              <Trash2 size={16} />
+              Archivar monitor
+            </button>
+          </>
+        )}
       </div>
+
+      {isEditing ? (
+        <section className="monitor-config-panel editing">
+          <div className="monitor-config-heading">
+            <h4>Modificar configuracion</h4>
+            <span>La URL y sus filtros efectivos se validan al guardar.</span>
+          </div>
+          <MonitorConfigEditor
+            disabled={hasCommandInFlight}
+            source={source}
+            sourceDraft={sourceDraft}
+            updateSourceDraft={updateSourceDraft}
+          />
+        </section>
+      ) : (
+        <CatalogFilterCompatibilityStatus source={source} />
+      )}
 
       <MonitorPerformancePanel
         range={statsRange}
@@ -804,91 +923,9 @@ function MonitorDetail({
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
 
-      <PreparedSessionsPanel sessions={source.prepared_sessions} />
+      <PreparedSessionsPanel key={`contexts-${source.id}`} sessions={source.prepared_sessions} />
 
-      <section className={`monitor-config-panel${source.is_active || isDraining || isRunStateUnknown ? ' readonly' : ''}`}>
-        <div className="monitor-config-heading">
-          <h4>Configuracion</h4>
-          {source.is_active || hasCommandInFlight ? (
-            <span>
-              {isDraining
-                ? 'Deteniendo la sesion; espera a que termine la ejecucion.'
-                : source.is_active
-                  ? 'Deten el monitor para editarla.'
-                  : isRunStateUnknown
-                    ? 'Comprobando el estado de ejecucion antes de habilitar acciones.'
-                    : 'Espera a que termine el comando de monitor en curso.'}
-            </span>
-          ) : (
-            <span>Editable con el monitor detenido.</span>
-          )}
-        </div>
-        <CatalogFilterCompatibilityStatus source={source} />
-        <MonitorConfigEditor
-          disabled={source.is_active || hasCommandInFlight}
-          source={source}
-          sourceDraft={sourceDraft}
-          updateSourceDraft={updateSourceDraft}
-        />
-        <div className="monitor-config-actions">
-          {source.is_active ? (
-            <>
-              {isManual ? (
-                <button type="button" disabled={savingSourceId === source.id || hasCommandInFlight} onClick={() => onRunNow(source)}>
-                  <Play size={16} />
-                  {runningSessionId === source.id ? 'Ejecutando...' : 'Ejecutar ahora'}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                disabled={monitorCommandPending}
-                title={monitorCommandPending ? 'Hay un comando de monitor en curso' : 'Detener sesion'}
-                onClick={() => onStopMonitor(source.id)}
-              >
-                <Square size={16} />
-                Detener sesion
-              </button>
-            </>
-          ) : (
-            <>
-              <button type="button" disabled={savingSourceId === source.id || hasCommandInFlight || !hasUnsavedChanges} title="Guardar monitor" onClick={() => onSaveSourceSchedule(source)}>
-                <Save size={16} />
-                Guardar
-              </button>
-              <button
-                type="button"
-                disabled={hasCommandInFlight || savingSourceId === source.id || hasUnsavedChanges || launchBlockedByFilters}
-                title={
-                  hasUnsavedChanges
-                    ? 'Guarda los cambios antes de iniciar la sesion'
-                    : launchBlockedByFilters
-                      ? 'Corrige los filtros de URL no soportados antes de ejecutar este monitor'
-                      : isManual
-                        ? 'Iniciar sesion y calibrar el listado actual'
-                        : 'Iniciar sesion periodica y calibrar el listado actual'
-                }
-                onClick={() => onStartSession(source)}
-              >
-                <Play size={17} />
-                {runningSessionId === source.id ? 'Iniciando...' : 'Iniciar sesion'}
-              </button>
-              <button
-                className="danger-button"
-                type="button"
-                disabled={savingSourceId === source.id || hasCommandInFlight}
-                title="Archivar monitor"
-                onClick={() => setArchiveSource(source)}
-              >
-                <Trash2 size={16} />
-                Archivar monitor
-              </button>
-              {hasUnsavedChanges ? <span className="monitor-config-dirty">Cambios sin guardar</span> : null}
-            </>
-          )}
-        </div>
-      </section>
-
-      <details className="monitor-logs" key={source.id}>
+      <details className="monitor-logs" key={`logs-${source.id}`}>
         <summary className="monitor-logs-header">
           <div className="monitor-logs-title">
             <FileText size={15} />
@@ -976,28 +1013,85 @@ function hasNonTerminalSessionRun(runs: Run[]): boolean {
   );
 }
 
-function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
-  const usableCount = sessions.filter((session) => session.usable_now).length;
+function DiscardSourceEditDialog({
+  onConfirm,
+  onKeepEditing
+}: {
+  onConfirm: () => void;
+  onKeepEditing: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
 
   return (
-    <section className="monitor-session-panel" aria-label="Sesiones Vinted preparadas para este monitor">
-      <div className="monitor-session-heading">
-        <div className="monitor-prepared-session-heading-copy">
-          <h4>Sesiones Vinted preparadas</h4>
-          <p>Contexto canonico reutilizable si el runtime admite ese proxy.</p>
+    <div className="confirm-dialog-backdrop" role="presentation" onClick={onKeepEditing}>
+      <div
+        aria-describedby="discard-monitor-edit-description"
+        aria-labelledby="discard-monitor-edit-title"
+        aria-modal="true"
+        className="confirm-dialog"
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            onKeepEditing();
+          }
+        }}
+      >
+        <h4 id="discard-monitor-edit-title">Cambios sin guardar</h4>
+        <p id="discard-monitor-edit-description">
+          La configuracion modificada no se ha guardado. Puedes seguir editando o descartarla para continuar.
+        </p>
+        <div className="confirm-dialog-actions">
+          <button type="button" onClick={onKeepEditing}>Seguir editando</button>
+          <button className="danger-button" type="button" onClick={onConfirm}>Descartar y continuar</button>
         </div>
-        <span>{sessions.length === 0 ? 'Sin contexto' : `${usableCount}/${sessions.length} utilizables`}</span>
       </div>
-      {sessions.length === 0 ? (
-        <p className="empty-inline compact">Sin contexto preparado para este monitor.</p>
-      ) : (
-        <div className="monitor-prepared-session-list">
-          {sessions.map((session) => (
-            <PreparedSessionRow key={session.proxy_profile_id} session={session} />
-          ))}
+    </div>
+  );
+}
+
+function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
+  const usableCount = sessions.filter((session) => session.usable_now).length;
+  const summaryLabel = sessions.length === 0 ? 'Sin contexto' : `${usableCount}/${sessions.length} reutilizables`;
+
+  return (
+    <details
+      aria-label="Contextos HTTP preparados para este monitor"
+      className={`monitor-logs monitor-http-contexts${sessions.length > 0 && usableCount === 0 ? ' warning' : ''}`}
+    >
+      <summary className="monitor-logs-header">
+        <div className="monitor-logs-title">
+          <RefreshCw size={15} />
+          <h4>Contextos HTTP preparados</h4>
+          <span>{summaryLabel}</span>
         </div>
-      )}
-    </section>
+        <span className="monitor-logs-toggle" aria-hidden="true">
+          <span className="monitor-logs-toggle-closed">Mostrar</span>
+          <span className="monitor-logs-toggle-open">Ocultar</span>
+          <ChevronDown size={17} />
+        </span>
+      </summary>
+      <div className="monitor-logs-body monitor-http-contexts-body">
+        <p className="monitor-log-note">
+          Cookies y tokens anonimos ligados a este monitor y a cada proxy; no agrupan el rendimiento de las sesiones del monitor.
+        </p>
+        {sessions.length === 0 ? (
+          <p className="empty-inline compact">Sin contexto HTTP preparado para este monitor.</p>
+        ) : (
+          <div className="monitor-prepared-session-list">
+            {sessions.map((session) => (
+              <PreparedSessionRow key={session.proxy_profile_id} session={session} />
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -1009,10 +1103,10 @@ function PreparedSessionRow({ session }: { session: VintedSession }) {
       <div className="monitor-prepared-session-main">
         <div>
           <strong>{session.proxy_name}</strong>
-          <span>Sesion #{session.id} | estado durable {session.status}</span>
+          <span>Contexto #{session.id} | estado durable {session.status}</span>
         </div>
         <span className={session.usable_now ? 'status active' : 'status failed'}>
-          {session.usable_now ? 'Utilizable ahora' : 'No utilizable'}
+          {session.usable_now ? 'Reutilizable' : 'No reutilizable'}
         </span>
       </div>
       <p>{session.usable_now ? 'Cumple el contexto efectivo del runtime.' : reason ?? 'Motivo no disponible.'}</p>
@@ -1028,13 +1122,13 @@ function PreparedSessionRow({ session }: { session: VintedSession }) {
 function preparedSessionReasonLabel(reason: VintedSessionUnusableReason): string {
   const labels: Record<VintedSessionUnusableReason, string> = {
     status_incomplete: 'La preparacion quedo incompleta.',
-    status_invalid: 'La sesion fue invalidada.',
+    status_invalid: 'El contexto fue invalidado.',
     status_unrecognized: 'El estado durable no es reconocido.',
     proxy_identity_mismatch: 'La identidad efectiva del proxy ha cambiado.',
     browser_profile_mismatch: 'El perfil de navegador ya no coincide.',
     request_context_mismatch: 'El contexto HTTP efectivo ya no coincide.',
-    expired: 'La sesion ha expirado.',
-    exhausted: 'La sesion ha agotado su limite de usos.',
+    expired: 'El contexto ha expirado.',
+    exhausted: 'El contexto ha agotado su limite de usos.',
     context_unreadable: 'El contexto cifrado no se puede leer.',
     context_incomplete: 'Faltan datos requeridos en el contexto preparado.'
   };
@@ -1065,7 +1159,12 @@ function CatalogFilterCompatibilityStatus({ source }: { source: SearchSource }) 
       {applicationControlled.length > 0 ? (
         <span>Controlados por la aplicacion: {formatCatalogApiParams(applicationControlled)}</span>
       ) : null}
-      {ignored.length > 0 ? <span>Sin efecto desde la URL: {formatFilterEntries(ignored)}</span> : null}
+      {ignored.length > 0 ? (
+        <details className="catalog-filter-ignored">
+          <summary>{ignored.length} parametros sin efecto desde la URL</summary>
+          <span>{formatFilterEntries(ignored)}</span>
+        </details>
+      ) : null}
       {unsupported.length > 0 ? <strong>Bloquean: {formatFilterEntries(unsupported)}</strong> : null}
     </div>
   );
@@ -1254,32 +1353,6 @@ function monitorSummary(source: SearchSource): string[] {
   }
   if (source.next_run_at) {
     entries.push(`Proxima ${formatDate(source.next_run_at)}`);
-  }
-  return entries;
-}
-
-function draftSummary(
-  source: SearchSource,
-  draft: SourceDraft
-): string[] {
-  const entries = [`Modo: ${modeLabel(draft.monitorMode)}`];
-  if (draft.monitorMode !== 'manual') {
-    entries.push(`Cada ${draft.intervalSeconds || source.scheduler_config.interval_seconds || 300}s`);
-    entries.push(`Jitter ${draft.jitterPercent || source.scheduler_config.jitter_percent || 20}%`);
-    const stopAfterUses = draft.stopAfterVintedSessionUses || source.scheduler_config.stop_after_vinted_session_uses;
-    if (stopAfterUses) {
-      entries.push(`Max ${stopAfterUses} usos sesion`);
-    }
-  }
-  if (draft.monitorMode === 'duration') {
-    entries.push(`${draft.sessionDurationMinutes || source.duration_minutes || 60} min`);
-  }
-  if (draft.monitorMode === 'window' && draft.windowStart && draft.windowEnd) {
-    entries.push(`${draft.windowStart}-${draft.windowEnd}`);
-  }
-  entries.push(`Filtros: ${filterTermLabelFromDraft(draft)}`);
-  if (source.last_run_at) {
-    entries.push(`Ultima ${formatDate(source.last_run_at)}`);
   }
   return entries;
 }

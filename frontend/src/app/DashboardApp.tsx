@@ -42,24 +42,32 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
         <SourcesView
           key={dashboard.sources.map((source) => source.id).sort((left, right) => left - right).join(':')}
           creatingSource={dashboard.creatingSource}
+          editingSourceId={dashboard.editingSourceId}
           monitorEventHistoryLoadedBySource={dashboard.monitorEventHistoryLoadedBySource}
           monitorEventsBySource={dashboard.monitorEventsBySource}
           monitorHiddenEventIdsBySource={dashboard.monitorHiddenEventIdsBySource}
           monitorCommandPending={dashboard.monitorCommandPending}
           monitorRunsBySource={dashboard.monitorRunsBySource}
           pendingStopSourceIds={dashboard.pendingStopSourceIds}
+          pendingSourceNavigation={dashboard.pendingSourceNavigation}
           monitorStatsBySource={dashboard.monitorStatsBySource}
           monitorStatsRangeBySource={dashboard.monitorStatsRangeBySource}
           onCreateSource={dashboard.onCreateSource}
           onClearMonitorEventsView={dashboard.onClearMonitorEventsView}
+          onBeginSourceEdit={dashboard.onBeginSourceEdit}
+          onCancelSourceEdit={dashboard.onCancelSourceEdit}
+          onConfirmDiscardSourceEdit={dashboard.onConfirmDiscardSourceEdit}
           onDeleteSource={(source) => void dashboard.onDeleteSource(source)}
           onLoadMonitorEvents={dashboard.loadMonitorEvents}
           onLoadMonitorStats={(sourceId, range) => void dashboard.loadMonitorStats(sourceId, range)}
           onLoadMonitorRuns={dashboard.loadMonitorRuns}
+          onKeepSourceEditing={dashboard.onKeepSourceEditing}
           onRunNow={(source) => void dashboard.onRunNow(source)}
+          onSelectMonitor={dashboard.onSelectMonitor}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
+          requestedSelectedMonitorId={dashboard.requestedSelectedMonitorId}
           runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}
           sourceDrafts={dashboard.sourceDrafts}
