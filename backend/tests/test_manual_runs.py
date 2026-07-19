@@ -32,6 +32,7 @@ from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
 from vinted_monitor.providers.vinted_catalog import (
+    DETAIL_BATCH_TELEMETRY_ATTR,
     CurlCffiVintedCatalogProvider,
     DetailBatchResult,
     DetailFetchOutcome,
@@ -194,9 +195,59 @@ class FakeEventingProvider(FakeSuccessProvider):
                 url=source.url,
                 status_code=200,
                 duration_ms=12,
-                details={"session_marker_count": 1},
+                details={
+                    "session_marker_count": 1,
+                    "proxy_transfer": {
+                        "category": "session_setup",
+                        "observed_requests": 1,
+                        "unobserved_attempts": 0,
+                        "request_size_bytes": 100,
+                        "upload_size_bytes": 20,
+                        "header_size_bytes": 40,
+                        "download_size_bytes": 840,
+                        "total_observed_bytes": 1000,
+                    },
+                },
             )
         return super().search(source, page)
+
+
+class FakeTerminalDetailEventingProvider(FakeSuccessProvider):
+    event_sink = None
+    transfer_observation = {
+        "category": "detail",
+        "observed_requests": 0,
+        "unobserved_attempts": 1,
+        "request_size_bytes": 0,
+        "upload_size_bytes": 0,
+        "header_size_bytes": 0,
+        "download_size_bytes": 0,
+        "total_observed_bytes": 0,
+    }
+
+    def fetch_detail(self, candidate: CatalogItemCandidate, *, referer_url: str | None = None) -> CatalogItemDetail:
+        if self.event_sink is not None:
+            self.event_sink(
+                phase="detail_http_request_error",
+                method="GET",
+                url=candidate.url,
+                level="error",
+                details={"proxy_transfer": self.transfer_observation},
+            )
+        raise DataDomeChallengeError("terminal detail challenge")
+
+
+class FakeObservedTerminalDetailEventingProvider(FakeTerminalDetailEventingProvider):
+    transfer_observation = {
+        "category": "detail",
+        "observed_requests": 1,
+        "unobserved_attempts": 0,
+        "request_size_bytes": 100,
+        "upload_size_bytes": 0,
+        "header_size_bytes": 50,
+        "download_size_bytes": 350,
+        "total_observed_bytes": 500,
+    }
 
 
 class FakeRefreshingProvider(FakeSuccessProvider):
@@ -322,6 +373,21 @@ class FakeConcurrentProvider(CurlCffiVintedCatalogProvider):
             summed_duration_ms=40,
             divergent_cookie_names=("_vinted_fr_session",),
         )
+
+
+class FakeFailingConcurrentProvider(FakeConcurrentProvider):
+    def fetch_detail_batch(self, candidates: list[CatalogItemCandidate], **_kwargs) -> DetailBatchResult:
+        error = DataDomeChallengeError("parallel detail challenge")
+        setattr(
+            error,
+            DETAIL_BATCH_TELEMETRY_ATTR,
+            {
+                "detail_fetch_elapsed_ms": 25,
+                "detail_fetch_request_duration_total_ms": 40,
+                "detail_fetch_attempts": len(candidates),
+            },
+        )
+        raise error
 
 
 class FakeFailingDetailProvider(FakeSuccessProvider):
@@ -672,10 +738,30 @@ def test_monitor_run_parallel_mode_consumes_ordered_prefetched_details(source_id
         assert run.runtime_metadata["detail_fetch_mode"] == "parallel"
         assert run.runtime_metadata["detail_concurrency_effective"] == 2
         assert run.runtime_metadata["detail_batch_makespan_ms"] == 25
+        assert run.runtime_metadata["detail_fetch_elapsed_ms"] == 25
+        assert run.runtime_metadata["detail_fetch_request_duration_total_ms"] == 40
+        assert run.runtime_metadata["detail_fetch_attempts"] == 2
         assert sorted(cache.marked_seen) == [
             "pytest-run-item-concurrent-0",
             "pytest-run-item-concurrent-1",
         ]
+
+
+def test_monitor_run_preserves_failed_parallel_detail_timings(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeFailingConcurrentProvider(),
+            seen_cache=FakeSeenCache(),
+            egress=_test_direct_egress(),
+        )
+
+        assert run.status == FAILED
+        assert run.runtime_metadata["detail_fetch_mode"] == "parallel"
+        assert run.runtime_metadata["detail_fetch_elapsed_ms"] == 25
+        assert run.runtime_metadata["detail_fetch_request_duration_total_ms"] == 40
+        assert run.runtime_metadata["detail_fetch_attempts"] == 2
 
 
 def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
@@ -696,10 +782,73 @@ def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
         assert bootstrap_success.status_code == 200
         assert bootstrap_success.duration_ms == 12
         assert bootstrap_success.level == "info"
-        assert bootstrap_success.details == {"session_marker_count": 1}
+        assert bootstrap_success.details["session_marker_count"] == 1
+        assert bootstrap_success.details["proxy_transfer"]["total_observed_bytes"] == 1000
+        assert "proxy_traffic_estimate" not in run.runtime_metadata
         redis_event = next(event for event in events if event.phase == "redis_seen_result")
         assert redis_event.details["seen_miss_count"] == 1
         assert next(event for event in events if event.phase == "run_succeeded").level == "info"
+
+
+def test_monitor_run_aggregates_proxy_transfer_observations_only_for_proxy_egress(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeEventingProvider(item_count=1),
+            seen_cache=FakeSeenCache(),
+            egress=RunEgress(mode="proxy", proxy_name="pytest proxy", proxy_kind="residential"),
+        )
+
+        assert run.runtime_metadata["proxy_traffic_estimate"] == {
+            "version": 1,
+            "observed_requests": 1,
+            "unobserved_attempts": 0,
+            "request_size_bytes": 100,
+            "upload_size_bytes": 20,
+            "header_size_bytes": 40,
+            "download_size_bytes": 840,
+            "total_observed_bytes": 1000,
+            "by_category": {
+                "session_setup": {
+                    "observed_requests": 1,
+                    "unobserved_attempts": 0,
+                    "total_observed_bytes": 1000,
+                }
+            },
+        }
+
+
+def test_monitor_run_preserves_partial_proxy_observation_across_failed_detail_rollback(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeTerminalDetailEventingProvider(item_count=1),
+            seen_cache=FakeSeenCache(),
+            egress=RunEgress(mode="proxy", proxy_name="pytest proxy", proxy_kind="residential"),
+        )
+
+        assert run.status == "failed"
+        assert run.runtime_metadata["proxy_traffic_estimate"]["observed_requests"] == 0
+        assert run.runtime_metadata["proxy_traffic_estimate"]["unobserved_attempts"] == 1
+        assert run.runtime_metadata["detail_fetch_attempts"] == 1
+
+
+def test_monitor_run_preserves_observed_proxy_bytes_across_failed_detail_rollback(source_id: int) -> None:
+    with SessionLocal() as db:
+        run = execute_monitor_run(
+            db,
+            source_id,
+            provider=FakeObservedTerminalDetailEventingProvider(item_count=1),
+            seen_cache=FakeSeenCache(),
+            egress=RunEgress(mode="proxy", proxy_name="pytest proxy", proxy_kind="residential"),
+        )
+
+        assert run.status == "failed"
+        assert run.runtime_metadata["proxy_traffic_estimate"]["observed_requests"] == 1
+        assert run.runtime_metadata["proxy_traffic_estimate"]["unobserved_attempts"] == 0
+        assert run.runtime_metadata["proxy_traffic_estimate"]["total_observed_bytes"] == 500
 
 
 def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(

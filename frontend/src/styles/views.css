@@ -1239,7 +1239,7 @@
 
 .monitor-activity-row dl {
   display: grid;
-  grid-template-columns: repeat(4, minmax(88px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
   gap: 8px;
   margin: 0;
 }
@@ -1268,7 +1268,7 @@
 
 .monitor-card dl {
   display: grid;
-  grid-template-columns: repeat(4, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 10px;
   margin: 0;
 }

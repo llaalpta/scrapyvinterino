@@ -14,6 +14,11 @@ from urllib.parse import urljoin, urlsplit
 
 from vinted_monitor.core.redaction import redact_sensitive_text, safe_headers
 from vinted_monitor.providers.browser_profiles import BrowserProfile
+from vinted_monitor.providers.transfer_metrics import (
+    PROXY_TRANSFER_DETAIL_KEY,
+    response_transfer_observation,
+    transfer_observation_from_exception,
+)
 
 DATADOME_CHALLENGE_MARKERS = [
     "geo.captcha-delivery.com",
@@ -111,6 +116,7 @@ class DataDomeCookieCollector:
         default_ddv: str,
         configured_client_key: str | None = None,
         event_sink: Callable[..., None] | None = None,
+        proxy_traffic_enabled: bool = False,
     ) -> None:
         self.session = session
         self.profile = profile
@@ -125,6 +131,7 @@ class DataDomeCookieCollector:
         self.default_ddv = default_ddv
         self.configured_client_key = configured_client_key.strip() if configured_client_key else None
         self.event_sink = event_sink
+        self.proxy_traffic_enabled = proxy_traffic_enabled
 
     def collect(self) -> DataDomeCollectorResult:
         ddv = extract_datadome_tags_version(self.page_html) or self.default_ddv
@@ -178,6 +185,7 @@ class DataDomeCookieCollector:
                 },
             )
             started_at = time.perf_counter()
+            response: Any | None = None
             try:
                 response = self.session.post(
                     self.collector_url,
@@ -186,6 +194,7 @@ class DataDomeCookieCollector:
                     timeout=self.timeout_seconds,
                     default_headers=False,
                 )
+                transfer_details = self._transfer_details(response=response)
                 response_payload = _response_json(response)
                 cookie_value = extract_datadome_cookie_from_response_cookie(_optional_str(response_payload.get("cookie")))
                 duration_ms = _elapsed_ms(started_at)
@@ -205,6 +214,7 @@ class DataDomeCookieCollector:
                             "cookie_found": True,
                             "response_keys": _safe_response_keys(response_payload),
                             "response_headers": safe_headers(dict(response.headers)),
+                            **transfer_details,
                         },
                     )
                     attempts.append(
@@ -233,6 +243,7 @@ class DataDomeCookieCollector:
                         "cookie_found": False,
                         "response_keys": _safe_response_keys(response_payload),
                         "response_headers": safe_headers(dict(response.headers)),
+                        **transfer_details,
                     },
                 )
                 attempts.append(
@@ -261,6 +272,11 @@ class DataDomeCookieCollector:
                         "jspl_length": jspl_length,
                         "cookie_found": False,
                         "error": safe_error,
+                        **(
+                            self._transfer_details(response=response)
+                            if response is not None
+                            else self._transfer_details(exc=exc)
+                        ),
                     },
                 )
                 attempts.append(
@@ -293,6 +309,16 @@ class DataDomeCookieCollector:
             jspl_length=jspl_length,
             error="datadome_cookie_not_returned",
         )
+
+    def _transfer_details(self, *, response: Any | None = None, exc: Exception | None = None) -> dict[str, Any]:
+        if not self.proxy_traffic_enabled:
+            return {}
+        observation = (
+            response_transfer_observation(response, category="session_setup")
+            if response is not None
+            else transfer_observation_from_exception(exc or RuntimeError("unobserved"), category="session_setup")
+        )
+        return {PROXY_TRANSFER_DETAIL_KEY: observation}
 
     def _current_datadome_cookie(self) -> str | None:
         cookies = getattr(self.session, "cookies", None)
