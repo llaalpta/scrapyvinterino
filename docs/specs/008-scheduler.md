@@ -1,5 +1,35 @@
 # 008 Bounded Concurrent Scheduler and Runtime Cache
 
+## Planned proxy trust and traffic block
+
+The program is split after its documentation-only planning branch. `14.49` owns proxy-only runtime in spec 010, and `14.50` depends on that invariant for its visible configuration/cooldown contract. `14.51` is technically independent and follows them only by agreed product priority. Each implementation requires its own confirmation, branch, real scenario, audit and merge.
+
+### 14.50 honest proxy settings and visible cooldown
+
+Status: `planned` after `14.49`. Settings describes local configuration, not remote readiness. Monitor start remains the only real data-plane check: it creates the monitor-owned sticky, validates its neutral egress/country and only then may call Vinted.
+
+Acceptance criteria:
+
+1. The independent `Test IP` control, endpoint and client state are removed without a tombstone; Alembic `0023` removes durable `last_test_*` fields. Profile creation and activation require host, port, credentials, target country and a valid sticky template; concurrency is labelled as a local limit.
+2. Monitors and Settings show an active cooldown only while `cooldown_until` is in the future, including failure count, expiry and remaining time. Terminal SSE/commands refresh proxy state without recreating the stream, and a known all-proxies-cooling state blocks start until local expiry.
+3. A failed baseline is not retried automatically and no control clears cooldown early. After expiry, `Reintentar sesion` uses the normal start path; a challenge-invalidated context requires a new sticky, without promising a different physical IP.
+
+Representative integration: against a migrated disposable database and the authenticated live API/PWA, a controlled provider raises one classified challenge through the real start/run transition. PostgreSQL cooldown and the SSE-refreshed PWA agree; a second click is unavailable and produces no request/run. Expiry is advanced within owned QA state, after which one controlled success is admitted. A local negative verifies incomplete configuration cannot activate. Cleanup removes all QA rows and restores service state. External traffic allowance is zero.
+
+### 14.51 accumulated and session proxy traffic
+
+Status: `planned`, independently ordered after `14.50`. The existing durable per-run transfer estimate remains diagnostic input; the product view moves consumption to the monitor and active/latest-session scopes.
+
+Acceptance criteria:
+
+1. Monitor stats expose a typed proxy-traffic summary with explicit no-run, not-applicable, not-measured, measured and partial states. Accumulated traffic includes every source-owned run, including baseline, diagnostic and failed attempts, without changing business counters or chart ranges.
+2. A successful session-start baseline records the monitor session it opened in runtime metadata. Session traffic includes that calibration plus linked later runs; a failed baseline is accumulated only, and historical missing linkage/telemetry is reported partial instead of guessed or zero.
+3. The PWA renders compact estimated bytes/requests in `Acumulado del monitor` and `Sesion activa`/`Ultima sesion cerrada`, removes the five-run timing/traffic panel and keeps DataImpulse billing explicitly authoritative.
+
+Representative integration: one controlled loopback baseline and later run traverse the live API/PostgreSQL/PWA path with known transfer observations, then stop exposes the same latest-session total. Focused negatives cover a failed baseline, response-less attempt, malformed/missing historical metadata and direct historical data. Cleanup restores initial state; no Vinted, proxy or vendor request is allowed.
+
+Excluded: vendor usage APIs, monetary estimates, historical backfill, fingerprint changes and a replacement per-run UI.
+
 ## 14.19 Worker Redis availability
 
 Status: `done`. This is a contained fail-stop correction for the current local worker, not a general dependency-readiness platform.

@@ -8,17 +8,19 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 - Manual maintenance, service restart and session relaunch from the PWA are acceptable.
 - Failures must be visible and must not create hidden fallbacks or retry loops.
 - Existing queue recovery remains best-effort; exactly-once crash recovery is not a product requirement.
-- The current block ends when manual and recurring sessions prove that only catalog entries observed after session-start calibration become opportunities. Notifications and production 24/7 hardening remain separate.
+- The current block ends when normal catalog traffic is proxy-only, cooldown/retry state is honest and proxy consumption is visible at monitor/session scope. Notifications and production 24/7 hardening remain separate.
 
 ## Now
 
 Keep no more than five independently valuable tasks here.
 
-- No implementation item is queued. Starting Telegram alerts requires the explicit product decision described below.
+- `14.49` Proxy-only catalog egress: remove normal direct fallback and reject proxy-less API/queue work before provider construction.
+- `14.50` Honest proxy settings and visible cooldown: remove the independent IP test, validate local sticky configuration and expose cooldown/retry state in Monitors.
+- `14.51` Monitor/session proxy traffic: move estimated consumption into accumulated and active/latest-session summaries and remove the five-run panel.
 
 ## Next
 
-Telegram opportunity alerts (`15.1`) are the first product candidate, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
+Telegram opportunity alerts (`15.1`) follow the proxy trust and traffic block, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
 
 ## Conditional hardening
 
