@@ -2,6 +2,20 @@
 
 Roadmap items 14.34.1 and 14.34.2 moved manual and recurring calibration into session start and removed the temporary public baseline surface. Item 14.34.3 makes stop PostgreSQL-first and drains session-owned runs without hard cancellation.
 
+## 14.49 proxy-only catalog egress
+
+Status: `planned`. This standard prerequisite makes the proxy requirement an invariant of normal monitor execution; explicit development scripts may still construct a direct diagnostic client outside the PWA, monitor API and queue.
+
+Acceptance criteria:
+
+1. Manual start, recurring start and business runs select an eligible target-country proxy or fail locally before creating a provider, run, prepared session or external request. Normal scheduler/API state no longer exposes direct capacity or an allow-direct control.
+2. A consumer treats a task without `proxy_profile_id` as malformed: it moves the exact payload once to dead-letter, releases its pending/reverse markers, records a sanitized operational error and creates no run or provider. A captured profile is revalidated before provider construction, and disabling or losing it never degrades admitted or stale work to host egress.
+3. Alembic `0022` removes the obsolete direct scheduler keys from `app_settings`; current API/types, Compose settings and documentation contain no compatibility reader or normal-runtime direct gate.
+
+Representative integration: use migrated disposable PostgreSQL and Redis with the real API, scheduler and consumer plus a controlled loopback provider. One proxy-owned task reaches that provider; a manual proxy-less command fails before a run, while an exact queued proxy-less payload reaches dead-letter once with no ready/processing/pending marker, run, session or provider call. Playwright confirms the direct controls are absent. Cleanup removes the owned dead-letter payload and QA graph, returns every queue key to zero and restores initial services. Vinted, proxy, DataImpulse and Telegram allowance is zero.
+
+Excluded: provider fingerprint rotation, proxy-vendor failover, automatic retry, a new direct diagnostic UI and changes to browser-loaded image/CDN traffic.
+
 ## Goal
 
 Move scheduled monitor execution from an in-process scheduler/executor to a Redis-backed producer-consumer flow, and make every public Vinted catalog request use the `curl_cffi` browser impersonation stack with a prepared persistent Vinted session bound to a sticky residential proxy identity.
