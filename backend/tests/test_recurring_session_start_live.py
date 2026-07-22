@@ -39,11 +39,15 @@ from vinted_monitor.db.models import (
     VintedSession,
 )
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogSearchResult, CatalogSource
+from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
 from vinted_monitor.services.local_auth import create_local_user
+from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, update_scheduler_config
 from vinted_monitor.services.seen_cache import RedisSeenCache, get_seen_cache
 from vinted_monitor.services.task_queue import (
+    InvalidTaskPayloadError,
     TaskReservation,
     dead_letter_queue_key,
     pending_payload_key,
@@ -52,6 +56,7 @@ from vinted_monitor.services.task_queue import (
     processing_queue_key,
     reserve_task,
 )
+from vinted_monitor.services.vinted_sessions import save_prepared_vinted_session
 from vinted_monitor.worker.consumer import TaskConsumer
 from vinted_monitor.worker.scheduler import SchedulerRunner
 
@@ -79,7 +84,7 @@ def test_live_recurring_session_start_baseline_and_real_consumer(
     state_path = _state_path()
     settings = get_settings()
     assert settings.scheduler_enabled is True
-    assert settings.vinted_direct_catalog_enabled is True
+    assert not hasattr(settings, "vinted_direct_catalog_enabled")
     assert settings.vinted_prepared_session_required is False
     assert settings.vinted_datadome_collector_enabled is False
     assert settings.action_requests_enabled is False
@@ -154,7 +159,7 @@ def test_live_session_stop_drains_run_and_fences_reserved_task(
     state_path = _state_path()
     settings = get_settings()
     assert settings.scheduler_enabled is True
-    assert settings.vinted_direct_catalog_enabled is True
+    assert not hasattr(settings, "vinted_direct_catalog_enabled")
     assert settings.vinted_prepared_session_required is False
     assert settings.vinted_datadome_collector_enabled is False
     assert settings.action_requests_enabled is False
@@ -261,16 +266,39 @@ def _exercise_live_stack(
             assert page.get_by_role("button", name="Deshabilitar scheduler", exact=True).count() == 0
             scheduler_payload = _get_json(context, f"{api_url}/api/scheduler", pwa_url)
             assert "enabled" not in scheduler_payload
+            assert scheduler_payload["proxy_capacity"] == 1
+            for removed_field in (
+                "allow_direct_without_proxy",
+                "direct_max_concurrent_runs",
+                "direct_runtime_enabled",
+                "direct_capacity",
+            ):
+                assert removed_field not in scheduler_payload
+            for removed_control in ("Permitir directo", "Salida directa sin proxy", "Runs directos"):
+                expect(page.get_by_text(removed_control, exact=True)).to_have_count(0)
             removed_gate = context.request.patch(
                 f"{api_url}/api/scheduler",
                 headers={"Origin": pwa_url, "X-CSRF-Token": csrf_token},
                 data={"enabled": True},
             )
             assert removed_gate.status == 422
+            removed_direct = context.request.patch(
+                f"{api_url}/api/scheduler",
+                headers={"Origin": pwa_url, "X-CSRF-Token": csrf_token},
+                data={"allow_direct_without_proxy": True},
+            )
+            assert removed_direct.status == 422
             with SessionLocal() as db:
                 scheduler_setting = db.get(AppSetting, SCHEDULER_SETTING_KEY)
                 assert scheduler_setting is not None
                 assert "enabled" not in (scheduler_setting.value or {})
+                assert "allow_direct_without_proxy" not in (scheduler_setting.value or {})
+            _assert_proxyless_legacy_task_quarantined(
+                scenario,
+                queue_client,
+                settings.worker_task_queue_key,
+                settings,
+            )
             page.get_by_role("button", name="Monitores", exact=True).click()
             _select_monitor(page, scenario.source_name, active=False)
             assert page.get_by_role("button", name="Recalibrar listado inicial", exact=True).count() == 0
@@ -317,7 +345,7 @@ def _exercise_live_stack(
             _assert_run(new_run, trigger="scheduler", found=1, opportunities=1)
             assert new_run["monitor_session_id"] == session_id
             _assert_one_opportunity(scenario)
-            logs = page.locator("details.monitor-logs")
+            logs = page.locator("details.monitor-logs").filter(has_text="Logs acumulados")
             logs.locator("summary").click()
             claimed_entry = logs.locator(".run-event-entry").filter(
                 has_text="Candidatos de detalle reclamados"
@@ -637,19 +665,81 @@ def _schedule_and_reserve_due(
     return reservation
 
 
+def _assert_proxyless_legacy_task_quarantined(scenario: Scenario, queue_client, queue_key: str, settings) -> None:
+    with SessionLocal() as db:
+        initial_run_count = db.scalar(select(func.count()).select_from(Run).where(Run.source_id == scenario.source_id))
+        initial_session_count = db.scalar(
+            select(func.count()).select_from(VintedSession).where(VintedSession.source_id == scenario.source_id)
+        )
+    task_id = f"qa-proxyless-{scenario.token}"
+    raw_payload = json.dumps(
+        {
+            "source_id": scenario.source_id,
+            "source_url": f"https://www.vinted.es/catalog?search_text=qa-recurring-{scenario.token}",
+            "monitor_mode": "continuous",
+            "trigger": "scheduler",
+            "scheduler_config": {"interval_seconds": 60},
+            "proxy_profile_id": None,
+            "proxy_identity_generation": None,
+            "task_id": task_id,
+            "enqueued_at": "2026-07-22T12:00:00+00:00",
+        },
+        separators=(",", ":"),
+    ).encode()
+    processing_key = processing_queue_key(queue_key, 9)
+    dead_letter_key = dead_letter_queue_key(queue_key)
+    pending_key = pending_task_key(scenario.source_id, queue_key)
+    reverse_key = pending_payload_key(raw_payload, queue_key)
+    queue_client.set(pending_key, task_id)
+    queue_client.set(
+        reverse_key,
+        json.dumps({"source_id": scenario.source_id, "task_id": task_id}, separators=(",", ":")),
+    )
+    queue_client.lpush(queue_key, raw_payload)
+
+    with pytest.raises(InvalidTaskPayloadError) as exc_info:
+        reserve_task(queue_client, timeout=1, queue_key=queue_key, consumer_id=9)
+    error = exc_info.value
+    consumer = TaskConsumer(settings.model_copy(update={"worker_task_queue_key": queue_key}), consumer_id=9)
+    for _ in range(2):
+        consumer._dead_letter_invalid_task(queue_client, error)
+
+    assert queue_client.llen(queue_key) == 0
+    assert queue_client.llen(processing_key) == 0
+    assert queue_client.lrange(dead_letter_key, 0, -1) == [raw_payload]
+    assert queue_client.get(pending_key) is None
+    assert queue_client.get(reverse_key) is None
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == scenario.source_id)) == initial_run_count
+        assert (
+            db.scalar(select(func.count()).select_from(VintedSession).where(VintedSession.source_id == scenario.source_id))
+            == initial_session_count
+        )
+    queue_client.delete(dead_letter_key)
+
+
 def _seed(token: str) -> Scenario:
     settings = get_settings()
     email = f"qa-recurring-session-{token}@example.local"
     source_name = f"qa recurring session {token}"
     with SessionLocal() as db:
         create_local_user(db, email=email, password=PASSWORD)
+        proxy = create_proxy_profile(
+            db,
+            name=f"qa recurring proxy {token}",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8080,
+            username=None,
+            password=None,
+            country_code="ES",
+            max_concurrent_runs=1,
+            settings=settings,
+        )
         update_scheduler_config(
             db,
-            {
-                "allow_direct_without_proxy": True,
-                "direct_max_concurrent_runs": 1,
-                "max_concurrent_runs": 1,
-            },
+            {"max_concurrent_runs": 1},
             settings,
         )
         source = SearchSource(
@@ -662,6 +752,37 @@ def _seed(token: str) -> Scenario:
             filter_definition={"blacklist_terms": []},
         )
         db.add(source)
+        db.flush()
+        sticky = f"qa-{token}"
+        save_prepared_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id=sticky,
+            profile=profile_for_impersonate(settings.curl_impersonate_browser),
+            context=PreparedCatalogSession(
+                proxy_session_id=sticky,
+                cookies={
+                    "anon_id": f"qa-anon-{token}",
+                    "access_token_web": f"qa-access-{token}",
+                    "datadome": f"qa-dd-{token}",
+                    "__cf_bm": f"qa-cf-{token}",
+                    "v_udt": f"qa-udt-{token}",
+                },
+                csrf_token=f"qa-csrf-{token}",
+                anon_id=f"qa-anon-{token}",
+                access_token_web=f"qa-access-{token}",
+                datadome=f"qa-dd-{token}",
+                cf_bm=f"qa-cf-{token}",
+                v_udt=f"qa-udt-{token}",
+                user_iso_locale=proxy.locale,
+                vinted_screen=proxy.vinted_screen,
+                egress_ip="127.0.0.1",
+                egress_country_code=proxy.country_code,
+                egress_validated_at=datetime.now(UTC),
+            ),
+            settings=settings,
+        )
         db.commit()
         return Scenario(
             token=token,
@@ -1066,6 +1187,7 @@ def _cleanup(token: str, cache: RedisSeenCache, queue_key: str) -> None:
             db.execute(delete(VintedSession).where(VintedSession.source_id.in_(source_ids)))
             db.execute(delete(MonitorSession).where(MonitorSession.source_id.in_(source_ids)))
             db.execute(delete(SearchSource).where(SearchSource.id.in_(source_ids)))
+        db.execute(delete(ProxyProfile).where(ProxyProfile.name == f"qa recurring proxy {token}"))
         db.execute(delete(Item).where(Item.vinted_item_id.like(f"qa-recurring-{token}-%")))
         db.execute(delete(UserSession))
         db.execute(delete(User).where(User.email == f"qa-recurring-session-{token}@example.local"))

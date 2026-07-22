@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -66,6 +66,9 @@ $TestTargets = @{
         "tests/test_item_detail_state_audit.py::test_transient_release_failure_after_challenge_keeps_terminal_run_and_discards_work",
         "tests/test_item_detail_state_audit.py::test_release_failure_does_not_mask_primary_run_error"
     )
+    "proxy-only-regression" = @(
+        "tests/test_manual_runs.py"
+    )
     "prepared-session-read-model" = @(
         "tests/test_prepared_session_read_model.py",
         "tests/test_prepared_session_live_contract.py::test_live_prepared_session_read_model_matches_runtime_and_pwa"
@@ -77,9 +80,14 @@ $TestTargets = @{
     "recurring-session-start-baseline" = @(
         "tests/test_recurring_session_start_live.py::test_live_recurring_session_start_baseline_and_real_consumer",
         "tests/test_migrations.py::test_scheduler_ui_gate_migration_removes_persisted_enabled_field",
+        "tests/test_migrations.py::test_proxy_only_catalog_migration_removes_persisted_direct_fields",
         "tests/test_scheduler.py::test_scheduler_state_uses_deployment_gate_and_runtime_dependencies",
         "tests/test_scheduler.py::test_scheduler_api_does_not_expose_removed_runtime_fields",
+        "tests/test_scheduler.py::test_scheduler_api_rejects_removed_runtime_fields",
         "tests/test_scheduler.py::test_scheduler_config_rejects_unknown_persisted_runtime_fields",
+        "tests/test_scheduler.py::test_scheduler_proxy_capacity_uses_proxy_profile_limits",
+        "tests/test_manual_runs.py::test_monitor_run_api_returns_conflict_when_no_egress_capacity",
+        "tests/test_task_queue_reliability_audit.py::test_proxyless_legacy_payload_dead_letters_exactly_once_and_releases_markers",
         "tests/test_scheduler_availability.py::test_scheduler_state_requires_fresh_producer_heartbeat",
         "tests/test_scheduler_availability.py::test_scheduler_runner_writes_heartbeat_while_deployment_gate_is_disabled",
         "tests/test_scheduler_availability.py::test_recurring_start_returns_503_without_producer_heartbeat",
@@ -380,6 +388,36 @@ function Invoke-PostgresAdmin([string]$Sql) {
     return $Output
 }
 
+function Seed-ProxyOnlyMigrationLegacyState([string]$DatabaseName) {
+    $Sql = @"
+\connect $DatabaseName
+INSERT INTO app_settings (key, value)
+VALUES (
+    'scheduler',
+    '{"allow_direct_without_proxy":true,"direct_max_concurrent_runs":3,"max_concurrent_runs":2}'::jsonb
+);
+"@
+    Invoke-PostgresAdmin $Sql | Out-Null
+}
+
+function Assert-ProxyOnlyMigrationDataTransform([string]$DatabaseName) {
+    $Sql = @"
+\connect $DatabaseName
+SELECT (
+    NOT (value ? 'allow_direct_without_proxy')
+    AND NOT (value ? 'direct_max_concurrent_runs')
+    AND value ->> 'max_concurrent_runs' = '2'
+)::text
+FROM app_settings
+WHERE key = 'scheduler';
+DELETE FROM app_settings WHERE key = 'scheduler';
+"@
+    $Output = @(Invoke-PostgresAdmin $Sql | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($Output.Count -ne 1 -or $Output[0] -ne "true") {
+        throw "Migration 0022 did not remove only the obsolete direct scheduler fields."
+    }
+}
+
 function Get-RedisDatabaseSize([int]$Database) {
     $Output = @(& docker exec $script:RedisContainer redis-cli -n $Database --raw DBSIZE 2>&1)
     if ($LASTEXITCODE -ne 0 -or $Output.Count -eq 0) {
@@ -506,7 +544,6 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["VINTED_BASE_URL"] = "http://127.0.0.1:9"
             $Values["VINTED_DATADOME_COLLECTOR_URL"] = "http://127.0.0.1:9"
             $Values["EGRESS_DIAGNOSTIC_URL"] = "http://127.0.0.1:9"
-            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "false"
             $Values["VINTED_DATADOME_COLLECTOR_ENABLED"] = "false"
             $Values["VINTED_AUTH_ENABLED"] = "false"
             $Values["ACTION_REQUESTS_ENABLED"] = "false"
@@ -539,7 +576,6 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
         }
         if ($Scenario -eq "worker-redis-availability") {
             $Values["REDIS_URL"] = "redis://127.0.0.1:9/0"
-            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
             $Values["SCHEDULER_ENABLED"] = "true"
             $Values["SCHEDULER_POLL_INTERVAL_SECONDS"] = "1"
             $Values["SCHEDULER_WORKER_HEARTBEAT_INTERVAL_SECONDS"] = "1"
@@ -554,14 +590,12 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         if ($Scenario -eq "manual-session-start-baseline") {
-            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
             $Values["MANUAL_SESSION_QA_API_URL"] = "http://127.0.0.1:8001"
             $Values["MANUAL_SESSION_QA_PWA_URL"] = "http://127.0.0.1:5176"
             $Values["MANUAL_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         if ($Scenario -eq "recurring-session-start-baseline") {
-            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
             $Values["VINTED_PREPARED_SESSION_REQUIRED"] = "false"
             $Values["SCHEDULER_ENABLED"] = "true"
             $Values["SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = "600"
@@ -573,7 +607,6 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         if ($Scenario -eq "session-stop-drain") {
-            $Values["VINTED_DIRECT_CATALOG_ENABLED"] = "true"
             $Values["VINTED_PREPARED_SESSION_REQUIRED"] = "false"
             $Values["SCHEDULER_ENABLED"] = "true"
             $Values["SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = "600"
@@ -603,7 +636,7 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
     $CurrentNames = @(
         "APP_ENV", "APP_SECRET_KEY", "DATABASE_URL", "REDIS_URL", "PYTHONPATH",
         "BACKEND_CORS_ORIGINS", "VINTED_BASE_URL", "VINTED_DATADOME_COLLECTOR_URL",
-        "EGRESS_DIAGNOSTIC_URL", "VINTED_DIRECT_CATALOG_ENABLED",
+        "EGRESS_DIAGNOSTIC_URL",
         "VINTED_DATADOME_COLLECTOR_ENABLED", "VINTED_AUTH_ENABLED",
         "ACTION_REQUESTS_ENABLED", "SCHEDULER_ENABLED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
         "PREPARED_SESSION_QA_API_URL", "PREPARED_SESSION_QA_PWA_URL",
@@ -692,7 +725,14 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
         $LocationPushed = $true
 
         Write-Host "Cycle $Cycle/${Repeat}: migrating an isolated PostgreSQL database"
-        Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
+        if ($Scenario -eq "recurring-session-start-baseline") {
+            Invoke-PythonChecked -Label "Alembic migration to 0021" -Arguments @("-m", "alembic", "upgrade", "0021")
+            Seed-ProxyOnlyMigrationLegacyState $DatabaseName
+            Invoke-PythonChecked -Label "Alembic migration to head" -Arguments @("-m", "alembic", "upgrade", "head")
+            Assert-ProxyOnlyMigrationDataTransform $DatabaseName
+        } else {
+            Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
+        }
 
         if ($Scenario -eq "worker-redis-availability") {
             Write-Host "Cycle $Cycle/${Repeat}: verifying worker supervisor behavior before live worker startup"
@@ -741,7 +781,6 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
                 VINTED_BASE_URL = "http://127.0.0.1:9"
                 VINTED_DATADOME_COLLECTOR_URL = "http://127.0.0.1:9"
                 EGRESS_DIAGNOSTIC_URL = "http://127.0.0.1:9"
-                VINTED_DIRECT_CATALOG_ENABLED = "true"
                 VINTED_DATADOME_COLLECTOR_ENABLED = "false"
                 VINTED_AUTH_ENABLED = "false"
                 ACTION_REQUESTS_ENABLED = "false"
@@ -833,7 +872,6 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:VINTED_BASE_URL = "http://127.0.0.1:9"
             $env:VINTED_DATADOME_COLLECTOR_URL = "http://127.0.0.1:9"
             $env:EGRESS_DIAGNOSTIC_URL = "http://127.0.0.1:9"
-            $env:VINTED_DIRECT_CATALOG_ENABLED = "false"
             $env:VINTED_DATADOME_COLLECTOR_ENABLED = "false"
             $env:VINTED_AUTH_ENABLED = "false"
             $env:ACTION_REQUESTS_ENABLED = "false"

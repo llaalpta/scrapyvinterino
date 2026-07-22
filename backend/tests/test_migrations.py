@@ -30,3 +30,10 @@ def test_scheduler_ui_gate_migration_removes_persisted_enabled_field() -> None:
 
     assert "value = value - 'enabled'" in migration
     assert "WHERE key = 'scheduler' AND value ? 'enabled'" in migration
+
+
+def test_proxy_only_catalog_migration_removes_persisted_direct_fields() -> None:
+    migration = (BACKEND_ROOT / "alembic/versions/0022_proxy_only_catalog_egress.py").read_text(encoding="utf-8")
+
+    assert "value - 'allow_direct_without_proxy' - 'direct_max_concurrent_runs'" in migration
+    assert "WHERE key = 'scheduler'" in migration

@@ -15,7 +15,6 @@ from vinted_monitor.core.config import get_settings
 from vinted_monitor.db.models import Run, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.local_auth import create_local_user
-from vinted_monitor.services.scheduler import update_scheduler_config
 
 pytestmark = [pytest.mark.real_auth, pytest.mark.live_stack]
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -34,7 +33,7 @@ def test_worker_redis_loss_exits_restarts_and_updates_live_pwa() -> None:
 
     settings = get_settings()
     assert settings.scheduler_enabled is True
-    assert settings.vinted_direct_catalog_enabled is True
+    assert not hasattr(settings, "vinted_direct_catalog_enabled")
     assert settings.vinted_datadome_collector_enabled is False
     assert settings.action_requests_enabled is False
     assert settings.scheduler_worker_heartbeat_interval_seconds == 1
@@ -51,11 +50,6 @@ def test_worker_redis_loss_exits_restarts_and_updates_live_pwa() -> None:
     email = f"qa-worker-redis-{token}@example.local"
     with SessionLocal() as db:
         create_local_user(db, email=email, password=PASSWORD)
-        update_scheduler_config(
-            db,
-            {"allow_direct_without_proxy": True},
-            settings,
-        )
         assert db.scalar(select(func.count()).select_from(SearchSource)) == 0
         assert db.scalar(select(func.count()).select_from(Run)) == 0
 

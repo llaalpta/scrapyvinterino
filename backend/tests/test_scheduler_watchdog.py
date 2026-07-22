@@ -28,7 +28,6 @@ QA_SOURCE_PREFIX = "pytest watchdog %"
 def _settings(**overrides) -> Settings:
     values = {
         "scheduler_enabled": True,
-        "vinted_direct_catalog_enabled": True,
         "scheduler_worker_heartbeat_interval_seconds": 5,
         "scheduler_worker_heartbeat_timeout_seconds": 30,
         "scheduler_watchdog_poll_interval_seconds": 5,

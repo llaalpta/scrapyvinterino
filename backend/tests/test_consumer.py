@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -11,10 +12,13 @@ from vinted_monitor.providers.vinted_catalog import (
     VintedCatalogSessionError,
 )
 from vinted_monitor.services.runs import FAILED, FINALIZING
-from vinted_monitor.services.task_queue import MonitorTask, TaskReservation
+from vinted_monitor.services.task_queue import InvalidTaskPayloadError, MonitorTask, TaskReservation
 from vinted_monitor.services.vinted_sessions import VintedSessionRequiredError
 from vinted_monitor.worker import consumer as consumer_module
 from vinted_monitor.worker.consumer import TaskConsumer
+
+PROXY_ID = 123
+PROXY_IDENTITY = "v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 class NullSession:
@@ -23,6 +27,62 @@ class NullSession:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         return None
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def error(self, event: str, **details) -> None:
+        self.events.append((event, details))
+
+
+def test_consumer_dead_letters_exact_payload_and_logs_no_payload_content(monkeypatch) -> None:
+    secret_canary = "proxy-password-canary"
+    raw_payload = f'{{"proxy_profile_id":null,"password":"{secret_canary}"}}'
+    error = InvalidTaskPayloadError(
+        "Failed to deserialize task: invalid field values",
+        raw_payload=raw_payload,
+        source_id=17,
+        task_id=secret_canary,
+        processing_key="queue:processing:3",
+        raw_queue_payload=raw_payload.encode(),
+    )
+    calls: list[tuple[bytes, dict]] = []
+    monkeypatch.setattr(
+        consumer_module,
+        "dead_letter_task",
+        lambda _client, payload, **kwargs: calls.append((payload, kwargs)) or True,
+    )
+    consumer = TaskConsumer(Settings(_env_file=None, worker_task_queue_key="queue"), consumer_id=3)
+    logger = RecordingLogger()
+    consumer.logger = logger
+
+    consumer._dead_letter_invalid_task(object(), error)
+
+    assert calls == [
+        (
+            raw_payload.encode(),
+            {
+                "queue_key": "queue",
+                "source_id": 17,
+                "task_id": secret_canary,
+                "processing_key_override": "queue:processing:3",
+            },
+        )
+    ]
+    assert logger.events == [
+        (
+            "consumer_invalid_task_dead_lettered",
+            {
+                "error": "Failed to deserialize task: invalid field values",
+                "moved": True,
+                "source_id": 17,
+                "task_id_fingerprint": hashlib.sha256(secret_canary.encode()).hexdigest()[:16],
+            },
+        )
+    ]
+    assert secret_canary not in repr(logger.events)
 
 
 @pytest.mark.parametrize(
@@ -55,6 +115,8 @@ def test_consumer_does_not_escalate_direct_terminal_catalog_response(monkeypatch
         source_url="https://www.vinted.es/catalog?search_text=nike",
         monitor_mode="window",
         trigger="scheduler",
+        proxy_profile_id=PROXY_ID,
+        proxy_identity_generation=PROXY_IDENTITY,
     )
 
     consumer._process_with_escalation(task)
@@ -78,8 +140,8 @@ def test_consumer_does_not_retry_when_prepared_vinted_session_is_missing(monkeyp
         source_url="https://www.vinted.es/catalog?search_text=nike",
         monitor_mode="window",
         trigger="scheduler",
-        proxy_profile_id=123,
-        proxy_identity_generation="v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        proxy_profile_id=PROXY_ID,
+        proxy_identity_generation=PROXY_IDENTITY,
     )
 
     consumer._process_with_escalation(task)
@@ -93,6 +155,8 @@ def test_consumer_requeues_finalizing_run_without_ack(monkeypatch) -> None:
         source_url="https://www.vinted.es/catalog?search_text=nike",
         monitor_mode="window",
         trigger="scheduler",
+        proxy_profile_id=PROXY_ID,
+        proxy_identity_generation=PROXY_IDENTITY,
     )
     reservation = TaskReservation(task=task, raw_payload="finalizing-payload")
     acknowledged: list[TaskReservation] = []
@@ -128,6 +192,8 @@ def test_consumer_acks_terminal_challenge_run_without_resume_or_requeue(monkeypa
         source_url="https://www.vinted.es/catalog?search_text=nike",
         monitor_mode="window",
         trigger="scheduler",
+        proxy_profile_id=PROXY_ID,
+        proxy_identity_generation=PROXY_IDENTITY,
     )
     reservation = TaskReservation(task=task, raw_payload="challenge-payload")
     previous_run = SimpleNamespace(

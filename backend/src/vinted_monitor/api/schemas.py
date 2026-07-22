@@ -179,8 +179,6 @@ class SchedulerUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=20)
-    allow_direct_without_proxy: bool | None = None
-    direct_max_concurrent_runs: int | None = Field(default=None, ge=0, le=10)
     catalog_per_page: int | None = Field(default=None, ge=1, le=96)
     detail_max_candidates_per_run: int | None = Field(default=None, ge=0, le=96)
     request_timeout_ms: int | None = Field(default=None, ge=1000, le=60000)
@@ -199,12 +197,8 @@ class SchedulerStateRead(BaseModel):
     per_source_concurrency: int
     poll_interval_seconds: int
     timezone: str
-    allow_direct_without_proxy: bool
-    direct_max_concurrent_runs: int
     active_proxy_count: int
     proxy_capacity: int
-    direct_runtime_enabled: bool
-    direct_capacity: int
     effective_capacity: int
     active_periodic_monitors: int
     catalog_per_page: int

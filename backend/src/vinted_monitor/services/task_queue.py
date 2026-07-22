@@ -48,13 +48,21 @@ class MonitorTask:
     source_url: str
     monitor_mode: str
     trigger: str
+    proxy_profile_id: int
+    proxy_identity_generation: str
     scheduler_config: dict = field(default_factory=dict)
-    proxy_profile_id: int | None = None
-    proxy_identity_generation: str | None = None
     enqueued_at: str = ""
     task_id: str = ""
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.proxy_profile_id, int)
+            or isinstance(self.proxy_profile_id, bool)
+            or self.proxy_profile_id <= 0
+            or not isinstance(self.proxy_identity_generation, str)
+            or not re.fullmatch(r"v1:[1-9]\d*:[0-9a-f]{64}", self.proxy_identity_generation)
+        ):
+            raise ValueError("MonitorTask requires a valid proxy identity binding")
         if not self.task_id:
             self.task_id = str(uuid.uuid4())
         if not self.enqueued_at:
@@ -477,7 +485,7 @@ def _deserialize_task(raw_payload: str) -> MonitorTask:
     unknown_fields = sorted(set(data) - MONITOR_TASK_FIELD_NAMES)
     if unknown_fields:
         raise InvalidTaskPayloadError(
-            f"Failed to deserialize task: unknown fields: {', '.join(unknown_fields)}",
+            "Failed to deserialize task: unknown fields",
             raw_payload=raw_payload,
             source_id=source_id,
             task_id=task_id,
@@ -532,25 +540,6 @@ def _deserialize_task(raw_payload: str) -> MonitorTask:
         or not isinstance(task.scheduler_config, dict)
         or not isinstance(task.enqueued_at, str)
         or len(task.enqueued_at) > 80
-        or (
-            task.proxy_profile_id is not None
-            and (
-                not isinstance(task.proxy_profile_id, int)
-                or isinstance(task.proxy_profile_id, bool)
-                or task.proxy_profile_id <= 0
-            )
-        )
-        or (
-            task.proxy_profile_id is None
-            and task.proxy_identity_generation is not None
-        )
-        or (
-            task.proxy_profile_id is not None
-            and (
-                not isinstance(task.proxy_identity_generation, str)
-                or not re.fullmatch(r"v1:[1-9]\d*:[0-9a-f]{64}", task.proxy_identity_generation)
-            )
-        )
     ):
         raise InvalidTaskPayloadError(
             "Failed to deserialize task: invalid field values",

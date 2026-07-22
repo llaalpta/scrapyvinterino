@@ -54,7 +54,7 @@ def test_live_monitor_identity_editing_contract() -> None:
     pwa_url = _loopback_origin("MONITOR_IDENTITY_QA_PWA_URL")
     settings = get_settings()
     assert settings.scheduler_enabled is False
-    assert settings.vinted_direct_catalog_enabled is False
+    assert not hasattr(settings, "vinted_direct_catalog_enabled")
     assert settings.vinted_datadome_collector_enabled is False
     for endpoint in (settings.vinted_base_url, settings.vinted_datadome_collector_url, settings.egress_diagnostic_url):
         assert urlsplit(str(endpoint)).hostname in LOOPBACK_HOSTS

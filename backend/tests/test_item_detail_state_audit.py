@@ -230,8 +230,14 @@ def _candidate(suffix: str) -> CatalogItemCandidate:
     )
 
 
-def _direct_egress() -> RunEgress:
-    return RunEgress(mode="direct")
+def _proxy_egress() -> RunEgress:
+    return RunEgress(
+        mode="proxy",
+        proxy_profile_id=999_999,
+        proxy_name="pytest proxy",
+        proxy_kind="residential",
+        proxy_identity_generation="v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
 
 
 def _redis_cache_with_post_ping_failure() -> RedisSeenCache:
@@ -437,7 +443,7 @@ def test_finalize_failure_keeps_sql_and_terminal_status_consistent(source_id: in
             source_id,
             provider=AuditProvider(),
             seen_cache=cache,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -480,7 +486,7 @@ def test_sql_commit_failure_after_redis_transition_never_marks_run_failed(
             source_id,
             provider=AuditProvider(),
             seen_cache=cache,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -500,7 +506,7 @@ def test_sql_commit_failure_after_redis_transition_never_marks_run_failed(
             provider=AuditProvider(item_count=0),
             seen_cache=cache,
             require_active=False,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -527,7 +533,7 @@ def test_persistent_finalize_failure_converges_before_next_catalog_run(
             source_id,
             provider=AuditProvider(),
             seen_cache=cache,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -551,7 +557,7 @@ def test_persistent_finalize_failure_converges_before_next_catalog_run(
             provider=AuditProvider(item_count=0),
             seen_cache=cache,
             require_active=False,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -586,7 +592,7 @@ def test_transient_release_failure_after_challenge_keeps_terminal_run_and_discar
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -622,7 +628,7 @@ def test_release_failure_does_not_mask_primary_run_error(
             source_id,
             provider=AuditProvider(),
             seen_cache=cache,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:
@@ -665,7 +671,7 @@ def test_process_crash_after_claim_leaves_only_the_short_processing_lock(
             source_id,
             provider=AuditProvider(),
             seen_cache=cache,
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     assert item_id in cache.processing
@@ -698,7 +704,7 @@ def test_stale_running_run_is_closed_before_monitor_continues(source_id: int, au
             source_id,
             provider=AuditProvider(),
             seen_cache=AuditSeenCache(),
-            egress=_direct_egress(),
+            egress=_proxy_egress(),
         )
 
     with audit_session_factory() as db:

@@ -37,7 +37,12 @@ from vinted_monitor.services.task_queue import (
     InvalidTaskPayloadError,
     MonitorTask,
     TaskQueueError,
+    dead_letter_queue_key,
+    dead_letter_task,
     pending_payload_key,
+    pending_task_key,
+    processing_queue_key,
+    reserve_task,
 )
 from vinted_monitor.worker import consumer as consumer_module
 from vinted_monitor.worker import main as worker_main
@@ -222,6 +227,8 @@ def _task(*, source_id: int = 41, task_id: str = "task-41") -> MonitorTask:
         source_url="https://www.vinted.es/catalog?order=newest_first",
         monitor_mode="window",
         trigger="scheduler",
+        proxy_profile_id=7,
+        proxy_identity_generation="v1:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         scheduler_config={"interval_seconds": 30},
         task_id=task_id,
         enqueued_at="2026-07-11T08:00:00+00:00",
@@ -890,6 +897,61 @@ def test_binary_queue_dead_letters_non_utf8_payload_without_poison_loop() -> Non
         assert client.lrange(dead_letter_key, 0, -1) == [raw_payload]
     finally:
         client.delete(queue_key, processing_key, dead_letter_key, reverse_key)
+        client.close()
+
+
+def test_proxyless_legacy_payload_dead_letters_exactly_once_and_releases_markers() -> None:
+    client = _reachable_real_redis(decode_responses=False)
+    queue_key = f"pytest:proxyless-task-queue:{uuid4().hex}"
+    processing_key = processing_queue_key(queue_key, 4)
+    dead_letter_key = dead_letter_queue_key(queue_key)
+    source_id = 91
+    task_id = f"proxyless-{uuid4().hex}"
+    raw_payload = json.dumps(
+        {
+            "source_id": source_id,
+            "source_url": "https://www.vinted.es/catalog?order=newest_first",
+            "monitor_mode": "continuous",
+            "trigger": "scheduler",
+            "scheduler_config": {"interval_seconds": 60},
+            "proxy_profile_id": None,
+            "proxy_identity_generation": None,
+            "task_id": task_id,
+            "enqueued_at": "2026-07-22T12:00:00+00:00",
+        },
+        separators=(",", ":"),
+    ).encode()
+    pending_key = pending_task_key(source_id, queue_key)
+    reverse_key = pending_payload_key(raw_payload, queue_key)
+    try:
+        client.set(pending_key, task_id)
+        client.set(reverse_key, json.dumps({"source_id": source_id, "task_id": task_id}, separators=(",", ":")))
+        client.lpush(queue_key, raw_payload)
+
+        with pytest.raises(InvalidTaskPayloadError) as exc_info:
+            reserve_task(client, timeout=1, queue_key=queue_key, consumer_id=4)
+
+        error = exc_info.value
+        assert error.raw_queue_payload == raw_payload
+        assert error.processing_key == processing_key
+        assert client.lrange(processing_key, 0, -1) == [raw_payload]
+        for _ in range(2):
+            assert dead_letter_task(
+                client,
+                error.raw_queue_payload,
+                queue_key=queue_key,
+                source_id=error.source_id,
+                task_id=error.task_id,
+                processing_key_override=error.processing_key,
+            ) is True
+
+        assert client.llen(queue_key) == 0
+        assert client.llen(processing_key) == 0
+        assert client.lrange(dead_letter_key, 0, -1) == [raw_payload]
+        assert client.get(pending_key) is None
+        assert client.get(reverse_key) is None
+    finally:
+        client.delete(queue_key, processing_key, dead_letter_key, pending_key, reverse_key)
         client.close()
 
 
