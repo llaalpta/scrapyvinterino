@@ -12,8 +12,6 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 ## Now
 
-Keep no more than five independently valuable tasks here.
-
 No implementation task is currently authorized. Starting the next outcome requires a separate explicit product decision.
 
 ## Next
@@ -93,6 +91,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.50 | done | Proxy settings now describe local configuration without a misleading IP test, while monitor start owns the real egress check and visible cooldown/retry contract. Migration 0023, 46 focused cases and one live authenticated PWA/API/PostgreSQL flow passed after a positive audit with no external traffic or operational-state drift. |
 | 14.51 | done | Monitor stats now aggregate typed proxy-traffic estimates across all runs and the active/latest session, with exact calibration linkage and honest missing/partial states; the compact PWA replaces the five-run panel. Five aggregation cases, five activation/linkage cases and one live API/PostgreSQL/PWA flow passed, followed by a positive independent audit, with no external traffic or operational-state drift. |
 | 14.52 | done | Monitor detail now orders compact filters and HTTP readiness before a single accumulated/session performance table, uses a 170 px chart only for real business activity and keeps logs collapsed. Five aggregation plus five linkage cases and one live desktop/mobile API/PostgreSQL/PWA flow passed; the audit fix proved partial traffic and URL blockers remain visible at 390 px, with no external traffic or operational-state drift. |
+| 14.53 | done | Prepared-context uses and expiry are now distinct from observed proxy requests; performance separates bytes and request counts and uses smaller chart labels. Five traffic cases, eight activation/rotation cases and one live PWA flow passed after a positive independent audit, with zero external traffic and no operational-state drift. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

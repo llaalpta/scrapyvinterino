@@ -71,7 +71,8 @@ export default function MonitorPerformanceChart({
             allowDataOverflow
             dataKey="bucketStartMs"
             domain={chartDomain}
-            label={{ value: xAxisLabel, position: 'insideBottom', offset: -24 }}
+            label={{ value: xAxisLabel, position: 'insideBottom', offset: -24, fontSize: 10 }}
+            tick={{ fontSize: 10 }}
             tickFormatter={(value) => formatChartTick(Number(value), range, chartRange)}
             ticks={ticks}
             type="number"
@@ -79,7 +80,8 @@ export default function MonitorPerformanceChart({
           <YAxis
             allowDecimals={false}
             domain={[0, yMax]}
-            label={{ value: 'Encontrados', angle: -90, position: 'insideLeft', offset: -12 }}
+            label={{ value: 'Encontrados', angle: -90, position: 'insideLeft', offset: -12, fontSize: 10 }}
+            tick={{ fontSize: 10 }}
             width={44}
           />
           <Bar dataKey="itemsFound" fill="transparent" isAnimationActive={false} legendType="none" maxBarSize={0} />

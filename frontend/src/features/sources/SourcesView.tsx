@@ -339,6 +339,7 @@ function MonitorPerformancePanel({
                 <col />
                 <col />
                 <col className="monitor-performance-traffic-column" />
+                <col className="monitor-performance-request-column" />
               </colgroup>
               <thead>
                 <tr>
@@ -349,6 +350,7 @@ function MonitorPerformancePanel({
                   <th scope="col">Oportunidades</th>
                   <th scope="col">Fallos</th>
                   <th scope="col">Trafico proxy</th>
+                  <th scope="col">Peticiones obs.</th>
                 </tr>
               </thead>
               <tbody>
@@ -360,7 +362,7 @@ function MonitorPerformancePanel({
                   runsCount={historical?.runs_count ?? 0}
                   secondary={`${historical?.sessions_count ?? 0} sesion${historical?.sessions_count === 1 ? '' : 'es'}`}
                   seconds={historical?.active_seconds ?? 0}
-                  traffic={proxyTrafficLabel(stats?.historical_proxy_traffic ?? null)}
+                  traffic={proxyTrafficDisplay(stats?.historical_proxy_traffic ?? null)}
                 />
                 {session ? (
                   <MonitorPerformanceRow
@@ -371,7 +373,7 @@ function MonitorPerformancePanel({
                     runsCount={sessionSummary?.runs_count ?? 0}
                     secondary={sessionTimingLabel(source, session, Boolean(stats?.active_session))}
                     seconds={session.duration_seconds}
-                    traffic={proxyTrafficLabel(stats?.session_proxy_traffic ?? null)}
+                    traffic={proxyTrafficDisplay(stats?.session_proxy_traffic ?? null)}
                   />
                 ) : null}
               </tbody>
@@ -440,7 +442,7 @@ function MonitorPerformanceRow({
   runsCount: number;
   secondary: string;
   seconds: number;
-  traffic: string;
+  traffic: ProxyTrafficDisplay;
 }) {
   return (
     <tr>
@@ -453,7 +455,8 @@ function MonitorPerformanceRow({
       <td data-label="Encontrados">{itemsFound}</td>
       <td data-label="Oportunidades">{opportunities}</td>
       <td data-label="Fallos">{failedRuns}</td>
-      <td data-label="Trafico proxy">{traffic}</td>
+      <td data-label="Trafico proxy">{traffic.bytes}</td>
+      <td data-label="Peticiones observadas">{traffic.requests}</td>
     </tr>
   );
 }
@@ -482,27 +485,36 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function proxyTrafficLabel(summary: ProxyTrafficSummary | null): string {
+type ProxyTrafficDisplay = {
+  bytes: string;
+  requests: string;
+};
+
+function proxyTrafficDisplay(summary: ProxyTrafficSummary | null): ProxyTrafficDisplay {
   if (!summary || summary.state === 'no_runs') {
-    return 'Sin ejecuciones';
+    return { bytes: 'Sin ejecuciones', requests: 'Sin ejecuciones' };
   }
   if (summary.state === 'not_applicable') {
-    return 'No aplica';
+    return { bytes: 'No aplica', requests: 'No aplica' };
   }
   if (summary.state === 'not_measured') {
-    return 'No medido';
+    return { bytes: 'No medido', requests: 'No medido' };
   }
   if (summary.total_observed_bytes === null || summary.observed_requests === null) {
-    return 'Parcial, sin cifra fiable';
+    return { bytes: 'Parcial, sin cifra fiable', requests: 'Parcial, sin cifra fiable' };
   }
-  const requests = `${summary.observed_requests} pet. observada${summary.observed_requests === 1 ? '' : 's'}`;
+  const bytes = formatBytes(summary.total_observed_bytes);
+  const requests = String(summary.observed_requests);
   if (summary.state === 'measured') {
-    return `${formatBytes(summary.total_observed_bytes)} · ${requests}`;
+    return { bytes, requests };
   }
   const unobserved = summary.unobserved_attempts
     ? ` · ${summary.unobserved_attempts} sin medir`
     : '';
-  return `${formatBytes(summary.total_observed_bytes)} · ${requests}${unobserved} (parcial)`;
+  return {
+    bytes: `${bytes} (parcial)`,
+    requests: `${requests} obs.${unobserved} (parcial)`
+  };
 }
 
 function MonitorEventTimeline({
@@ -1182,10 +1194,10 @@ function DiscardSourceEditDialog({
 
 function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
   const usableCount = sessions.filter((session) => session.usable_now).length;
-  const usageLabel = sessions.length === 1 ? ` · ${sessions[0].request_count}/${sessions[0].max_requests} usos` : '';
+  const contextLabel = sessions.length === 1 ? ` · ${preparedSessionSummary(sessions[0])}` : '';
   const summaryLabel = sessions.length === 0
     ? 'Sin contexto'
-    : `${usableCount}/${sessions.length} reutilizable${sessions.length === 1 ? '' : 's'}${usageLabel}`;
+    : `${usableCount}/${sessions.length} reutilizable${sessions.length === 1 ? '' : 's'}${contextLabel}`;
 
   return (
     <details
@@ -1206,7 +1218,8 @@ function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
       </summary>
       <div className="monitor-logs-body monitor-http-contexts-body">
         <p className="monitor-log-note">
-          Cookies y tokens anonimos ligados a este monitor y a cada proxy; no agrupan el rendimiento de las sesiones del monitor.
+          Cada uso es una preparacion o seleccion del contexto para un run, no una peticion HTTP. Se comprueba al iniciar el run: si ha
+          caducado o se ha agotado, se prepara otro; un run ya iniciado no se interrumpe y un fallo de preparacion queda visible.
         </p>
         {sessions.length === 0 ? (
           <p className="empty-inline compact">Sin contexto HTTP preparado para este monitor.</p>
@@ -1236,14 +1249,28 @@ function PreparedSessionRow({ session }: { session: VintedSession }) {
           {session.usable_now ? 'Reutilizable' : 'No reutilizable'}
         </span>
       </div>
-      <p>{session.usable_now ? 'Cumple el contexto efectivo del runtime.' : reason ?? 'Motivo no disponible.'}</p>
+      <p>{session.usable_now ? 'Se reutilizara mientras no caduque ni alcance su limite.' : reason ?? 'Motivo no disponible.'}</p>
       <dl className="monitor-session-strip">
-        <Metric label="Usos" value={`${session.request_count}/${session.max_requests}`} />
-        <Metric label="Expira" value={session.expires_at ? formatDate(session.expires_at) : 'Sin expiracion'} />
+        <Metric label="Usos del contexto" value={`${session.request_count}/${session.max_requests}`} />
+        <Metric label="Caduca" value={session.expires_at ? formatDate(session.expires_at) : 'Sin caducidad'} />
         <Metric label="Ultimo uso" value={session.last_used_at ? formatDate(session.last_used_at) : 'Nunca'} />
       </dl>
     </article>
   );
+}
+
+function preparedSessionSummary(session: VintedSession): string {
+  const usage = `${session.request_count}/${session.max_requests} usos`;
+  if (session.unusable_reason === 'exhausted') {
+    return `${usage} · agotado`;
+  }
+  if (!session.expires_at) {
+    return `${usage} · sin caducidad`;
+  }
+  const expiry = formatDate(session.expires_at);
+  return session.unusable_reason === 'expired'
+    ? `${usage} · caduco ${expiry}`
+    : `${usage} · caduca ${expiry}`;
 }
 
 function preparedSessionReasonLabel(reason: VintedSessionUnusableReason): string {
@@ -1395,8 +1422,8 @@ function MonitorConfigEditor({
                 onChange={(event) => updateSourceDraft(source.id, 'jitterPercent', event.target.value)}
               />
             </label>
-            <label>
-              Parar tras usos sesion
+            <label className="monitor-context-limit-field">
+              Detener tras N runs con el mismo contexto
               <input
                 type="number"
                 min="1"
@@ -1406,6 +1433,7 @@ function MonitorConfigEditor({
                 value={sourceDraft.stopAfterVintedSessionUses}
                 onChange={(event) => updateSourceDraft(source.id, 'stopAfterVintedSessionUses', event.target.value)}
               />
+              <small>Vacio: continua. Al rotar el contexto, el contador vuelve a empezar.</small>
             </label>
           </>
         ) : null}
@@ -1484,7 +1512,7 @@ function monitorSummary(source: SearchSource): string[] {
     entries.push(`Cada ${config.interval_seconds ?? 300}s`);
     entries.push(`Jitter ${config.jitter_percent ?? 20}%`);
     if (config.stop_after_vinted_session_uses) {
-      entries.push(`Max ${config.stop_after_vinted_session_uses} usos sesion`);
+      entries.push(`Max ${config.stop_after_vinted_session_uses} runs/contexto`);
     }
   }
   if (source.monitor_mode === 'duration' && source.monitor_until) {

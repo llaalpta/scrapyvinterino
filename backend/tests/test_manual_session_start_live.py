@@ -211,6 +211,11 @@ def _exercise_proxy_traffic_live_stack(
             _assert_proxy_traffic_pwa(page, row_label="Acumulado")
             _assert_proxy_traffic_pwa(page, row_label="Sesion activa")
             _assert_compact_monitor_activity(page, business_activity=True)
+            page.set_viewport_size({"width": 1366, "height": 768})
+            assert page.locator(".monitor-performance-table-wrap").evaluate(
+                "node => node.scrollWidth <= node.clientWidth"
+            ) is True
+            page.set_viewport_size({"width": 1440, "height": 900})
             expect(page.locator('section[aria-label="Tiempo y trafico por ejecucion"]')).to_have_count(0)
             _assert_proxy_traffic_database(scenario, baseline, later_run)
 
@@ -225,6 +230,17 @@ def _exercise_proxy_traffic_live_stack(
                 pwa_url,
             )
             assert stopped_stats["session_proxy_traffic"] == expected_traffic
+            _move_prepared_context_to_near_expiry(scenario.source_id)
+            page.reload(wait_until="domcontentloaded")
+            expect(page.get_by_role("button", name="Monitores", exact=True)).to_be_visible()
+            page.get_by_role("button", name="Monitores", exact=True).click()
+            _select_monitor(page, scenario.source_name, active=False)
+            contexts = page.get_by_role("group", name="Contextos HTTP preparados para este monitor")
+            expect(contexts.locator("summary")).to_contain_text(re.compile(r"\d+/50 usos · caduca"))
+            contexts.locator("summary").click()
+            expect(contexts.get_by_text(re.compile(r"Cada uso.*no una peticion HTTP", re.IGNORECASE))).to_be_visible()
+            expect(contexts.get_by_text("El contexto ha expirado.", exact=True)).to_be_visible(timeout=12_000)
+            expect(contexts.locator("summary")).to_contain_text(re.compile(r"\d+/50 usos · caduco"))
             _mark_proxy_traffic_partial(baseline["id"])
             page.set_viewport_size({"width": 390, "height": 844})
             page.reload(wait_until="domcontentloaded")
@@ -235,6 +251,12 @@ def _exercise_proxy_traffic_live_stack(
             latest = _performance_row(page, "Ultima sesion")
             expect(accumulated.locator('td[data-label="Trafico proxy"]')).to_contain_text("parcial")
             expect(latest.locator('td[data-label="Trafico proxy"]')).to_contain_text("parcial")
+            expect(accumulated.locator('td[data-label="Peticiones observadas"]')).to_have_text(
+                "3 obs. · 1 sin medir (parcial)"
+            )
+            expect(latest.locator('td[data-label="Peticiones observadas"]')).to_have_text(
+                "3 obs. · 1 sin medir (parcial)"
+            )
             assert page.locator(".monitor-performance-table-wrap").evaluate(
                 "node => node.scrollWidth <= node.clientWidth"
             ) is True
@@ -246,6 +268,11 @@ def _exercise_proxy_traffic_live_stack(
             expect(blocker.get_by_text(re.compile(r"Bloquean:.*color_ids"))).to_be_visible()
             expect(page.locator("section.monitor-detail-shell details.catalog-filter-summary")).to_have_count(0)
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") is True
+            page.get_by_role("button", name="Modificar", exact=True).click()
+            expect(page.get_by_label(re.compile(r"Detener tras N runs con el mismo contexto"))).to_be_visible()
+            expect(
+                page.get_by_text("Vacio: continua. Al rotar el contexto, el contador vuelve a empezar.", exact=True)
+            ).to_be_visible()
         finally:
             context.close()
             browser.close()
@@ -490,8 +517,12 @@ def _seed_proxy_traffic(token: str) -> TrafficScenario:
             url="https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12",
             normalized_query={"catalog[]": ["76"], "color_ids[]": ["12"]},
             is_active=False,
-            monitor_mode="manual",
-            scheduler_config={},
+            monitor_mode="continuous",
+            scheduler_config={
+                "interval_seconds": 60,
+                "jitter_percent": 0,
+                "allowed_windows": [],
+            },
         )
         db.add(blocked_source)
         db.flush()
@@ -546,6 +577,14 @@ def _mark_proxy_traffic_partial(run_id: int) -> None:
         estimate["unobserved_attempts"] = 1
         metadata["proxy_traffic_estimate"] = estimate
         run.runtime_metadata = metadata
+        db.commit()
+
+
+def _move_prepared_context_to_near_expiry(source_id: int) -> None:
+    with SessionLocal() as db:
+        prepared = db.scalar(select(VintedSession).where(VintedSession.source_id == source_id))
+        assert prepared is not None
+        prepared.expires_at = datetime.now(UTC) + timedelta(seconds=4)
         db.commit()
 
 
@@ -666,7 +705,8 @@ def _assert_honest_metrics_ui(page: Page, *, found: int, opportunities: int) -> 
 
 def _assert_proxy_traffic_pwa(page: Page, *, row_label: str) -> None:
     row = _performance_row(page, row_label)
-    expect(row.locator('td[data-label="Trafico proxy"]')).to_have_text("4 kB · 3 pet. observadas")
+    expect(row.locator('td[data-label="Trafico proxy"]')).to_have_text("4 kB")
+    expect(row.locator('td[data-label="Peticiones observadas"]')).to_have_text("3")
     performance = page.locator("section.monitor-performance")
     expect(performance.get_by_text(re.compile(r"DataImpulse.*facturacion autoritativo", re.IGNORECASE))).to_be_visible()
 
@@ -692,11 +732,14 @@ def _assert_compact_monitor_activity(page: Page, *, business_activity: bool) -> 
     )
     expect(contexts).to_be_visible()
     expect(contexts).not_to_have_attribute("open", "")
-    expect(contexts.locator("summary")).to_contain_text(re.compile(r"1/1 reutilizable · \d+/50 usos"))
+    expect(contexts.locator("summary")).to_contain_text(
+        re.compile(r"1/1 reutilizable · \d+/50 usos · caduca")
+    )
     expect(logs).not_to_have_attribute("open", "")
     table = page.get_by_role("table", name="Comparativa de rendimiento del monitor")
     expect(table).to_be_visible()
     expect(table.get_by_role("columnheader", name="Trafico proxy", exact=True)).to_be_visible()
+    expect(table.get_by_role("columnheader", name="Peticiones obs.", exact=True)).to_be_visible()
     table_wrapper = detail.locator(".monitor-performance-table-wrap")
     assert table_wrapper.evaluate("node => node.scrollWidth <= node.clientWidth") is True
 
@@ -713,6 +756,20 @@ def _assert_compact_monitor_activity(page: Page, *, business_activity: bool) -> 
         expect(empty_chart).to_have_count(0)
         chart_box = chart.bounding_box()
         assert chart_box is not None and 150 <= chart_box["height"] <= 175
+        ticks = chart.locator(".recharts-cartesian-axis-tick-value")
+        expect(ticks.first).to_be_visible()
+        assert ticks.evaluate_all(
+            "nodes => nodes.every(node => getComputedStyle(node).fontSize === '10px')"
+        ) is True
+        for label in ("Encontrados", re.compile(r"^Tiempo")):
+            axis_label = chart.locator("svg text").filter(has_text=label).first
+            expect(axis_label).to_be_visible()
+            assert axis_label.evaluate("node => getComputedStyle(node).fontSize") == "10px"
+        legend = chart.locator(".monitor-chart-legend")
+        assert legend.evaluate("node => getComputedStyle(node).fontSize") == "11px"
+        session_marker = chart.locator("svg text").filter(has_text="Inicio sesion")
+        expect(session_marker).to_be_visible()
+        assert session_marker.evaluate("node => getComputedStyle(node).fontSize") == "11px"
         detail.evaluate("node => node.scrollIntoView({block: 'start'})")
         page.wait_for_timeout(100)
         logs_box = logs.locator("summary").bounding_box()

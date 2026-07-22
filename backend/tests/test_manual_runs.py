@@ -542,6 +542,25 @@ class FakeSessionPreparingProvider:
         self.closed = True
 
 
+class FakeRotatingSessionProvider(FakeSessionPreparingProvider):
+    def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+        return CatalogSearchResult(
+            items=[],
+            page=1,
+            total_pages=1,
+            total_entries=0,
+            per_page=5,
+            next_page=None,
+            provider_metadata={"provider": "fake-rotated-context"},
+        )
+
+
+class FakeFailingSessionPreparationProvider(FakeRotatingSessionProvider):
+    def bootstrap_for_session(self, source_url: str, *, collect_datadome: bool = False) -> dict:
+        self.bootstrap_calls.append((source_url, collect_datadome))
+        raise RuntimeError("QA replacement preparation failed")
+
+
 class FakeDataDomeDetailProvider(FakeSessionPreparingProvider):
     def probe_item_detail_document(self, item_ref: str, *, referer_url: str | None = None) -> dict:
         self.detail_probe_calls.append((item_ref, referer_url))
@@ -979,6 +998,163 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert selected.details["vinted_session_id"] == run.runtime_metadata["vinted_session_id"]
         assert selected.details["proxy_session"] == run.runtime_metadata["proxy_sticky_session"]
         assert created_providers[0].kwargs["proxy_session_marker"] == run.runtime_metadata["proxy_sticky_session"]
+
+
+@pytest.mark.parametrize("unusable_state", ["expired", "exhausted"])
+def test_monitor_run_replaces_unusable_context_and_keeps_monitor_session_active(
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: int,
+    unusable_state: str,
+) -> None:
+    FakeSessionPreparingProvider.created = []
+    runtime_settings = Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}")
+    monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeRotatingSessionProvider)
+    monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: runtime_settings)
+
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name=f"pytest {unusable_state} context rotation proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8014,
+            username="customer",
+            password="test-password",
+            settings=runtime_settings,
+        )
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.monitor_mode = "continuous"
+        db.flush()
+        unusable = _create_ready_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id="expiredcontext01",
+            settings=runtime_settings,
+        )
+        if unusable_state == "expired":
+            unusable.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        else:
+            unusable.request_count = unusable.max_requests
+        unusable_id = unusable.id
+        monitor_session = db.scalar(
+            select(MonitorSession).where(MonitorSession.source_id == source_id, MonitorSession.stopped_at.is_(None))
+        )
+        assert monitor_session is not None
+        monitor_session_id = monitor_session.id
+        db.commit()
+
+        run = execute_monitor_run(
+            db,
+            source_id,
+            egress=RunEgress(
+                mode="proxy",
+                proxy_profile_id=proxy.id,
+                proxy_name=proxy.name,
+                proxy_kind=proxy.kind,
+                proxy_identity_generation=effective_proxy_identity_generation(proxy),
+            ),
+            seen_cache=FakeSeenCache(),
+        )
+
+        source = db.get(SearchSource, source_id)
+        sessions = list(
+            db.scalars(
+                select(VintedSession)
+                .where(VintedSession.source_id == source_id, VintedSession.proxy_profile_id == proxy.id)
+                .order_by(VintedSession.id.asc())
+            )
+        )
+        active_session = db.get(MonitorSession, monitor_session_id)
+        selected = db.scalar(
+            select(RunEvent).where(RunEvent.run_id == run.id, RunEvent.phase == "vinted_session_selected")
+        )
+
+        assert run.status == SUCCESS
+        assert run.monitor_session_id == monitor_session_id
+        assert run.runtime_metadata["vinted_session_action"] == "prepared"
+        assert len(sessions) == 2
+        assert sessions[0].id == unusable_id
+        assert sessions[1].id == run.runtime_metadata["vinted_session_id"]
+        assert sessions[1].request_count == 1
+        assert source is not None and source.is_active is True
+        assert active_session is not None and active_session.stopped_at is None
+        assert selected is not None and selected.details["action"] == "prepared"
+        assert len(FakeSessionPreparingProvider.created) == 2
+        assert all(provider.closed for provider in FakeSessionPreparingProvider.created)
+
+
+def test_monitor_run_surfaces_expired_context_replacement_failure_without_hidden_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: int,
+) -> None:
+    FakeSessionPreparingProvider.created = []
+    runtime_settings = Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}")
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
+        FakeFailingSessionPreparationProvider,
+    )
+    monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: runtime_settings)
+
+    with SessionLocal() as db:
+        proxy = create_proxy_profile(
+            db,
+            name="pytest failed context rotation proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8015,
+            username="customer",
+            password="test-password",
+            settings=runtime_settings,
+        )
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        source.monitor_mode = "continuous"
+        db.flush()
+        expired = _create_ready_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id="expiredcontext02",
+            settings=runtime_settings,
+        )
+        expired.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        monitor_session = db.scalar(
+            select(MonitorSession).where(MonitorSession.source_id == source_id, MonitorSession.stopped_at.is_(None))
+        )
+        assert monitor_session is not None
+        monitor_session_id = monitor_session.id
+        db.commit()
+
+        run = execute_monitor_run(
+            db,
+            source_id,
+            egress=RunEgress(
+                mode="proxy",
+                proxy_profile_id=proxy.id,
+                proxy_name=proxy.name,
+                proxy_kind=proxy.kind,
+                proxy_identity_generation=effective_proxy_identity_generation(proxy),
+            ),
+            seen_cache=FakeSeenCache(),
+        )
+
+        source = db.get(SearchSource, source_id)
+        active_session = db.get(MonitorSession, monitor_session_id)
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
+
+        assert run.status == FAILED
+        assert "replacement preparation failed" in (run.error_message or "")
+        assert source is not None and source.is_active is True
+        assert active_session is not None and active_session.stopped_at is None
+        assert [event.phase for event in events].count("run_failed") == 1
+        assert all(event.phase != "catalog_search_start" for event in events)
+        assert len(FakeSessionPreparingProvider.created) == 1
+        assert FakeSessionPreparingProvider.created[0].bootstrap_calls == [(source.url, True)]
+        assert FakeSessionPreparingProvider.created[0].closed is True
 
 
 def test_monitor_session_prepare_api_creates_ready_session_without_business_effects(monkeypatch: pytest.MonkeyPatch) -> None:
