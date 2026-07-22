@@ -155,12 +155,8 @@ export type SchedulerState = {
   per_source_concurrency: number;
   poll_interval_seconds: number;
   timezone: string;
-  allow_direct_without_proxy: boolean;
-  direct_max_concurrent_runs: number;
   active_proxy_count: number;
   proxy_capacity: number;
-  direct_runtime_enabled: boolean;
-  direct_capacity: number;
   effective_capacity: number;
   active_periodic_monitors: number;
   catalog_per_page: number;
@@ -462,8 +458,6 @@ export function fetchScheduler(): Promise<SchedulerState> {
 
 export type SchedulerUpdate = Partial<{
   max_concurrent_runs: number;
-  allow_direct_without_proxy: boolean;
-  direct_max_concurrent_runs: number;
   catalog_per_page: number;
   detail_max_candidates_per_run: number;
   request_timeout_ms: number;

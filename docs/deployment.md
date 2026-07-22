@@ -35,7 +35,7 @@ La configuracion no debe tener dos fuentes de verdad activas:
 | Dueño | Uso |
 | --- | --- |
 | `.env` | Infraestructura, secretos, auth local, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS exacto, `APP_SECRET_KEY`, TTL absoluto de pre-auth/auth, `SCHEDULER_ENABLED`, heartbeat del productor, intervalo/gracia del watchdog, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos, penalizacion DataDome y plantilla sticky de proxy. |
-| PWA | Operacion diaria: iniciar/detener sesiones por monitor, runs simultaneos, salida directa, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. No arranca contenedores ni mantiene un gate global del scheduler. |
+| PWA | Operacion diaria: iniciar/detener sesiones por monitor, runs simultaneos, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/test/pausa de proxys. No arranca contenedores ni mantiene un gate global del scheduler. |
 | Backend | Limites duros de validacion y defaults seguros cuando no hay override operativo. |
 
 Algunos valores `.env` tambien sirven como defaults cuando aun no existe override operativo en `app_settings.scheduler`; por ejemplo `VINTED_REQUEST_TIMEOUT_MS`. Una vez guardado desde la PWA, el valor persistido en DB es la fuente de verdad operativa.
@@ -155,7 +155,7 @@ La ventana de heartbeat obsoleto, la ausencia de health del watchdog, el restart
 
 ## Outbound Vinted Proxy
 
-El monitor debe funcionar sin proxy de salida por defecto cuando el ajuste global de acceso directo lo permite. El uso de proxy residencial o de otro proveedor es optativo y se configura en el pool global de proxys gestionado por la PWA. El password se almacena cifrado; el username permanece hoy en texto claro y 14.12.8 lo retira del contrato publico y lo cifra.
+Todo catalogo normal requiere un proxy activo del pais objetivo configurado en el pool global de la PWA. Sin capacidad elegible, start y run fallan localmente antes de crear proveedor, run o sesion Vinted; no existe fallback al host. El password se almacena cifrado; el username permanece hoy en texto claro y 14.12.8 lo retira del contrato publico y lo cifra.
 
 La politica de secretos, redaccion y limites anti-bot vive en `docs/security.md`; la spec runtime vive en `docs/specs/008-scheduler.md`.
 

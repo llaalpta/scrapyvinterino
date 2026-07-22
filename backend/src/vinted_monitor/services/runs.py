@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -235,6 +236,7 @@ def execute_monitor_baseline(
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
+    _require_proxy_egress(selected_egress)
     owned_provider = provider is None
     run_provider: ManualRunProvider | None = provider
     prepared_catalog_result: CatalogSearchResult | None = None
@@ -357,8 +359,6 @@ def execute_monitor_baseline(
             "vinted_screen": (run.runtime_metadata or {}).get("vinted_screen"),
             "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
-            "direct_allowed": runtime_config.allow_direct_without_proxy,
-            "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
         },
     )
 
@@ -547,8 +547,7 @@ def execute_monitor_session_prepare(
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
-    if selected_egress.proxy_profile_id is None:
-        raise VintedSessionRequiredError("Configura un proxy activo antes de preparar una sesion Vinted")
+    _require_proxy_egress(selected_egress)
     proxy_profile = db.get(ProxyProfile, selected_egress.proxy_profile_id)
     if proxy_profile is None:
         raise SchedulerCapacityError(f"Proxy profile {selected_egress.proxy_profile_id} no longer exists")
@@ -662,8 +661,6 @@ def execute_monitor_session_prepare(
             "accept_language": proxy_profile.accept_language,
             "screen": proxy_profile.screen,
             "vinted_screen": proxy_profile.vinted_screen,
-            "direct_allowed": runtime_config.allow_direct_without_proxy,
-            "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
             "session_prepare_run": True,
         },
     )
@@ -768,8 +765,7 @@ def execute_monitor_item_detail_probe(
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
-    if selected_egress.proxy_profile_id is None:
-        raise VintedSessionRequiredError("Configura un proxy activo antes de probar el detalle de un item")
+    _require_proxy_egress(selected_egress)
     proxy_profile = db.get(ProxyProfile, selected_egress.proxy_profile_id)
     if proxy_profile is None:
         raise SchedulerCapacityError(f"Proxy profile {selected_egress.proxy_profile_id} no longer exists")
@@ -1021,6 +1017,7 @@ def execute_monitor_run(
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
     selected_egress = egress or choose_run_egress(db, settings)
+    _require_proxy_egress(selected_egress)
     owned_provider = provider is None
     run_provider: ManualRunProvider | None = provider
     run_session = start_monitor_session(db, source, allow_manual=True) if create_session_for_run else None
@@ -1153,8 +1150,6 @@ def execute_monitor_run(
             "vinted_screen": (run.runtime_metadata or {}).get("vinted_screen"),
             "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
-            "direct_allowed": runtime_config.allow_direct_without_proxy,
-            "direct_runtime_enabled": runtime_config.direct_runtime_enabled,
         },
     )
 
@@ -1692,6 +1687,7 @@ def _provider_for_egress(
     run: Run | None = None,
     include_catalog_payload: bool = False,
 ) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any], CatalogSearchResult | None]:
+    _require_proxy_egress(egress)
     proxy_url = egress.proxy_url
     metadata: dict[str, Any] = {
         "target_country_code": settings.vinted_target_country_code.strip().upper(),
@@ -1709,76 +1705,73 @@ def _provider_for_egress(
     prepared_catalog_result: CatalogSearchResult | None = None
     proxy_marker: dict[str, Any] | None = None
     event_sink = _build_provider_event_sink(db, run, source, egress.proxy_profile_id) if run is not None else None
-    if egress.proxy_profile_id is not None:
-        profile = lock_and_revalidate_proxy_selection(
+    profile = lock_and_revalidate_proxy_selection(
+        db,
+        egress.proxy_profile_id,
+        egress.proxy_identity_generation,
+        settings,
+    )
+    try:
+        vinted_session, prepared_session = get_ready_vinted_session(
             db,
-            egress.proxy_profile_id,
-            egress.proxy_identity_generation,
-            settings,
+            source,
+            profile,
+            settings=settings,
         )
-        try:
-            vinted_session, prepared_session = get_ready_vinted_session(
-                db,
-                source,
-                profile,
-                settings=settings,
-            )
-            session_action = "reused"
-        except VintedSessionRequiredError:
-            vinted_session, prepared_session, prepared_metadata, prepared_catalog_result = _prepare_vinted_session_for_run(
-                db,
-                source,
-                profile,
-                runtime_config,
-                settings,
-                event_sink=event_sink,
-                include_catalog_payload=include_catalog_payload,
-            )
-            metadata.update(prepared_metadata)
-            session_action = "prepared"
-        proxy_session_id = vinted_session.proxy_session_id
-        proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
-        proxy_marker = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
-        provider_country_code = profile.country_code
-        provider_locale = profile.locale
-        provider_accept_language = profile.accept_language
-        provider_viewport_size = profile.screen
-        provider_vinted_screen = profile.vinted_screen
-        metadata["proxy_country_code"] = profile.country_code
-        metadata["locale"] = profile.locale
-        metadata["accept_language"] = profile.accept_language
-        metadata["screen"] = profile.screen
-        metadata["vinted_screen"] = profile.vinted_screen
-        metadata["vinted_session_id"] = vinted_session.id
-        metadata["vinted_session_status"] = vinted_session.status
-        metadata["vinted_session_request_count"] = vinted_session.request_count
-        metadata["vinted_session_max_requests"] = vinted_session.max_requests
-        metadata["vinted_session_action"] = session_action
-        metadata["vinted_session_datadome_present"] = bool(prepared_session.datadome or (prepared_session.cookies or {}).get("datadome"))
-        metadata["vinted_session_cf_bm_present"] = bool(prepared_session.cf_bm or (prepared_session.cookies or {}).get("__cf_bm"))
-        metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
-        metadata["proxy_sticky_session"] = proxy_marker
-        if run is not None:
-            record_run_event(
-                db,
-                run_id=run.id,
-                source_id=source.id,
-                phase="vinted_session_selected",
-                proxy_profile_id=profile.id,
-                auth_mode="public_anonymous",
-                details={
-                    "action": session_action,
-                    "vinted_session_id": vinted_session.id,
-                    "vinted_session_status": vinted_session.status,
-                    "vinted_session_use_count": vinted_session.request_count,
-                    "vinted_session_max_requests": vinted_session.max_requests,
-                    "context": prepared_context_flags(prepared_session),
-                    "datadome_required": True,
-                    "proxy_session": proxy_marker,
-                },
-            )
-    elif settings.vinted_prepared_session_required:
-        raise VintedSessionRequiredError("Prepara una sesion Vinted con proxy antes de lanzar trafico de catalogo")
+        session_action = "reused"
+    except VintedSessionRequiredError:
+        vinted_session, prepared_session, prepared_metadata, prepared_catalog_result = _prepare_vinted_session_for_run(
+            db,
+            source,
+            profile,
+            runtime_config,
+            settings,
+            event_sink=event_sink,
+            include_catalog_payload=include_catalog_payload,
+        )
+        metadata.update(prepared_metadata)
+        session_action = "prepared"
+    proxy_session_id = vinted_session.proxy_session_id
+    proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
+    proxy_marker = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
+    provider_country_code = profile.country_code
+    provider_locale = profile.locale
+    provider_accept_language = profile.accept_language
+    provider_viewport_size = profile.screen
+    provider_vinted_screen = profile.vinted_screen
+    metadata["proxy_country_code"] = profile.country_code
+    metadata["locale"] = profile.locale
+    metadata["accept_language"] = profile.accept_language
+    metadata["screen"] = profile.screen
+    metadata["vinted_screen"] = profile.vinted_screen
+    metadata["vinted_session_id"] = vinted_session.id
+    metadata["vinted_session_status"] = vinted_session.status
+    metadata["vinted_session_request_count"] = vinted_session.request_count
+    metadata["vinted_session_max_requests"] = vinted_session.max_requests
+    metadata["vinted_session_action"] = session_action
+    metadata["vinted_session_datadome_present"] = bool(prepared_session.datadome or (prepared_session.cookies or {}).get("datadome"))
+    metadata["vinted_session_cf_bm_present"] = bool(prepared_session.cf_bm or (prepared_session.cookies or {}).get("__cf_bm"))
+    metadata["proxy_session_id_prefix"] = proxy_session_id[:8]
+    metadata["proxy_sticky_session"] = proxy_marker
+    if run is not None:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase="vinted_session_selected",
+            proxy_profile_id=profile.id,
+            auth_mode="public_anonymous",
+            details={
+                "action": session_action,
+                "vinted_session_id": vinted_session.id,
+                "vinted_session_status": vinted_session.status,
+                "vinted_session_use_count": vinted_session.request_count,
+                "vinted_session_max_requests": vinted_session.max_requests,
+                "context": prepared_context_flags(prepared_session),
+                "datadome_required": True,
+                "proxy_session": proxy_marker,
+            },
+        )
 
     return CurlCffiVintedCatalogProvider(
         settings=settings,
@@ -1798,6 +1791,18 @@ def _provider_for_egress(
         prepared_session=prepared_session,
         require_datadome_cookie=True,
     ), metadata, prepared_catalog_result
+
+
+def _require_proxy_egress(egress: RunEgress) -> None:
+    if (
+        egress.mode != "proxy"
+        or not isinstance(egress.proxy_profile_id, int)
+        or isinstance(egress.proxy_profile_id, bool)
+        or egress.proxy_profile_id <= 0
+        or not isinstance(egress.proxy_identity_generation, str)
+        or not re.fullmatch(r"v1:[1-9]\d*:[0-9a-f]{64}", egress.proxy_identity_generation)
+    ):
+        raise SchedulerCapacityError("Catalog execution requires an eligible proxy")
 
 
 def _prepare_vinted_session_for_run(

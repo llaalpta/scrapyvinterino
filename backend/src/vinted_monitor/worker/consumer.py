@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 
 import structlog
@@ -42,6 +43,12 @@ from vinted_monitor.services.task_queue import (
     reserve_task,
 )
 from vinted_monitor.services.vinted_sessions import VintedSessionRequiredError
+
+
+def _untrusted_task_id_fingerprint(task_id: str | None) -> str | None:
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    return hashlib.sha256(task_id.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 class TaskConsumer:
@@ -186,7 +193,7 @@ class TaskConsumer:
             error=str(exc),
             moved=moved,
             source_id=exc.source_id,
-            task_id=exc.task_id,
+            task_id_fingerprint=_untrusted_task_id_fingerprint(exc.task_id),
         )
 
     def _recover_processing_queue(self, queue_client: Redis, consumer_processing_key: str) -> None:
@@ -316,10 +323,9 @@ class TaskConsumer:
                     attempt=attempt,
                     error=str(exc),
                 )
-                if task.proxy_profile_id:
-                    with SessionLocal() as db:
-                        mark_proxy_run_failure(db, task.proxy_profile_id)
-                        db.commit()
+                with SessionLocal() as db:
+                    mark_proxy_run_failure(db, task.proxy_profile_id)
+                    db.commit()
         # All attempts exhausted
         self.logger.error(
             "consumer_all_attempts_exhausted",
@@ -351,7 +357,7 @@ class TaskConsumer:
     ) -> Run:
         """Execute the monitor run using the pre-configured provider."""
         egress = RunEgress(
-            mode="proxy" if task.proxy_profile_id else "direct",
+            mode="proxy",
             proxy_profile_id=task.proxy_profile_id,
             proxy_identity_generation=task.proxy_identity_generation,
             proxy_url=None,

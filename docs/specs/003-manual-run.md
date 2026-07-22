@@ -60,7 +60,7 @@ Allow one user to open a manual monitor session, execute explicit catalog checks
 
 The final manual-session gate uses one temporary manual monitor through the already-running PWA/API and exactly one `start`, one later `run` and one `stop`. Worker and scheduler-watchdog remain stopped. The browser blocks every non-loopback request, so only the backend provider may reach the configured egress diagnostic, Vinted and DataDome collector endpoints through the single eligible proxy.
 
-Before traffic, the gate requires no active monitor, non-terminal run or open monitor session, one active proxy, an empty operational Redis database and the expected serial runtime (`catalog_per_page=5`, detail limit `5`, one catalog retry, prepared sessions required and direct catalog disabled). Its allowance is at most `19` logical external operations: up to two six-operation session preparations, two catalog attempts and five item-detail requests. Redirect hops are not logical operations and remain a declared residual because egress/DataDome clients use their library redirect policy.
+Before traffic, the gate requires no active monitor, non-terminal run or open monitor session, one active proxy, an empty operational Redis database and the expected serial proxy-only runtime (`catalog_per_page=5`, detail limit `5`, one catalog retry and prepared sessions required). Its allowance is at most `19` logical external operations: up to two six-operation session preparations, two catalog attempts and five item-detail requests. Redirect hops are not logical operations and remain a declared residual because egress/DataDome clients use their library redirect policy.
 
 Acceptance has three criteria:
 

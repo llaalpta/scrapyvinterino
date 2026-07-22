@@ -92,7 +92,7 @@ class SchedulerRunner:
             db.commit()
 
             cache = get_seen_cache()
-            active_proxy_counts, active_direct_count = active_run_egress_counts(db)
+            active_proxy_counts = active_run_egress_counts(db)
             active_task_ids = set(
                 db.scalars(
                     select(Run.task_id).where(
@@ -119,12 +119,9 @@ class SchedulerRunner:
             for queued_task in queued_tasks:
                 if queued_task.task_id in active_task_ids:
                     continue
-                if queued_task.proxy_profile_id is not None:
-                    active_proxy_counts[queued_task.proxy_profile_id] = (
-                        active_proxy_counts.get(queued_task.proxy_profile_id, 0) + 1
-                    )
-                else:
-                    active_direct_count += 1
+                active_proxy_counts[queued_task.proxy_profile_id] = (
+                    active_proxy_counts.get(queued_task.proxy_profile_id, 0) + 1
+                )
             for _, source_id, _source, _config in sorted(due_sources, key=lambda e: (e[0], e[1])):
                 source = db.scalar(
                     select(SearchSource)
@@ -166,7 +163,7 @@ class SchedulerRunner:
                     )
                     db.commit()
                     continue
-                if sum(active_proxy_counts.values()) + active_direct_count >= state.max_concurrent_runs:
+                if sum(active_proxy_counts.values()) >= state.max_concurrent_runs:
                     db.commit()
                     break
 
@@ -181,7 +178,6 @@ class SchedulerRunner:
                         db,
                         self.settings,
                         active_proxy_counts=active_proxy_counts,
-                        active_direct_count=active_direct_count,
                     )
                 except SchedulerCapacityError:
                     db.rollback()
@@ -217,6 +213,14 @@ class SchedulerRunner:
                     source.next_run_at = next_due
                     db.commit()
                     continue
+
+                if egress.proxy_profile_id is None or egress.proxy_identity_generation is None:
+                    db.rollback()
+                    self.logger.error(
+                        "scheduler_proxy_binding_missing",
+                        source_id=source_id,
+                    )
+                    break
 
                 task = MonitorTask(
                     source_id=source_id,
@@ -255,10 +259,7 @@ class SchedulerRunner:
                     )
                     db.commit()
                     continue
-                if egress.proxy_profile_id is not None:
-                    active_proxy_counts[egress.proxy_profile_id] = active_proxy_counts.get(egress.proxy_profile_id, 0) + 1
-                elif egress.mode == "direct":
-                    active_direct_count += 1
+                active_proxy_counts[egress.proxy_profile_id] = active_proxy_counts.get(egress.proxy_profile_id, 0) + 1
                 submitted.append(source_id)
                 pending_by_source_id[source_id] = task
                 db.commit()

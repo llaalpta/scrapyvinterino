@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from api_client import authenticated_test_client
@@ -7,9 +8,9 @@ from pydantic import ValidationError
 from sqlalchemy import delete, select
 
 from vinted_monitor.core.config import Settings
-from vinted_monitor.db.models import AppSetting, MonitorSession, Run, RunEvent, SearchSource
+from vinted_monitor.db.models import AppSetting, MonitorSession, ProxyProfile, Run, RunEvent, SearchSource
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, get_scheduler_state, update_scheduler_config
+from vinted_monitor.services.scheduler import SCHEDULER_SETTING_KEY, get_scheduler_state
 from vinted_monitor.services.scheduler_liveness import (
     SCHEDULER_WORKER_HEARTBEAT_KEY,
     scheduler_worker_availability,
@@ -24,7 +25,6 @@ def _settings(**overrides) -> Settings:
     return Settings(
         _env_file=None,
         scheduler_enabled=True,
-        vinted_direct_catalog_enabled=True,
         **overrides,
     )
 
@@ -68,11 +68,33 @@ def preserve_scheduler_app_settings():
         db.commit()
 
 
-def test_scheduler_state_requires_fresh_producer_heartbeat() -> None:
+@pytest.fixture
+def scheduler_proxy_id() -> int:
+    with SessionLocal() as db:
+        proxy = ProxyProfile(
+            name=f"pytest scheduler availability proxy {uuid4()}",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8080,
+            country_code="ES",
+            is_active=True,
+        )
+        db.add(proxy)
+        db.commit()
+        proxy_id = proxy.id
+    yield proxy_id
+    with SessionLocal() as db:
+        proxy = db.get(ProxyProfile, proxy_id)
+        if proxy is not None:
+            db.delete(proxy)
+        db.commit()
+
+
+def test_scheduler_state_requires_fresh_producer_heartbeat(scheduler_proxy_id: int) -> None:
     settings = _settings()
     now = datetime.now(UTC)
     with SessionLocal() as db:
-        update_scheduler_config(db, {"allow_direct_without_proxy": True}, settings)
 
         missing = get_scheduler_state(db, settings, now=now)
         assert missing.worker_available is False
@@ -111,7 +133,6 @@ def test_scheduler_runner_writes_heartbeat_while_deployment_gate_is_disabled() -
     settings = Settings(
         _env_file=None,
         scheduler_enabled=False,
-        vinted_direct_catalog_enabled=True,
     )
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
 
@@ -170,7 +191,6 @@ def test_recurring_start_returns_503_without_producer_heartbeat(monkeypatch: pyt
         lambda *_args, **_kwargs: pytest.fail("egress selection must not run without a producer heartbeat"),
     )
     with SessionLocal() as db:
-        update_scheduler_config(db, {"allow_direct_without_proxy": True}, settings)
         source = SearchSource(
             name="pytest scheduler availability unavailable",
             url="https://www.vinted.es/catalog?search_text=scheduler-availability",

@@ -246,10 +246,7 @@ def _enabled_scheduler_runtime(settings):
             snapshots[key] = (setting is not None, deepcopy(setting.value or {}) if setting is not None else {})
         update_scheduler_config(
             db,
-            {
-                "max_concurrent_runs": 1,
-                "allow_direct_without_proxy": False,
-            },
+            {"max_concurrent_runs": 1},
             settings,
         )
     try:
@@ -572,7 +569,6 @@ def test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence
     settings = base_settings.model_copy(
         update={
             "scheduler_enabled": True,
-            "vinted_direct_catalog_enabled": False,
             "worker_task_queue_key": queue_key,
             "worker_consumer_count": 1,
             "worker_reserve_timeout_seconds": 1,
@@ -675,7 +671,6 @@ def test_scheduler_proxy_selection_and_identity_edit_use_one_lock_order(
     settings = base_settings.model_copy(
         update={
             "scheduler_enabled": True,
-            "vinted_direct_catalog_enabled": False,
             "worker_task_queue_key": queue_key,
             "worker_consumer_count": 1,
         }
@@ -759,7 +754,6 @@ def test_saturated_proxy_selection_does_not_accumulate_identity_fences(
     settings = base_settings.model_copy(
         update={
             "scheduler_enabled": True,
-            "vinted_direct_catalog_enabled": False,
             "proxy_sticky_username_template": replacement_template,
         }
     )
@@ -807,7 +801,6 @@ def test_saturated_proxy_selection_does_not_accumulate_identity_fences(
                         db,
                         settings,
                         active_proxy_counts=active_counts,
-                        active_direct_count=0,
                     )
                 db.rollback()
 
@@ -818,17 +811,12 @@ def test_saturated_proxy_selection_does_not_accumulate_identity_fences(
         assert identity_lock_calls == 0
 
 
-def test_egress_selection_fences_only_one_usable_candidate_and_preserves_direct_fallback(
+def test_egress_selection_fences_only_one_usable_candidate_and_fails_without_proxy_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vinted_monitor.services.proxies as proxies_module
 
-    settings = get_settings().model_copy(
-        update={
-            "scheduler_enabled": True,
-            "vinted_direct_catalog_enabled": True,
-        }
-    )
+    settings = get_settings().model_copy(update={"scheduler_enabled": True})
     real_selection_lock = proxies_module.lock_proxy_profile_for_selection
     lock_calls: list[int] = []
     lower_selected_capacity = False
@@ -844,10 +832,7 @@ def test_egress_selection_fences_only_one_usable_candidate_and_preserves_direct_
             first_profile.max_concurrent_runs = 2
             update_scheduler_config(
                 db,
-                {
-                    "max_concurrent_runs": 3,
-                    "allow_direct_without_proxy": True,
-                },
+                {"max_concurrent_runs": 3},
                 settings,
             )
 
@@ -879,12 +864,12 @@ def test_egress_selection_fences_only_one_usable_candidate_and_preserves_direct_
 
         lock_calls.clear()
         with SessionLocal() as db:
-            selected = choose_run_egress(
-                db,
-                settings,
-                active_proxy_counts={first_graph.proxy_id: 2, second_graph.proxy_id: 1},
-            )
-            assert selected.mode == "direct"
+            with pytest.raises(SchedulerCapacityError, match="No proxy is available"):
+                choose_run_egress(
+                    db,
+                    settings,
+                    active_proxy_counts={first_graph.proxy_id: 2, second_graph.proxy_id: 1},
+                )
             assert lock_calls == []
             db.rollback()
 
@@ -1002,7 +987,6 @@ def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
                     "WORKER_TASK_QUEUE_KEY": queue_key,
                     "WORKER_MAX_RETRY_ATTEMPTS": "3",
                     "WORKER_RESERVE_TIMEOUT_SECONDS": "1",
-                    "VINTED_DIRECT_CATALOG_ENABLED": "false",
                 }
             )
             child = subprocess.run(

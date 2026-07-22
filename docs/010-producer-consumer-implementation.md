@@ -22,10 +22,10 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Residential proxy sticky IDs are stored with prepared Vinted sessions for a monitor, not with one-off task attempts. A monotonic generation plus keyed identity digest binds each row to transport, credentials, country preset and sticky template. Profile-field edits invalidate old context in their own transaction; global template drift is reconciled and invalidated transactionally by the first fenced selector after restart.
 - Do not call the Asocks refresh API from runtime scraping code; an authorized new preparation/rotation creates a new session UUID, which normal runs then reuse while eligible.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
-- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Direct no-proxy runs remain disabled unless explicitly enabled for diagnostics.
+- Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Business runs always require a proxy-owned binding; only explicit development clients outside the PWA, monitor API and queue may construct a direct diagnostic transport.
 - Runtime metadata and events may store `proxy_session_id_prefix` plus the redactor-created masked/fingerprinted `proxy_sticky_session` marker; they never persist the full sticky value, proxy URL, credentials, cookies or raw DataDome values.
 - Redis task payloads carry only `proxy_profile_id` plus `proxy_identity_generation` as proxy-related data, alongside safe task/source/trigger identity and scheduling fields. A proxy payload without the versioned token is malformed rather than legacy-compatible. The consumer resolves PostgreSQL state and takes a shared advisory fence before run events/provider construction; profile edits take the exclusive side of the same fence. That ownership lasts through the first durable commit after the last provider call, not through the later provider-free `finalizing` reconciliation.
-- Egress selection removes candidates already saturated in its capacity snapshot before taking an identity fence and acquires ownership for at most one candidate per transaction. If that candidate's durable capacity decreases while the fence is acquired, selection fails for a later transaction instead of retaining one advisory lock while trying another; this preserves direct fallback when every proxy was already saturated and prevents opposite telemetry orders from creating a multiprofile deadlock during template reconciliation.
+- Egress selection removes candidates already saturated in its capacity snapshot before taking an identity fence and acquires ownership for at most one candidate per transaction. If that candidate's durable capacity decreases while the fence is acquired, selection fails for a later transaction instead of retaining one advisory lock while trying another; this prevents opposite telemetry orders from creating a multiprofile deadlock during template reconciliation without degrading to host egress.
 - Run rows persist indexed `task_id`. Redelivery acknowledges an existing terminal run without Vinted traffic, reconciles `finalizing`, and closes an orphan `running` row before retrying.
 - Every active manual or recurring run admission requires its open `monitor_sessions` row under the locked source decision. Terminal and orphan-recovery paths reacquire that source row; after an explicit stop, normal outcomes preserve every run result and only the last terminal closes the matching session with reason `stopped`. Strong fail-stop paths keep their diagnostic reason.
 - Development Redis uses a persisted AOF volume. The recovery contract assumes one worker service instance with multiple in-process consumers; horizontally scaled workers require distributed reservation ownership before deployment.
@@ -90,6 +90,8 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 
 ## Chrome 120 Runtime Direct Validation 2026-07-06
 
+Historical and superseded by 14.49: these results describe the former business direct path and are retained only as dated evidence.
+
 - At that checkpoint, `chrome_120_win10` was added as the then-default runtime browser profile and the example environment was aligned with Chrome 120.
 - `CurlCffiVintedCatalogProvider`, worker-owned runs, manual owned-provider runs, and diagnostics now use the configured browser profile instead of random profile selection by default.
 - Direct no-proxy validation passed through the API: temporary manual monitor `1106`, run `900`, status `success`, `items_found=5`, `items_new=5`, `opportunities_created=5`, `browser_profile=chrome_120_win10`, and 25 safe run events. The temporary monitor was archived after the check.
@@ -151,6 +153,8 @@ The roadmap item is `done` after the 2026-07-11 residential proxy, reliable queu
 - Superseded conclusion: DataDome remains part of the prepared-session context, but direct-detail request batteries are no longer product work. The supported detail contract is the public document parser used by both business runs and the operator probe.
 
 ## Continuous Direct Scheduler Validation 2026-07-06
+
+Historical and superseded by 14.49: this section records the former direct-fallback runtime and is not a current operating contract.
 
 - Local `.env` was cleaned for runtime testing: removed legacy `VINTED_PROXY_ENABLED`, `VINTED_PROXY_URL`, and `VINTED_USER_AGENT`; kept runtime browser identity on the then-current Chrome 120 profile.
 - Scheduler and detailed process logs were enabled locally with `SCHEDULER_ENABLED=true` and `LOG_LEVEL=DEBUG`. Because Docker Compose does not refresh container environment on `restart`, `api` and `worker` had to be recreated once with `docker compose up -d --force-recreate api worker`.

@@ -18,6 +18,7 @@ from vinted_monitor.db.models import (
     Item,
     MonitorSession,
     Opportunity,
+    ProxyProfile,
     Run,
     RunEvent,
     RunEventOutbox,
@@ -29,6 +30,7 @@ from vinted_monitor.db.models import (
 )
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.local_auth import create_local_user
+from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.runs import monitor_policy_hash
 from vinted_monitor.services.search_sources import create_source
 from vinted_monitor.services.seen_cache import RedisSeenCache, get_seen_cache
@@ -56,7 +58,7 @@ def test_live_manual_session_start_baseline_lifecycle() -> None:
     state_path = _state_path()
     settings = get_settings()
     assert settings.scheduler_enabled is False
-    assert settings.vinted_direct_catalog_enabled is True
+    assert not hasattr(settings, "vinted_direct_catalog_enabled")
     assert settings.vinted_datadome_collector_enabled is False
     assert settings.action_requests_enabled is False
     for endpoint in (
@@ -199,6 +201,17 @@ def _seed(token: str) -> Scenario:
     failure_source_name = f"qa manual failure {token}"
     with SessionLocal() as db:
         create_local_user(db, email=email, password=PASSWORD)
+        create_proxy_profile(
+            db,
+            name=f"qa manual proxy {token}",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8080,
+            username=None,
+            password=None,
+            country_code="ES",
+        )
         source = create_source(
             db,
             source_name,
@@ -438,6 +451,7 @@ def _cleanup(token: str, cache: RedisSeenCache) -> None:
             db.execute(delete(VintedSession).where(VintedSession.source_id.in_(source_ids)))
             db.execute(delete(MonitorSession).where(MonitorSession.source_id.in_(source_ids)))
             db.execute(delete(SearchSource).where(SearchSource.id.in_(source_ids)))
+        db.execute(delete(ProxyProfile).where(ProxyProfile.name == f"qa manual proxy {token}"))
         db.execute(delete(Item).where(Item.vinted_item_id.like(f"qa-manual-{token}-%")))
         user_id = db.scalar(select(User.id).where(User.email == f"qa-manual-session-{token}@example.local"))
         db.execute(delete(UserSession))
@@ -451,6 +465,7 @@ def _assert_isolated_database_empty() -> None:
         User,
         UserSession,
         SearchSource,
+        ProxyProfile,
         Item,
         Run,
         MonitorSession,

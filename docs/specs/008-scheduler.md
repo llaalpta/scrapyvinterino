@@ -219,7 +219,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Keep proxy usage globally managed by the scheduler.
 - Support UI-managed proxy profiles with encrypted credentials and a declared proxy country; locale, `Accept-Language`, viewport, and Vinted `x-screen` context are resolved internally from country/domain presets.
 - Assign proxy/session identity consistently for a run; do not mix cookies across proxies.
-- Use active global proxies matching the target country before direct outbound access; direct access is allowed only when both the UI setting and the deployment gate permit it.
+- Require an active global proxy matching the target country for every normal catalog run; absence of eligible proxy capacity fails locally without host egress.
 
 ## Interfaces
 
@@ -243,9 +243,7 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
   - deployment-owned watchdog poll interval and startup grace, both bounded against the producer heartbeat contract;
   - global concurrency limit, default `2`;
   - per-monitor concurrency limit, default `1`;
-  - direct-without-proxy UI enable flag and direct concurrency limit;
-  - deployment direct-catalog gate `VINTED_DIRECT_CATALOG_ENABLED`, default false;
-  - target Vinted country and internal locale/header/viewport/Vinted-screen presets, with deployment-owned defaults for direct diagnostics;
+  - target Vinted country and internal locale/header/viewport/Vinted-screen presets, with deployment-owned defaults for explicit development diagnostics;
   - per-proxy run concurrency limit stored on each proxy profile;
   - catalog results per run, detail fetch candidate limit, request timeout, proxy cooldown, and stop-after-failures settings;
   - monitor interval seconds: default `300`, minimum `60`, maximum `3600`;
@@ -325,10 +323,9 @@ Automatically execute active opportunity monitors on safe, bounded intervals wit
 - Invalid scheduler config is rejected clearly: interval outside `60..3600`, jitter outside `0..50`, `stop_after_vinted_session_uses` outside `1..1000`, malformed allowed windows, unsupported keys such as `pause_windows`, or an invalid scheduler timezone.
 - No more than `2` monitor runs execute at the same time by default.
 - The same active monitor never has two active runs at the same time.
-- The scheduler uses active healthy proxies from the global pool before direct access, filtered by target country.
+- The scheduler uses only active healthy target-country proxies from the global pool.
 - Proxy capacity is the sum of active healthy target-country proxy profile `max_concurrent_runs` values; there is no separate UI-level global per-proxy cap.
-- When no proxy is available, direct access is used only if the UI setting allows it and `VINTED_DIRECT_CATALOG_ENABLED=true`.
-- If neither proxy nor direct capacity is available, a periodic monitor is not activated or run.
+- When no eligible proxy capacity is available, manual/recurring start and later runs fail locally before run, prepared-session or provider creation.
 - Manual and scheduler-triggered runs share the same Redis seen state, item identity, monitor dedupe, detail fetch, redaction, and error behavior.
 - Manual and scheduler-triggered runs share the same URL-filter compatibility validation and fast API parameter translation.
 - Manual and recurring start own their initial snapshot and never create opportunities from it. Scheduler-triggered runs require that session-start marker.
@@ -384,7 +381,7 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Anonymous public cookies/tokens are encrypted at rest only in prepared Vinted sessions and are isolated per monitor plus proxy sticky identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
 - Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, viewport and Vinted `x-screen` are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
-- Direct requests behave exactly as monitor runs only when global direct fallback is enabled in the UI, `VINTED_DIRECT_CATALOG_ENABLED=true`, and no matching proxy is available.
+- Explicit development diagnostics may construct a direct transport outside the PWA, monitor API and queue; they are not monitor runs and cannot be selected as fallback.
 - Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
 - Proxy passwords stored through the UI are encrypted at rest. The username remains in plaintext and is returned raw by the current API even though the PWA renders its mask; 14.12.8 closes that credential-contract gap.
 - Proxy pool entries can be `own`, `datacenter`, or `residential`; target-specific/special proxy classes are not exposed for Vinted.
@@ -428,15 +425,15 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - Confirm a third due monitor waits when the global limit is reached.
 - Confirm no monitor API or PWA path exposes proxy selection per monitor.
 - Confirm proxy API/PWA writes reject manual `locale`, `Accept-Language`, viewport and Vinted `x-screen` fields while read views expose only the resolved context for diagnostics.
-- Confirm scheduler capacity reflects active proxy capacity plus allowed direct capacity.
+- Confirm scheduler capacity reflects only active healthy target-country proxy capacity.
 - Confirm periodic activation is blocked when scheduler is disabled or capacity is exhausted.
-- Confirm run metadata records `egress_mode=proxy` with proxy details when a proxy is selected and `egress_mode=direct` when direct fallback is used.
+- Confirm every new business run records `egress_mode=proxy` with its proxy identity while historical `direct` metadata remains readable only as legacy evidence.
 - Confirm a proxied run aggregates each completed curl response once, preserves upload/download/header/request components and category totals, marks response-less failures as partial, and never treats direct or historical unmeasured runs as zero proxy traffic.
 - Confirm the PWA run card renders total and stage durations plus compact estimated proxy bytes without exposing raw transfer details or credentials; the API, PostgreSQL row and visible value agree.
 - Confirm provider requests use the deterministic order `egress diagnostic` when configured, saved `/catalog?...` document URL, then `/api/v2/catalog/items`.
 - Confirm repeated overlapping-monitor items use Redis monitor-scoped dedupe and do not duplicate opportunities within a monitor.
 - Confirm Redis miss plus existing monitor opportunity is skipped before filters and logged as `candidate_existing_opportunity_skipped`.
-- Confirm direct-disabled/no-proxy path leaves the monitor pending instead of running.
+- Confirm a no-proxy start/run returns a visible local capacity error and creates no run, prepared session or provider.
 - Confirm proxy credentials are never returned or logged.
 - Confirm anonymous session refresh failure marks only the affected run failed and does not stop the scheduler loop.
 - Confirm redaction tests cover nested details, URLs, bearer tokens, cookies, token-like assignments, masked values, and fingerprints.

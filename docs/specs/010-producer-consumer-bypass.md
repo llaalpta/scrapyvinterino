@@ -4,17 +4,19 @@ Roadmap items 14.34.1 and 14.34.2 moved manual and recurring calibration into se
 
 ## 14.49 proxy-only catalog egress
 
-Status: `planned`. This standard prerequisite makes the proxy requirement an invariant of normal monitor execution; explicit development scripts may still construct a direct diagnostic client outside the PWA, monitor API and queue.
+Status: `done`. This standard prerequisite makes the proxy requirement an invariant of normal monitor execution; explicit development scripts may still construct a direct diagnostic client outside the PWA, monitor API and queue.
 
 Acceptance criteria:
 
-1. Manual start, recurring start and business runs select an eligible target-country proxy or fail locally before creating a provider, run, prepared session or external request. Normal scheduler/API state no longer exposes direct capacity or an allow-direct control.
+1. Manual start, recurring start and business runs require an eligible target-country proxy binding. If none can be admitted, they fail locally before creating a provider, run, prepared session or external request; a binding that becomes stale after admission follows the existing pre-provider fence and produces no transport call. Normal scheduler/API state no longer exposes direct capacity or an allow-direct control.
 2. A consumer treats a task without `proxy_profile_id` as malformed: it moves the exact payload once to dead-letter, releases its pending/reverse markers, records a sanitized operational error and creates no run or provider. A captured profile is revalidated before provider construction, and disabling or losing it never degrades admitted or stale work to host egress.
 3. Alembic `0022` removes the obsolete direct scheduler keys from `app_settings`; current API/types, Compose settings and documentation contain no compatibility reader or normal-runtime direct gate.
 
 Representative integration: use migrated disposable PostgreSQL and Redis with the real API, scheduler and consumer plus a controlled loopback provider. One proxy-owned task reaches that provider; a manual proxy-less command fails before a run, while an exact queued proxy-less payload reaches dead-letter once with no ready/processing/pending marker, run, session or provider call. Playwright confirms the direct controls are absent. Cleanup removes the owned dead-letter payload and QA graph, returns every queue key to zero and restores initial services. Vinted, proxy, DataImpulse and Telegram allowance is zero.
 
 Excluded: provider fingerprint rotation, proxy-vendor failover, automatic retry, a new direct diagnostic UI and changes to browser-loaded image/CDN traffic.
+
+Closure evidence: the migrated isolated API/scheduler/Redis/consumer/PWA scenario passed `14/14` with one real proxy-bound controlled run, proxy-less exact-payload quarantine and Playwright control removal; its final pass started at 0021, proved 0022 removes both legacy keys while preserving a current key, and then removed that seed. The isolated manual-run regression passed `71/71`; the final hostile-payload consumer/queue checks passed `16/16`. Ruff, frontend lint/build and focused migration checks passed. The one allowed full backend pass first reached `504 passed, 9 skipped, 37 failed` because the converted test helper referenced a nonexistent proxy FK; after replacing it with a real isolated proxy row, the entire affected file passed and the representative scenario passed again. Every QA cycle reported unchanged operational PostgreSQL/Redis fingerprints and zero Vinted, proxy, DataImpulse or Telegram traffic.
 
 ## Goal
 
@@ -45,7 +47,7 @@ Move scheduled monitor execution from an in-process scheduler/executor to a Redi
 - `WORKER_MAX_RETRY_ATTEMPTS` applies only to unexpected worker failures. A classified challenge, session rejection or catalog `429` is terminal on its first response and cannot enter worker escalation.
 - Proxy-related task data includes only `proxy_profile_id` plus the opaque effective-identity token selected with it; the payload also carries safe task/source/trigger identity and scheduling fields. Its format is `v1:<positive monotonic generation>:<HMAC-SHA256 hex>`. The keyed digest covers canonical scheme, host, port, username, decrypted password, stored country-derived preset and `PROXY_STICKY_USERNAME_TEMPLATE`; the counter prevents ABA reuse across every change observed by an API edit or runtime reconciliation, even if values later return to their prior state. Full proxy transport, usernames, passwords and cookies are never written to Redis or run metadata, and the token does not reveal its canonical values or permit offline password verification without the application key.
 - Runtime metadata: runs include `task_id`, `consumer_id`, `browser_profile`, `vinted_session_id`, `vinted_session_request_count`, `vinted_session_max_requests`, `proxy_session_id_prefix` and `attempt`; full proxy credentials and raw cookies/tokens are never returned or logged.
-- Deployment safety gate: public Vinted catalog traffic is not sent directly from the host unless `VINTED_DIRECT_CATALOG_ENABLED=true`; the default is false.
+- Normal catalog execution requires an eligible target-country proxy before a run, prepared session or provider is created. There is no PWA/API/queue direct gate or fallback; only an explicit development client outside those business paths may construct a direct diagnostic transport.
 - Geo context: Vinted ES catalog runs require an ES proxy profile by default. Proxy profiles declare country only; locale, `Accept-Language`, viewport and Vinted `x-screen` are resolved from internal country/domain presets and stored as read-only diagnostics. The ES preset keeps `locale=es-ES` and `x-screen=catalog`, but uses the observed Chrome 146 HAR `Accept-Language` value `en-GB,en;q=0.9`.
 
 ## Public anonymous session lifecycle
@@ -79,7 +81,7 @@ Acceptance criteria:
 - Updating an identity-bearing profile field takes an exclusive transaction-scoped advisory lock, then a `FOR NO KEY UPDATE` profile lock. It advances the generation and locks affected monitors and session rows in stable order before invalidating every associated prepared-session row in the same commit. The first selection after a process restart with a changed sticky template performs the same exclusive reconciliation for generations created with the old template; an invalid template fails settings validation and cannot become an ordinary penalized proxy error. Invalidating replaces encrypted context with `{}`; no credential or canonical identity is copied to Redis, events, errors or API output.
 - Every traffic-producing command captures `proxy_profile_id` plus identity token at egress selection. Before writing its first run event, runtime takes the shared transaction-scoped advisory fence and revalidates existence, active state, cooldown, target country, canonical country preset and the captured token; the provider path remains under that ownership and revalidates the current profile before construction. Shared locks allow concurrent admitted runs for the same profile and remain held through the last provider use and its first durable post-traffic PostgreSQL commit. A business run may then release the fence while it finishes the Redis-to-terminal `finalizing` transition because no provider call remains. A concurrent profile edit therefore either wins before the fence and makes captured work fail without provider construction, or waits until the already-authorized traffic is durably closed.
 - An absent, inactive, cooling-down, wrong-country, corrupt-preset or generation-mismatched profile is fail-stop. Runtime neither prepares a session nor silently selects another profile. A fresh command after a legitimate identity change may select the new generation, invalidate old contexts and prepare only that new identity.
-- Every session-start baseline, manual `Ejecutar ahora`, explicit preparation, detail probe and Redis consumer work use this same fence. Direct mode has no proxy generation. Response/challenge policy, durable refresh writes and the canonical PWA eligibility read model remain owned by 14.12.3, 14.12.4 and 14.12.5 respectively.
+- Every session-start baseline, manual `Ejecutar ahora`, explicit preparation, detail probe and Redis consumer work use this same fence. Explicit direct development clients sit outside those business paths and do not participate in their proxy-generation contract. Response/challenge policy, durable refresh writes and the canonical PWA eligibility read model remain owned by 14.12.3, 14.12.4 and 14.12.5 respectively.
 
 ## Acceptance Criteria
 
@@ -125,7 +127,7 @@ Acceptance criteria:
 - The PWA proxy test action is observable: clicking `Test IP` shows a pending state, disables conflicting proxy actions for that row, and leaves the latest success or failure visible without exposing credentials.
 - The normal PWA exposes no standalone detail probe. Later business runs fetch the public detail document for each Redis-new candidate; the direct authenticated detail-probe endpoint remains available only for development diagnosis and leaves its result in accumulated logs.
 - Before wiring a new ephemeral HTTP client into Redis workers or live Vinted catalog traffic, `scripts/verify_impersonation.py` exits successfully with exact Chrome 120 `User-Agent`, `sec-ch-ua`, and `Accept-Encoding` echoes, no Python/curl/cffi/requests leak markers in header values or non-browser header names, and expected BrowserLeaks TLS 1.3 / HTTP/2 fields. The standard Chrome header name `Upgrade-Insecure-Requests` is allowed.
-- Manual and worker-owned catalog runs use the configured browser profile; the default is `chrome146`. Direct runs without a proxy are blocked by default and are available only when explicitly enabled by deployment configuration.
+- Manual and worker-owned catalog runs use the configured browser profile; the default is `chrome146`. They always require a proxy binding and no deployment flag can enable host egress for them.
 - Runtime browser profiles define ordered lowercase request headers for bootstrap and catalog API calls, and Vinted requests pass `default_headers=False` so `curl_cffi` owns TLS/HTTP2 impersonation but does not add duplicate browser headers. The code never manually sends HTTP/2 pseudo headers, `host`, `cookie`, `content-length`, or hop-by-hop headers such as `connection` or `te`; cookie values come only from the session cookie jar.
 
 ## Detail performance gate
@@ -160,6 +162,7 @@ Acceptance criteria:
 - `.\scripts\qa-backend-integration.ps1 -Scenario catalog-fail-stop`
 - `.\scripts\qa-backend-integration.ps1 -Scenario prepared-session-read-model -Repeat 1`
 - `.\scripts\qa-backend-integration.ps1 -Scenario recurring-session-start-baseline -Repeat 1`
+- `.\scripts\qa-backend-integration.ps1 -Scenario proxy-only-regression -Repeat 1`
 - `.\scripts\qa-backend-integration.ps1 -Scenario session-stop-drain -Repeat 1`
 - `.\scripts\qa-backend-integration.ps1 -Scenario full -Repeat 1`
 - `python scripts/verify_impersonation.py`

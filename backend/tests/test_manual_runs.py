@@ -43,7 +43,11 @@ from vinted_monitor.providers.vinted_catalog import (
 )
 from vinted_monitor.services.monitor_sessions import start_monitor_session
 from vinted_monitor.services.monitor_stats import get_monitor_stats
-from vinted_monitor.services.proxies import create_proxy_profile, effective_proxy_identity_generation
+from vinted_monitor.services.proxies import (
+    create_proxy_profile,
+    effective_proxy_identity_generation,
+    synchronize_proxy_identity,
+)
 from vinted_monitor.services.run_events import record_run_event
 from vinted_monitor.services.runs import (
     DETAIL_PROBE_TRIGGER,
@@ -64,6 +68,9 @@ from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
     SchedulerUnavailableError,
     update_scheduler_config,
+)
+from vinted_monitor.services.scheduler import (
+    choose_run_egress as choose_scheduler_run_egress,
 )
 from vinted_monitor.services.scheduler_liveness import SchedulerWorkerAvailability
 from vinted_monitor.services.search_sources import archive_source
@@ -559,8 +566,29 @@ class FakeSessionPreparingProviderWithoutDataDome(FakeSessionPreparingProvider):
         )
 
 
-def _test_direct_egress() -> RunEgress:
-    return RunEgress(mode="direct")
+def _test_proxy_egress(db) -> RunEgress:
+    proxy = db.scalar(select(ProxyProfile).where(ProxyProfile.name == "pytest injected provider proxy"))
+    if proxy is None:
+        proxy = ProxyProfile(
+            name="pytest injected provider proxy",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8080,
+            country_code="ES",
+            max_concurrent_runs=1,
+            is_active=True,
+        )
+        db.add(proxy)
+        db.flush()
+        synchronize_proxy_identity(db, proxy, Settings())
+    return RunEgress(
+        mode="proxy",
+        proxy_profile_id=proxy.id,
+        proxy_name=proxy.name,
+        proxy_kind=proxy.kind,
+        proxy_identity_generation=effective_proxy_identity_generation(proxy),
+    )
 
 
 def _create_ready_vinted_session(
@@ -605,10 +633,22 @@ def _create_ready_vinted_session(
     return session
 
 
-def _enable_direct_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
+def _enable_test_proxy_runtime(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    settings = Settings(scheduler_enabled=True)
     monkeypatch.setattr("vinted_monitor.api.main.settings", settings)
     monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.choose_run_egress",
+        lambda db, *_args, **_kwargs: _test_proxy_egress(db),
+    )
+    monkeypatch.setattr(
+        "vinted_monitor.api.main.choose_run_egress",
+        lambda db, *_args, **_kwargs: _test_proxy_egress(db),
+    )
+    monkeypatch.setattr(
+        "vinted_monitor.services.scheduler._active_proxy_profiles",
+        lambda *_args, **_kwargs: [SimpleNamespace(id=999_999, max_concurrent_runs=1)],
+    )
     monkeypatch.setattr(
         "vinted_monitor.services.scheduler.scheduler_worker_availability",
         lambda *_args, **_kwargs: SchedulerWorkerAvailability(available=True, last_seen_at=datetime.now(UTC)),
@@ -666,6 +706,7 @@ def cleanup_source(source_id: int | None) -> None:
         proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.name.like("pytest%"))))
         if proxy_ids:
             db.query(VintedSession).filter(VintedSession.proxy_profile_id.in_(proxy_ids)).delete(synchronize_session=False)
+            db.query(RunEvent).filter(RunEvent.proxy_profile_id.in_(proxy_ids)).delete(synchronize_session=False)
             db.query(ProxyProfile).filter(ProxyProfile.id.in_(proxy_ids)).delete(synchronize_session=False)
         db.query(Item).filter(Item.vinted_item_id.like("pytest-run-item%")).delete(synchronize_session=False)
         if source_id is not None:
@@ -682,7 +723,7 @@ def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(s
     provider = FakeSuccessProvider(item_count=2)
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_proxy_egress(db))
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
@@ -723,7 +764,7 @@ def test_monitor_run_parallel_mode_consumes_ordered_prefetched_details(source_id
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         opportunity_count = db.scalar(
             select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id)
@@ -754,7 +795,7 @@ def test_monitor_run_preserves_failed_parallel_detail_timings(source_id: int) ->
             source_id,
             provider=FakeFailingConcurrentProvider(),
             seen_cache=FakeSeenCache(),
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
 
         assert run.status == FAILED
@@ -771,7 +812,7 @@ def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
             source_id,
             provider=FakeEventingProvider(item_count=1),
             seen_cache=FakeSeenCache(),
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
 
@@ -784,7 +825,7 @@ def test_monitor_run_persists_provider_progress_events(source_id: int) -> None:
         assert bootstrap_success.level == "info"
         assert bootstrap_success.details["session_marker_count"] == 1
         assert bootstrap_success.details["proxy_transfer"]["total_observed_bytes"] == 1000
-        assert "proxy_traffic_estimate" not in run.runtime_metadata
+        assert run.runtime_metadata["proxy_traffic_estimate"]["total_observed_bytes"] == 1000
         redis_event = next(event for event in events if event.phase == "redis_seen_result")
         assert redis_event.details["seen_miss_count"] == 1
         assert next(event for event in events if event.phase == "run_succeeded").level == "info"
@@ -797,7 +838,7 @@ def test_monitor_run_aggregates_proxy_transfer_observations_only_for_proxy_egres
             source_id,
             provider=FakeEventingProvider(item_count=1),
             seen_cache=FakeSeenCache(),
-            egress=RunEgress(mode="proxy", proxy_name="pytest proxy", proxy_kind="residential"),
+            egress=_test_proxy_egress(db),
         )
 
         assert run.runtime_metadata["proxy_traffic_estimate"] == {
@@ -826,7 +867,7 @@ def test_monitor_run_preserves_partial_proxy_observation_across_failed_detail_ro
             source_id,
             provider=FakeTerminalDetailEventingProvider(item_count=1),
             seen_cache=FakeSeenCache(),
-            egress=RunEgress(mode="proxy", proxy_name="pytest proxy", proxy_kind="residential"),
+            egress=_test_proxy_egress(db),
         )
 
         assert run.status == "failed"
@@ -842,7 +883,7 @@ def test_monitor_run_preserves_observed_proxy_bytes_across_failed_detail_rollbac
             source_id,
             provider=FakeObservedTerminalDetailEventingProvider(item_count=1),
             seen_cache=FakeSeenCache(),
-            egress=RunEgress(mode="proxy", proxy_name="pytest proxy", proxy_kind="residential"),
+            egress=_test_proxy_egress(db),
         )
 
         assert run.status == "failed"
@@ -1123,9 +1164,8 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
         assert len(FakeSessionPreparingProvider.created) == 2
         assert FakeSessionPreparingProvider.created[0].closed is True
         assert FakeSessionPreparingProvider.created[1].closed is True
-        assert FakeSessionPreparingProvider.created[1].detail_probe_calls == [
-            ("https://www.vinted.es/items/9356705635", source_url)
-        ]
+        expected_item_url = f"{str(Settings().vinted_base_url).rstrip('/')}/items/9356705635"
+        assert FakeSessionPreparingProvider.created[1].detail_probe_calls == [(expected_item_url, source_url)]
 
         with SessionLocal() as db:
             session = db.scalar(
@@ -1491,6 +1531,7 @@ def test_monitor_run_persists_refreshed_prepared_vinted_session_context(source_i
                 proxy_profile_id=proxy.id,
                 proxy_name=proxy.name,
                 proxy_kind=proxy.kind,
+                proxy_identity_generation=effective_proxy_identity_generation(proxy),
             ),
             seen_cache=FakeSeenCache(),
             runtime_metadata_extra={
@@ -1634,7 +1675,7 @@ def test_active_monitor_stops_after_vinted_session_use_limit() -> None:
             source_id,
             provider=FakeSuccessProvider(item_count=1, prefix="pytest-run-item-limit"),
             seen_cache=FakeSeenCache(),
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
             runtime_metadata_extra={"vinted_session_id": 987654},
         )
 
@@ -1672,7 +1713,7 @@ def test_manual_run_reuses_active_session_without_closing_it(source_id: int) -> 
             source_id,
             provider=FakeSuccessProvider(item_count=1),
             seen_cache=FakeSeenCache(),
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         source = db.get(SearchSource, source_id)
         session = db.get(MonitorSession, session_id)
@@ -1703,7 +1744,7 @@ def test_scheduler_style_run_still_requires_active_monitor(source_id: int) -> No
                 source_id,
                 provider=FakeSuccessProvider(item_count=1),
                 seen_cache=FakeSeenCache(),
-                egress=_test_direct_egress(),
+                egress=_test_proxy_egress(db),
             )
 
 
@@ -1723,7 +1764,7 @@ def test_internal_baseline_marks_visible_items_without_opportunities(source_id: 
             source_id,
             provider=FakeSuccessProvider(item_count=2),
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
@@ -1834,7 +1875,7 @@ def test_recurring_monitor_run_without_baseline_fails_before_catalog_and_preserv
             source_id,
             provider=provider,
             seen_cache=FakeSeenCache(baseline_ready=False),
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
         source = db.get(SearchSource, source_id)
@@ -1861,13 +1902,13 @@ def test_monitor_run_skips_existing_opportunity_before_filters(source_id: int) -
     provider = FakeSuccessProvider(item_count=1)
     cache = FakeSeenCache()
     with SessionLocal() as db:
-        first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
+        first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_proxy_egress(db))
         source = db.get(SearchSource, source_id)
         assert source is not None
         source.is_active = True
         db.commit()
         second_cache = FakeSeenCache()
-        second_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=second_cache, egress=_test_direct_egress())
+        second_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=second_cache, egress=_test_proxy_egress(db))
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == second_run.id).order_by(RunEvent.id.asc())))
 
         assert first_run.opportunities_created == 1
@@ -1899,7 +1940,7 @@ def test_monitor_run_api_requires_baseline(monkeypatch: pytest.MonkeyPatch) -> N
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache(baseline_ready=False))
     try:
         response = client.post(f"/api/monitors/{source_id}/runs")
@@ -1969,7 +2010,7 @@ def test_monitor_start_rejects_existing_monitor_with_unsupported_url_filter(monk
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     try:
         response = client.post(f"/api/monitors/{source_id}/start")
 
@@ -2050,7 +2091,7 @@ def test_monitor_run_api_reuses_active_manual_session(monkeypatch: pytest.Monkey
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -2114,7 +2155,6 @@ def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: p
                 {ProxyProfile.is_active: False},
                 synchronize_session=False,
             )
-        update_scheduler_config(db, {"allow_direct_without_proxy": False}, Settings())
         started_at = datetime.now(UTC)
         source = SearchSource(
             name="pytest no egress capacity",
@@ -2131,15 +2171,21 @@ def test_monitor_run_api_returns_conflict_when_no_egress_capacity(monkeypatch: p
         db.commit()
         source_id = source.id
 
-    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs._provider_for_egress",
+        lambda *_args, **_kwargs: pytest.fail("provider construction must not run without a proxy"),
+    )
     try:
         response = client.post(f"/api/monitors/{source_id}/runs")
 
         assert response.status_code == 409
         assert "No proxy is available" in response.json()["detail"]
+        with SessionLocal() as db:
+            assert db.scalar(select(func.count()).select_from(Run).where(Run.source_id == source_id)) == 0
+            assert db.scalar(select(func.count()).select_from(RunEvent).where(RunEvent.source_id == source_id)) == 0
+            assert db.scalar(select(func.count()).select_from(VintedSession).where(VintedSession.source_id == source_id)) == 0
     finally:
         with SessionLocal() as db:
-            update_scheduler_config(db, {"allow_direct_without_proxy": True}, Settings())
             if active_proxy_ids:
                 db.query(ProxyProfile).filter(ProxyProfile.id.in_(active_proxy_ids)).update(
                     {ProxyProfile.is_active: True},
@@ -2165,7 +2211,7 @@ def test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session(monke
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     cache = FakeSeenCache(baseline_ready=False)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
@@ -2226,7 +2272,7 @@ def test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive(monke
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSearchFailingProvider()
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache(baseline_ready=False))
     try:
@@ -2283,10 +2329,9 @@ def test_recurring_monitor_start_baselines_then_opens_session_with_future_deadli
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=1)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
-    monkeypatch.setattr("vinted_monitor.services.runs.choose_run_egress", lambda *_args, **_kwargs: _test_direct_egress())
     try:
         response = client.post(f"/api/monitors/{source_id}/start")
 
@@ -2325,7 +2370,7 @@ def test_recurring_monitor_start_baselines_then_opens_session_with_future_deadli
 
 def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     cleanup_source(None)
-    settings = _enable_direct_runtime(monkeypatch)
+    settings = _enable_test_proxy_runtime(monkeypatch)
     source_ids: list[int] = []
 
     first_baseline_reached_catalog = Event()
@@ -2346,11 +2391,7 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
                 )
             update_scheduler_config(
                 db,
-                {
-                    "max_concurrent_runs": 1,
-                    "allow_direct_without_proxy": True,
-                    "direct_max_concurrent_runs": 1,
-                },
+                {"max_concurrent_runs": 1},
                 settings,
             )
             for index in range(2):
@@ -2365,7 +2406,17 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
                 db.add(source)
                 db.flush()
                 source_ids.append(source.id)
+            # Persist the shared fake egress before either concurrent request
+            # enters its admission transaction. Creating it lazily in the
+            # first request would make the second wait on the uncommitted
+            # unique proxy row instead of exercising the scheduler lock.
+            _test_proxy_egress(db)
             db.commit()
+
+        # Use the production selector for this concurrency assertion: the
+        # already committed baseline run must consume the only proxy slot.
+        monkeypatch.setattr("vinted_monitor.api.main.choose_run_egress", choose_scheduler_run_egress)
+        monkeypatch.setattr("vinted_monitor.services.runs.choose_run_egress", choose_scheduler_run_egress)
 
         class BlockingBaselineProvider(FakeSuccessProvider):
             def search(self, source, page=None):
@@ -2395,16 +2446,13 @@ def test_concurrent_recurring_activation_does_not_exceed_initial_capacity(monkey
                 pytest.fail(f"first activation returned before baseline catalog search: {first_future.result()}")
             second_future = executor.submit(activate, source_ids[1])
             second_response = second_future.result(timeout=5)
-            assert second_response == (
-                409,
-                "No proxy is available for country ES and direct Vinted catalog access is disabled or saturated",
-            )
+            assert second_response == (409, "No proxy is available for country ES")
             release_first_baseline.set()
             responses = [first_future.result(timeout=5), second_future.result(timeout=5)]
 
         assert sorted(status for status, _detail in responses) == [201, 409]
         assert [detail for status, detail in responses if status == 409] == [
-            "No proxy is available for country ES and direct Vinted catalog access is disabled or saturated"
+            "No proxy is available for country ES"
         ]
         with SessionLocal() as db:
             sources = list(db.scalars(select(SearchSource).where(SearchSource.id.in_(source_ids))))
@@ -2474,7 +2522,7 @@ def test_recurring_monitor_start_preserves_successful_baseline_when_postflight_f
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     cache = FakeSeenCache(baseline_ready=False)
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: cache)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSuccessProvider(item_count=2)
@@ -2770,7 +2818,7 @@ def test_recurring_monitor_baseline_failure_leaves_session_inactive(monkeypatch:
         db.commit()
         source_id = source.id
 
-    _enable_direct_runtime(monkeypatch)
+    _enable_test_proxy_runtime(monkeypatch)
     app.dependency_overrides[get_manual_run_provider] = lambda: FakeSearchFailingProvider()
     monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache())
     try:
@@ -3126,7 +3174,7 @@ def test_seen_cache_hit_skips_detail_and_database_writes(source_id: int) -> None
     provider = FakeSuccessProvider(item_count=1)
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_proxy_egress(db))
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
 
         assert run.status == SUCCESS
@@ -3147,7 +3195,7 @@ def test_discarded_item_is_not_persisted(source_id: int) -> None:
     provider = FakeDiscardingDetailProvider(item_count=1)
 
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_proxy_egress(db))
         item_count = db.scalar(select(func.count()).select_from(Item).where(Item.vinted_item_id.like("pytest-run-item%")))
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
 
@@ -3194,7 +3242,7 @@ def test_only_description_filters_and_optional_decision_data_do_not_block_opport
     cache = FakeSeenCache()
     provider = TitleOnlyMatchProvider(item_count=1)
     with SessionLocal() as db:
-        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_direct_egress())
+        run = execute_monitor_run(db, source_id, provider=provider, seen_cache=cache, egress=_test_proxy_egress(db))
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
         item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id.asc())))
@@ -3240,7 +3288,7 @@ def test_detail_failure_retries_once_in_run_then_closes_candidate(
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
         item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
@@ -3290,7 +3338,7 @@ def test_detail_retry_can_create_opportunity_in_the_same_run(
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         opportunity = db.scalar(select(Opportunity).where(Opportunity.source_id == source_id))
         retry_event = db.scalar(
@@ -3329,7 +3377,7 @@ def test_detail_budget_closes_candidate_without_deferred_work(
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
 
     assert run.opportunities_created == 1
@@ -3365,7 +3413,7 @@ def test_datadome_mid_batch_rolls_back_and_discards_claimed_work(source_id: int)
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
 
     with SessionLocal() as db:
@@ -3405,7 +3453,7 @@ def test_detail_session_context_failure_is_fail_stop_without_retry(
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
 
     assert run.status == FAILED
@@ -3440,7 +3488,7 @@ def test_observed_empty_description_is_valid_detail(source_id: int) -> None:
             source_id,
             provider=EmptyDescriptionProvider(item_count=1),
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
 
@@ -3472,7 +3520,7 @@ def test_missing_required_detail_is_terminal_without_opportunity(source_id: int)
             source_id,
             provider=MissingDescriptionProvider(item_count=1),
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         incomplete_event = db.scalar(
             select(RunEvent).where(
@@ -3514,7 +3562,7 @@ def test_gone_detail_is_terminal_without_retry(
             source_id,
             provider=provider,
             seen_cache=cache,
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         retry_event = db.scalar(
             select(RunEvent).where(
@@ -3538,7 +3586,7 @@ def test_redis_unavailable_fails_run_and_pauses_monitor(source_id: int) -> None:
             source_id,
             provider=FakeSuccessProvider(item_count=1),
             seen_cache=FakeSeenCache(unavailable=True),
-            egress=_test_direct_egress(),
+            egress=_test_proxy_egress(db),
         )
         source = db.get(SearchSource, source_id)
         opportunity_count = db.scalar(select(func.count()).select_from(Opportunity).where(Opportunity.source_id == source_id))
@@ -3573,8 +3621,8 @@ def test_same_item_can_create_opportunity_in_different_monitor(source_id: int) -
     try:
         provider = FakeSuccessProvider(item_count=1)
         with SessionLocal() as db:
-            first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=FakeSeenCache(), egress=_test_direct_egress())
-            second_run = execute_monitor_run(db, second_id, provider=provider, seen_cache=FakeSeenCache(), egress=_test_direct_egress())
+            first_run = execute_monitor_run(db, source_id, provider=provider, seen_cache=FakeSeenCache(), egress=_test_proxy_egress(db))
+            second_run = execute_monitor_run(db, second_id, provider=provider, seen_cache=FakeSeenCache(), egress=_test_proxy_egress(db))
             item = db.scalar(select(Item).where(Item.vinted_item_id == "pytest-run-item-0"))
             assert item is not None
             opportunity_sources = sorted(db.scalars(select(Opportunity.source_id).where(Opportunity.item_id == item.id)))

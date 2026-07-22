@@ -66,6 +66,7 @@ def test_enqueue_task_serializes_current_payload_without_proxy_secrets() -> None
 
 
 def test_reserve_task_rejects_unknown_fields_without_logging_values() -> None:
+    secret_field_name = "user-password-secret-field"
     with pytest.raises(InvalidTaskPayloadError, match="unknown fields") as exc_info:
         reserve_task(
             FakeRedis(
@@ -76,7 +77,7 @@ def test_reserve_task_rejects_unknown_fields_without_logging_values() -> None:
                     "trigger": "scheduler",
                     "scheduler_config": {},
                     "proxy_profile_id": 7,
-                    "proxy_url_template": "http://user:password@proxy.example:8000",
+                    secret_field_name: "http://user:password@proxy.example:8000",
                     "task_id": "pytest-task",
                     "enqueued_at": "2026-07-05T12:00:00+00:00",
                 }
@@ -84,6 +85,7 @@ def test_reserve_task_rejects_unknown_fields_without_logging_values() -> None:
         )
 
     assert "user:password" not in str(exc_info.value)
+    assert secret_field_name not in str(exc_info.value)
 
 
 def test_reserve_task_reads_current_payload() -> None:
@@ -122,6 +124,31 @@ def test_reserve_task_rejects_proxy_payload_without_identity_generation() -> Non
                     "proxy_profile_id": 7,
                     "task_id": "pytest-task-stale-contract",
                     "enqueued_at": "2026-07-05T12:00:00+00:00",
+                }
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "proxy_fields",
+    [
+        {},
+        {"proxy_profile_id": None, "proxy_identity_generation": None},
+    ],
+)
+def test_reserve_task_rejects_payload_without_proxy_binding(proxy_fields: dict) -> None:
+    with pytest.raises(InvalidTaskPayloadError, match="invalid field values"):
+        reserve_task(
+            FakeRedis(
+                {
+                    "source_id": 123,
+                    "source_url": "https://www.vinted.es/catalog?search_text=nike",
+                    "monitor_mode": "window",
+                    "trigger": "scheduler",
+                    "scheduler_config": {},
+                    "task_id": "pytest-task-no-proxy",
+                    "enqueued_at": "2026-07-05T12:00:00+00:00",
+                    **proxy_fields,
                 }
             )
         )

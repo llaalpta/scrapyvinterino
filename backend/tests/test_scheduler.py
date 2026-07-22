@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from threading import Event
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -91,7 +92,31 @@ def preserve_scheduler_settings():
         db.commit()
 
 
-def test_scheduler_state_uses_deployment_gate_and_runtime_dependencies() -> None:
+@pytest.fixture
+def scheduler_proxy_id() -> int:
+    with SessionLocal() as db:
+        proxy = ProxyProfile(
+            name=f"pytest scheduler proxy {uuid4()}",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8080,
+            country_code="ES",
+            max_concurrent_runs=1,
+            is_active=True,
+        )
+        db.add(proxy)
+        db.commit()
+        proxy_id = proxy.id
+    yield proxy_id
+    with SessionLocal() as db:
+        proxy = db.get(ProxyProfile, proxy_id)
+        if proxy is not None:
+            db.delete(proxy)
+        db.commit()
+
+
+def test_scheduler_state_uses_deployment_gate_and_runtime_dependencies(scheduler_proxy_id: int) -> None:
     settings = Settings(scheduler_enabled=False)
 
     with SessionLocal() as db:
@@ -101,7 +126,7 @@ def test_scheduler_state_uses_deployment_gate_and_runtime_dependencies() -> None
         assert state.effective_enabled is False
 
     with SessionLocal() as db:
-        enabled_settings = Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)
+        enabled_settings = Settings(scheduler_enabled=True)
         touch_scheduler_worker_heartbeat(db)
         db.commit()
         state = get_scheduler_state(db, enabled_settings)
@@ -122,12 +147,19 @@ def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:
     assert "enabled" not in payload
     assert "max_runs_per_proxy" not in payload
     assert "request_retries" not in payload
+    assert "allow_direct_without_proxy" not in payload
+    assert "direct_max_concurrent_runs" not in payload
+    assert "direct_runtime_enabled" not in payload
+    assert "direct_capacity" not in payload
 
 
 def test_scheduler_api_rejects_removed_runtime_fields() -> None:
     client = authenticated_test_client()
 
-    response = client.patch("/api/scheduler", json={"max_runs_per_proxy": 2, "request_retries": 2})
+    response = client.patch(
+        "/api/scheduler",
+        json={"allow_direct_without_proxy": True, "direct_max_concurrent_runs": 1},
+    )
 
     assert response.status_code == 422
 
@@ -146,8 +178,11 @@ def test_scheduler_config_rejects_unknown_persisted_runtime_fields() -> None:
         db.add(setting)
         db.commit()
 
-        with pytest.raises(SchedulerConfigError, match="unsupported scheduler fields: enabled, max_runs_per_proxy, request_retries"):
-            update_scheduler_config(db, {"direct_max_concurrent_runs": 2}, Settings(scheduler_enabled=True))
+        with pytest.raises(
+            SchedulerConfigError,
+            match="unsupported scheduler fields: enabled, max_runs_per_proxy, request_retries",
+        ):
+            update_scheduler_config(db, {"max_concurrent_runs": 2}, Settings(scheduler_enabled=True))
 
 
 def test_scheduler_proxy_capacity_uses_proxy_profile_limits() -> None:
@@ -162,7 +197,7 @@ def test_scheduler_proxy_capacity_uses_proxy_profile_limits() -> None:
             )
         update_scheduler_config(
             db,
-            {"max_concurrent_runs": 20, "allow_direct_without_proxy": False},
+            {"max_concurrent_runs": 20},
             Settings(scheduler_enabled=True),
         )
         for index, limit in enumerate((3, 2)):
@@ -185,7 +220,6 @@ def test_scheduler_proxy_capacity_uses_proxy_profile_limits() -> None:
             state = get_scheduler_state(db, Settings(scheduler_enabled=True))
 
             assert state.proxy_capacity == 5
-            assert state.direct_capacity == 0
             assert state.effective_capacity == 5
     finally:
         with SessionLocal() as db:
@@ -262,7 +296,10 @@ def test_validate_proxy_settings_rejects_invalid_timezone() -> None:
         validate_proxy_settings(Settings(scheduler_timezone="Not/AZone"))
 
 
-def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
+) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())
 
@@ -290,7 +327,7 @@ def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(monkeyp
         source_id = source.id
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True))
         submitted_ids = runner.run_once(now=datetime(2026, 7, 3, 6, 0, tzinfo=UTC))
 
         assert submitted_ids == []
@@ -311,7 +348,7 @@ def test_scheduler_runner_does_not_enqueue_source_outside_allowed_window(monkeyp
             db.commit()
 
 
-def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPatch, scheduler_proxy_id: int) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())
     now = datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
@@ -319,7 +356,14 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
 
     with SessionLocal() as db:
         previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
-        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        active_proxy_ids = list(
+            db.scalars(
+                select(ProxyProfile.id).where(
+                    ProxyProfile.is_active.is_(True),
+                    ProxyProfile.id != scheduler_proxy_id,
+                )
+            )
+        )
         for active_source_id in previously_active_source_ids:
             active_source = db.get(SearchSource, active_source_id)
             if active_source is not None:
@@ -348,7 +392,7 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
         source_id = source.id
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True))
         submitted_ids = runner.run_once(now=now)
 
         assert submitted_ids == [source_id]
@@ -357,7 +401,8 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
         assert payload["source_id"] == source_id
         assert payload["source_url"] == "https://www.vinted.es/catalog?search_text=nike"
         assert payload["trigger"] == "scheduler"
-        assert payload["proxy_profile_id"] is None
+        assert payload["proxy_profile_id"] == scheduler_proxy_id
+        assert payload["proxy_identity_generation"].startswith("v1:1:")
         assert "proxy_url_template" not in payload
 
         coalesced_ids = runner.run_once(now=now + timedelta(minutes=5))
@@ -388,7 +433,10 @@ def test_scheduler_runner_enqueues_due_monitor_task(monkeypatch: pytest.MonkeyPa
             db.commit()
 
 
-def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
+) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
@@ -415,7 +463,7 @@ def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(mo
         source_id = source.id
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True))
         runner.next_due_by_source_id[source_id] = now
 
         assert runner.run_once(now=now) == []
@@ -436,7 +484,10 @@ def test_scheduler_runner_prefers_persisted_deadline_over_stale_runtime_cache(mo
             db.commit()
 
 
-def test_scheduler_runner_rechecks_persisted_deadline_after_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_runner_rechecks_persisted_deadline_after_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
+) -> None:
     fake_redis = FakeRedis()
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
     moved_deadline = now + timedelta(seconds=60)
@@ -471,7 +522,7 @@ def test_scheduler_runner_rechecks_persisted_deadline_after_lock(monkeypatch: py
 
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", move_deadline_before_lock)
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True))
 
         assert runner.run_once(now=now) == []
         assert runner.next_due_by_source_id[source_id] == moved_deadline
@@ -491,7 +542,10 @@ def test_scheduler_runner_rechecks_persisted_deadline_after_lock(monkeypatch: py
             db.commit()
 
 
-def test_scheduler_window_deferral_survives_cache_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_window_deferral_survives_cache_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
+) -> None:
     now = datetime(2026, 7, 3, 6, 0, tzinfo=UTC)
 
     with SessionLocal() as db:
@@ -520,7 +574,7 @@ def test_scheduler_window_deferral_survives_cache_failure(monkeypatch: pytest.Mo
     )
     try:
         with pytest.raises(RuntimeError, match="synthetic cache failure"):
-            SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True)).run_once(now=now)
+            SchedulerRunner(Settings(scheduler_enabled=True)).run_once(now=now)
 
         with SessionLocal() as db:
             source = db.get(SearchSource, source_id)
@@ -541,7 +595,10 @@ def test_scheduler_window_deferral_survives_cache_failure(monkeypatch: pytest.Mo
             db.commit()
 
 
-def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_runner_respects_proxy_capacity_for_due_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
+) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: type("Cache", (), {"client": fake_redis})())
     now = datetime(2026, 7, 3, 8, 0, tzinfo=UTC)
@@ -549,7 +606,14 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
 
     with SessionLocal() as db:
         previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
-        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        active_proxy_ids = list(
+            db.scalars(
+                select(ProxyProfile.id).where(
+                    ProxyProfile.is_active.is_(True),
+                    ProxyProfile.id != scheduler_proxy_id,
+                )
+            )
+        )
         for active_source_id in previously_active_source_ids:
             active_source = db.get(SearchSource, active_source_id)
             if active_source is not None:
@@ -580,7 +644,7 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
         db.commit()
 
     try:
-        runner = SchedulerRunner(Settings(scheduler_enabled=True, vinted_direct_catalog_enabled=True))
+        runner = SchedulerRunner(Settings(scheduler_enabled=True))
         submitted_ids = runner.run_once(now=now)
 
         assert submitted_ids == [source_ids[0]]
@@ -611,12 +675,14 @@ def test_scheduler_runner_respects_direct_capacity_for_due_batch(monkeypatch: py
             db.commit()
 
 
-def test_archive_cancels_scheduler_task_that_is_still_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_archive_cancels_scheduler_task_that_is_still_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
+) -> None:
     fake_redis = FakeRedis()
     cache = type("Cache", (), {"client": fake_redis})()
     settings = Settings(
         scheduler_enabled=True,
-        vinted_direct_catalog_enabled=True,
         worker_task_queue_key="pytest:archive-scheduler-queue",
     )
     monkeypatch.setattr("vinted_monitor.worker.scheduler.get_seen_cache", lambda: cache)
@@ -626,7 +692,14 @@ def test_archive_cancels_scheduler_task_that_is_still_ready(monkeypatch: pytest.
 
     with SessionLocal() as db:
         previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
-        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        active_proxy_ids = list(
+            db.scalars(
+                select(ProxyProfile.id).where(
+                    ProxyProfile.is_active.is_(True),
+                    ProxyProfile.id != scheduler_proxy_id,
+                )
+            )
+        )
         if previously_active_source_ids:
             db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
                 {SearchSource.is_active: False},
@@ -687,12 +760,12 @@ def test_archive_cancels_scheduler_task_that_is_still_ready(monkeypatch: pytest.
 
 def test_scheduler_revalidates_source_after_archive_commits_during_initial_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    scheduler_proxy_id: int,
 ) -> None:
     fake_redis = FakeRedis()
     cache = type("Cache", (), {"client": fake_redis})()
     settings = Settings(
         scheduler_enabled=True,
-        vinted_direct_catalog_enabled=True,
         worker_task_queue_key="pytest:archive-snapshot-queue",
     )
     snapshot_taken = Event()
@@ -711,7 +784,14 @@ def test_scheduler_revalidates_source_after_archive_commits_during_initial_snaps
 
     with SessionLocal() as db:
         previously_active_source_ids = list(db.scalars(select(SearchSource.id).where(SearchSource.is_active.is_(True))))
-        active_proxy_ids = list(db.scalars(select(ProxyProfile.id).where(ProxyProfile.is_active.is_(True))))
+        active_proxy_ids = list(
+            db.scalars(
+                select(ProxyProfile.id).where(
+                    ProxyProfile.is_active.is_(True),
+                    ProxyProfile.id != scheduler_proxy_id,
+                )
+            )
+        )
         if previously_active_source_ids:
             db.query(SearchSource).filter(SearchSource.id.in_(previously_active_source_ids)).update(
                 {SearchSource.is_active: False},

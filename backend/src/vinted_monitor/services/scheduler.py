@@ -31,8 +31,6 @@ SUPPORTED_SOURCE_CONFIG_KEYS = {
 }
 RUNTIME_CONFIG_KEYS = {
     "max_concurrent_runs",
-    "allow_direct_without_proxy",
-    "direct_max_concurrent_runs",
     "catalog_per_page",
     "detail_max_candidates_per_run",
     "request_timeout_ms",
@@ -73,9 +71,6 @@ class SourceSchedulerConfig:
 @dataclass(frozen=True)
 class SchedulerRuntimeConfig:
     max_concurrent_runs: int
-    allow_direct_without_proxy: bool
-    direct_max_concurrent_runs: int
-    direct_runtime_enabled: bool
     catalog_per_page: int
     detail_max_candidates_per_run: int
     request_timeout_ms: int
@@ -93,12 +88,8 @@ class SchedulerState:
     per_source_concurrency: int
     poll_interval_seconds: int
     timezone: str
-    allow_direct_without_proxy: bool
-    direct_max_concurrent_runs: int
     active_proxy_count: int
     proxy_capacity: int
-    direct_runtime_enabled: bool
-    direct_capacity: int
     effective_capacity: int
     active_periodic_monitors: int
     catalog_per_page: int
@@ -129,13 +120,7 @@ def get_scheduler_state(
     target_country_code = settings.vinted_target_country_code.strip().upper()
     active_proxies = _active_proxy_profiles(db, country_code=target_country_code)
     proxy_capacity = sum(max(proxy.max_concurrent_runs, 1) for proxy in active_proxies)
-    direct_runtime_enabled = settings.vinted_direct_catalog_enabled
-    direct_capacity = (
-        runtime_config.direct_max_concurrent_runs
-        if runtime_config.allow_direct_without_proxy and direct_runtime_enabled
-        else 0
-    )
-    effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity + direct_capacity)
+    effective_capacity = min(runtime_config.max_concurrent_runs, proxy_capacity)
     worker = scheduler_worker_availability(db, settings, now=now)
     return SchedulerState(
         runtime_enabled=runtime_enabled,
@@ -146,12 +131,8 @@ def get_scheduler_state(
         per_source_concurrency=max(settings.scheduler_per_source_concurrency, 1),
         poll_interval_seconds=max(settings.scheduler_poll_interval_seconds, 1),
         timezone=settings.scheduler_timezone,
-        allow_direct_without_proxy=runtime_config.allow_direct_without_proxy,
-        direct_max_concurrent_runs=runtime_config.direct_max_concurrent_runs,
-        direct_runtime_enabled=direct_runtime_enabled,
         active_proxy_count=len(active_proxies),
         proxy_capacity=proxy_capacity,
-        direct_capacity=direct_capacity,
         effective_capacity=effective_capacity,
         active_periodic_monitors=_active_periodic_monitor_count(db),
         catalog_per_page=runtime_config.catalog_per_page,
@@ -175,9 +156,6 @@ def scheduler_runtime_config_from_value(value: dict[str, Any], settings: Setting
             1,
             20,
         ),
-        allow_direct_without_proxy=bool(value.get("allow_direct_without_proxy", True)),
-        direct_max_concurrent_runs=_validate_int(value.get("direct_max_concurrent_runs", 1), "direct_max_concurrent_runs", 0, 10),
-        direct_runtime_enabled=settings.vinted_direct_catalog_enabled,
         catalog_per_page=_validate_int(value.get("catalog_per_page", settings.vinted_fast_catalog_per_page), "catalog_per_page", 1, 96),
         detail_max_candidates_per_run=_validate_int(
             value.get("detail_max_candidates_per_run", settings.vinted_detail_max_candidates_per_run),
@@ -243,7 +221,6 @@ def choose_run_egress(
     settings: Settings,
     *,
     active_proxy_counts: dict[int, int] | None = None,
-    active_direct_count: int = 0,
 ) -> RunEgress:
     from vinted_monitor.services.proxies import (
         ProxyProfileEligibilityError,
@@ -254,12 +231,7 @@ def choose_run_egress(
         proxy_url_for_profile,
     )
 
-    runtime = get_scheduler_runtime_config(db, settings)
-    proxy_counts, direct_count = (
-        (active_proxy_counts, active_direct_count)
-        if active_proxy_counts is not None
-        else _active_run_egress_counts(db)
-    )
+    proxy_counts = active_proxy_counts if active_proxy_counts is not None else _active_run_egress_counts(db)
     target_country_code = settings.vinted_target_country_code.strip().upper()
     available_proxies = [
         proxy
@@ -290,11 +262,7 @@ def choose_run_egress(
             proxy_url=proxy_url_for_profile(proxy, settings),
             proxy_identity_generation=effective_proxy_identity_generation(proxy),
         )
-    if runtime.allow_direct_without_proxy and runtime.direct_runtime_enabled and direct_count < runtime.direct_max_concurrent_runs:
-        return RunEgress(mode="direct")
-    raise SchedulerCapacityError(
-        f"No proxy is available for country {target_country_code} and direct Vinted catalog access is disabled or saturated"
-    )
+    raise SchedulerCapacityError(f"No proxy is available for country {target_country_code}")
 
 
 def normalize_scheduler_config(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -456,9 +424,8 @@ def _active_periodic_monitor_count(db: Session) -> int:
     )
 
 
-def _active_run_egress_counts(db: Session) -> tuple[dict[int, int], int]:
+def _active_run_egress_counts(db: Session) -> dict[int, int]:
     proxy_counts: dict[int, int] = {}
-    direct_count = 0
     rows = db.scalars(
         select(Run.runtime_metadata).where(
             Run.status == "running",
@@ -471,12 +438,10 @@ def _active_run_egress_counts(db: Session) -> tuple[dict[int, int], int]:
         proxy_profile_id = metadata.get("proxy_profile_id")
         if isinstance(proxy_profile_id, int):
             proxy_counts[proxy_profile_id] = proxy_counts.get(proxy_profile_id, 0) + 1
-        elif metadata.get("egress_mode") == "direct":
-            direct_count += 1
-    return proxy_counts, direct_count
+    return proxy_counts
 
 
-def active_run_egress_counts(db: Session) -> tuple[dict[int, int], int]:
+def active_run_egress_counts(db: Session) -> dict[int, int]:
     return _active_run_egress_counts(db)
 
 

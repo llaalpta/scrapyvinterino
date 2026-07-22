@@ -14,7 +14,6 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 Keep no more than five independently valuable tasks here.
 
-- `14.49` Proxy-only catalog egress: remove normal direct fallback and reject proxy-less API/queue work before provider construction.
 - `14.50` Honest proxy settings and visible cooldown: remove the independent IP test, validate local sticky configuration and expose cooldown/retry state in Monitors.
 - `14.51` Monitor/session proxy traffic: move estimated consumption into accumulated and active/latest-session summaries and remove the five-run panel.
 
@@ -91,6 +90,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.46 | done | The redundant scheduler UI gate and persisted `app_settings.scheduler.enabled` were removed. `.env`, live worker heartbeat and capacity now determine availability, while per-monitor start/stop owns recurrence. Migration 0021, the nine-case live PWA/scheduler/queue gate and the complete isolated backend suite (`525` normal plus `3` loopback-only) passed without external traffic or QA residue. |
 | 14.47 | done | The selected-monitor detail now separates a compact action-first read mode from guarded stopped/idle editing, preserves accumulated/session performance and collapses proxy-bound HTTP contexts plus logs as diagnosis. The isolated authenticated API/PostgreSQL/Vite/Playwright gate passed `8` focused plus `1` live case on desktop/mobile with no external traffic, QA residue or operational PostgreSQL/Redis drift; Ruff and frontend lint/build passed. |
 | 14.48 | done | Run cards now expose total and phase timings plus curl-observed proxy bytes, category totals and explicit partial/direct/historical states. Eighteen initial focused checks plus eleven finding-specific rechecks, Ruff, frontend lint/build and local PostgreSQL/API/PWA Playwright passed; one bounded real PWA start crossed the proxy/Vinted path and DataImpulse independently reported `3` requests / `830343` bytes for its billing window, without runtime vendor integration. Exact cleanup left no QA rows or queued work. |
+| 14.49 | done | Normal API/PWA/scheduler/queue catalog work is proxy-only; migration 0022 removed seeded legacy keys while preserving current state, and hostile proxy-less payloads are quarantined once without logging raw identity/content. The live API/scheduler/Redis/consumer/PWA gate passed `14/14`, the affected manual-run regression `71/71` and hostile queue/consumer checks `16/16`; Ruff/frontend checks passed with unchanged operational fingerprints and zero external traffic. The single full-suite pass exposed only the then-invalid test proxy FK (`504 passed, 9 skipped, 37 failed`); all 37 belonged to the subsequently green 71-case file. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

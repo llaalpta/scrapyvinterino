@@ -49,7 +49,7 @@ def test_live_pwa_monitor_command_state_contract() -> None:
     pwa_url = _loopback_origin("PWA_MONITOR_COMMAND_QA_PWA_URL")
     settings = get_settings()
     assert settings.scheduler_enabled is False
-    assert settings.vinted_direct_catalog_enabled is False
+    assert not hasattr(settings, "vinted_direct_catalog_enabled")
     assert settings.vinted_datadome_collector_enabled is False
     assert settings.vinted_auth_enabled is False
     assert settings.action_requests_enabled is False

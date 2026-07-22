@@ -59,8 +59,7 @@ export function SettingsView({
               <SummaryItem label="Runtime" value={scheduler.runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
               <SummaryItem label="Worker" value={getWorkerStatus(scheduler)} />
               <SummaryItem label="Capacidad" value={`${scheduler.active_periodic_monitors}/${scheduler.effective_capacity} monitores activos`} />
-              <SummaryItem label="Egress" value={`${scheduler.proxy_capacity} proxy / ${scheduler.direct_capacity} directo`} />
-              <SummaryItem label="Directo" value={scheduler.direct_runtime_enabled ? 'Permitido por .env' : 'Bloqueado por .env'} />
+              <SummaryItem label="Egress" value={`${scheduler.proxy_capacity} proxy`} />
             </div>
           </section>
 
@@ -80,28 +79,6 @@ export function SettingsView({
                 max="20"
                 value={scheduler.max_concurrent_runs}
                 onBlur={(value) => updateNumber('max_concurrent_runs', value)}
-              />
-              <div className="settings-field settings-checkbox-field">
-                <FieldHeading help="Permite ejecutar runs sin proxy cuando no hay proxy disponible.">Permitir directo</FieldHeading>
-                <label className="settings-switch">
-                  <input
-                    type="checkbox"
-                    checked={scheduler.allow_direct_without_proxy && scheduler.direct_runtime_enabled}
-                    disabled={!scheduler.direct_runtime_enabled}
-                    onChange={(event) => onUpdateSchedulerConfig({ allow_direct_without_proxy: event.target.checked })}
-                  />
-                  <span>Salida directa sin proxy</span>
-                </label>
-              </div>
-              <NumberSetting
-                id="direct-max-concurrent-runs"
-                label="Runs directos"
-                help="Limite de runs simultaneos que pueden salir sin proxy."
-                min="0"
-                max="10"
-                value={scheduler.direct_max_concurrent_runs}
-                disabled={!scheduler.allow_direct_without_proxy || !scheduler.direct_runtime_enabled}
-                onBlur={(value) => updateNumber('direct_max_concurrent_runs', value)}
               />
             </div>
           </section>
@@ -193,7 +170,7 @@ export function SettingsView({
           <div className="proxy-form-intro">
             <div>
               <strong>Nuevo proxy</strong>
-              <p>Pool global opcional. Si hay proxys activos, el scheduler los prioriza antes de salir directo.</p>
+              <p>Pool global obligatorio para ejecutar catalogos de Vinted.</p>
             </div>
             <HelpTooltip text="Credenciales cifradas en reposo. La API no devuelve passwords ni se asignan proxys manualmente por monitor." />
           </div>
@@ -276,7 +253,7 @@ export function SettingsView({
               : 'Proxys no disponibles. Recarga la PWA para reintentar.'}
           </p>
         ) : proxyProfiles.length === 0 ? (
-          <p className="empty-inline">Sin proxys configurados. Los runs de catalogo quedan bloqueados mientras el directo este deshabilitado por runtime.</p>
+          <p className="empty-inline">Sin proxys configurados. Los runs de catalogo quedan bloqueados.</p>
         ) : (
           <div className="proxy-list">
             {proxyProfiles.map((proxy) => {
@@ -429,16 +406,10 @@ function getCapacityHint(scheduler: SchedulerState) {
   if (!scheduler.worker_available) {
     return 'El worker no esta disponible: recuperalo antes de lanzar monitores periodicos.';
   }
-  if (!scheduler.direct_runtime_enabled && scheduler.proxy_capacity <= 0) {
-    return 'Salida directa bloqueada por .env: configura un proxy activo de ES antes de lanzar runs.';
+  if (scheduler.proxy_capacity <= 0) {
+    return 'Configura un proxy activo de ES antes de lanzar monitores.';
   }
-  if (scheduler.proxy_capacity > 0) {
-    return 'Los proxys activos tienen prioridad antes de usar salida directa.';
-  }
-  if (scheduler.allow_direct_without_proxy && scheduler.direct_capacity > 0) {
-    return 'Sin proxys activos: el scheduler puede usar salida directa limitada.';
-  }
-  return 'Sin capacidad de salida: activa proxys o permite salida directa.';
+  return 'La capacidad de salida procede exclusivamente de los proxys activos.';
 }
 
 function getSchedulerStatus(scheduler: SchedulerState) {
