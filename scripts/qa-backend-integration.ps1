@@ -58,7 +58,9 @@ $MonitorSessionProxyTrafficFocusedTargets = @(
 $MonitorSessionProxyTrafficActivationTargets = @(
     "tests/test_manual_runs.py::test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session",
     "tests/test_manual_runs.py::test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive",
-    "tests/test_manual_runs.py::test_recurring_monitor_start_baselines_then_opens_session_with_future_deadline"
+    "tests/test_manual_runs.py::test_recurring_monitor_start_baselines_then_opens_session_with_future_deadline",
+    "tests/test_manual_runs.py::test_monitor_run_replaces_unusable_context_and_keeps_monitor_session_active",
+    "tests/test_manual_runs.py::test_monitor_run_surfaces_expired_context_replacement_failure_without_hidden_retry"
 )
 $MonitorSessionProxyTrafficLiveTargets = @(
     "tests/test_manual_session_start_live.py::test_live_monitor_and_session_proxy_traffic_summary"

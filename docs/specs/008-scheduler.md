@@ -52,6 +52,24 @@ Verification passed five traffic-aggregation cases, five activation/linkage case
 
 A post-merge check against the operational Vite at `1366x768` exposed that its long-lived generated stylesheet still omitted the already-merged table `min-width: 0`; the generic results-table minimum made the performance table `1180` px inside a `1018` px hidden-overflow wrapper, clipping the proxy column. The original assertion compared the table's own scroll/client width and could pass that overflow. Restarting only the frontend loaded the current source rule, after which real authenticated Playwright observed the wrapper at `1018/1018`, the proxy header and both traffic cells visible, zero external requests and zero QA residue. The permanent guard now compares wrapper scroll/client width, so the stale/clipped state fails.
 
+### 14.53 context lifecycle and proxy-traffic clarity
+
+Status: `done` on `feat/14.53-context-traffic-clarity` after a positive independent audit. This is a presentation and verification outcome: prepared-context eligibility, scheduler behavior, traffic aggregation, API fields and persistence remain unchanged.
+
+Acceptance criteria:
+
+1. The collapsed HTTP-context summary distinguishes per-run context uses from measured HTTP transfers and exposes the current/max uses plus the real expiry. Expanded guidance states that expiry or exhaustion is evaluated when a run selects its context: the next run prepares a replacement on demand, an already-started run is not interrupted, and a preparation failure remains a visible run failure.
+2. The optional monitor limit is labelled as completed runs with the same context, including that an empty value does not stop the monitor and context rotation resets this counter. The performance table separates locally observed proxy bytes from observed request count, preserving explicit no-run, not-applicable, unmeasured and partial states without inventing zeroes.
+3. The eight-column desktop table remains fully visible at `1366` and `1440` px, the mobile comparison remains overflow-free at `390` px, and chart ticks/axis titles use `10` px while the legend/session marker use `11` px without changing the chart height, ranges or tooltip readability.
+
+Representative integration: extend the isolated `monitor-session-proxy-traffic` API/PostgreSQL/PWA scenario with separate traffic/request cells, measured and partial states, prepared-context expiry and desktop/mobile containment. A focused loopback-provider run starts with an expired prepared context and proves that the business run selects a newly prepared context while the same monitor session remains active. The negative variation makes replacement preparation fail and requires one visible failed run without a hidden retry. Cleanup restores PostgreSQL/Redis fingerprints and service ownership. External Vinted, proxy and vendor allowance is zero.
+
+Excluded: proactive refresh, scheduler/session-limit changes, API/schema changes, vendor usage APIs, traffic backfill, chart-range changes and additional recovery behavior.
+
+Verification passed Ruff, frontend lint/build, five focused traffic cases, eight activation/context-rotation cases and one isolated authenticated Playwright flow over the live API/PostgreSQL/Redis/PWA path. The runtime cases proved both expired and `50/50` contexts are replaced on demand while a recurring monitor remains active, and a failed replacement produces one visible failure without a hidden retry. The PWA separated `4 kB` from `3` observed requests, preserved the partial `3 observed / 1 unmeasured` state, transitioned a prepared context to expired, kept both columns visible at `1366`, `1440` and `390` px, and rendered the agreed chart text sizes. Cleanup removed all QA resources, preserved operational PostgreSQL/Redis fingerprints, restored the initially running worker/watchdog and allowed no external destination.
+
+The independent read-only audit found no A, B or C findings. It confirmed the context-use/request distinction, on-demand expiry and exhaustion behavior, visible no-retry failure path, honest partial traffic states and responsive containment against the final diff and live evidence.
+
 ## 14.19 Worker Redis availability
 
 Status: `done`. This is a contained fail-stop correction for the current local worker, not a general dependency-readiness platform.
