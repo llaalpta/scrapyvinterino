@@ -2,35 +2,33 @@ import { Info, Pause, Play, Save } from 'lucide-react';
 import type { FormEvent } from 'react';
 import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
 import type { CollectionLoadState } from '../../app/collectionLoadState';
+import { formatDate } from '../../utils/format';
+import { formatProxyCooldownRemaining, proxyCooldownRemainingMs } from '../../utils/proxyCooldown';
 
 export function SettingsView({
   onCreateProxy,
-  onTestProxy,
   onToggleProxy,
   onUpdateSchedulerConfig,
   proxyDraft,
-  proxyActionMessages,
   proxyCollectionState,
+  proxyCooldownNowMs,
   proxyProfiles,
   savingProxy,
   scheduler,
   schedulerAvailabilityError,
-  setProxyDraft,
-  testingProxyIds
+  setProxyDraft
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
-  onTestProxy: (profileId: number) => void;
   onToggleProxy: (profile: ProxyProfile) => void;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
   proxyDraft: ProxyDraft;
-  proxyActionMessages: Record<number, string>;
   proxyCollectionState: CollectionLoadState;
+  proxyCooldownNowMs: number;
   proxyProfiles: ProxyProfile[];
   savingProxy: boolean;
   scheduler: SchedulerState | null;
   schedulerAvailabilityError: string | null;
   setProxyDraft: (draft: ProxyDraft) => void;
-  testingProxyIds: number[];
 }) {
   const updateNumber = (field: keyof SchedulerUpdate, value: string) => {
     if (!value) {
@@ -73,8 +71,8 @@ export function SettingsView({
             <div className="settings-grid">
               <NumberSetting
                 id="max-concurrent-runs"
-                label="Runs simultaneos"
-                help="Maximo de runs de monitores que pueden ejecutarse a la vez."
+                label="Limite local simultaneo"
+                help="Limite local de runs de monitores que pueden ejecutarse a la vez."
                 min="1"
                 max="20"
                 value={scheduler.max_concurrent_runs}
@@ -211,7 +209,7 @@ export function SettingsView({
               />
             </label>
             <label>
-              Max runs
+              Limite local
               <input
                 value={proxyDraft.maxConcurrentRuns}
                 type="number"
@@ -232,11 +230,11 @@ export function SettingsView({
             </label>
             <label>
               Usuario
-              <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} />
+              <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} required />
             </label>
             <label>
               Password
-              <input value={proxyDraft.password} type="password" onChange={(event) => setProxyDraft({ ...proxyDraft, password: event.target.value })} />
+              <input value={proxyDraft.password} type="password" onChange={(event) => setProxyDraft({ ...proxyDraft, password: event.target.value })} required />
             </label>
           </div>
           <div className="proxy-form-actions">
@@ -257,36 +255,30 @@ export function SettingsView({
         ) : (
           <div className="proxy-list">
             {proxyProfiles.map((proxy) => {
-              const testing = testingProxyIds.includes(proxy.id);
-              const busy = testing;
+              const cooldownUntil = proxy.cooldown_until;
+              const cooldownRemainingMs = proxyCooldownRemainingMs(proxy, proxyCooldownNowMs);
               return (
                 <article className="proxy-row" key={proxy.id}>
                   <div>
                     <strong>{proxy.name}</strong>
                     <span>
                       {proxy.kind} | {proxy.scheme}://{proxy.username_masked ? `${proxy.username_masked}@` : ''}
-                      {proxy.host}:{proxy.port} | max {proxy.max_concurrent_runs}
+                      {proxy.host}:{proxy.port} | limite local {proxy.max_concurrent_runs}
                     </span>
                     <span>
                       Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
                     </span>
-                    <ProxyTestStatus proxy={proxy} testing={testing} message={proxyActionMessages[proxy.id]} />
+                    {cooldownRemainingMs !== null && cooldownUntil ? (
+                      <span className="proxy-action-message failed">
+                        {proxy.failure_count} fallos | hasta {formatDate(cooldownUntil)} | restan {formatProxyCooldownRemaining(cooldownRemainingMs)}
+                      </span>
+                    ) : null}
                   </div>
                   <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
-                  <span className={proxyTestStatusClass(proxy, testing)}>
-                    {testing
-                      ? 'Probando...'
-                      : proxy.cooldown_until
-                        ? 'Cooldown'
-                        : proxy.last_test_ip ?? proxy.last_test_status ?? 'Sin test'}
-                  </span>
-                  <button type="button" disabled={busy} onClick={() => onToggleProxy(proxy)}>
+                  {cooldownRemainingMs !== null ? <span className="status failed">Cooldown activo</span> : null}
+                  <button type="button" onClick={() => onToggleProxy(proxy)}>
                     {proxy.is_active ? <Pause size={16} /> : <Play size={16} />}
                     {proxy.is_active ? 'Pausar' : 'Activar'}
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => onTestProxy(proxy.id)}>
-                    <Play size={16} />
-                    {testing ? 'Probando...' : 'Test IP'}
                   </button>
                 </article>
               );
@@ -296,32 +288,6 @@ export function SettingsView({
       </div>
     </section>
   );
-}
-
-function ProxyTestStatus({ message, proxy, testing }: { message?: string; proxy: ProxyProfile; testing: boolean }) {
-  const status = proxy.last_test_status;
-  const detail = message ?? proxy.last_test_error;
-  if (!testing && !status && !detail) {
-    return null;
-  }
-  return (
-    <span className={status === 'failed' ? 'proxy-action-message failed' : 'proxy-action-message'}>
-      Ultimo test: {testing ? 'probando salida IP...' : detail ?? proxy.last_test_ip ?? status}
-    </span>
-  );
-}
-
-function proxyTestStatusClass(proxy: ProxyProfile, testing: boolean) {
-  if (testing) {
-    return 'status running';
-  }
-  if (proxy.last_test_status === 'success') {
-    return 'status active';
-  }
-  if (proxy.last_test_status === 'failed') {
-    return 'status failed';
-  }
-  return 'status';
 }
 
 function SummaryItem({ label, value }: { label: string; value: string }) {

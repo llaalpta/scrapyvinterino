@@ -300,14 +300,14 @@ def _apply_mutation(case: str, client, proxy_id: int) -> str | None:
     elif case == "username":
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"username": f"qa-next-{uuid4().hex}"})
     elif case == "clear_username":
-        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"username": ""})
+        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"username": "", "is_active": False})
     elif case == "password":
         secret_canary = f"qa-next-password-{uuid4().hex}"
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"password": secret_canary})
     elif case == "clear_password":
-        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"clear_password": True})
+        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"clear_password": True, "is_active": False})
     elif case == "country":
-        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"country_code": "FR"})
+        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"country_code": "FR", "is_active": False})
     elif case == "inactive":
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"is_active": False})
     elif case == "cooldown":
@@ -1267,8 +1267,6 @@ def test_nonidentity_profile_edits_preserve_generation_and_ready_context() -> No
             profile = db.get(ProxyProfile, graph.proxy_id)
             session = db.get(VintedSession, graph.session_id)
             assert profile is not None and session is not None
-            profile.last_test_status = "qa-local"
-            profile.last_test_ip = "192.0.2.20"
             profile.failure_count = 2
             db.commit()
             db.refresh(profile)

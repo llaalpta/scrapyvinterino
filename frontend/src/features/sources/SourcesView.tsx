@@ -3,6 +3,7 @@ import { ChevronDown, Eraser, ExternalLink, FileText, Pencil, Play, RefreshCw, S
 import {
   type MonitorStats,
   type MonitorStatsRange,
+  type ProxyProfile,
   type Run,
   type RunEvent,
   type SearchSource,
@@ -11,6 +12,7 @@ import {
 } from '../../api';
 import type { CollectionLoadState } from '../../app/collectionLoadState';
 import { formatDate } from '../../utils/format';
+import { allActiveProxiesCooling, formatProxyCooldownRemaining, proxyCooldownRemainingMs } from '../../utils/proxyCooldown';
 import { eventSearchText } from '../runs/runEventSearch';
 import { RunEventEntry, RunTelemetryList } from '../runs/RunsView';
 import { buildSourceDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
@@ -44,6 +46,9 @@ export function SourcesView({
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
+  proxyCollectionState,
+  proxyCooldownNowMs,
+  proxyProfiles,
   runningSessionId,
   requestedSelectedMonitorId,
   savingSourceId,
@@ -84,6 +89,9 @@ export function SourcesView({
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
+  proxyCollectionState: CollectionLoadState;
+  proxyCooldownNowMs: number;
+  proxyProfiles: ProxyProfile[];
   runningSessionId: number | null;
   requestedSelectedMonitorId: number | null;
   savingSourceId: number | null;
@@ -118,6 +126,14 @@ export function SourcesView({
     [drainingSourceIds, sources]
   );
   const orderedSources = useMemo(() => [...activeSources, ...inactiveSources], [activeSources, inactiveSources]);
+  const coolingProxyProfiles = useMemo(
+    () => proxyProfiles.filter(
+      (profile) => profile.is_active && proxyCooldownRemainingMs(profile, proxyCooldownNowMs) !== null
+    ),
+    [proxyCooldownNowMs, proxyProfiles]
+  );
+  const allKnownActiveProxiesCooling = proxyCollectionState === 'ready'
+    && allActiveProxiesCooling(proxyProfiles, proxyCooldownNowMs);
   const defaultSelectedMonitorId = activeSources[0]?.id ?? inactiveSources[0]?.id ?? null;
   const selectedMonitorId = sources.some((source) => source.id === requestedSelectedMonitorId)
     ? requestedSelectedMonitorId
@@ -233,6 +249,8 @@ export function SourcesView({
           monitorRuns={selectedSource ? (monitorRunsBySource[selectedSource.id] ?? []) : []}
           monitorRunStateKnown={selectedSource ? Object.hasOwn(monitorRunsBySource, selectedSource.id) : false}
           monitorCommandPending={monitorCommandPending}
+          coolingProxyProfiles={coolingProxyProfiles}
+          allKnownActiveProxiesCooling={allKnownActiveProxiesCooling}
           onBeginSourceEdit={onBeginSourceEdit}
           onCancelSourceEdit={onCancelSourceEdit}
           onClearMonitorEventsView={onClearMonitorEventsView}
@@ -243,6 +261,7 @@ export function SourcesView({
           onStartSession={onStartSession}
           onStopMonitor={onStopMonitor}
           runningSessionId={runningSessionId}
+          proxyCooldownNowMs={proxyCooldownNowMs}
           savingSourceId={savingSourceId}
           source={selectedSource}
           sourceDrafts={sourceDrafts}
@@ -715,6 +734,8 @@ function MonitorTableRow({
 }
 
 function MonitorDetail({
+  allKnownActiveProxiesCooling,
+  coolingProxyProfiles,
   editingSourceId,
   hiddenEventIds,
   isDraining,
@@ -732,6 +753,7 @@ function MonitorDetail({
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
+  proxyCooldownNowMs,
   runningSessionId,
   savingSourceId,
   source,
@@ -741,6 +763,8 @@ function MonitorDetail({
   streamStatus,
   updateSourceDraft
 }: {
+  allKnownActiveProxiesCooling: boolean;
+  coolingProxyProfiles: ProxyProfile[];
   editingSourceId: number | null;
   hiddenEventIds: number[];
   isDraining: boolean;
@@ -758,6 +782,7 @@ function MonitorDetail({
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
+  proxyCooldownNowMs: number;
   runningSessionId: number | null;
   savingSourceId: number | null;
   source: SearchSource | null;
@@ -798,6 +823,7 @@ function MonitorDetail({
   const isRunStateUnknown = !source.is_active && !monitorRunStateKnown;
   const hasCommandInFlight = monitorCommandPending || hasNonTerminalRun || isRunStateUnknown;
   const isEditing = editingSourceId === source.id && !source.is_active && !isDraining;
+  const retryingFailedBaseline = monitorRuns[0]?.trigger === 'baseline' && monitorRuns[0]?.status === 'failed';
 
   return (
     <div className={`monitor-detail-content${source.is_active || isDraining ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -822,6 +848,19 @@ function MonitorDetail({
           </a>
         ) : null}
       </header>
+
+      {coolingProxyProfiles.length > 0 ? (
+        <div className="empty-inline compact">
+          <strong>Cooldown de proxy activo.</strong>{' '}
+          {coolingProxyProfiles.map((profile) => {
+            const cooldownUntil = profile.cooldown_until;
+            const remainingMs = proxyCooldownRemainingMs(profile, proxyCooldownNowMs);
+            return remainingMs === null || !cooldownUntil
+              ? null
+              : `${profile.name}: ${profile.failure_count} fallos, hasta ${formatDate(cooldownUntil)}, restan ${formatProxyCooldownRemaining(remainingMs)}`;
+          }).filter(Boolean).join(' | ')}
+        </div>
+      ) : null}
 
       <div className="monitor-config-actions monitor-primary-actions" aria-label="Acciones del monitor seleccionado">
         {isEditing ? (
@@ -868,18 +907,24 @@ function MonitorDetail({
           <>
             <button
               type="button"
-              disabled={hasCommandInFlight || savingSourceId === source.id || launchBlockedByFilters}
+              disabled={hasCommandInFlight || savingSourceId === source.id || launchBlockedByFilters || allKnownActiveProxiesCooling}
               title={
                 launchBlockedByFilters
                   ? 'Corrige los filtros de URL no soportados antes de ejecutar este monitor'
-                  : isManual
-                    ? 'Iniciar sesion y calibrar el listado actual'
-                    : 'Iniciar sesion periodica y calibrar el listado actual'
+                  : allKnownActiveProxiesCooling
+                    ? 'Todos los proxys activos estan en cooldown; espera a la expiracion indicada'
+                    : isManual
+                      ? 'Iniciar sesion y calibrar el listado actual'
+                      : 'Iniciar sesion periodica y calibrar el listado actual'
               }
               onClick={() => onStartSession(source)}
             >
               <Play size={17} />
-              {runningSessionId === source.id ? 'Iniciando...' : 'Iniciar sesion'}
+              {runningSessionId === source.id
+                ? 'Iniciando...'
+                : retryingFailedBaseline
+                  ? 'Reintentar sesion'
+                  : 'Iniciar sesion'}
             </button>
             <button type="button" disabled={hasCommandInFlight} onClick={() => onBeginSourceEdit(source)}>
               <Pencil size={16} />

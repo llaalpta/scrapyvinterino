@@ -216,9 +216,9 @@ class ProxyProfileCreate(BaseModel):
     kind: str = "own"
     host: str
     port: int = Field(ge=1, le=65535)
-    username: str | None = None
-    password: str | None = None
-    country_code: str = "ES"
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    country_code: str = Field(min_length=2, max_length=2)
     max_concurrent_runs: int = Field(default=1, ge=1, le=10)
     is_active: bool = True
 
@@ -260,9 +260,6 @@ class ProxyProfileRead(BaseModel):
     cooldown_until: datetime | None
     failure_count: int
     last_used_at: datetime | None
-    last_test_status: str | None
-    last_test_ip: str | None
-    last_test_error: str | None
 
 
 class ItemRead(BaseModel):

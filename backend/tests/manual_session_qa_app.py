@@ -15,6 +15,7 @@ from vinted_monitor.providers.catalog import (
     CatalogSearchResult,
     CatalogSource,
 )
+from vinted_monitor.providers.vinted_catalog import VintedCatalogChallengeError
 
 _QA_ITEM_ID = re.compile(r"^qa-(?:manual|recurring)-[0-9a-f]{32}-[A-F]$")
 
@@ -45,6 +46,8 @@ class ControlledManualSessionProvider:
             time.sleep(delay_ms / 1000)
         if state["mode"] == "fail":
             raise RuntimeError("QA catalog provider forced failure")
+        if state["mode"] == "challenge":
+            raise VintedCatalogChallengeError("QA controlled Cloudflare challenge")
 
         items = [_candidate(item_id) for item_id in state["ids"]]
         return CatalogSearchResult(
@@ -102,7 +105,7 @@ def _load_state() -> dict[str, Any]:
         payload = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError("Controlled QA catalog state is unavailable") from exc
-    if not isinstance(payload, dict) or payload.get("mode") not in {"ok", "fail"}:
+    if not isinstance(payload, dict) or payload.get("mode") not in {"ok", "fail", "challenge"}:
         raise RuntimeError("Controlled QA catalog state has an invalid mode")
     ids = payload.get("ids", [])
     delay_ms = payload.get("delay_ms", 0)

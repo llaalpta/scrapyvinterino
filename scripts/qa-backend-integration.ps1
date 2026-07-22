@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "proxy-cooldown", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -68,6 +68,16 @@ $TestTargets = @{
     )
     "proxy-only-regression" = @(
         "tests/test_manual_runs.py"
+    )
+    "proxy-cooldown" = @(
+        "tests/test_proxies.py",
+        "tests/test_migrations.py::test_proxy_test_telemetry_migration_drops_obsolete_columns",
+        "tests/test_manual_runs.py::test_monitor_start_classifies_terminal_baseline_without_generic_proxy_penalty",
+        "tests/test_proxy_identity_fence.py::test_manual_api_stale_proxy_selection_never_constructs_provider",
+        "tests/test_proxy_identity_fence.py::test_redis_consumer_stale_proxy_selection_is_terminal_and_acknowledged",
+        "tests/test_scheduler.py::test_scheduler_runner_enqueues_due_monitor_task",
+        "tests/test_scheduler.py::test_scheduler_runner_respects_proxy_capacity_for_due_batch",
+        "tests/test_scheduler.py::test_archive_cancels_scheduler_task_that_is_still_ready"
     )
     "prepared-session-read-model" = @(
         "tests/test_prepared_session_read_model.py",
@@ -418,6 +428,48 @@ DELETE FROM app_settings WHERE key = 'scheduler';
     }
 }
 
+function Seed-ProxyCooldownMigrationLegacyState([string]$DatabaseName) {
+    $Sql = @"
+\connect $DatabaseName
+INSERT INTO proxy_profiles (
+    name, scheme, kind, host, port, country_code, locale, accept_language,
+    screen, vinted_screen, max_concurrent_runs, is_active, failure_count,
+    identity_generation, last_test_status, last_test_ip, last_test_error
+) VALUES (
+    'qa migration proxy cooldown', 'http', 'residential', 'proxy.invalid', 8080,
+    'ES', 'es-ES', 'en-GB,en;q=0.9', '1920x1080', 'catalog', 1, false, 2,
+    1, 'failed', '192.0.2.1', 'legacy diagnostic'
+);
+"@
+    Invoke-PostgresAdmin $Sql | Out-Null
+}
+
+function Assert-ProxyCooldownMigrationDataTransform([string]$DatabaseName) {
+    $Sql = @"
+\connect $DatabaseName
+SELECT (
+    NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'proxy_profiles'
+          AND column_name IN ('last_test_status', 'last_test_ip', 'last_test_error')
+    )
+    AND EXISTS (
+        SELECT 1 FROM proxy_profiles
+        WHERE name = 'qa migration proxy cooldown'
+          AND failure_count = 2
+          AND is_active = false
+    )
+)::text;
+DELETE FROM proxy_profiles WHERE name = 'qa migration proxy cooldown';
+"@
+    $Output = @(Invoke-PostgresAdmin $Sql | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($Output.Count -ne 1 -or $Output[0] -ne "true") {
+        throw "Migration 0023 did not remove only the obsolete proxy test fields."
+    }
+}
+
 function Get-RedisDatabaseSize([int]$Database) {
     $Output = @(& docker exec $script:RedisContainer redis-cli -n $Database --raw DBSIZE 2>&1)
     if ($LASTEXITCODE -ne 0 -or $Output.Count -eq 0) {
@@ -730,6 +782,11 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             Seed-ProxyOnlyMigrationLegacyState $DatabaseName
             Invoke-PythonChecked -Label "Alembic migration to head" -Arguments @("-m", "alembic", "upgrade", "head")
             Assert-ProxyOnlyMigrationDataTransform $DatabaseName
+        } elseif ($Scenario -eq "manual-session-start-baseline") {
+            Invoke-PythonChecked -Label "Alembic migration to 0022" -Arguments @("-m", "alembic", "upgrade", "0022")
+            Seed-ProxyCooldownMigrationLegacyState $DatabaseName
+            Invoke-PythonChecked -Label "Alembic migration to head" -Arguments @("-m", "alembic", "upgrade", "head")
+            Assert-ProxyCooldownMigrationDataTransform $DatabaseName
         } else {
             Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
         }

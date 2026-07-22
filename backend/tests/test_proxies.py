@@ -6,7 +6,13 @@ from api_client import authenticated_test_client
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import ProxyProfile, VintedSession
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.services.proxies import create_proxy_profile, proxy_url_with_sticky_session, resolve_proxy_context, update_proxy_profile
+from vinted_monitor.services.proxies import (
+    ProxyProfileEligibilityError,
+    create_proxy_profile,
+    proxy_url_with_sticky_session,
+    resolve_proxy_context,
+    update_proxy_profile,
+)
 
 
 def proxy_profile(username: str | None = "customer-user") -> ProxyProfile:
@@ -82,9 +88,10 @@ def test_create_proxy_profile_resolves_context_from_country() -> None:
             kind="residential",
             host="proxy.example",
             port=7777,
-            username=None,
-            password=None,
+            username="customer",
+            password="test-password",
             country_code="FR",
+            settings=Settings(vinted_target_country_code="FR"),
         )
         try:
             assert profile.country_code == "FR"
@@ -106,10 +113,11 @@ def test_update_proxy_profile_recomputes_context_from_country() -> None:
             kind="residential",
             host="proxy.example",
             port=7778,
-            username=None,
-            password=None,
+            username="customer",
+            password="test-password",
         )
         try:
+            update_proxy_profile(db, profile.id, is_active=False)
             updated = update_proxy_profile(db, profile.id, country_code="IT")
 
             assert updated.country_code == "IT"
@@ -132,8 +140,8 @@ def test_create_proxy_profile_rejects_unsupported_country() -> None:
                 kind="residential",
                 host="proxy.example",
                 port=7779,
-                username=None,
-                password=None,
+                username="customer",
+                password="test-password",
                 country_code="ZZ",
             )
 
@@ -148,6 +156,8 @@ def test_proxy_profile_api_rejects_manual_context_fields() -> None:
             "kind": "residential",
             "host": "proxy.example",
             "port": 7780,
+            "username": "customer",
+            "password": "test-password",
             "country_code": "ES",
             "locale": "es-ES",
             "accept_language": "es-ES,es;q=0.9,en;q=0.8",
@@ -168,6 +178,8 @@ def test_proxy_profile_api_rejects_manual_context_update_fields() -> None:
             "kind": "residential",
             "host": "proxy.example",
             "port": 7782,
+            "username": "customer",
+            "password": "test-password",
             "country_code": "ES",
         },
     )
@@ -197,7 +209,7 @@ def test_proxy_profile_api_rejects_manual_context_update_fields() -> None:
                 db.commit()
 
 
-def test_proxy_profile_api_resolves_context_from_country_only() -> None:
+def test_proxy_profile_api_resolves_context_from_target_country() -> None:
     client = authenticated_test_client()
     response = client.post(
         "/api/proxy-profiles",
@@ -207,16 +219,18 @@ def test_proxy_profile_api_resolves_context_from_country_only() -> None:
             "kind": "residential",
             "host": "proxy.example",
             "port": 7781,
-            "country_code": "PT",
+            "username": "customer",
+            "password": "test-password",
+            "country_code": "ES",
         },
     )
     assert response.status_code == 201
     payload = response.json()
 
     try:
-        assert payload["country_code"] == "PT"
-        assert payload["locale"] == "pt-PT"
-        assert payload["accept_language"] == "pt-PT,pt;q=0.9,en;q=0.8"
+        assert payload["country_code"] == "ES"
+        assert payload["locale"] == "es-ES"
+        assert payload["accept_language"] == "en-GB,en;q=0.9"
         assert payload["screen"] == "1920x1080"
         assert payload["vinted_screen"] == "catalog"
     finally:
@@ -237,6 +251,8 @@ def test_proxy_profile_api_imports_vinted_session_without_returning_raw_secrets(
             "kind": "residential",
             "host": "proxy.example",
             "port": 7783,
+            "username": "customer",
+            "password": "test-password",
             "country_code": "ES",
         },
     )
@@ -271,30 +287,7 @@ def test_proxy_profile_api_imports_vinted_session_without_returning_raw_secrets(
                 db.commit()
 
 
-def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
-    class FakeResponse:
-        status_code = 200
-
-        def json(self) -> dict[str, str]:
-            return {"ip": "198.51.100.77"}
-
-    class FakeCurlSession:
-        calls: list[dict] = []
-
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback) -> None:
-            return None
-
-        def get(self, url: str, *, timeout: int):
-            self.calls.append({"kwargs": self.kwargs, "url": url, "timeout": timeout})
-            return FakeResponse()
-
-    monkeypatch.setattr("vinted_monitor.api.main.CurlSession", FakeCurlSession)
+def test_proxy_profile_test_endpoint_and_telemetry_contract_are_removed() -> None:
     client = authenticated_test_client()
     create_response = client.post(
         "/api/proxy-profiles",
@@ -304,6 +297,8 @@ def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
             "kind": "residential",
             "host": "proxy.example",
             "port": 7784,
+            "username": "customer",
+            "password": "test-password",
             "country_code": "ES",
         },
     )
@@ -313,17 +308,9 @@ def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
     try:
         response = client.post(f"/api/proxy-profiles/{proxy_payload['id']}/test")
 
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["last_test_status"] == "success"
-        assert payload["last_test_ip"] == "198.51.100.77"
-        assert payload["last_test_error"] is None
-        assert payload["failure_count"] == 0
-        assert payload["cooldown_until"] is None
-        assert FakeCurlSession.calls[0]["url"] == "https://api.ipify.org?format=json"
-        assert FakeCurlSession.calls[0]["timeout"] == 10
-        assert FakeCurlSession.calls[0]["kwargs"]["impersonate"] == "chrome146"
-        assert FakeCurlSession.calls[0]["kwargs"]["proxies"]["https"] == "http://proxy.example:7784"
+        assert response.status_code == 404
+        assert "/api/proxy-profiles/{profile_id}/test" not in client.get("/openapi.json").json()["paths"]
+        assert not {"last_test_status", "last_test_ip", "last_test_error"}.intersection(proxy_payload)
     finally:
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, proxy_payload["id"])
@@ -332,26 +319,12 @@ def test_proxy_profile_test_endpoint_records_success(monkeypatch) -> None:
                 db.commit()
 
 
-def test_proxy_profile_test_endpoint_records_failure(monkeypatch) -> None:
-    class FakeCurlSession:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback) -> None:
-            return None
-
-        def get(self, url: str, *, timeout: int):
-            raise RuntimeError("proxy connection refused")
-
-    monkeypatch.setattr("vinted_monitor.api.main.CurlSession", FakeCurlSession)
+def test_proxy_profile_api_requires_complete_target_configuration() -> None:
     client = authenticated_test_client()
-    create_response = client.post(
+    missing_credentials = client.post(
         "/api/proxy-profiles",
         json={
-            "name": unique_name("api proxy test failure"),
+            "name": unique_name("api incomplete proxy"),
             "scheme": "http",
             "kind": "residential",
             "host": "proxy.example",
@@ -359,23 +332,99 @@ def test_proxy_profile_test_endpoint_records_failure(monkeypatch) -> None:
             "country_code": "ES",
         },
     )
-    assert create_response.status_code == 201
-    proxy_payload = create_response.json()
+    wrong_country = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": unique_name("api wrong-country proxy"),
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7785,
+            "username": "customer",
+            "password": "test-password",
+            "country_code": "FR",
+        },
+    )
+
+    assert missing_credentials.status_code == 422
+    assert wrong_country.status_code == 422
+    assert "target country ES" in wrong_country.json()["detail"]
+
+
+def test_proxy_profile_activation_and_active_password_clear_require_credentials() -> None:
+    client = authenticated_test_client()
+    incomplete_name = unique_name("api inactive incomplete proxy")
+    with SessionLocal() as db:
+        incomplete = ProxyProfile(
+            name=incomplete_name,
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=7786,
+            username=None,
+            password_encrypted=None,
+            country_code="ES",
+            max_concurrent_runs=1,
+            is_active=False,
+        )
+        db.add(incomplete)
+        db.commit()
+        incomplete_id = incomplete.id
+
+    created = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": unique_name("api complete proxy"),
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7787,
+            "username": "customer",
+            "password": "test-password",
+            "country_code": "ES",
+        },
+    )
+    assert created.status_code == 201
+    complete_id = created.json()["id"]
 
     try:
-        response = client.post(f"/api/proxy-profiles/{proxy_payload['id']}/test")
+        activation = client.patch(f"/api/proxy-profiles/{incomplete_id}", json={"is_active": True})
+        clear_password = client.patch(f"/api/proxy-profiles/{complete_id}", json={"clear_password": True})
 
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["last_test_status"] == "failed"
-        assert payload["last_test_ip"] is None
-        assert "proxy connection refused" in payload["last_test_error"]
+        assert activation.status_code == 422
+        assert activation.json()["detail"] == "Proxy username is required"
+        assert clear_password.status_code == 422
+        assert clear_password.json()["detail"] == "Proxy password is required"
+        with SessionLocal() as db:
+            incomplete = db.get(ProxyProfile, incomplete_id)
+            complete = db.get(ProxyProfile, complete_id)
+            assert incomplete is not None and incomplete.is_active is False
+            assert complete is not None and complete.password_encrypted is not None
     finally:
         with SessionLocal() as db:
-            profile = db.get(ProxyProfile, proxy_payload["id"])
-            if profile is not None:
-                db.delete(profile)
-                db.commit()
+            for profile_id in (incomplete_id, complete_id):
+                profile = db.get(ProxyProfile, profile_id)
+                if profile is not None:
+                    db.delete(profile)
+            db.commit()
+
+
+def test_create_proxy_profile_rejects_invalid_sticky_template() -> None:
+    invalid_settings = Settings().model_copy(update={"proxy_sticky_username_template": "{username}"})
+    with SessionLocal() as db:
+        with pytest.raises(ProxyProfileEligibilityError, match="sticky username template is invalid"):
+            create_proxy_profile(
+                db,
+                name=unique_name("invalid sticky proxy"),
+                scheme="http",
+                kind="residential",
+                host="proxy.example",
+                port=7788,
+                username="customer",
+                password="test-password",
+                country_code="ES",
+                settings=invalid_settings,
+            )
 
 
 def test_proxy_profile_catalog_api_probe_endpoint_is_removed() -> None:
@@ -388,6 +437,8 @@ def test_proxy_profile_catalog_api_probe_endpoint_is_removed() -> None:
             "kind": "residential",
             "host": "proxy.example",
             "port": 7786,
+            "username": "customer",
+            "password": "test-password",
             "country_code": "ES",
         },
     )

@@ -16,7 +16,6 @@ import {
   runMonitor,
   startMonitor,
   stopMonitor,
-  testProxyProfile,
   updateScheduler,
   updateProxyProfile,
   updateSource,
@@ -41,6 +40,7 @@ import {
 } from '../features/opportunities/opportunityFilters';
 import { type ProxyDraft } from '../features/settings/SettingsView';
 import { buildSourceDraft, buildSourceDrafts, parseFilterTerms, sourceDraftHasChanges, type SourceDraft } from '../features/sources/sourceDrafts';
+import { proxyCooldownRemainingMs } from '../utils/proxyCooldown';
 
 const emptyOpportunityPage: Page<OpportunityResult> = { items: [], total: 0, page: 1, page_size: 25, total_pages: 0 };
 const emptyProxyDraft: ProxyDraft = {
@@ -76,6 +76,11 @@ type PendingSourceNavigation =
   | { kind: 'monitor'; sourceId: number }
   | { kind: 'section'; section: string };
 
+type TerminalRefreshDecision = {
+  refreshOpportunities: boolean;
+  refreshProxies: boolean;
+};
+
 export function useDashboardController() {
   const [sources, setSources] = useState<SearchSource[]>([]);
   const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
@@ -100,8 +105,7 @@ export function useDashboardController() {
   const [monitorCommand, setMonitorCommand] = useState<MonitorCommand | null>(null);
   const [pendingStopSourceIds, setPendingStopSourceIds] = useState<number[]>([]);
   const [savingProxy, setSavingProxy] = useState(false);
-  const [testingProxyIds, setTestingProxyIds] = useState<number[]>([]);
-  const [proxyActionMessages, setProxyActionMessages] = useState<Record<number, string>>({});
+  const [proxyCooldownNowMs, setProxyCooldownNowMs] = useState(() => Date.now());
   const [loadingOpportunities, setLoadingOpportunities] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceName, setSourceName] = useState('');
@@ -130,7 +134,7 @@ export function useDashboardController() {
   const monitorStreamCursorRef = useRef<number | null>(null);
   const monitorCommandRef = useRef<MonitorCommand | null>(null);
   const monitorStreamSeenEventIdsRef = useRef<Set<number>>(new Set());
-  const pendingTerminalEventsRef = useRef<Map<number, boolean>>(new Map());
+  const pendingTerminalEventsRef = useRef<Map<number, TerminalRefreshDecision>>(new Map());
   const terminalRefreshTimerRef = useRef<number | null>(null);
   const monitorStreamReconnectTimerRef = useRef<number | null>(null);
   const monitorRunsRequestGenerationRef = useRef<Map<number, number>>(new Map());
@@ -282,6 +286,23 @@ export function useDashboardController() {
   }, [activeSection]);
 
   useEffect(() => {
+    let timer: number | null = null;
+    const tick = () => {
+      const nowMs = Date.now();
+      setProxyCooldownNowMs(nowMs);
+      if (proxyProfiles.some((profile) => proxyCooldownRemainingMs(profile, nowMs) !== null)) {
+        timer = window.setTimeout(tick, 1000);
+      }
+    };
+    timer = window.setTimeout(tick, 0);
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [proxyProfiles]);
+
+  useEffect(() => {
     if (activeSection !== 'sources') {
       return undefined;
     }
@@ -374,7 +395,8 @@ export function useDashboardController() {
 
       const sourceIds = [...pending.keys()];
       const runtime = monitorStreamRuntimeRef.current;
-      const shouldRefreshOpportunities = [...pending.values()].some(Boolean);
+      const shouldRefreshOpportunities = [...pending.values()].some((decision) => decision.refreshOpportunities);
+      const shouldRefreshProxies = [...pending.values()].some((decision) => decision.refreshProxies);
       sourceListRequestGenerationRef.current += 1;
       const sourceRequestGeneration = sourceListRequestGenerationRef.current;
       const runRequests = sourceIds.map(async (sourceId) => {
@@ -388,7 +410,7 @@ export function useDashboardController() {
         const stats = await fetchMonitorStats(sourceId, range);
         return [sourceId, stats, generation] as const;
       });
-      const [sourceResult, runResults, statsResults, opportunityResult] = await Promise.all([
+      const [sourceResult, runResults, statsResults, opportunityResult, proxyResult] = await Promise.all([
         settlePromise(fetchSources()),
         Promise.allSettled(runRequests),
         Promise.allSettled(statsRequests),
@@ -396,7 +418,8 @@ export function useDashboardController() {
           shouldRefreshOpportunities
             ? fetchOpportunityCollection(buildOpportunityQuery(runtime.opportunityFilters, 1, runtime.opportunitiesPageSize))
             : Promise.resolve(null)
-        )
+        ),
+        settlePromise(shouldRefreshProxies ? fetchProxyProfiles() : Promise.resolve(null))
       ]);
 
       if (
@@ -432,14 +455,25 @@ export function useDashboardController() {
       if (statsEntries.length > 0) {
         setMonitorStatsBySource((current) => ({ ...current, ...Object.fromEntries(statsEntries) }));
       }
+      if (proxyResult.status === 'fulfilled' && proxyResult.value !== null) {
+        setProxyProfiles(proxyResult.value);
+        setProxyCollectionState('ready');
+      } else if (proxyResult.status === 'rejected') {
+        setProxyCollectionState(markCollectionUnavailable);
+      }
       const failed = sourceResult.status === 'rejected'
         || runResults.some((result) => result.status === 'rejected')
         || statsResults.some((result) => result.status === 'rejected')
-        || opportunityResult.status === 'rejected';
+        || opportunityResult.status === 'rejected'
+        || proxyResult.status === 'rejected';
       if (failed) {
-        pending.forEach((refreshOpportunities, sourceId) => {
+        pending.forEach((decision, sourceId) => {
           if (monitorStreamRuntimeRef.current.sourceIds.has(sourceId)) {
-            pendingTerminalEvents.set(sourceId, (pendingTerminalEvents.get(sourceId) ?? false) || refreshOpportunities);
+            const currentDecision = pendingTerminalEvents.get(sourceId);
+            pendingTerminalEvents.set(sourceId, {
+              refreshOpportunities: (currentDecision?.refreshOpportunities ?? false) || decision.refreshOpportunities,
+              refreshProxies: (currentDecision?.refreshProxies ?? false) || decision.refreshProxies
+            });
           }
         });
         setError('No se pudo actualizar por completo el monitor terminado');
@@ -459,8 +493,11 @@ export function useDashboardController() {
       }
       const opportunitiesCreated = event.details?.opportunities_created;
       const refreshOpportunities = typeof opportunitiesCreated !== 'number' || opportunitiesCreated > 0;
-      const currentDecision = pendingTerminalEvents.get(event.source_id) ?? false;
-      pendingTerminalEvents.set(event.source_id, currentDecision || refreshOpportunities);
+      const currentDecision = pendingTerminalEvents.get(event.source_id);
+      pendingTerminalEvents.set(event.source_id, {
+        refreshOpportunities: (currentDecision?.refreshOpportunities ?? false) || refreshOpportunities,
+        refreshProxies: true
+      });
       if (terminalRefreshTimerRef.current === null) {
         terminalRefreshTimerRef.current = window.setTimeout(() => void refreshTerminalBatch(), 400);
       }
@@ -754,26 +791,6 @@ export function useDashboardController() {
     }
   }
 
-  async function onTestProxy(profileId: number) {
-    setError(null);
-    setTestingProxyIds((current) => addId(current, profileId));
-    setProxyActionMessages((current) => ({ ...current, [profileId]: 'Probando salida IP...' }));
-    try {
-      const updated = await testProxyProfile(profileId);
-      setProxyProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
-      setProxyActionMessages((current) => ({
-        ...current,
-        [profileId]: proxyTestMessage(updated)
-      }));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'No se pudo probar el proxy';
-      setError(message);
-      setProxyActionMessages((current) => ({ ...current, [profileId]: message }));
-    } finally {
-      setTestingProxyIds((current) => current.filter((id) => id !== profileId));
-    }
-  }
-
   async function onToggleProxy(profile: ProxyProfile) {
     setError(null);
     try {
@@ -879,6 +896,19 @@ export function useDashboardController() {
     if (run.opportunities_created > 0) {
       refreshes.push(
         fetchOpportunityCollection(buildOpportunityQuery(opportunityFilters, 1, opportunitiesPageSize))
+      );
+    }
+    if (run.status === 'success' || run.status === 'failed') {
+      refreshes.push(
+        fetchProxyProfiles()
+          .then((profiles) => {
+            setProxyProfiles(profiles);
+            setProxyCollectionState('ready');
+          })
+          .catch((caught: unknown) => {
+            setProxyCollectionState(markCollectionUnavailable);
+            throw caught;
+          })
       );
     }
     const [sourceResult, refreshResults] = await Promise.all([
@@ -1266,7 +1296,6 @@ export function useDashboardController() {
     onRunNow,
     onStartSession,
     onStopMonitor,
-    onTestProxy,
     onToggleProxy,
     onUpdateSchedulerConfig,
     monitorStatsBySource,
@@ -1284,8 +1313,8 @@ export function useDashboardController() {
     pendingSourceNavigation,
     proxyDraft,
     proxyCollectionState,
+    proxyCooldownNowMs,
     proxyProfiles,
-    proxyActionMessages,
     refreshRuntime,
     opportunityFilters,
     opportunitiesPageSize,
@@ -1305,7 +1334,6 @@ export function useDashboardController() {
     sourceName,
     sources,
     sourceUrl,
-    testingProxyIds,
     updateOpportunityFilter,
     updateSourceDraft
   };
@@ -1359,10 +1387,6 @@ function markPreparedSessionsExpired(sourceData: SearchSource[], expiryThreshold
   });
 }
 
-function addId(current: number[], id: number): number[] {
-  return current.includes(id) ? current : [...current, id];
-}
-
 function hasNonTerminalSessionRun(runs: Run[]): boolean {
   return runs.some(
     (run) => run.monitor_session_id !== null && (run.status === 'running' || run.status === 'finalizing')
@@ -1375,16 +1399,6 @@ function mergeMissingSourceDrafts(
 ): Record<number, SourceDraft> {
   const missingSources = sources.filter((source) => !Object.hasOwn(current, source.id));
   return missingSources.length === 0 ? current : { ...current, ...buildSourceDrafts(missingSources) };
-}
-
-function proxyTestMessage(profile: ProxyProfile): string {
-  if (profile.last_test_status === 'success') {
-    return `Test IP correcto: ${profile.last_test_ip ?? 'IP no informada'}`;
-  }
-  if (profile.last_test_status === 'failed') {
-    return `Test IP fallido: ${profile.last_test_error ?? 'sin detalle'}`;
-  }
-  return 'Test IP completado sin estado';
 }
 
 function sectionSubtitle(

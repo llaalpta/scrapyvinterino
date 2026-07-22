@@ -68,6 +68,9 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onStartSession={(source) => void dashboard.onStartSession(source)}
           onStopMonitor={(sourceId) => void dashboard.onStopMonitor(sourceId)}
           requestedSelectedMonitorId={dashboard.requestedSelectedMonitorId}
+          proxyCollectionState={dashboard.proxyCollectionState}
+          proxyCooldownNowMs={dashboard.proxyCooldownNowMs}
+          proxyProfiles={dashboard.proxyProfiles}
           runningSessionId={dashboard.runningSessionId}
           savingSourceId={dashboard.savingSourceId}
           sourceDrafts={dashboard.sourceDrafts}
@@ -86,18 +89,16 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
       {dashboard.activeSection === 'settings' ? (
         <SettingsView
           onCreateProxy={dashboard.onCreateProxy}
-          onTestProxy={(profileId) => void dashboard.onTestProxy(profileId)}
           onToggleProxy={(profile) => void dashboard.onToggleProxy(profile)}
           onUpdateSchedulerConfig={(payload) => void dashboard.onUpdateSchedulerConfig(payload)}
           proxyDraft={dashboard.proxyDraft}
-          proxyActionMessages={dashboard.proxyActionMessages}
           proxyCollectionState={dashboard.proxyCollectionState}
+          proxyCooldownNowMs={dashboard.proxyCooldownNowMs}
           proxyProfiles={dashboard.proxyProfiles}
           savingProxy={dashboard.savingProxy}
           scheduler={dashboard.scheduler}
           schedulerAvailabilityError={dashboard.schedulerAvailabilityError}
           setProxyDraft={dashboard.setProxyDraft}
-          testingProxyIds={dashboard.testingProxyIds}
         />
       ) : null}
     </DashboardShell>

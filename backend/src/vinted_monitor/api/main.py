@@ -3,7 +3,6 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from curl_cffi.requests import Session as CurlSession
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -40,7 +39,6 @@ from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.logging import configure_logging
 from vinted_monitor.db.models import RunEvent, SearchSource
 from vinted_monitor.db.session import get_db
-from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.services.actions import create_action_request
 from vinted_monitor.services.browse import (
     DEFAULT_PAGE,
@@ -54,9 +52,7 @@ from vinted_monitor.services.proxies import (
     ProxyProfileNotFoundError,
     create_proxy_profile,
     list_proxy_profiles,
-    mark_proxy_test_result,
     profile_to_public_fields,
-    proxy_url_for_profile,
     update_proxy_profile,
 )
 from vinted_monitor.services.run_event_stream import monitor_event_stream, resolve_monitor_event_cursor
@@ -329,26 +325,6 @@ def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Sessio
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _proxy_profile_read(profile)
-
-
-@business_router.post("/proxy-profiles/{profile_id}/test", response_model=ProxyProfileRead)
-def post_proxy_profile_test(profile_id: int, db: Session = Depends(get_db)) -> ProxyProfileRead:
-    profile = next((entry for entry in list_proxy_profiles(db) if entry.id == profile_id), None)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"Proxy profile {profile_id} does not exist")
-    try:
-        proxy_url = proxy_url_for_profile(profile, settings)
-        proxy_dict = {"https": proxy_url, "http": proxy_url} if proxy_url else None
-        browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
-        with CurlSession(impersonate=browser_profile.impersonate, proxies=proxy_dict) as client:
-            response = client.get("https://api.ipify.org?format=json", timeout=10)
-            if response.status_code != 200:
-                raise RuntimeError(f"HTTP {response.status_code}")
-            ip = response.json().get("ip")
-        updated = mark_proxy_test_result(db, profile_id, status="success", ip=str(ip) if ip else None)
-    except Exception as exc:
-        updated = mark_proxy_test_result(db, profile_id, status="failed", error=str(exc))
-    return _proxy_profile_read(updated)
 
 
 @business_router.post("/proxy-profiles/{profile_id}/vinted-session/preflight", status_code=410)

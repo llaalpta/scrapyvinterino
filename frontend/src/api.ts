@@ -84,9 +84,6 @@ export type ProxyProfile = {
   cooldown_until: string | null;
   failure_count: number;
   last_used_at: string | null;
-  last_test_status: string | null;
-  last_test_ip: string | null;
-  last_test_error: string | null;
 };
 
 export type VintedSessionUnusableReason =
@@ -493,10 +490,6 @@ export function updateProxyProfile(
   payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code'>>
 ): Promise<ProxyProfile> {
   return patchJson<ProxyProfile>(`/api/proxy-profiles/${profileId}`, payload);
-}
-
-export function testProxyProfile(profileId: number): Promise<ProxyProfile> {
-  return postJson<ProxyProfile>(`/api/proxy-profiles/${profileId}/test`);
 }
 
 export function startMonitor(sourceId: number): Promise<Run> {

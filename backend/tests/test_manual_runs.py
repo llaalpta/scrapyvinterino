@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 
 from vinted_monitor.api.main import app, get_manual_run_provider
 from vinted_monitor.core.config import Settings
+from vinted_monitor.core.crypto import encrypt_text
 from vinted_monitor.db.models import (
     AppSetting,
     ErrorLog,
@@ -37,6 +38,8 @@ from vinted_monitor.providers.vinted_catalog import (
     DetailBatchResult,
     DetailFetchOutcome,
     PreparedCatalogSession,
+    VintedCatalogChallengeError,
+    VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedItemDetailHTTPError,
     extract_vinted_item_id,
@@ -410,6 +413,17 @@ class FakeSearchFailingProvider(FakeSuccessProvider):
         raise RuntimeError("search boom cookie=session-secret")
 
 
+class FakeClassifiedBaselineFailureProvider(FakeSuccessProvider):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+        self.search_calls = 0
+
+    def search(self, source: CatalogSource, page: int | None = None) -> CatalogSearchResult:
+        self.search_calls += 1
+        raise self.error
+
+
 class FakeSessionPreparingProvider:
     created: list[FakeSessionPreparingProvider] = []
 
@@ -569,19 +583,22 @@ class FakeSessionPreparingProviderWithoutDataDome(FakeSessionPreparingProvider):
 def _test_proxy_egress(db) -> RunEgress:
     proxy = db.scalar(select(ProxyProfile).where(ProxyProfile.name == "pytest injected provider proxy"))
     if proxy is None:
+        settings = Settings()
         proxy = ProxyProfile(
             name="pytest injected provider proxy",
             scheme="http",
             kind="residential",
             host="proxy.invalid",
             port=8080,
+            username="customer",
+            password_encrypted=encrypt_text("test-password", settings.app_secret_key),
             country_code="ES",
             max_concurrent_runs=1,
             is_active=True,
         )
         db.add(proxy)
         db.flush()
-        synchronize_proxy_identity(db, proxy, Settings())
+        synchronize_proxy_identity(db, proxy, settings)
     return RunEgress(
         mode="proxy",
         proxy_profile_id=proxy.id,
@@ -923,7 +940,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
             host="proxy.example",
             port=8000,
             username="customer",
-            password=None,
+            password="test-password",
             settings=runtime_settings,
         )
         source = db.get(SearchSource, source_id)
@@ -952,7 +969,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert len(created_providers) == 1
         assert created_providers[0].closed is True
         assert created_providers[0].kwargs["proxy_url"].startswith("http://customer-sessid-stickytest01")
-        assert created_providers[0].kwargs["proxy_url"].endswith(":@proxy.example:8000")
+        assert created_providers[0].kwargs["proxy_url"].endswith(":test-password@proxy.example:8000")
         assert run.runtime_metadata["proxy_profile_id"] == proxy.id
         assert run.runtime_metadata["proxy_session_id_prefix"] == "stickyte"
         assert run.runtime_metadata["vinted_session_id"]
@@ -986,7 +1003,7 @@ def test_monitor_session_prepare_api_creates_ready_session_without_business_effe
             host="proxy.example",
             port=8010,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = SearchSource(
             name="pytest prepare monitor",
@@ -1065,7 +1082,7 @@ def test_monitor_session_prepare_api_rejects_session_without_datadome(monkeypatc
             host="proxy.example",
             port=8012,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = SearchSource(
             name="pytest prepare no datadome monitor",
@@ -1128,7 +1145,7 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
             host="proxy.example",
             port=8011,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = SearchSource(
             name="pytest detail probe monitor",
@@ -1215,7 +1232,7 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
             host="proxy.example",
             port=8012,
             username="customer",
-            password=None,
+            password="test-password",
             settings=runtime_settings,
         )
         source = SearchSource(
@@ -1290,7 +1307,7 @@ def test_archiving_monitor_invalidates_and_purges_prepared_sessions_when_queue_i
             host="proxy.example",
             port=8013,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = SearchSource(
             name="pytest archive session monitor",
@@ -1335,7 +1352,7 @@ def test_archived_monitor_rejects_stale_session_context_refresh() -> None:
             host="proxy.example",
             port=8014,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = SearchSource(
             name="pytest stale archive session monitor",
@@ -1415,7 +1432,7 @@ def test_archive_waits_for_inflight_session_refresh_then_purges_it() -> None:
             host="proxy.example",
             port=8015,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = SearchSource(
             name="pytest concurrent archive session monitor",
@@ -1507,7 +1524,7 @@ def test_monitor_run_persists_refreshed_prepared_vinted_session_context(source_i
             host="proxy.example",
             port=8002,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = db.get(SearchSource, source_id)
         assert source is not None
@@ -1570,7 +1587,7 @@ def test_run_persists_prepared_vinted_session_context_refreshed_by_detail(source
             host="proxy.example",
             port=8003,
             username="customer",
-            password=None,
+            password="test-password",
         )
         source = db.get(SearchSource, source_id)
         assert source is not None
@@ -1631,8 +1648,8 @@ def test_ready_vinted_session_is_scoped_to_monitor(source_id: int) -> None:
             kind="residential",
             host="proxy.example",
             port=8001,
-            username=None,
-            password=None,
+            username="customer",
+            password="test-password",
         )
         db.add(other_source)
         db.flush()
@@ -1809,7 +1826,7 @@ def test_internal_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.Monk
             host="proxy.example",
             port=8013,
             username="customer",
-            password=None,
+            password="test-password",
             settings=runtime_settings,
         )
         source = SearchSource(
@@ -2294,6 +2311,67 @@ def test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive(monke
             assert run.monitor_session_id is None
             assert run.runtime_metadata["baseline_reason"] == "session_start"
             assert db.scalar(select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == source_id)) == 0
+    finally:
+        app.dependency_overrides.clear()
+        cleanup_source(source_id)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_kind", "expected_failure_count", "expects_cooldown"),
+    [
+        (VintedCatalogChallengeError("controlled Cloudflare challenge"), "cloudflare_challenge", 1, True),
+        (
+            VintedCatalogRateLimitError(
+                "controlled catalog rate limit",
+                retry_after_seconds=1.0,
+                retry_after_source="seconds",
+            ),
+            "catalog_rate_limited",
+            0,
+            False,
+        ),
+    ],
+)
+def test_monitor_start_classifies_terminal_baseline_without_generic_proxy_penalty(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_kind: str,
+    expected_failure_count: int,
+    expects_cooldown: bool,
+) -> None:
+    cleanup_source(None)
+    client = authenticated_test_client()
+    provider = FakeClassifiedBaselineFailureProvider(error)
+    with SessionLocal() as db:
+        source = SearchSource(
+            name=f"pytest classified baseline {expected_kind}",
+            url="https://www.vinted.es/catalog?search_text=&order=newest_first",
+            normalized_query={"order": ["newest_first"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    _enable_test_proxy_runtime(monkeypatch)
+    app.dependency_overrides[get_manual_run_provider] = lambda: provider
+    monkeypatch.setattr("vinted_monitor.services.runs.get_seen_cache", lambda: FakeSeenCache(baseline_ready=False))
+    try:
+        response = client.post(f"/api/monitors/{source_id}/start")
+
+        assert response.status_code == 201
+        assert response.json()["status"] == FAILED
+        assert provider.search_calls == 1
+        with SessionLocal() as db:
+            run = db.get(Run, response.json()["id"])
+            assert run is not None
+            assert (run.runtime_metadata or {})["failure_kind"] == expected_kind
+            proxy = db.get(ProxyProfile, (run.runtime_metadata or {})["proxy_profile_id"])
+            assert proxy is not None
+            assert proxy.failure_count == expected_failure_count
+            assert (proxy.cooldown_until is not None) is expects_cooldown
     finally:
         app.dependency_overrides.clear()
         cleanup_source(source_id)

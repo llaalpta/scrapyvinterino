@@ -13,6 +13,7 @@ from sqlalchemy import select
 from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import AppSetting, MonitorSession, ProxyProfile, SearchSource
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.scheduler import (
     SCHEDULER_SETTING_KEY,
     SchedulerConfigError,
@@ -95,18 +96,19 @@ def preserve_scheduler_settings():
 @pytest.fixture
 def scheduler_proxy_id() -> int:
     with SessionLocal() as db:
-        proxy = ProxyProfile(
+        proxy = create_proxy_profile(
+            db,
             name=f"pytest scheduler proxy {uuid4()}",
             scheme="http",
             kind="residential",
             host="proxy.invalid",
             port=8080,
+            username="pytest-scheduler-user",
+            password="pytest-scheduler-password",
             country_code="ES",
             max_concurrent_runs=1,
             is_active=True,
         )
-        db.add(proxy)
-        db.commit()
         proxy_id = proxy.id
     yield proxy_id
     with SessionLocal() as db:
