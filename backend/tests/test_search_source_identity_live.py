@@ -180,10 +180,11 @@ def _exercise_live_stack(scenario: Scenario, *, api_url: str, pwa_url: str) -> N
             expect(detail.get_by_role("button", name="Modificar", exact=True)).to_be_visible()
             expect(detail.get_by_role("button", name="Archivar monitor", exact=True)).to_be_visible()
             actions_box = detail.get_by_label("Acciones del monitor seleccionado").bounding_box()
-            performance_box = detail.get_by_role("heading", name="Rendimiento del monitor", exact=True).bounding_box()
-            assert actions_box is not None and performance_box is not None
-            assert actions_box["y"] < performance_box["y"]
             http_contexts = detail.locator("details.monitor-http-contexts")
+            performance_box = detail.get_by_role("heading", name="Rendimiento", exact=True).bounding_box()
+            contexts_box = http_contexts.bounding_box()
+            assert actions_box is not None and contexts_box is not None and performance_box is not None
+            assert actions_box["y"] < contexts_box["y"] < performance_box["y"]
             logs = detail.locator("details.monitor-logs").filter(has_text="Logs acumulados")
             expect(http_contexts).not_to_have_attribute("open", "")
             expect(logs).not_to_have_attribute("open", "")

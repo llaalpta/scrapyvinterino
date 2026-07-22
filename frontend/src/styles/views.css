@@ -339,7 +339,7 @@
 
 .monitor-detail-content {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -397,7 +397,7 @@
 .monitor-primary-actions {
   min-width: 0;
   border-top: 1px solid #e5eaf0;
-  padding-top: 12px;
+  padding-top: 10px;
 }
 
 .monitor-primary-actions .monitor-archive-action {
@@ -425,14 +425,12 @@
   gap: 12px;
 }
 
-.monitor-config-heading h4,
-.monitor-session-heading h4 {
+.monitor-config-heading h4 {
   color: #1f2933;
   font-size: 14px;
 }
 
-.monitor-config-heading span,
-.monitor-session-heading span {
+.monitor-config-heading span {
   color: #697586;
   font-size: 13px;
 }
@@ -446,6 +444,56 @@
   border-radius: 6px;
   padding: 8px 10px;
   background: #f8fafc;
+}
+
+.catalog-filter-summary {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+}
+
+.catalog-filter-summary > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.catalog-filter-summary > summary::-webkit-details-marker {
+  display: none;
+}
+
+.catalog-filter-summary > summary > span:nth-child(2) {
+  margin-left: auto;
+  color: #52606d;
+  font-size: 12px;
+}
+
+.catalog-filter-summary > summary svg {
+  flex: 0 0 auto;
+  transition: transform 160ms ease;
+}
+
+.catalog-filter-summary[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.catalog-filter-summary > summary:hover,
+.catalog-filter-summary > summary:focus-visible {
+  background: rgb(255 255 255 / 0.45);
+}
+
+.catalog-filter-details {
+  display: grid;
+  gap: 6px;
+  padding: 0 10px 9px;
+}
+
+.catalog-filter-status.blocked .catalog-filter-details {
+  padding: 0;
 }
 
 .catalog-filter-status.ready {
@@ -662,38 +710,10 @@
   margin: 0;
 }
 
-.monitor-session-panel {
-  display: grid;
-  gap: 10px;
-  border-top: 1px solid #e5eaf0;
-  padding-top: 12px;
-}
-
-.monitor-session-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.monitor-session-heading-copy {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.monitor-session-heading-copy h5,
-.monitor-performance-subheading h5,
 .monitor-chart-heading h5 {
   margin: 0;
   color: #1f2933;
   font-size: 13px;
-}
-
-.monitor-session-heading-copy span,
-.monitor-performance-subheading span {
-  color: #697586;
-  font-size: 12px;
 }
 
 .monitor-prepared-session-main > div {
@@ -772,22 +792,16 @@
 
 .monitor-performance {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   border-top: 1px solid #e5eaf0;
-  padding-top: 12px;
+  padding-top: 10px;
 }
 
 .monitor-performance-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
-}
-
-.monitor-performance-heading > div:first-child {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
+  gap: 10px;
 }
 
 .monitor-performance-heading h4 {
@@ -795,23 +809,89 @@
   font-size: 14px;
 }
 
-.monitor-performance-heading span {
+.monitor-performance-table-wrap {
+  min-width: 0;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.monitor-performance-table {
+  width: 100%;
+  min-width: 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: #ffffff;
+}
+
+.monitor-performance-scope-column {
+  width: 18%;
+}
+
+.monitor-performance-traffic-column {
+  width: 19%;
+}
+
+.monitor-performance-table th,
+.monitor-performance-table td {
+  border-bottom: 1px solid #e5eaf0;
+  padding: 7px 8px;
+  overflow-wrap: anywhere;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.monitor-performance-table thead th {
   color: #697586;
+  font-size: 11px;
+  font-weight: 700;
+  background: #f8fafc;
+}
+
+.monitor-performance-table tbody tr:last-child th,
+.monitor-performance-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.monitor-performance-table tbody th {
+  font-weight: 400;
+}
+
+.monitor-performance-table tbody th strong,
+.monitor-performance-table tbody th span {
+  display: block;
+}
+
+.monitor-performance-table tbody th strong {
+  color: #1f2933;
   font-size: 13px;
 }
 
-.monitor-performance-summary,
-.monitor-chart-section {
-  display: grid;
-  gap: 10px;
+.monitor-performance-table tbody th span {
+  margin-top: 2px;
+  color: #697586;
+  font-size: 11px;
+  line-height: 1.25;
 }
 
-.monitor-performance-subheading,
+.monitor-performance-table td {
+  color: #1f2933;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.monitor-chart-section {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid #e5eaf0;
+  padding-top: 8px;
+}
+
 .monitor-chart-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 
 .range-tabs {
@@ -822,9 +902,9 @@
 }
 
 .range-tabs button {
-  min-height: 30px;
+  min-height: 27px;
   border-radius: 8px;
-  padding: 5px 9px;
+  padding: 3px 8px;
   color: #52606d;
   background: #ffffff;
 }
@@ -835,23 +915,14 @@
   background: #d1e7dd;
 }
 
-.monitor-session-strip,
-.monitor-accumulated-strip {
+.monitor-session-strip {
   display: grid;
   gap: 8px;
   margin: 0;
-}
-
-.monitor-session-strip {
   grid-template-columns: repeat(6, minmax(100px, 1fr));
 }
 
-.monitor-accumulated-strip {
-  grid-template-columns: repeat(8, minmax(88px, 1fr));
-}
-
-.monitor-session-strip div,
-.monitor-accumulated-strip div {
+.monitor-session-strip div {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -861,14 +932,12 @@
   background: #ffffff;
 }
 
-.monitor-session-strip dt,
-.monitor-accumulated-strip dt {
+.monitor-session-strip dt {
   color: #697586;
   font-size: 12px;
 }
 
-.monitor-session-strip dd,
-.monitor-accumulated-strip dd {
+.monitor-session-strip dd {
   overflow-wrap: anywhere;
   margin: 0;
   color: #1f2933;
@@ -878,13 +947,13 @@
 .monitor-traffic-note {
   margin: 0;
   color: #697586;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .monitor-chart {
   position: relative;
   min-width: 0;
-  height: 280px;
+  height: 170px;
   border: 1px solid #e5eaf0;
   border-radius: 8px;
   padding: 8px;
@@ -893,7 +962,7 @@
 
 .monitor-chart-canvas {
   position: relative;
-  height: 260px;
+  height: 152px;
 }
 
 .monitor-chart-legend {
@@ -918,8 +987,18 @@
 }
 
 .monitor-chart-loading {
-  height: 260px;
+  height: 152px;
   border-radius: 6px;
+  background: #f8fafc;
+}
+
+.monitor-chart-empty {
+  margin: 0;
+  border: 1px dashed #d8e0e7;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #697586;
+  font-size: 12px;
   background: #f8fafc;
 }
 

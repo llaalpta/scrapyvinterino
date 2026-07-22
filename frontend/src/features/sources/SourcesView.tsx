@@ -312,6 +312,9 @@ function MonitorPerformancePanel({
   const chartDomain = chartRange ? ([chartRange.rangeStartMs, chartRange.rangeEndMs] as [number, number]) : undefined;
   const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
   const historical = stats?.historical_summary;
+  const session = stats?.active_session ?? stats?.latest_session ?? null;
+  const sessionSummary = stats?.session_summary ?? null;
+  const hasBusinessActivityInRange = chartData.some((point) => point.runsCount > 0);
   const hasAnyActivity = stats !== null && (
     (historical?.sessions_count ?? 0) > 0
     || stats.historical_proxy_traffic.state !== 'no_runs'
@@ -321,36 +324,66 @@ function MonitorPerformancePanel({
   return (
     <section className="monitor-performance">
       <div className="monitor-performance-heading">
-        <div>
-          <h4>Rendimiento del monitor</h4>
-          <span>{hasAnyActivity ? 'Acumulado y sesion comparable' : 'Sin ejecuciones registradas'}</span>
-        </div>
+        <h4>Rendimiento</h4>
       </div>
 
       {hasAnyActivity ? (
         <>
-          <section className="monitor-performance-summary" aria-label="Acumulado del monitor">
-            <div className="monitor-performance-subheading">
-              <h5>Acumulado del monitor</h5>
-              <span>Resultados de sesiones; trafico de todas las ejecuciones del monitor.</span>
-            </div>
-            <dl className="monitor-accumulated-strip">
-              <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
-              <Metric label="Tiempo activo" value={formatSeconds(historical?.active_seconds ?? 0)} />
-              <Metric label="Ejecuciones" value={String(historical?.runs_count ?? 0)} />
-              <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
-              <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
-              <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
-              <Metric label="Trafico proxy estimado" value={proxyTrafficLabel(stats?.historical_proxy_traffic ?? null)} />
-            </dl>
-            <p className="monitor-traffic-note">Estimacion local. DataImpulse mantiene el dato de facturacion autoritativo.</p>
-          </section>
-
-          <MonitorSessionOverview source={source} stats={stats} />
+          <div className="monitor-performance-table-wrap">
+            <table className="monitor-performance-table" aria-label="Comparativa de rendimiento del monitor">
+              <colgroup>
+                <col className="monitor-performance-scope-column" />
+                <col />
+                <col />
+                <col />
+                <col />
+                <col />
+                <col className="monitor-performance-traffic-column" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col">Ambito</th>
+                  <th scope="col">Tiempo</th>
+                  <th scope="col">Ejecuciones</th>
+                  <th scope="col">Encontrados</th>
+                  <th scope="col">Oportunidades</th>
+                  <th scope="col">Fallos</th>
+                  <th scope="col">Trafico proxy</th>
+                </tr>
+              </thead>
+              <tbody>
+                <MonitorPerformanceRow
+                  failedRuns={historical?.failed_runs ?? 0}
+                  itemsFound={historical?.items_found ?? 0}
+                  label="Acumulado"
+                  opportunities={historical?.opportunities_created ?? 0}
+                  runsCount={historical?.runs_count ?? 0}
+                  secondary={`${historical?.sessions_count ?? 0} sesion${historical?.sessions_count === 1 ? '' : 'es'}`}
+                  seconds={historical?.active_seconds ?? 0}
+                  traffic={proxyTrafficLabel(stats?.historical_proxy_traffic ?? null)}
+                />
+                {session ? (
+                  <MonitorPerformanceRow
+                    failedRuns={sessionSummary?.failed_runs ?? 0}
+                    itemsFound={sessionSummary?.items_found ?? 0}
+                    label={stats?.active_session ? 'Sesion activa' : 'Ultima sesion'}
+                    opportunities={sessionSummary?.opportunities_created ?? 0}
+                    runsCount={sessionSummary?.runs_count ?? 0}
+                    secondary={sessionTimingLabel(source, session, Boolean(stats?.active_session))}
+                    seconds={session.duration_seconds}
+                    traffic={proxyTrafficLabel(stats?.session_proxy_traffic ?? null)}
+                  />
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+          <p className="monitor-traffic-note">
+            Trafico estimado local; DataImpulse mantiene el dato de facturacion autoritativo. La sesion incluye su calibracion inicial.
+          </p>
 
           <section className="monitor-chart-section" aria-label="Historico acumulado por intervalo">
             <div className="monitor-chart-heading">
-              <h5>Historico acumulado por intervalo</h5>
+              <h5>Evolucion acumulada</h5>
               <div className="range-tabs" aria-label="Rango de grafica">
                 {rangeOptions.map((option) => (
                   <button
@@ -364,10 +397,8 @@ function MonitorPerformancePanel({
                 ))}
               </div>
             </div>
-            <div className="monitor-chart">
-              {chartData.length === 0 ? (
-                <p className="empty-inline compact">Sin datos historicos para graficar.</p>
-              ) : (
+            {hasBusinessActivityInRange ? (
+              <div className="monitor-chart">
                 <ChartErrorBoundary key={range}>
                   <Suspense fallback={<div className="monitor-chart-loading" aria-hidden="true" />}>
                     <MonitorPerformanceChart
@@ -379,49 +410,67 @@ function MonitorPerformancePanel({
                     />
                   </Suspense>
                 </ChartErrorBoundary>
-              )}
-            </div>
+              </div>
+            ) : (
+              <p className="monitor-chart-empty">Sin ejecuciones de negocio en este rango.</p>
+            )}
           </section>
         </>
-      ) : null}
+      ) : (
+        <p className="empty-inline compact">Sin ejecuciones registradas.</p>
+      )}
     </section>
   );
 }
 
-function MonitorSessionOverview({ source, stats }: { source: SearchSource; stats: MonitorStats | null }) {
-  const session = stats?.active_session ?? stats?.latest_session ?? null;
-  const summary = stats?.session_summary ?? null;
-
-  if (!session) {
-    return null;
-  }
-
-  const isActiveSession = Boolean(stats?.active_session);
-  const timing = isActiveSession
-    ? `Inicio ${formatDate(session.started_at)} · Duracion ${formatSeconds(session.duration_seconds)}`
-    : `Inicio ${formatDate(session.started_at)} · Fin ${session.stopped_at ? formatDate(session.stopped_at) : '-'} · Duracion ${formatSeconds(session.duration_seconds)}`;
-
+function MonitorPerformanceRow({
+  failedRuns,
+  itemsFound,
+  label,
+  opportunities,
+  runsCount,
+  secondary,
+  seconds,
+  traffic
+}: {
+  failedRuns: number;
+  itemsFound: number;
+  label: string;
+  opportunities: number;
+  runsCount: number;
+  secondary: string;
+  seconds: number;
+  traffic: string;
+}) {
   return (
-    <section className="monitor-session-panel" aria-label={isActiveSession ? 'Sesion activa' : 'Ultima sesion cerrada'}>
-      <div className="monitor-session-heading">
-        <div className="monitor-session-heading-copy">
-          <h5>{isActiveSession ? 'Sesion activa' : 'Ultima sesion cerrada'}</h5>
-          <span>{timing}</span>
-        </div>
-        {isActiveSession && source.next_run_at ? <span>Proxima {formatDate(source.next_run_at)}</span> : null}
-      </div>
-      <dl className="monitor-session-strip">
-        <Metric label="Ejecuciones" value={String(summary?.runs_count ?? 0)} />
-        <Metric label="Encontrados" value={String(summary?.items_found ?? 0)} />
-        <Metric label="Oportunidades" value={String(summary?.opportunities_created ?? 0)} />
-        <Metric label="Fallos" value={String(summary?.failed_runs ?? 0)} />
-        <Metric label="Trafico proxy estimado" value={proxyTrafficLabel(stats?.session_proxy_traffic ?? null)} />
-      </dl>
-      <p className="monitor-traffic-note">
-        Incluye la calibracion de inicio. Estimacion local; DataImpulse mantiene el dato de facturacion autoritativo.
-      </p>
-    </section>
+    <tr>
+      <th scope="row">
+        <strong>{label}</strong>
+        <span>{secondary}</span>
+      </th>
+      <td data-label="Tiempo">{formatSeconds(seconds)}</td>
+      <td data-label="Ejecuciones">{runsCount}</td>
+      <td data-label="Encontrados">{itemsFound}</td>
+      <td data-label="Oportunidades">{opportunities}</td>
+      <td data-label="Fallos">{failedRuns}</td>
+      <td data-label="Trafico proxy">{traffic}</td>
+    </tr>
   );
+}
+
+function sessionTimingLabel(source: SearchSource, session: MonitorStats['latest_session'], active: boolean): string {
+  if (!session) {
+    return '';
+  }
+  if (active && source.next_run_at) {
+    return `Desde ${formatDate(session.started_at)} · proxima ${formatDate(source.next_run_at)}`;
+  }
+  if (active) {
+    return `Desde ${formatDate(session.started_at)}`;
+  }
+  return session.stopped_at
+    ? `${formatDate(session.started_at)} · ${formatDate(session.stopped_at)}`
+    : `Desde ${formatDate(session.started_at)}`;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -869,11 +918,7 @@ function MonitorDetail({
               {isDraining ? 'Deteniendo...' : source.is_active ? 'Activo' : 'Inactivo'}
             </span>
           </div>
-          <p>
-            {isEditing
-              ? 'Modifica la configuracion persistida de este monitor.'
-              : 'Consulta efectiva y acciones disponibles para este monitor.'}
-          </p>
+          {isEditing ? <p>Modifica la configuracion persistida de este monitor.</p> : null}
         </div>
         {!isEditing ? (
           <a className="monitor-catalog-link" href={source.url} target="_blank" rel="noreferrer" title={source.url}>
@@ -995,14 +1040,14 @@ function MonitorDetail({
         <CatalogFilterCompatibilityStatus source={source} />
       )}
 
+      <PreparedSessionsPanel key={`contexts-${source.id}`} sessions={source.prepared_sessions} />
+
       <MonitorPerformancePanel
         range={statsRange}
         source={source}
         stats={stats}
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
-
-      <PreparedSessionsPanel key={`contexts-${source.id}`} sessions={source.prepared_sessions} />
 
       <details className="monitor-logs" key={`logs-${source.id}`}>
         <summary className="monitor-logs-header">
@@ -1137,7 +1182,10 @@ function DiscardSourceEditDialog({
 
 function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
   const usableCount = sessions.filter((session) => session.usable_now).length;
-  const summaryLabel = sessions.length === 0 ? 'Sin contexto' : `${usableCount}/${sessions.length} reutilizables`;
+  const usageLabel = sessions.length === 1 ? ` · ${sessions[0].request_count}/${sessions[0].max_requests} usos` : '';
+  const summaryLabel = sessions.length === 0
+    ? 'Sin contexto'
+    : `${usableCount}/${sessions.length} reutilizable${sessions.length === 1 ? '' : 's'}${usageLabel}`;
 
   return (
     <details
@@ -1225,11 +1273,13 @@ function CatalogFilterCompatibilityStatus({ source }: { source: SearchSource }) 
   const applicationControlled = ['order', 'page']
     .map((key) => [key, compatibility.api_params[key]] as const)
     .filter((entry): entry is readonly [string, string | number] => typeof entry[1] === 'string' || typeof entry[1] === 'number');
-  return (
-    <div className={`catalog-filter-status ${compatibility.compatible ? 'ready' : 'blocked'}`}>
-      <div className="catalog-filter-status-title">
-        <span>{compatibility.compatible ? 'Filtros URL compatibles' : 'Filtros URL no soportados'}</span>
-      </div>
+  const summaryLabel = [
+    `${supported.length} filtro${supported.length === 1 ? '' : 's'} URL`,
+    `${applicationControlled.length} controlado${applicationControlled.length === 1 ? '' : 's'}`,
+    `${ignored.length} sin efecto`
+  ].join(' · ');
+  const details = (
+    <div className="catalog-filter-details">
       {supported.length > 0 ? (
         <span>Aplicados desde la URL: {formatFilterEntries(supported)}</span>
       ) : (
@@ -1245,6 +1295,26 @@ function CatalogFilterCompatibilityStatus({ source }: { source: SearchSource }) 
         </details>
       ) : null}
       {unsupported.length > 0 ? <strong>Bloquean: {formatFilterEntries(unsupported)}</strong> : null}
+    </div>
+  );
+  if (compatibility.compatible) {
+    return (
+      <details className="catalog-filter-status catalog-filter-summary ready" key={`filters-${source.id}`}>
+        <summary>
+          <span className="catalog-filter-status-title">Filtros URL compatibles</span>
+          <span>{summaryLabel}</span>
+          <ChevronDown aria-hidden="true" size={17} />
+        </summary>
+        {details}
+      </details>
+    );
+  }
+  return (
+    <div className="catalog-filter-status blocked">
+      <div className="catalog-filter-status-title">
+        <span>Filtros URL no soportados</span>
+      </div>
+      {details}
     </div>
   );
 }
