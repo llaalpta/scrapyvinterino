@@ -32,11 +32,14 @@ from vinted_monitor.db.models import (
     VintedSession,
 )
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
+from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
 from vinted_monitor.services.local_auth import LOCAL_SESSION_COOKIE_NAME, create_local_user
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.runs import monitor_policy_hash
 from vinted_monitor.services.search_sources import create_source
 from vinted_monitor.services.seen_cache import RedisSeenCache, get_seen_cache
+from vinted_monitor.services.vinted_sessions import save_prepared_vinted_session
 
 pytestmark = [pytest.mark.real_auth, pytest.mark.live_stack]
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -60,6 +63,8 @@ class Scenario:
 
 @dataclass(frozen=True)
 class TrafficScenario:
+    blocked_source_id: int
+    blocked_source_name: str
     token: str
     email: str
     raw_session_token: str
@@ -154,7 +159,11 @@ def _exercise_proxy_traffic_live_stack(
             headless=True,
             args=["--disable-background-networking", "--disable-component-update", "--disable-sync", "--no-first-run"],
         )
-        context = browser.new_context(base_url=pwa_url, service_workers="block")
+        context = browser.new_context(
+            base_url=pwa_url,
+            service_workers="block",
+            viewport={"width": 1440, "height": 900},
+        )
         try:
             context.add_cookies(
                 [
@@ -184,6 +193,7 @@ def _exercise_proxy_traffic_live_stack(
 
             baseline = _start_session(page, scenario.source_id)
             _assert_run(baseline, trigger="baseline", status="success", found=0, opportunities=0)
+            _assert_compact_monitor_activity(page, business_activity=False)
             _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCD"])
             later_run = _run_now(page, scenario.source_id)
             _assert_run(later_run, trigger="manual", status="success", found=1, opportunities=1)
@@ -198,22 +208,44 @@ def _exercise_proxy_traffic_live_stack(
             }
             assert stats["historical_proxy_traffic"] == expected_traffic
             assert stats["session_proxy_traffic"] == expected_traffic
-            _assert_proxy_traffic_pwa(page, section_label="Acumulado del monitor")
-            _assert_proxy_traffic_pwa(page, section_label="Sesion activa")
+            _assert_proxy_traffic_pwa(page, row_label="Acumulado")
+            _assert_proxy_traffic_pwa(page, row_label="Sesion activa")
+            _assert_compact_monitor_activity(page, business_activity=True)
             expect(page.locator('section[aria-label="Tiempo y trafico por ejecucion"]')).to_have_count(0)
             _assert_proxy_traffic_database(scenario, baseline, later_run)
 
             stop_payload = _stop_session(page, scenario.source_id)
             assert stop_payload["is_active"] is False
-            latest = page.locator('section[aria-label="Ultima sesion cerrada"]')
+            latest = _performance_row(page, "Ultima sesion")
             expect(latest).to_be_visible(timeout=8_000)
-            _assert_proxy_traffic_pwa(page, section_label="Ultima sesion cerrada")
+            _assert_proxy_traffic_pwa(page, row_label="Ultima sesion")
             stopped_stats = _get_json(
                 context,
                 f"{api_url}/api/monitors/{scenario.source_id}/stats?range=all",
                 pwa_url,
             )
             assert stopped_stats["session_proxy_traffic"] == expected_traffic
+            _mark_proxy_traffic_partial(baseline["id"])
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.reload(wait_until="domcontentloaded")
+            expect(page.get_by_role("button", name="Monitores", exact=True)).to_be_visible()
+            page.get_by_role("button", name="Monitores", exact=True).click()
+            _select_monitor(page, scenario.source_name, active=False)
+            accumulated = _performance_row(page, "Acumulado")
+            latest = _performance_row(page, "Ultima sesion")
+            expect(accumulated.locator('td[data-label="Trafico proxy"]')).to_contain_text("parcial")
+            expect(latest.locator('td[data-label="Trafico proxy"]')).to_contain_text("parcial")
+            assert page.get_by_role("table", name="Comparativa de rendimiento del monitor").evaluate(
+                "node => node.scrollWidth <= node.clientWidth"
+            ) is True
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") is True
+
+            _select_monitor(page, scenario.blocked_source_name, active=False)
+            blocker = page.locator("section.monitor-detail-shell .catalog-filter-status.blocked")
+            expect(blocker.get_by_text("Filtros URL no soportados", exact=True)).to_be_visible()
+            expect(blocker.get_by_text(re.compile(r"Bloquean:.*color_ids"))).to_be_visible()
+            expect(page.locator("section.monitor-detail-shell details.catalog-filter-summary")).to_have_count(0)
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") is True
         finally:
             context.close()
             browser.close()
@@ -453,7 +485,48 @@ def _seed_proxy_traffic(token: str) -> TrafficScenario:
             source_name,
             f"https://www.vinted.es/catalog?search_text=qa-manual-{token}",
         )
+        blocked_source = SearchSource(
+            name=f"qa manual blocked {token}",
+            url="https://www.vinted.es/catalog?catalog[]=76&color_ids[]=12",
+            normalized_query={"catalog[]": ["76"], "color_ids[]": ["12"]},
+            is_active=False,
+            monitor_mode="manual",
+            scheduler_config={},
+        )
+        db.add(blocked_source)
+        db.flush()
+        profile = profile_for_impersonate(get_settings().curl_impersonate_browser)
+        prepared = save_prepared_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id=f"qa-{token}",
+            profile=profile,
+            context=PreparedCatalogSession(
+                proxy_session_id=f"qa-{token}",
+                cookies={
+                    name: token
+                    for name in ("anon_id", "access_token_web", "datadome", "__cf_bm", "v_udt")
+                },
+                csrf_token=token,
+                anon_id=token,
+                access_token_web=token,
+                datadome=token,
+                cf_bm=token,
+                v_udt=token,
+                user_iso_locale=proxy.locale,
+                vinted_screen=proxy.vinted_screen,
+                egress_ip="127.0.0.1",
+                egress_country_code=proxy.country_code,
+                egress_validated_at=datetime.now(UTC),
+            ),
+            settings=get_settings(),
+        )
+        prepared.request_count = 7
+        db.commit()
         return TrafficScenario(
+            blocked_source_id=blocked_source.id,
+            blocked_source_name=blocked_source.name,
             token=token,
             email=email,
             raw_session_token=raw_session_token,
@@ -462,6 +535,18 @@ def _seed_proxy_traffic(token: str) -> TrafficScenario:
             proxy_id=proxy.id,
             item_ids={letter: f"qa-manual-{token}-{letter}" for letter in "ABCD"},
         )
+
+
+def _mark_proxy_traffic_partial(run_id: int) -> None:
+    with SessionLocal() as db:
+        run = db.get(Run, run_id)
+        assert run is not None
+        metadata = dict(run.runtime_metadata or {})
+        estimate = dict(metadata["proxy_traffic_estimate"])
+        estimate["unobserved_attempts"] = 1
+        metadata["proxy_traffic_estimate"] = estimate
+        run.runtime_metadata = metadata
+        db.commit()
 
 
 def _login(page: Page, scenario: Scenario, pwa_url: str) -> None:
@@ -569,25 +654,70 @@ def _assert_active_manual_ui(page: Page, source_name: str) -> None:
 
 
 def _assert_honest_metrics_ui(page: Page, *, found: int, opportunities: int) -> None:
-    accumulated = page.locator('section[aria-label="Acumulado del monitor"]')
-    active_session = page.locator('section[aria-label="Sesion activa"]')
-    expect(accumulated).to_be_visible()
-    expect(active_session).to_be_visible()
-    for section in (accumulated, active_session):
-        expect(section.get_by_text("Encontrados", exact=True).locator("..").locator("dd")).to_have_text(str(found))
-        expect(section.get_by_text("Oportunidades", exact=True).locator("..").locator("dd")).to_have_text(
-            str(opportunities)
-        )
+    table = page.get_by_role("table", name="Comparativa de rendimiento del monitor")
+    expect(table).to_be_visible()
+    for row_label in ("Acumulado", "Sesion activa"):
+        row = _performance_row(page, row_label)
+        expect(row.locator('td[data-label="Encontrados"]')).to_have_text(str(found))
+        expect(row.locator('td[data-label="Oportunidades"]')).to_have_text(str(opportunities))
         for obsolete_label in ("Nuevos", "Nuevos monitor", "Pasan", "Descartados", "Sin detalle"):
-            expect(section.get_by_text(obsolete_label, exact=True)).to_have_count(0)
+            expect(row.get_by_text(obsolete_label, exact=True)).to_have_count(0)
 
 
-def _assert_proxy_traffic_pwa(page: Page, *, section_label: str) -> None:
-    section = page.locator(f'section[aria-label="{section_label}"]')
-    expect(section).to_be_visible()
-    metric = section.get_by_text("Trafico proxy estimado", exact=True).locator("..").locator("dd")
-    expect(metric).to_have_text("4 kB · 3 pet. observadas")
-    expect(section.get_by_text(re.compile(r"DataImpulse.*facturacion autoritativo", re.IGNORECASE))).to_be_visible()
+def _assert_proxy_traffic_pwa(page: Page, *, row_label: str) -> None:
+    row = _performance_row(page, row_label)
+    expect(row.locator('td[data-label="Trafico proxy"]')).to_have_text("4 kB · 3 pet. observadas")
+    performance = page.locator("section.monitor-performance")
+    expect(performance.get_by_text(re.compile(r"DataImpulse.*facturacion autoritativo", re.IGNORECASE))).to_be_visible()
+
+
+def _performance_row(page: Page, label: str):
+    table = page.get_by_role("table", name="Comparativa de rendimiento del monitor")
+    return table.locator("tbody tr").filter(
+        has=page.get_by_role("rowheader", name=re.compile(rf"^{re.escape(label)}(?:\s|$)"))
+    )
+
+
+def _assert_compact_monitor_activity(page: Page, *, business_activity: bool) -> None:
+    detail = page.locator("section.monitor-detail-shell")
+    filters = detail.locator("details.catalog-filter-summary")
+    contexts = detail.get_by_role("group", name="Contextos HTTP preparados para este monitor")
+    performance = detail.locator("section.monitor-performance")
+    logs = detail.locator("details.monitor-logs").filter(has_text="Logs acumulados")
+
+    expect(filters).to_be_visible()
+    expect(filters).not_to_have_attribute("open", "")
+    expect(filters.locator("summary")).to_contain_text(
+        re.compile(r"\d+ filtros? URL · \d+ controlados? · \d+ sin efecto")
+    )
+    expect(contexts).to_be_visible()
+    expect(contexts).not_to_have_attribute("open", "")
+    expect(contexts.locator("summary")).to_contain_text(re.compile(r"1/1 reutilizable · \d+/50 usos"))
+    expect(logs).not_to_have_attribute("open", "")
+    table = page.get_by_role("table", name="Comparativa de rendimiento del monitor")
+    expect(table).to_be_visible()
+    assert table.evaluate("node => node.scrollWidth <= node.clientWidth") is True
+
+    filter_box = filters.bounding_box()
+    context_box = contexts.bounding_box()
+    performance_box = performance.bounding_box()
+    assert filter_box is not None and context_box is not None and performance_box is not None
+    assert filter_box["y"] < context_box["y"] < performance_box["y"]
+
+    chart = detail.locator(".monitor-chart")
+    empty_chart = detail.get_by_text("Sin ejecuciones de negocio en este rango.", exact=True)
+    if business_activity:
+        expect(chart).to_be_visible()
+        expect(empty_chart).to_have_count(0)
+        chart_box = chart.bounding_box()
+        assert chart_box is not None and 150 <= chart_box["height"] <= 175
+        detail.evaluate("node => node.scrollIntoView({block: 'start'})")
+        page.wait_for_timeout(100)
+        logs_box = logs.locator("summary").bounding_box()
+        assert logs_box is not None and logs_box["y"] + logs_box["height"] <= 900
+    else:
+        expect(chart).to_have_count(0)
+        expect(empty_chart).to_be_visible()
 
 
 def _assert_proxy_traffic_database(scenario: TrafficScenario, baseline: dict, later_run: dict) -> None:

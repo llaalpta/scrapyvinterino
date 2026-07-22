@@ -34,6 +34,22 @@ Excluded: vendor usage APIs, monetary estimates, historical backfill, fingerprin
 
 Verification passed five focused aggregation cases, five activation/linkage cases, Ruff, frontend lint/build and one isolated authenticated Playwright flow through the live API/PostgreSQL/PWA path. The controlled baseline contributed `1000` bytes and the later catalog/detail run `3000`; durable rows, API, accumulated UI, active session and stopped latest session all agreed on `4000` bytes and three observed requests. Cleanup preserved operational PostgreSQL/Redis fingerprints, restored worker/watchdog and made no Vinted, proxy or vendor request. The independent audit found one B documentation mismatch (`direct` is `not_applicable`, not `not_measured`); the focused re-audit was positive after correction.
 
+### 14.52 compact monitor activity
+
+Status: `done` on `feat/14.52-compact-monitor-activity` after a positive independent audit. This is a frontend-only presentation outcome: existing source, session, traffic and chart data remain authoritative and unchanged.
+
+Acceptance criteria:
+
+1. Selected-monitor order is identity/actions, compact filter status, collapsed HTTP-context status, compact accumulated/session performance, accumulated chart and collapsed logs. Compatible filters collapse to counts while unsupported blockers remain visible; one prepared context also exposes its current/max use count in the summary.
+2. Performance uses one directly comparable accumulated/session table for time, business counters, failures and proxy traffic, with one billing-authority note. A chart with business activity is 150-170 px tall; a range with no business run shows a compact empty state instead of an empty canvas.
+3. At `1440x900`, the default active-session detail through the logs summary fits in one viewport once aligned at its top. At `390x844`, comparison rows stack without horizontal overflow and no blocker or unknown/partial traffic state is hidden.
+
+Representative integration: extend the isolated `monitor-session-proxy-traffic` live API/PostgreSQL/PWA scenario. Its controlled baseline proves the no-business-chart negative; one later run supplies the accumulated/active values and chart, then stop preserves the latest-session comparison. Playwright checks order, collapsed controls, desktop containment and mobile overflow. Cleanup restores PostgreSQL/Redis fingerprints and service ownership. External Vinted, proxy and vendor allowance is zero.
+
+Excluded: API/schema changes, chart semantics/range changes, configurable layouts, monitor table/create-form redesign and expanded-log redesign.
+
+Verification passed five traffic-aggregation cases, five activation/linkage cases, Ruff, frontend lint/build and one isolated authenticated Playwright flow over the live API/PostgreSQL/Redis/PWA boundaries. It proved the compact empty range after baseline, the 170 px populated chart, the accumulated/active and stopped/latest comparison, one prepared context at `7/50`, desktop containment through logs at `1440x900`, and stacked rows without overflow at `390x844`. The audit found one B coverage gap: mobile evidence used only compatible/measured state. The same scenario now also reloads an API-derived partial traffic aggregate and an existing monitor with blocked `color_ids[]`, requiring both honest labels to remain visible and uncollapsed at 390 px; the finding-specific re-audit was positive. Cleanup preserved operational PostgreSQL/Redis fingerprints, restored worker/watchdog and allowed no external destination.
+
 ## 14.19 Worker Redis availability
 
 Status: `done`. This is a contained fail-stop correction for the current local worker, not a general dependency-readiness platform.
@@ -74,11 +90,11 @@ Acceptance criteria:
 
 1. In normal mode, inactive monitors expose start/edit/archive, active manual monitors expose run/stop, and active recurring monitors expose only stop. Raw URL and configuration inputs are not duplicated outside edit mode.
 2. Dirty edit navigation to another monitor or PWA section requires an in-app discard decision. Save success exits editing with the persisted response, save rejection keeps the draft, and cancel/discard restores the persisted source without traffic.
-3. Accumulated monitor metrics and active/latest-session metrics remain unchanged and precede collapsed `Contextos HTTP preparados` plus collapsed logs. Responsive layout has no horizontal overflow.
+3. Accumulated monitor metrics and active/latest-session metrics remain unchanged. Current ordering and compact presentation are owned by 14.52; logs remain collapsed by default and responsive layout has no horizontal overflow.
 
 The representative real gate is the existing isolated monitor-identity PWA/API/PostgreSQL scenario with a second source, a local HTTP-context diagnostic row and desktop/mobile Playwright. Worker/watchdog and all external destinations remain unavailable; cleanup restores the initial operational fingerprints and service ownership.
 
-Verification passed `8` focused cases plus `1` live Playwright case. The live PWA kept the table selector command-free, enforced read/edit and dirty-navigation boundaries, presented the active manual action set, retained performance before two independently collapsed diagnostic sections and had no horizontal overflow at `390x844`. No external request was allowed or observed; cleanup removed all isolated resources and preserved operational PostgreSQL/Redis fingerprints. Ruff and frontend lint/build passed.
+Verification passed `8` focused cases plus `1` live Playwright case. The live PWA kept the table selector command-free, enforced read/edit and dirty-navigation boundaries, presented the active manual action set and had no horizontal overflow at `390x844`. Its then-current performance-before-context order is superseded by 14.52 without changing the guarded editing contract. No external request was allowed or observed; cleanup removed all isolated resources and preserved operational PostgreSQL/Redis fingerprints. Ruff and frontend lint/build passed.
 
 ## Planned 14.34 session program
 

@@ -64,8 +64,8 @@ export default function MonitorPerformanceChart({
         <span />
         Encontrados
       </div>
-      <ResponsiveContainer width="100%" height={260}>
-        <BarChart accessibilityLayer={false} data={chartData} margin={{ top: 30, right: 14, bottom: 34, left: 22 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart accessibilityLayer={false} data={chartData} margin={{ top: 24, right: 12, bottom: 28, left: 16 }}>
           <CartesianGrid strokeDasharray="3 3" vertical />
           <XAxis
             allowDataOverflow

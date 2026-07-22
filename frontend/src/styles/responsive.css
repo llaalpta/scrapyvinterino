@@ -272,10 +272,22 @@
   }
 
   .monitor-config-heading,
-  .monitor-session-heading,
-  .monitor-performance-subheading,
   .monitor-chart-heading {
     flex-direction: column;
+  }
+
+  .catalog-filter-summary > summary {
+    flex-wrap: wrap;
+  }
+
+  .catalog-filter-summary > summary > span:nth-child(2) {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .catalog-filter-summary > summary svg {
+    margin-left: auto;
   }
 
   .range-tabs {
@@ -286,9 +298,64 @@
     flex: 1 1 auto;
   }
 
-  .monitor-session-strip,
-  .monitor-accumulated-strip {
+  .monitor-session-strip {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .monitor-performance-table-wrap {
+    border: 0;
+    overflow: visible;
+  }
+
+  .monitor-performance-table,
+  .monitor-performance-table tbody,
+  .monitor-performance-table tr {
+    display: block;
+    width: 100%;
+  }
+
+  .monitor-performance-table colgroup,
+  .monitor-performance-table thead {
+    display: none;
+  }
+
+  .monitor-performance-table tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+    margin-bottom: 8px;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 9px;
+    background: #ffffff;
+  }
+
+  .monitor-performance-table tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .monitor-performance-table th,
+  .monitor-performance-table td {
+    border: 0;
+    padding: 0;
+  }
+
+  .monitor-performance-table tbody th {
+    grid-column: 1 / -1;
+    padding-bottom: 7px;
+    border-bottom: 1px solid #e5eaf0;
+  }
+
+  .monitor-performance-table td {
+    display: grid;
+    gap: 2px;
+  }
+
+  .monitor-performance-table td::before {
+    content: attr(data-label);
+    color: #697586;
+    font-size: 11px;
+    font-weight: 600;
   }
 
   .run-row,
