@@ -235,7 +235,7 @@ def _exercise_proxy_traffic_live_stack(
             latest = _performance_row(page, "Ultima sesion")
             expect(accumulated.locator('td[data-label="Trafico proxy"]')).to_contain_text("parcial")
             expect(latest.locator('td[data-label="Trafico proxy"]')).to_contain_text("parcial")
-            assert page.get_by_role("table", name="Comparativa de rendimiento del monitor").evaluate(
+            assert page.locator(".monitor-performance-table-wrap").evaluate(
                 "node => node.scrollWidth <= node.clientWidth"
             ) is True
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") is True
@@ -696,7 +696,9 @@ def _assert_compact_monitor_activity(page: Page, *, business_activity: bool) -> 
     expect(logs).not_to_have_attribute("open", "")
     table = page.get_by_role("table", name="Comparativa de rendimiento del monitor")
     expect(table).to_be_visible()
-    assert table.evaluate("node => node.scrollWidth <= node.clientWidth") is True
+    expect(table.get_by_role("columnheader", name="Trafico proxy", exact=True)).to_be_visible()
+    table_wrapper = detail.locator(".monitor-performance-table-wrap")
+    assert table_wrapper.evaluate("node => node.scrollWidth <= node.clientWidth") is True
 
     filter_box = filters.bounding_box()
     context_box = contexts.bounding_box()
