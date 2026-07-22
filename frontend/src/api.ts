@@ -256,6 +256,14 @@ export type MonitorStatsSummary = {
   opportunities_created: number;
 };
 
+export type ProxyTrafficSummary = {
+  state: 'no_runs' | 'not_applicable' | 'not_measured' | 'measured' | 'partial';
+  runs_count: number;
+  observed_requests: number | null;
+  unobserved_attempts: number | null;
+  total_observed_bytes: number | null;
+};
+
 export type MonitorSession = {
   id: number;
   started_at: string;
@@ -281,6 +289,8 @@ export type MonitorStats = {
   latest_session: MonitorSession | null;
   session_summary: MonitorStatsSummary;
   historical_summary: MonitorStatsSummary;
+  session_proxy_traffic: ProxyTrafficSummary;
+  historical_proxy_traffic: ProxyTrafficSummary;
   chart_points: MonitorChartPoint[];
 };
 

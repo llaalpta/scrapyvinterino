@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.db.models import MonitorSession, Run, SearchSource
+from vinted_monitor.providers.transfer_metrics import PROXY_TRAFFIC_METADATA_KEY, PROXY_TRAFFIC_VERSION
+from vinted_monitor.services.monitor_sessions import OPENED_MONITOR_SESSION_ID_KEY
 
 STATS_RANGES = {"minutes", "hours", "days", "month", "all"}
 NON_METRIC_RUN_TRIGGERS = {"baseline", "detail_probe", "session_prepare"}
+ProxyTrafficState = Literal["no_runs", "not_applicable", "not_measured", "measured", "partial"]
+_PROXY_TRAFFIC_BYTE_FIELDS = (
+    "request_size_bytes",
+    "upload_size_bytes",
+    "header_size_bytes",
+    "download_size_bytes",
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +43,15 @@ class MonitorSummary:
 
 
 @dataclass(frozen=True)
+class ProxyTrafficSummary:
+    state: ProxyTrafficState
+    runs_count: int
+    observed_requests: int | None
+    unobserved_attempts: int | None
+    total_observed_bytes: int | None
+
+
+@dataclass(frozen=True)
 class MonitorSessionDetails:
     id: int
     started_at: datetime
@@ -51,6 +71,8 @@ class MonitorStats:
     latest_session: MonitorSessionDetails | None
     session_summary: MonitorSummary
     historical_summary: MonitorSummary
+    session_proxy_traffic: ProxyTrafficSummary
+    historical_proxy_traffic: ProxyTrafficSummary
     chart_points: list[MonitorChartPoint]
 
 
@@ -87,14 +109,14 @@ def get_monitor_stats(db: Session, monitor_id: int, *, range_name: str = "hours"
             .order_by(MonitorSession.started_at.asc(), MonitorSession.id.asc())
         )
     )
-    runs = [
-        run
-        for run in db.scalars(select(Run).where(Run.source_id == monitor_id).order_by(Run.started_at.asc(), Run.id.asc()))
-        if run.trigger not in NON_METRIC_RUN_TRIGGERS
-    ]
+    all_runs = list(
+        db.scalars(select(Run).where(Run.source_id == monitor_id).order_by(Run.started_at.asc(), Run.id.asc()))
+    )
+    runs = [run for run in all_runs if run.trigger not in NON_METRIC_RUN_TRIGGERS]
     active_session = next((session for session in reversed(sessions) if session.stopped_at is None), None)
     latest_session = active_session or next((session for session in reversed(sessions) if session.stopped_at is not None), None)
     session_runs = [run for run in runs if latest_session is not None and run.monitor_session_id == latest_session.id]
+    session_traffic_runs, session_linkage_complete = _session_traffic_runs(all_runs, latest_session)
     chart_config = _chart_config(runs, range_name, current_time)
 
     return MonitorStats(
@@ -107,8 +129,125 @@ def get_monitor_stats(db: Session, monitor_id: int, *, range_name: str = "hours"
         latest_session=_session_read(latest_session, current_time),
         session_summary=_summary(sessions=[latest_session] if latest_session is not None else [], runs=session_runs, now=current_time),
         historical_summary=_summary(sessions=sessions, runs=runs, now=current_time),
+        session_proxy_traffic=_proxy_traffic_summary(
+            session_traffic_runs,
+            linkage_complete=session_linkage_complete,
+        ),
+        historical_proxy_traffic=_proxy_traffic_summary(all_runs),
         chart_points=_chart_points(runs, chart_config),
     )
+
+
+def _session_traffic_runs(
+    runs: list[Run],
+    session: MonitorSession | None,
+) -> tuple[list[Run], bool]:
+    if session is None:
+        return [], True
+    linked_runs = [run for run in runs if run.monitor_session_id == session.id]
+    baselines = [
+        run
+        for run in runs
+        if run.trigger == "baseline"
+        and run.status == "success"
+        and isinstance(run.runtime_metadata, Mapping)
+        and run.runtime_metadata.get("baseline_reason") == "session_start"
+        and _strict_int(run.runtime_metadata.get(OPENED_MONITOR_SESSION_ID_KEY)) == session.id
+    ]
+    if len(baselines) != 1:
+        return linked_runs, False
+    baseline = baselines[0]
+    return [baseline, *(run for run in linked_runs if run is not baseline)], True
+
+
+def _proxy_traffic_summary(
+    runs: list[Run],
+    *,
+    linkage_complete: bool = True,
+) -> ProxyTrafficSummary:
+    if not runs:
+        state: ProxyTrafficState = "no_runs" if linkage_complete else "partial"
+        return ProxyTrafficSummary(
+            state=state,
+            runs_count=0,
+            observed_requests=None,
+            unobserved_attempts=None,
+            total_observed_bytes=None,
+        )
+
+    measured_runs = 0
+    not_measured_runs = 0
+    not_applicable_runs = 0
+    partial = not linkage_complete
+    observed_requests = 0
+    unobserved_attempts = 0
+    total_observed_bytes = 0
+
+    for run in runs:
+        metadata = run.runtime_metadata if isinstance(run.runtime_metadata, Mapping) else {}
+        egress_mode = metadata.get("egress_mode")
+        estimate = metadata.get(PROXY_TRAFFIC_METADATA_KEY)
+        if egress_mode == "direct":
+            if estimate is None:
+                not_applicable_runs += 1
+            else:
+                partial = True
+            continue
+        if estimate is None:
+            if egress_mode in {None, "proxy"}:
+                not_measured_runs += 1
+            else:
+                partial = True
+            continue
+        parsed = _parse_proxy_traffic_estimate(estimate)
+        if egress_mode != "proxy" or parsed is None:
+            partial = True
+            continue
+        measured_runs += 1
+        observed_requests += parsed["observed_requests"]
+        unobserved_attempts += parsed["unobserved_attempts"]
+        total_observed_bytes += parsed["total_observed_bytes"]
+        if parsed["observed_requests"] == 0 or parsed["unobserved_attempts"] > 0:
+            partial = True
+
+    if measured_runs and not_measured_runs:
+        partial = True
+    if partial:
+        state = "partial"
+    elif measured_runs:
+        state = "measured"
+    elif not_measured_runs:
+        state = "not_measured"
+    elif not_applicable_runs == len(runs):
+        state = "not_applicable"
+    else:
+        state = "partial"
+    return ProxyTrafficSummary(
+        state=state,
+        runs_count=len(runs),
+        observed_requests=observed_requests if measured_runs else None,
+        unobserved_attempts=unobserved_attempts if measured_runs else None,
+        total_observed_bytes=total_observed_bytes if measured_runs else None,
+    )
+
+
+def _parse_proxy_traffic_estimate(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, Mapping) or _strict_int(value.get("version")) != PROXY_TRAFFIC_VERSION:
+        return None
+    fields = ("observed_requests", "unobserved_attempts", "total_observed_bytes", *_PROXY_TRAFFIC_BYTE_FIELDS)
+    parsed: dict[str, int] = {}
+    for field in fields:
+        raw = value.get(field)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            return None
+        parsed[field] = raw
+    if parsed["total_observed_bytes"] != sum(parsed[field] for field in _PROXY_TRAFFIC_BYTE_FIELDS):
+        return None
+    return parsed
+
+
+def _strict_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _summary(*, sessions: list[MonitorSession | None], runs: list[Run], now: datetime) -> MonitorSummary:

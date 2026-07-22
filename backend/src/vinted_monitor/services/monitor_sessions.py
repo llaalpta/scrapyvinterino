@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 
 from vinted_monitor.db.models import MonitorSession, SearchSource
 
+OPENED_MONITOR_SESSION_ID_KEY = "opened_monitor_session_id"
+
 
 def start_monitor_session(
     db: Session,

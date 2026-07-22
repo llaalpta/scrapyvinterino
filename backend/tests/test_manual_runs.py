@@ -2264,6 +2264,7 @@ def test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session(monke
             assert runs[0].id == body["id"]
             assert runs[0].monitor_session_id is None
             assert runs[0].runtime_metadata["baseline_reason"] == "session_start"
+            assert runs[0].runtime_metadata["opened_monitor_session_id"] == sessions[0].id
             assert cache.marked_seen == ["pytest-run-item-0"]
             assert cache.baseline_ready is True
             assert item_count == 0
@@ -2310,6 +2311,7 @@ def test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive(monke
             assert run is not None
             assert run.monitor_session_id is None
             assert run.runtime_metadata["baseline_reason"] == "session_start"
+            assert "opened_monitor_session_id" not in run.runtime_metadata
             assert db.scalar(select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == source_id)) == 0
     finally:
         app.dependency_overrides.clear()
@@ -2440,6 +2442,7 @@ def test_recurring_monitor_start_baselines_then_opens_session_with_future_deadli
             assert source.monitor_started_at > run.finished_at
             assert run.opportunities_created == 0
             assert run.monitor_session_id is None
+            assert run.runtime_metadata["opened_monitor_session_id"] == session.id
             assert [entry.id for entry in source_runs] == [run.id]
     finally:
         app.dependency_overrides.clear()

@@ -49,6 +49,7 @@ class ControlledManualSessionProvider:
         if state["mode"] == "challenge":
             raise VintedCatalogChallengeError("QA controlled Cloudflare challenge")
 
+        self._record_transfer(category="catalog", total_bytes=1000)
         items = [_candidate(item_id) for item_id in state["ids"]]
         return CatalogSearchResult(
             items=items,
@@ -68,6 +69,7 @@ class ControlledManualSessionProvider:
         early_filter_terms: tuple[str, ...] = (),
     ) -> CatalogItemDetail:
         del referer_url, early_filter_terms
+        self._record_transfer(category="detail", total_bytes=2000)
         return CatalogItemDetail(
             vinted_item_id=candidate.vinted_item_id,
             title=candidate.title,
@@ -98,6 +100,28 @@ class ControlledManualSessionProvider:
 
     def close(self) -> None:
         return None
+
+    def _record_transfer(self, *, category: str, total_bytes: int) -> None:
+        if self.event_sink is None:
+            return
+        self.event_sink(
+            phase=f"qa_{category}_transfer_observed",
+            method="GET",
+            url=f"http://127.0.0.1/qa/{category}",
+            status_code=200,
+            details={
+                "proxy_transfer": {
+                    "category": category,
+                    "observed_requests": 1,
+                    "unobserved_attempts": 0,
+                    "request_size_bytes": 100,
+                    "upload_size_bytes": 0,
+                    "header_size_bytes": 200,
+                    "download_size_bytes": total_bytes - 300,
+                    "total_observed_bytes": total_bytes,
+                }
+            },
+        )
 
 
 def _load_state() -> dict[str, Any]:

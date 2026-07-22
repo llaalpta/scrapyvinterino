@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,7 +32,7 @@ from vinted_monitor.db.models import (
     VintedSession,
 )
 from vinted_monitor.db.session import SessionLocal
-from vinted_monitor.services.local_auth import create_local_user
+from vinted_monitor.services.local_auth import LOCAL_SESSION_COOKIE_NAME, create_local_user
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.runs import monitor_policy_hash
 from vinted_monitor.services.search_sources import create_source
@@ -53,6 +55,17 @@ class Scenario:
     proxy_id: int
     incomplete_proxy_id: int
     incomplete_proxy_name: str
+    item_ids: dict[str, str]
+
+
+@dataclass(frozen=True)
+class TrafficScenario:
+    token: str
+    email: str
+    raw_session_token: str
+    source_id: int
+    source_name: str
+    proxy_id: int
     item_ids: dict[str, str]
 
 
@@ -91,6 +104,121 @@ def test_live_manual_session_start_baseline_lifecycle() -> None:
         _cleanup(token, cache)
         assert _redis_keys(cache) == initial_redis_keys
         _assert_isolated_database_empty()
+
+
+def test_live_monitor_and_session_proxy_traffic_summary() -> None:
+    api_url = _loopback_origin("MANUAL_SESSION_QA_API_URL")
+    pwa_url = _loopback_origin("MANUAL_SESSION_QA_PWA_URL")
+    state_path = _state_path()
+    settings = get_settings()
+    assert settings.scheduler_enabled is False
+    for endpoint in (
+        settings.vinted_base_url,
+        settings.vinted_datadome_collector_url,
+        settings.egress_diagnostic_url,
+    ):
+        assert urlsplit(str(endpoint)).hostname in LOOPBACK_HOSTS
+
+    cache = get_seen_cache(settings)
+    initial_redis_keys = _redis_keys(cache)
+    assert initial_redis_keys == {REDIS_LEASE_KEY}
+    _assert_isolated_database_empty()
+    token = uuid4().hex
+    try:
+        scenario = _seed_proxy_traffic(token)
+        _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABC"])
+        _exercise_proxy_traffic_live_stack(
+            scenario,
+            state_path=state_path,
+            api_url=api_url,
+            pwa_url=pwa_url,
+        )
+    finally:
+        _cleanup(token, cache)
+        assert _redis_keys(cache) == initial_redis_keys
+        _assert_isolated_database_empty()
+
+
+def _exercise_proxy_traffic_live_stack(
+    scenario: TrafficScenario,
+    *,
+    state_path: Path,
+    api_url: str,
+    pwa_url: str,
+) -> None:
+    seen_urls: list[str] = []
+    blocked_urls: list[str] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            channel=os.getenv("MANUAL_SESSION_QA_BROWSER_CHANNEL", "chrome"),
+            headless=True,
+            args=["--disable-background-networking", "--disable-component-update", "--disable-sync", "--no-first-run"],
+        )
+        context = browser.new_context(base_url=pwa_url, service_workers="block")
+        try:
+            context.add_cookies(
+                [
+                    {
+                        "name": LOCAL_SESSION_COOKIE_NAME,
+                        "value": scenario.raw_session_token,
+                        "url": f"{pwa_url}/api",
+                    }
+                ]
+            )
+            page = context.new_page()
+
+            def guard(route: Route) -> None:
+                seen_urls.append(route.request.url)
+                if _local_or_non_network(route.request.url):
+                    route.continue_()
+                else:
+                    blocked_urls.append(route.request.url)
+                    route.abort("blockedbyclient")
+
+            page.route("**/*", guard)
+            page.on("websocket", lambda socket: _assert_loopback(socket.url))
+            page.goto(pwa_url, wait_until="domcontentloaded")
+            expect(page.get_by_role("button", name="Monitores", exact=True)).to_be_visible()
+            page.get_by_role("button", name="Monitores", exact=True).click()
+            _select_monitor(page, scenario.source_name, active=False)
+
+            baseline = _start_session(page, scenario.source_id)
+            _assert_run(baseline, trigger="baseline", status="success", found=0, opportunities=0)
+            _write_state(state_path, ids=[scenario.item_ids[key] for key in "ABCD"])
+            later_run = _run_now(page, scenario.source_id)
+            _assert_run(later_run, trigger="manual", status="success", found=1, opportunities=1)
+
+            stats = _get_json(context, f"{api_url}/api/monitors/{scenario.source_id}/stats?range=all", pwa_url)
+            expected_traffic = {
+                "state": "measured",
+                "runs_count": 2,
+                "observed_requests": 3,
+                "unobserved_attempts": 0,
+                "total_observed_bytes": 4000,
+            }
+            assert stats["historical_proxy_traffic"] == expected_traffic
+            assert stats["session_proxy_traffic"] == expected_traffic
+            _assert_proxy_traffic_pwa(page, section_label="Acumulado del monitor")
+            _assert_proxy_traffic_pwa(page, section_label="Sesion activa")
+            expect(page.locator('section[aria-label="Tiempo y trafico por ejecucion"]')).to_have_count(0)
+            _assert_proxy_traffic_database(scenario, baseline, later_run)
+
+            stop_payload = _stop_session(page, scenario.source_id)
+            assert stop_payload["is_active"] is False
+            latest = page.locator('section[aria-label="Ultima sesion cerrada"]')
+            expect(latest).to_be_visible(timeout=8_000)
+            _assert_proxy_traffic_pwa(page, section_label="Ultima sesion cerrada")
+            stopped_stats = _get_json(
+                context,
+                f"{api_url}/api/monitors/{scenario.source_id}/stats?range=all",
+                pwa_url,
+            )
+            assert stopped_stats["session_proxy_traffic"] == expected_traffic
+        finally:
+            context.close()
+            browser.close()
+    assert seen_urls and not blocked_urls
+    assert all(_local_or_non_network(url) for url in seen_urls)
 
 
 def _exercise_live_stack(
@@ -289,6 +417,53 @@ def _seed(token: str) -> Scenario:
         )
 
 
+def _seed_proxy_traffic(token: str) -> TrafficScenario:
+    email = f"qa-manual-session-{token}@example.local"
+    source_name = f"qa manual traffic {token}"
+    raw_session_token = secrets.token_urlsafe(48)
+    with SessionLocal() as db:
+        user = User(
+            email=email,
+            password_hash="preauthenticated-qa-session-only",
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
+        db.add(
+            UserSession(
+                token_hash=hashlib.sha256(raw_session_token.encode()).hexdigest(),
+                user_id=user.id,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                authenticated_at=datetime.now(UTC),
+            )
+        )
+        proxy = create_proxy_profile(
+            db,
+            name=f"qa manual proxy {token}",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8080,
+            username="qa-user",
+            password="qa-password",
+            country_code="ES",
+        )
+        source = create_source(
+            db,
+            source_name,
+            f"https://www.vinted.es/catalog?search_text=qa-manual-{token}",
+        )
+        return TrafficScenario(
+            token=token,
+            email=email,
+            raw_session_token=raw_session_token,
+            source_id=source.id,
+            source_name=source.name,
+            proxy_id=proxy.id,
+            item_ids={letter: f"qa-manual-{token}-{letter}" for letter in "ABCD"},
+        )
+
+
 def _login(page: Page, scenario: Scenario, pwa_url: str) -> None:
     page.goto(pwa_url, wait_until="domcontentloaded")
     expect(page.get_by_role("heading", name="Acceso a Vinted Monitor")).to_be_visible()
@@ -405,6 +580,28 @@ def _assert_honest_metrics_ui(page: Page, *, found: int, opportunities: int) -> 
         )
         for obsolete_label in ("Nuevos", "Nuevos monitor", "Pasan", "Descartados", "Sin detalle"):
             expect(section.get_by_text(obsolete_label, exact=True)).to_have_count(0)
+
+
+def _assert_proxy_traffic_pwa(page: Page, *, section_label: str) -> None:
+    section = page.locator(f'section[aria-label="{section_label}"]')
+    expect(section).to_be_visible()
+    metric = section.get_by_text("Trafico proxy estimado", exact=True).locator("..").locator("dd")
+    expect(metric).to_have_text("4 kB · 3 pet. observadas")
+    expect(section.get_by_text(re.compile(r"DataImpulse.*facturacion autoritativo", re.IGNORECASE))).to_be_visible()
+
+
+def _assert_proxy_traffic_database(scenario: TrafficScenario, baseline: dict, later_run: dict) -> None:
+    with SessionLocal() as db:
+        baseline_row = db.get(Run, baseline["id"])
+        later_row = db.get(Run, later_run["id"])
+        session = db.scalar(
+            select(MonitorSession).where(MonitorSession.source_id == scenario.source_id, MonitorSession.stopped_at.is_(None))
+        )
+        assert baseline_row is not None and later_row is not None and session is not None
+        assert baseline_row.runtime_metadata["opened_monitor_session_id"] == session.id
+        assert baseline_row.runtime_metadata["proxy_traffic_estimate"]["total_observed_bytes"] == 1000
+        assert later_row.monitor_session_id == session.id
+        assert later_row.runtime_metadata["proxy_traffic_estimate"]["total_observed_bytes"] == 3000
 
 
 def _assert_first_baseline_state(scenario: Scenario, run_payload: dict, cache: RedisSeenCache) -> int:

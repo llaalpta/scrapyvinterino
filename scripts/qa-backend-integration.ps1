@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "proxy-cooldown", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "proxy-cooldown", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -52,6 +52,17 @@ $PwaMonitorCommandLiveTargets = @(
 $PwaBootstrapIsolationLiveTargets = @(
     "tests/test_pwa_bootstrap_isolation_live.py::test_live_pwa_bootstrap_failures_do_not_hide_monitors"
 )
+$MonitorSessionProxyTrafficFocusedTargets = @(
+    "tests/test_monitor_proxy_traffic.py"
+)
+$MonitorSessionProxyTrafficActivationTargets = @(
+    "tests/test_manual_runs.py::test_monitor_start_api_in_manual_mode_baselines_once_and_opens_session",
+    "tests/test_manual_runs.py::test_monitor_start_api_baseline_failure_leaves_manual_monitor_inactive",
+    "tests/test_manual_runs.py::test_recurring_monitor_start_baselines_then_opens_session_with_future_deadline"
+)
+$MonitorSessionProxyTrafficLiveTargets = @(
+    "tests/test_manual_session_start_live.py::test_live_monitor_and_session_proxy_traffic_summary"
+)
 $TestTargets = @{
     "identity" = @(
         "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
@@ -87,6 +98,7 @@ $TestTargets = @{
     "manual-session-start-baseline" = @(
         "tests/test_manual_session_start_live.py::test_live_manual_session_start_baseline_lifecycle"
     )
+    "monitor-session-proxy-traffic" = @($MonitorSessionProxyTrafficLiveTargets)
     "recurring-session-start-baseline" = @(
         "tests/test_recurring_session_start_live.py::test_live_recurring_session_start_baseline_and_real_consumer",
         "tests/test_migrations.py::test_scheduler_ui_gate_migration_removes_persisted_enabled_field",
@@ -641,7 +653,7 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["WORKER_REDIS_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
-        if ($Scenario -eq "manual-session-start-baseline") {
+        if ($Scenario -in @("manual-session-start-baseline", "monitor-session-proxy-traffic")) {
             $Values["MANUAL_SESSION_QA_API_URL"] = "http://127.0.0.1:8001"
             $Values["MANUAL_SESSION_QA_PWA_URL"] = "http://127.0.0.1:5176"
             $Values["MANUAL_SESSION_QA_BROWSER_CHANNEL"] = "chrome"
@@ -791,6 +803,16 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             Invoke-PythonChecked -Label "Alembic migration" -Arguments @("-m", "alembic", "upgrade", "head")
         }
 
+        if ($Scenario -eq "monitor-session-proxy-traffic") {
+            Write-Host "Cycle $Cycle/${Repeat}: verifying proxy-traffic aggregation before live PWA startup"
+            Invoke-PythonChecked `
+                -Label "Monitor/session proxy-traffic focused contract" `
+                -Arguments (@("-m", "pytest", "-q") + $MonitorSessionProxyTrafficFocusedTargets)
+            Invoke-PythonChecked `
+                -Label "Monitor/session baseline linkage contract" `
+                -Arguments (@("-m", "pytest", "-q") + $MonitorSessionProxyTrafficActivationTargets)
+        }
+
         if ($Scenario -eq "worker-redis-availability") {
             Write-Host "Cycle $Cycle/${Repeat}: verifying worker supervisor behavior before live worker startup"
             Invoke-PythonChecked `
@@ -868,9 +890,20 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
+        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
+            if ($Scenario -eq "monitor-session-proxy-traffic") {
+                Push-Location $FrontendDir
+                try {
+                    & pnpm.cmd build
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Frontend production build failed with exit code $LASTEXITCODE."
+                    }
+                } finally {
+                    Pop-Location
+                }
+            }
             $QaStateDir = Join-Path $env:TEMP "scrapyvinterino-qa"
             New-Item -ItemType Directory -Path $QaStateDir -Force | Out-Null
             $ApiOutLog = Join-Path $QaStateDir "$Scenario-api-$Suffix.out.log"
@@ -881,11 +914,11 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
 
             $ApiApplication = "vinted_monitor.api.main:app"
             $ApiArguments = @("-m", "uvicorn", $ApiApplication, "--host", "127.0.0.1", "--port", "8001")
-            if ($Scenario -in @("manual-session-start-baseline", "recurring-session-start-baseline", "session-stop-drain")) {
+            if ($Scenario -in @("manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
                 $ProviderStateFile = Join-Path $QaStateDir "$Scenario-provider-$Suffix.json"
                 $QaTemporaryFiles = @($ProviderStateFile)
                 $env:SESSION_QA_PROVIDER_STATE = $ProviderStateFile
-                if ($Scenario -eq "manual-session-start-baseline") {
+                if ($Scenario -in @("manual-session-start-baseline", "monitor-session-proxy-traffic")) {
                     $env:MANUAL_SESSION_QA_PROVIDER_STATE = $ProviderStateFile
                 } elseif ($Scenario -eq "session-stop-drain") {
                     $env:WORKER_TASK_QUEUE_KEY = "qa:session-stop-drain:$Suffix"
@@ -910,9 +943,14 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
                 -PassThru
             Wait-HttpReady "http://127.0.0.1:8001/health" 45 $ApiProcess
 
+            $ViteCommand = if ($Scenario -eq "monitor-session-proxy-traffic") {
+                "pnpm.cmd exec vite preview --host 127.0.0.1 --port 5176 --strictPort"
+            } else {
+                "pnpm.cmd exec vite --host 127.0.0.1 --port 5176 --strictPort"
+            }
             $ViteProcess = Start-Process `
                 -FilePath "cmd.exe" `
-                -ArgumentList @("/d", "/s", "/c", "pnpm.cmd exec vite --host 127.0.0.1 --port 5176 --strictPort") `
+                -ArgumentList @("/d", "/s", "/c", $ViteCommand) `
                 -WorkingDirectory $FrontendDir `
                 -WindowStyle Hidden `
                 -RedirectStandardOutput $ViteOutLog `

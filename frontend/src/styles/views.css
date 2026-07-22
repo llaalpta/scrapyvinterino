@@ -875,6 +875,12 @@
   font-weight: 700;
 }
 
+.monitor-traffic-note {
+  margin: 0;
+  color: #697586;
+  font-size: 12px;
+}
+
 .monitor-chart {
   position: relative;
   min-width: 0;

@@ -20,7 +20,7 @@ Verification passed `46` focused cases and `1` live authenticated Playwright cas
 
 ### 14.51 accumulated and session proxy traffic
 
-Status: `planned`, independently ordered after `14.50`. The existing durable per-run transfer estimate remains diagnostic input; the product view moves consumption to the monitor and active/latest-session scopes.
+Status: `done` on `feature/14.51-monitor-session-proxy-traffic` after a positive independent audit. The existing durable per-run transfer estimate remains diagnostic input; the product view moves consumption to the monitor and active/latest-session scopes.
 
 Acceptance criteria:
 
@@ -31,6 +31,8 @@ Acceptance criteria:
 Representative integration: one controlled loopback baseline and later run traverse the live API/PostgreSQL/PWA path with known transfer observations, then stop exposes the same latest-session total. Focused negatives cover a failed baseline, response-less attempt, malformed/missing historical metadata and direct historical data. Cleanup restores initial state; no Vinted, proxy or vendor request is allowed.
 
 Excluded: vendor usage APIs, monetary estimates, historical backfill, fingerprint changes and a replacement per-run UI.
+
+Verification passed five focused aggregation cases, five activation/linkage cases, Ruff, frontend lint/build and one isolated authenticated Playwright flow through the live API/PostgreSQL/PWA path. The controlled baseline contributed `1000` bytes and the later catalog/detail run `3000`; durable rows, API, accumulated UI, active session and stopped latest session all agreed on `4000` bytes and three observed requests. Cleanup preserved operational PostgreSQL/Redis fingerprints, restored worker/watchdog and made no Vinted, proxy or vendor request. The independent audit found one B documentation mismatch (`direct` is `not_applicable`, not `not_measured`); the focused re-audit was positive after correction.
 
 ## 14.19 Worker Redis availability
 
