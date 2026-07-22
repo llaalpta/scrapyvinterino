@@ -3,6 +3,7 @@ import { ChevronDown, Eraser, ExternalLink, FileText, Pencil, Play, RefreshCw, S
 import {
   type MonitorStats,
   type MonitorStatsRange,
+  type ProxyTrafficSummary,
   type ProxyProfile,
   type Run,
   type RunEvent,
@@ -11,10 +12,10 @@ import {
   type VintedSessionUnusableReason
 } from '../../api';
 import type { CollectionLoadState } from '../../app/collectionLoadState';
-import { formatDate } from '../../utils/format';
+import { formatBytes, formatDate } from '../../utils/format';
 import { allActiveProxiesCooling, formatProxyCooldownRemaining, proxyCooldownRemainingMs } from '../../utils/proxyCooldown';
 import { eventSearchText } from '../runs/runEventSearch';
-import { RunEventEntry, RunTelemetryList } from '../runs/RunsView';
+import { RunEventEntry } from '../runs/RunsView';
 import { buildSourceDraft, filterTermLabelFromSource, sourceDraftHasChanges, type SourceDraft } from './sourceDrafts';
 
 const MonitorPerformanceChart = lazy(() => import('./MonitorPerformanceChart'));
@@ -311,23 +312,27 @@ function MonitorPerformancePanel({
   const chartDomain = chartRange ? ([chartRange.rangeStartMs, chartRange.rangeEndMs] as [number, number]) : undefined;
   const activeSessionMs = stats?.active_session ? new Date(stats.active_session.started_at).getTime() : null;
   const historical = stats?.historical_summary;
-  const hasAnySession = (historical?.sessions_count ?? 0) > 0 || Boolean(stats?.active_session ?? stats?.latest_session);
+  const hasAnyActivity = stats !== null && (
+    (historical?.sessions_count ?? 0) > 0
+    || stats.historical_proxy_traffic.state !== 'no_runs'
+    || Boolean(stats.active_session ?? stats.latest_session)
+  );
 
   return (
     <section className="monitor-performance">
       <div className="monitor-performance-heading">
         <div>
           <h4>Rendimiento del monitor</h4>
-          <span>{hasAnySession ? 'Acumulado y sesion comparable' : 'Sin sesiones registradas'}</span>
+          <span>{hasAnyActivity ? 'Acumulado y sesion comparable' : 'Sin ejecuciones registradas'}</span>
         </div>
       </div>
 
-      {hasAnySession ? (
+      {hasAnyActivity ? (
         <>
           <section className="monitor-performance-summary" aria-label="Acumulado del monitor">
             <div className="monitor-performance-subheading">
               <h5>Acumulado del monitor</h5>
-              <span>Incluye todas las sesiones{stats?.active_session ? ', incluida la activa' : ''}.</span>
+              <span>Resultados de sesiones; trafico de todas las ejecuciones del monitor.</span>
             </div>
             <dl className="monitor-accumulated-strip">
               <Metric label="Sesiones" value={String(historical?.sessions_count ?? 0)} />
@@ -336,7 +341,9 @@ function MonitorPerformancePanel({
               <Metric label="Encontrados" value={String(historical?.items_found ?? 0)} />
               <Metric label="Oportunidades" value={String(historical?.opportunities_created ?? 0)} />
               <Metric label="Fallos" value={String(historical?.failed_runs ?? 0)} />
+              <Metric label="Trafico proxy estimado" value={proxyTrafficLabel(stats?.historical_proxy_traffic ?? null)} />
             </dl>
+            <p className="monitor-traffic-note">Estimacion local. DataImpulse mantiene el dato de facturacion autoritativo.</p>
           </section>
 
           <MonitorSessionOverview source={source} stats={stats} />
@@ -408,7 +415,11 @@ function MonitorSessionOverview({ source, stats }: { source: SearchSource; stats
         <Metric label="Encontrados" value={String(summary?.items_found ?? 0)} />
         <Metric label="Oportunidades" value={String(summary?.opportunities_created ?? 0)} />
         <Metric label="Fallos" value={String(summary?.failed_runs ?? 0)} />
+        <Metric label="Trafico proxy estimado" value={proxyTrafficLabel(stats?.session_proxy_traffic ?? null)} />
       </dl>
+      <p className="monitor-traffic-note">
+        Incluye la calibracion de inicio. Estimacion local; DataImpulse mantiene el dato de facturacion autoritativo.
+      </p>
     </section>
   );
 }
@@ -420,6 +431,29 @@ function Metric({ label, value }: { label: string; value: string }) {
       <dd>{value}</dd>
     </div>
   );
+}
+
+function proxyTrafficLabel(summary: ProxyTrafficSummary | null): string {
+  if (!summary || summary.state === 'no_runs') {
+    return 'Sin ejecuciones';
+  }
+  if (summary.state === 'not_applicable') {
+    return 'No aplica';
+  }
+  if (summary.state === 'not_measured') {
+    return 'No medido';
+  }
+  if (summary.total_observed_bytes === null || summary.observed_requests === null) {
+    return 'Parcial, sin cifra fiable';
+  }
+  const requests = `${summary.observed_requests} pet. observada${summary.observed_requests === 1 ? '' : 's'}`;
+  if (summary.state === 'measured') {
+    return `${formatBytes(summary.total_observed_bytes)} · ${requests}`;
+  }
+  const unobserved = summary.unobserved_attempts
+    ? ` · ${summary.unobserved_attempts} sin medir`
+    : '';
+  return `${formatBytes(summary.total_observed_bytes)} · ${requests}${unobserved} (parcial)`;
 }
 
 function MonitorEventTimeline({
@@ -967,20 +1001,6 @@ function MonitorDetail({
         stats={stats}
         onRangeChange={(range) => onLoadMonitorStats(source.id, range)}
       />
-
-      <section className="monitor-performance monitor-run-telemetry" aria-label="Tiempo y trafico por ejecucion">
-        <div className="monitor-performance-heading">
-          <div>
-            <h4>Tiempo y trafico por ejecucion</h4>
-            <span>Estimacion local de las cinco ejecuciones mas recientes.</span>
-          </div>
-        </div>
-        <RunTelemetryList
-          emptyText="Sin ejecuciones registradas."
-          getSourceName={() => source.name}
-          runs={monitorRuns.slice(0, 5)}
-        />
-      </section>
 
       <PreparedSessionsPanel key={`contexts-${source.id}`} sessions={source.prepared_sessions} />
 

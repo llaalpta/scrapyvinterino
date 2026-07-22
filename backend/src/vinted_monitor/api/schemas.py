@@ -364,6 +364,14 @@ class MonitorSummaryRead(BaseModel):
     opportunities_created: int
 
 
+class ProxyTrafficSummaryRead(BaseModel):
+    state: Literal["no_runs", "not_applicable", "not_measured", "measured", "partial"]
+    runs_count: int
+    observed_requests: int | None
+    unobserved_attempts: int | None
+    total_observed_bytes: int | None
+
+
 class MonitorSessionRead(BaseModel):
     id: int
     started_at: datetime
@@ -382,6 +390,8 @@ class MonitorStatsRead(BaseModel):
     latest_session: MonitorSessionRead | None
     session_summary: MonitorSummaryRead
     historical_summary: MonitorSummaryRead
+    session_proxy_traffic: ProxyTrafficSummaryRead
+    historical_proxy_traffic: ProxyTrafficSummaryRead
     chart_points: list[MonitorChartPointRead]
 
 

@@ -28,3 +28,17 @@ export function formatDate(value: string): string {
     timeStyle: 'medium'
   }).format(new Date(value));
 }
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) {
+    return `${Math.round(bytes)} B`;
+  }
+  const units = ['kB', 'MB', 'GB'];
+  let value = bytes / 1000;
+  let unitIndex = 0;
+  while (value >= 1000 && unitIndex < units.length - 1) {
+    value /= 1000;
+    unitIndex += 1;
+  }
+  return `${value.toLocaleString('es-ES', { maximumFractionDigits: value < 10 ? 2 : 1 })} ${units[unitIndex]}`;
+}

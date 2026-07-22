@@ -1,9 +1,7 @@
 import { FileText, RefreshCw } from 'lucide-react';
 import type { Run, RunEvent } from '../../api';
-import { formatDate } from '../../utils/format';
+import { formatBytes, formatDate } from '../../utils/format';
 import { type RunActivityController, useRunActivity } from './runActivity';
-
-const noRunEvents = async (): Promise<RunEvent[]> => [];
 
 export function RunsView({
   getSourceName,
@@ -24,30 +22,6 @@ export function RunsView({
       </div>
       <RunActivityList activity={activity} getSourceName={getSourceName} runs={runs} />
     </section>
-  );
-}
-
-export function RunTelemetryList({
-  emptyText = 'Sin ejecuciones registradas.',
-  getSourceName,
-  runs,
-  variant = 'inline'
-}: {
-  emptyText?: string;
-  getSourceName: (sourceId: number) => string;
-  runs: Run[];
-  variant?: 'cards' | 'inline';
-}) {
-  const activity = useRunActivity(runs, noRunEvents);
-  return (
-    <RunActivityList
-      activity={activity}
-      emptyText={emptyText}
-      getSourceName={getSourceName}
-      runs={runs}
-      showLogs={false}
-      variant={variant}
-    />
   );
 }
 
@@ -1128,20 +1102,6 @@ function optionalNumberValue(value: unknown): number | null {
 
 function numberValue(value: unknown): number {
   return optionalNumberValue(value) ?? 0;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1000) {
-    return `${Math.round(bytes)} B`;
-  }
-  const units = ['kB', 'MB', 'GB'];
-  let value = bytes / 1000;
-  let unitIndex = 0;
-  while (value >= 1000 && unitIndex < units.length - 1) {
-    value /= 1000;
-    unitIndex += 1;
-  }
-  return `${value.toLocaleString('es-ES', { maximumFractionDigits: value < 10 ? 2 : 1 })} ${units[unitIndex]}`;
 }
 
 function formatMilliseconds(milliseconds: number): string {

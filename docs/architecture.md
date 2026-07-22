@@ -96,6 +96,7 @@ PWA Iniciar sesion -> POST /api/monitors/{id}/start
   -> Run(trigger=baseline, session_id=null, running)
   -> proveedor/catalogo + Redis mark_seen/mark_baseline
   -> mismo commit SQL terminal: baseline success + source active + next_run_at=null + MonitorSession abierta
+     + baseline.runtime_metadata.opened_monitor_session_id
   -> fallo operacional: Run failed + source inactiva + ninguna MonitorSession
 
 PWA Ejecutar ahora -> POST /api/monitors/{id}/runs
@@ -123,7 +124,7 @@ PWA Iniciar sesion -> POST /api/monitors/{id}/start
   -> Run(trigger=baseline, session_id=null) mientras source sigue inactiva
   -> proveedor/catalogo + Redis mark_seen/mark_baseline; nunca crea oportunidades
   -> segunda admision serializada
-     -> exito: mismo commit SQL terminal abre MonitorSession, activa source y fija next_run_at futuro
+     -> exito: mismo commit SQL terminal abre MonitorSession, enlaza su ID en el baseline, activa source y fija next_run_at futuro
      -> 503/409: confirma solo el baseline success; source/sesion/deadline siguen ausentes
 
 SchedulerRunner al vencer next_run_at
@@ -135,6 +136,8 @@ PWA Detener sesion sigue el mismo drain que manual
   -> el commit inactivo impide nuevas admisiones y deadlines antes de cancelar ready best-effort
   -> los runs ya admitidos terminan sin cancelacion de red; el ultimo terminal normal cierra MonitorSession
 ```
+
+Las estadisticas mantienen dos conjuntos distintos. Contadores de negocio y grafica excluyen baseline y diagnosticos; el trafico acumulado agrega todos los runs del monitor, incluso fallidos. El trafico de sesion usa la FK de los runs posteriores y exactamente un baseline `success/session_start` cuyo `opened_monitor_session_id` coincide. Si ese enlace historico falta o es contradictorio, el read model devuelve `partial` y no infiere una calibracion por proximidad temporal.
 
 El commit HTTP es el limite del comando, no el de las recargas posteriores de la PWA. Un mutex inmediato respaldado por `ref` admite un solo comando de monitor por instancia PWA, antes del primer `await`; el estado renderizado deshabilita a la vez el alta y todas las mutaciones de detalle. Alta, inicio, run, diagnosticos y archivo aplican primero la respuesta confirmada y distinguen despues cualquier lectura derivada incompleta; stop conserva su aviso especifico equivalente. Las lecturas de la lista de fuentes llevan una generacion monotona y cada `201`/`204` que cambia su conjunto la invalida antes de añadir o retirar el ID, por lo que un snapshot anterior no puede ocultarlo o reinsertarlo. Esta exclusion es local a una instancia, no un lock entre pestañas o clientes API. Al montar el dashboard, monitores, oportunidades, runs y proxies aplican sus respuestas iniciales por separado; un fallo enumera solo su superficie y no retiene los resultados validos de las demas.
 

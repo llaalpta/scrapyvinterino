@@ -51,7 +51,12 @@ from vinted_monitor.services.items import (
     build_transient_catalog_item,
     get_or_persist_catalog_item,
 )
-from vinted_monitor.services.monitor_sessions import get_active_monitor_session, start_monitor_session, stop_active_monitor_session
+from vinted_monitor.services.monitor_sessions import (
+    OPENED_MONITOR_SESSION_ID_KEY,
+    get_active_monitor_session,
+    start_monitor_session,
+    stop_active_monitor_session,
+)
 from vinted_monitor.services.proxies import (
     ProxyProfileEligibilityError,
     lock_and_revalidate_proxy_selection,
@@ -494,6 +499,10 @@ def execute_monitor_baseline(
                     source.id,
                     commit=False,
                 )
+                opened_session = get_active_monitor_session(db, source.id)
+                if opened_session is None:
+                    raise RuntimeError("Monitor activation did not open a session")
+                _merge_run_metadata(run, {OPENED_MONITOR_SESSION_ID_KEY: opened_session.id})
         record_run_event(
             db,
             run_id=run.id,
