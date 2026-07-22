@@ -8,12 +8,12 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from urllib.parse import quote
 
+from cryptography.fernet import InvalidToken
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import Settings, get_settings, validate_proxy_sticky_username_template
 from vinted_monitor.core.crypto import decrypt_text, encrypt_text, fingerprint_text, mask_text
-from vinted_monitor.core.redaction import redact_sensitive_text
 from vinted_monitor.db.models import ProxyProfile
 
 PROXY_KINDS = {"own", "datacenter", "residential"}
@@ -53,9 +53,6 @@ class ProxyPublicFields:
     cooldown_until: datetime | None
     failure_count: int
     last_used_at: datetime | None
-    last_test_status: str | None
-    last_test_ip: str | None
-    last_test_error: str | None
 
 
 @dataclass(frozen=True)
@@ -147,6 +144,7 @@ def create_proxy_profile(
         is_active=is_active,
         identity_generation=1,
     )
+    _validate_complete_proxy_configuration(profile, settings)
     profile.identity_fingerprint = effective_proxy_identity_fingerprint(profile, settings)
     db.add(profile)
     db.commit()
@@ -204,6 +202,8 @@ def update_proxy_profile(
         profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
         profile.is_active = is_active
+    if profile.is_active:
+        _validate_complete_proxy_configuration(profile, settings)
     synchronize_proxy_identity(db, profile, settings)
     db.commit()
     db.refresh(profile)
@@ -252,22 +252,6 @@ def mark_proxy_challenge_detected(db: Session, profile_id: int | None, *, penalt
     profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=max(backoff, 1))
 
 
-def mark_proxy_test_result(db: Session, profile_id: int, *, status: str, ip: str | None = None, error: str | None = None) -> ProxyProfile:
-    profile = db.get(ProxyProfile, profile_id)
-    if profile is None:
-        raise ProxyProfileNotFoundError(f"Proxy profile {profile_id} does not exist")
-    profile.last_test_status = status
-    profile.last_test_ip = ip
-    profile.last_test_error = redact_sensitive_text(error) if error else None
-    if status == "success":
-        profile.failure_count = 0
-        profile.cooldown_until = None
-    profile.updated_at = datetime.now(UTC)
-    db.commit()
-    db.refresh(profile)
-    return profile
-
-
 def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = None) -> ProxyPublicFields:
     settings = settings or get_settings()
     password = _decrypt_password(profile, settings) if profile.password_encrypted else None
@@ -292,9 +276,6 @@ def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = 
         cooldown_until=profile.cooldown_until,
         failure_count=profile.failure_count,
         last_used_at=profile.last_used_at,
-        last_test_status=profile.last_test_status,
-        last_test_ip=profile.last_test_ip,
-        last_test_error=profile.last_test_error,
     )
 
 
@@ -505,10 +486,7 @@ def _validate_proxy_profile_eligibility(
     now: datetime | None = None,
 ) -> None:
     current_time = now or datetime.now(UTC)
-    try:
-        validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
-    except ValueError as exc:
-        raise ProxyProfileEligibilityError("Proxy sticky username template is invalid") from exc
+    _validate_complete_proxy_configuration(profile, settings)
     if not profile.is_active:
         raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} is inactive")
     if profile.cooldown_until is not None and profile.cooldown_until > current_time:
@@ -535,6 +513,33 @@ def _validate_proxy_profile_eligibility(
     )
     if actual_context != canonical_context:
         raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} has a non-canonical country context preset")
+
+
+def _validate_complete_proxy_configuration(profile: ProxyProfile, settings: Settings) -> None:
+    try:
+        _validate_host(profile.host)
+        _validate_port(profile.port)
+    except ValueError as exc:
+        raise ProxyProfileEligibilityError("Proxy transport configuration is invalid") from exc
+    try:
+        validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
+    except ValueError as exc:
+        raise ProxyProfileEligibilityError("Proxy sticky username template is invalid") from exc
+    if not profile.username or not profile.username.strip():
+        raise ProxyProfileEligibilityError("Proxy username is required")
+    if not profile.password_encrypted:
+        raise ProxyProfileEligibilityError("Proxy password is required")
+    try:
+        password = _decrypt_password(profile, settings)
+    except (InvalidToken, ValueError) as exc:
+        raise ProxyProfileEligibilityError("Proxy password cannot be decrypted") from exc
+    if not password:
+        raise ProxyProfileEligibilityError("Proxy password is required")
+    target_country_code = settings.vinted_target_country_code.strip().upper()
+    if profile.country_code != target_country_code:
+        raise ProxyProfileEligibilityError(
+            f"Proxy profile country must match target country {target_country_code}"
+        )
 
 
 def _encrypt_password(password: str, settings: Settings) -> str:

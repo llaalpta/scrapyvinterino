@@ -4,6 +4,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -49,6 +50,9 @@ class Scenario:
     source_name: str
     failure_source_id: int
     failure_source_name: str
+    proxy_id: int
+    incomplete_proxy_id: int
+    incomplete_proxy_name: str
     item_ids: dict[str, str]
 
 
@@ -177,17 +181,47 @@ def _exercise_live_stack(
                 stopped = db.get(MonitorSession, second_session_id)
                 assert stopped is not None and stopped.stopped_at is not None and stopped.stop_reason == "stopped"
 
-            _write_state(state_path, mode="fail", ids=[], delay_ms=800)
+            _write_state(state_path, mode="challenge", ids=[], delay_ms=800)
             _select_monitor(page, scenario.failure_source_name, active=False)
-            failed_baseline = _start_session(page, scenario.failure_source_id, assert_busy=True)
+            stream_count = _stream_request_count(seen_urls)
+            start_count = _start_request_count(seen_urls, scenario.failure_source_id)
+            failed_baseline = _start_session_without_controller(page, scenario.failure_source_id)
             _assert_run(failed_baseline, trigger="baseline", status="failed", found=0, opportunities=0)
             assert failed_baseline["monitor_session_id"] is None
-            assert "QA catalog provider forced failure" in (failed_baseline["error_message"] or "")
-            expect(page.locator(".notice")).to_contain_text("QA catalog provider forced failure")
+            assert "QA controlled Cloudflare challenge" in (failed_baseline["error_message"] or "")
+            expect(page.get_by_text(re.compile(r"Cooldown.*proxy|proxy.*cooldown", re.IGNORECASE))).to_be_visible(
+                timeout=10_000
+            )
+            assert _stream_request_count(seen_urls) == stream_count
+            assert _start_request_count(seen_urls, scenario.failure_source_id) == start_count + 1
+            blocked_start = page.get_by_role("button", name=re.compile(r"^(Iniciar|Reintentar) sesion$"))
+            expect(blocked_start).to_be_disabled()
+            blocked_start.click(force=True)
+            page.wait_for_timeout(300)
+            assert _start_request_count(seen_urls, scenario.failure_source_id) == start_count + 1
             expect(
                 page.get_by_role("button", name=f"{scenario.failure_source_name}, inactivo", exact=True)
             ).to_be_visible()
             _assert_failed_baseline_state(scenario, failed_baseline)
+
+            page.get_by_role("button", name="Ajustes", exact=True).click()
+            expect(page.get_by_role("button", name="Test IP", exact=True)).to_have_count(0)
+            expect(page.get_by_text(re.compile(r"Cooldown activo", re.IGNORECASE))).to_be_visible()
+            incomplete_row = page.locator("article.proxy-row").filter(has_text=scenario.incomplete_proxy_name)
+            incomplete_row.get_by_role("button", name="Activar", exact=True).click()
+            expect(page.locator(".notice")).to_contain_text(re.compile(r"username.*required", re.IGNORECASE), timeout=5_000)
+            _assert_incomplete_proxy_still_inactive(scenario)
+
+            _move_cooldown_to_near_expiry(scenario.proxy_id)
+            page.reload(wait_until="domcontentloaded")
+            page.get_by_role("button", name="Monitores", exact=True).click()
+            _select_monitor(page, scenario.failure_source_name, active=False)
+            retry_button = page.get_by_role("button", name="Reintentar sesion", exact=True)
+            expect(retry_button).to_be_enabled(timeout=8_000)
+            _write_state(state_path, mode="ok", ids=[])
+            retried_baseline = _start_session(page, scenario.failure_source_id)
+            _assert_run(retried_baseline, trigger="baseline", status="success", found=0, opportunities=0)
+            _assert_retry_cleared_cooldown(scenario, failed_baseline, retried_baseline)
         finally:
             context.close()
             browser.close()
@@ -201,17 +235,36 @@ def _seed(token: str) -> Scenario:
     failure_source_name = f"qa manual failure {token}"
     with SessionLocal() as db:
         create_local_user(db, email=email, password=PASSWORD)
-        create_proxy_profile(
+        proxy = create_proxy_profile(
             db,
             name=f"qa manual proxy {token}",
             scheme="http",
             kind="residential",
             host="proxy.invalid",
             port=8080,
-            username=None,
-            password=None,
+            username="qa-user",
+            password="qa-password",
             country_code="ES",
         )
+        incomplete_proxy = ProxyProfile(
+            name=f"qa manual proxy {token} incomplete",
+            scheme="http",
+            kind="residential",
+            host="proxy.invalid",
+            port=8081,
+            username=None,
+            password_encrypted=None,
+            country_code="ES",
+            locale="es-ES",
+            accept_language="en-GB,en;q=0.9",
+            screen="1920x1080",
+            vinted_screen="catalog",
+            max_concurrent_runs=1,
+            is_active=False,
+            identity_generation=1,
+        )
+        db.add(incomplete_proxy)
+        db.flush()
         source = create_source(
             db,
             source_name,
@@ -229,6 +282,9 @@ def _seed(token: str) -> Scenario:
             source_name=source.name,
             failure_source_id=failure_source.id,
             failure_source_name=failure_source.name,
+            proxy_id=proxy.id,
+            incomplete_proxy_id=incomplete_proxy.id,
+            incomplete_proxy_name=incomplete_proxy.name,
             item_ids={letter: f"qa-manual-{token}-{letter}" for letter in "ABCDE"},
         )
 
@@ -248,18 +304,45 @@ def _select_monitor(page: Page, name: str, *, active: bool) -> None:
     row = page.get_by_role("button", name=f"{name}, {status}", exact=True)
     expect(row).to_be_visible()
     row.click()
-    expect(page.locator(".monitor-detail-content").get_by_text(name, exact=True)).to_be_visible()
+    expect(page.locator(".monitor-detail-content").get_by_role("heading", name=name, exact=True)).to_be_visible()
 
 
 def _start_session(page: Page, source_id: int, *, assert_busy: bool = False) -> dict:
     path = f"/api/monitors/{source_id}/start"
     with page.expect_response(lambda response: response.request.method == "POST" and urlsplit(response.url).path == path) as info:
-        page.get_by_role("button", name="Iniciar sesion", exact=True).click()
+        page.get_by_role("button", name=re.compile(r"^(Iniciar|Reintentar) sesion$")).click()
         if assert_busy:
             expect(page.get_by_role("button", name="Iniciando...", exact=True)).to_be_disabled()
             expect(page.get_by_role("button", name="Preparar sesion", exact=True)).to_have_count(0)
             expect(page.get_by_role("button", name="Probar detalle", exact=True)).to_have_count(0)
     return _response_json(info.value, path)
+
+
+def _start_session_without_controller(page: Page, source_id: int) -> dict:
+    path = f"/api/monitors/{source_id}/start"
+    result = page.evaluate(
+        """async (path) => {
+          const session = await fetch('/api/auth/session', { credentials: 'same-origin' }).then((response) => response.json());
+          const response = await fetch(path, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': session.csrf_token }
+          });
+          return { status: response.status, body: await response.json() };
+        }""",
+        path,
+    )
+    assert result["status"] == 201, f"POST {path} returned HTTP {result['status']}"
+    return result["body"]
+
+
+def _stream_request_count(urls: list[str]) -> int:
+    return sum(urlsplit(url).path == "/api/monitors/events/stream" for url in urls)
+
+
+def _start_request_count(urls: list[str], source_id: int) -> int:
+    path = f"/api/monitors/{source_id}/start"
+    return sum(urlsplit(url).path == path for url in urls)
 
 
 def _run_now(page: Page, source_id: int, *, assert_busy: bool = False) -> dict:
@@ -306,9 +389,8 @@ def _assert_active_manual_ui(page: Page, source_name: str) -> None:
     expect(page.get_by_role("button", name="Detener sesion", exact=True)).to_be_enabled()
     assert page.get_by_role("button", name="Iniciar sesion", exact=True).count() == 0
     assert page.get_by_role("button", name="Recalibrar listado inicial", exact=True).count() == 0
-    config_controls = page.locator(".monitor-config-editor input, .monitor-config-editor select, .monitor-config-editor textarea")
-    assert config_controls.count() > 0
-    assert all(config_controls.nth(index).is_disabled() for index in range(config_controls.count()))
+    expect(page.locator(".monitor-config-editor")).to_have_count(0)
+    expect(page.get_by_role("button", name="Modificar", exact=True)).to_have_count(0)
 
 
 def _assert_honest_metrics_ui(page: Page, *, found: int, opportunities: int) -> None:
@@ -390,13 +472,41 @@ def _assert_failed_baseline_state(scenario: Scenario, run_payload: dict) -> None
     with SessionLocal() as db:
         source = db.get(SearchSource, scenario.failure_source_id)
         run = db.get(Run, run_payload["id"])
+        proxy = db.get(ProxyProfile, scenario.proxy_id)
         assert source is not None and source.is_active is False
         assert source.monitor_started_at is None and source.monitor_until is None and source.next_run_at is None
         assert run is not None and run.status == "failed" and run.monitor_session_id is None
+        assert run.runtime_metadata["failure_kind"] == "cloudflare_challenge"
+        assert proxy is not None and proxy.failure_count == 1
+        assert proxy.cooldown_until is not None and proxy.cooldown_until > datetime.now(UTC)
         assert db.scalar(
             select(func.count()).select_from(MonitorSession).where(MonitorSession.source_id == scenario.failure_source_id)
         ) == 0
         assert db.scalar(select(func.count()).select_from(ErrorLog).where(ErrorLog.run_id == run.id)) == 1
+
+
+def _assert_incomplete_proxy_still_inactive(scenario: Scenario) -> None:
+    with SessionLocal() as db:
+        profile = db.get(ProxyProfile, scenario.incomplete_proxy_id)
+        assert profile is not None and profile.is_active is False
+
+
+def _move_cooldown_to_near_expiry(proxy_id: int) -> None:
+    with SessionLocal() as db:
+        profile = db.get(ProxyProfile, proxy_id)
+        assert profile is not None and profile.cooldown_until is not None
+        profile.cooldown_until = datetime.now(UTC) + timedelta(seconds=3)
+        db.commit()
+
+
+def _assert_retry_cleared_cooldown(scenario: Scenario, failed_run: dict, retried_run: dict) -> None:
+    with SessionLocal() as db:
+        failed = db.get(Run, failed_run["id"])
+        retried = db.get(Run, retried_run["id"])
+        proxy = db.get(ProxyProfile, scenario.proxy_id)
+        assert failed is not None and retried is not None and proxy is not None
+        assert failed.runtime_metadata["proxy_profile_id"] == retried.runtime_metadata["proxy_profile_id"] == proxy.id
+        assert proxy.failure_count == 0 and proxy.cooldown_until is None
 
 
 def _baseline_key(source_id: int) -> str:
@@ -451,7 +561,7 @@ def _cleanup(token: str, cache: RedisSeenCache) -> None:
             db.execute(delete(VintedSession).where(VintedSession.source_id.in_(source_ids)))
             db.execute(delete(MonitorSession).where(MonitorSession.source_id.in_(source_ids)))
             db.execute(delete(SearchSource).where(SearchSource.id.in_(source_ids)))
-        db.execute(delete(ProxyProfile).where(ProxyProfile.name == f"qa manual proxy {token}"))
+        db.execute(delete(ProxyProfile).where(ProxyProfile.name.like(f"qa manual proxy {token}%")))
         db.execute(delete(Item).where(Item.vinted_item_id.like(f"qa-manual-{token}-%")))
         user_id = db.scalar(select(User.id).where(User.email == f"qa-manual-session-{token}@example.local"))
         db.execute(delete(UserSession))

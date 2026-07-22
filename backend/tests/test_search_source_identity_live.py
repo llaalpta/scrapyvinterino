@@ -86,8 +86,8 @@ def _seed() -> Scenario:
             scheme="http",
             host="127.0.0.1",
             port=9,
-            username=None,
-            password=None,
+            username="qa-user",
+            password="qa-password",
             country_code="ES",
             settings=settings,
         )

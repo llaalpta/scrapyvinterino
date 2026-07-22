@@ -81,7 +81,7 @@ def unreadable_rows():
             db.flush()
             proxy = create_proxy_profile(
                 db, name=f"{prefix} proxy", scheme="http", kind="residential", host="proxy.example", port=8910,
-                username=None, password=None, country_code="ES", settings=settings,
+                username="customer", password="test-password", country_code="ES", settings=settings,
             )
             profile = profile_for_impersonate(settings.curl_impersonate_browser)
             rows = []

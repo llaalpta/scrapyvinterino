@@ -37,3 +37,11 @@ def test_proxy_only_catalog_migration_removes_persisted_direct_fields() -> None:
 
     assert "value - 'allow_direct_without_proxy' - 'direct_max_concurrent_runs'" in migration
     assert "WHERE key = 'scheduler'" in migration
+
+
+def test_proxy_test_telemetry_migration_drops_obsolete_columns() -> None:
+    migration = (BACKEND_ROOT / "alembic/versions/0023_remove_proxy_test_telemetry.py").read_text(encoding="utf-8")
+
+    assert 'op.drop_column("proxy_profiles", "last_test_status")' in migration
+    assert 'op.drop_column("proxy_profiles", "last_test_ip")' in migration
+    assert 'op.drop_column("proxy_profiles", "last_test_error")' in migration

@@ -14,7 +14,6 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 Keep no more than five independently valuable tasks here.
 
-- `14.50` Honest proxy settings and visible cooldown: remove the independent IP test, validate local sticky configuration and expose cooldown/retry state in Monitors.
 - `14.51` Monitor/session proxy traffic: move estimated consumption into accumulated and active/latest-session summaries and remove the five-run panel.
 
 ## Next

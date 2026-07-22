@@ -398,6 +398,24 @@ def execute_monitor_baseline(
                 db.flush()
             proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
             _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+        except (
+            DataDomeChallengeError,
+            VintedCatalogChallengeError,
+            VintedCatalogRateLimitError,
+            VintedCatalogSessionContextError,
+            VintedCatalogSessionError,
+        ) as exc:
+            failed_run = _record_failed_run(
+                db,
+                run,
+                source,
+                exc,
+                kind=_catalog_terminal_failure_kind(exc),
+                penalize_proxy=False,
+            )
+            if run_provider is not None:
+                _close_owned_provider(run_provider, owned_provider=owned_provider)
+            return failed_run
         except Exception as exc:
             failed_run = _record_failed_run(
                 db,
@@ -518,6 +536,23 @@ def execute_monitor_baseline(
     except (SchedulerCapacityError, SchedulerUnavailableError):
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         raise
+    except (
+        DataDomeChallengeError,
+        VintedCatalogChallengeError,
+        VintedCatalogRateLimitError,
+        VintedCatalogSessionContextError,
+        VintedCatalogSessionError,
+    ) as exc:
+        failed_run = _record_failed_run(
+            db,
+            run,
+            source,
+            exc,
+            kind=_catalog_terminal_failure_kind(exc),
+            penalize_proxy=False,
+        )
+        _close_owned_provider(run_provider, owned_provider=owned_provider)
+        return failed_run
     except Exception as exc:
         failed_run = _record_failed_run(
             db,
