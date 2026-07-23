@@ -1195,9 +1195,14 @@ function DiscardSourceEditDialog({
 function PreparedSessionsPanel({ sessions }: { sessions: VintedSession[] }) {
   const usableCount = sessions.filter((session) => session.usable_now).length;
   const contextLabel = sessions.length === 1 ? ` · ${preparedSessionSummary(sessions[0])}` : '';
+  const availabilityLabel = sessions.length === 1
+    ? sessions[0].usable_now
+      ? '1 contexto listo'
+      : '1 contexto no reutilizable'
+    : `${usableCount} de ${sessions.length} contextos listos`;
   const summaryLabel = sessions.length === 0
     ? 'Sin contexto'
-    : `${usableCount}/${sessions.length} reutilizable${sessions.length === 1 ? '' : 's'}${contextLabel}`;
+    : `${availabilityLabel}${contextLabel}`;
 
   return (
     <details
