@@ -2,7 +2,7 @@
 
 Fecha de observacion inicial: 2026-07-02.
 
-Ultima actualizacion: 2026-07-12.
+Ultima actualizacion: 2026-07-24.
 
 ## Evidencia del documento de detalle
 
@@ -192,6 +192,16 @@ Vinted usa DataDome como WAF. DataDome analiza multiples capas de la conexion:
 - **Timing**: un bot hace bootstrap + catalogo en <50ms. Un humano tarda 1-4 segundos. DataDome correlaciona latencia con trust score.
 - **Cookie datadome**: DataDome emite una cookie `datadome` cuyo valor codifica un trust score. Si se pierde o manipula, DataDome puede servir un challenge.
 - **IP reputation**: DataDome mantiene bases de datos de reputacion por IP. IPs de datacenter son mas sospechosas que residenciales.
+
+### Contrato sticky de DataImpulse
+
+Observacion documental: 2026-07-24. Fuentes oficiales: [Session ID](https://docs.dataimpulse.com/proxies/parameters/session-id), [Session Interval](https://docs.dataimpulse.com/proxies/parameters/session-interval), [Protocols](https://docs.dataimpulse.com/proxies/protocols), [Types of connections](https://docs.dataimpulse.com/proxies/types-of-connections) y [User API](https://documenter.getpostman.com/view/7041120/2sAY4rGRZC).
+
+- El puerto HTTP/HTTPS `823` es rotatorio por peticion cuando el username no incorpora afinidad. El parametro `sessid.<valor>` en ese mismo username selecciona una IP durante aproximadamente 30 minutos; el ID puede ser cualquier string o numero y no requiere una llamada API para crear la afinidad.
+- La documentacion de `sessttl` usa conexiones sticky por puerto, con ejemplos en `10000`. No documenta que `sessttl` y `sessid` puedan combinarse sobre `823`, por lo que runtime no debe asumir esa compatibilidad.
+- `GET /api/rotate_ip` resetea una asignacion sticky por puerto o `sessid` y exige al menos 30 segundos entre resets de la misma sesion. No promete que el siguiente peer fisico sea distinto. Un ID nuevo mas una observacion neutral de egress es un contrato mas simple y verificable para el producto actual.
+- `GET /api/list` devuelve conexiones formateadas y admite cantidad, tipo y TTL. Varias lineas del gateway/cuenta no equivalen a varios proveedores independientes; el fallback de la app requiere perfiles configurados de forma explicita.
+- El programa planificado 14.54 fija 25 minutos como margen local para el perfil DataImpulse, conserva el monitor mas alla de ese TTL, evita integrar `rotate_ip` y rechaza una rotacion observada hacia la misma IP antes de volver a Vinted.
 
 ### Bypass implementado
 

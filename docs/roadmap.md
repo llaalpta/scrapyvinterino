@@ -8,15 +8,22 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 - Manual maintenance, service restart and session relaunch from the PWA are acceptable.
 - Failures must be visible and must not create hidden fallbacks or retry loops.
 - Existing queue recovery remains best-effort; exactly-once crash recovery is not a product requirement.
-- The current block ends when normal catalog traffic is proxy-only, cooldown/retry state is honest and proxy consumption is visible at monitor/session scope. Notifications and production 24/7 hardening remain separate.
+- The current block ends when normal catalog traffic is proxy-only, sticky lifetime matches the configured provider, bounded challenge recovery is honest and proxy consumption is visible at monitor/session scope. Notifications and production 24/7 hardening remain separate.
 
 ## Now
 
-No implementation task is currently authorized. Starting the next outcome requires a separate explicit product decision.
+Program `14.54` is planned and must be completed in order. This planning merge does not authorize an implementation task; starting `14.54.1` requires a separate explicit confirmation.
+
+| Item | Status | Outcome | Dependency |
+| --- | --- | --- | --- |
+| 14.54.1 | planned | Move sticky username format and maximum lifetime to each proxy profile; DataImpulse uses `sessid` with a 25-minute local limit, while the monitor session remains independent. | None |
+| 14.54.2 | planned | Before candidates are accepted, give the selected profile at most its current/initial attempt plus one fresh sticky, verify forced egress rotation and cool it once if both attempts fail. | 14.54.1 merged |
+| 14.54.3 | planned | Reassign an exhausted run to the next eligible proxy profile through one capacity-checked PostgreSQL handoff that makes the durable run binding authoritative over its stale queue payload. | 14.54.2 merged |
+| 14.54.4 | planned | Let an explicit PWA retry target one cooling profile for one fresh-sticky attempt without clearing cooldown in advance. | 14.54.3 merged |
 
 ## Next
 
-Telegram opportunity alerts (`15.1`) follow the proxy trust and traffic block, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
+Telegram opportunity alerts (`15.1`) follow `14.54` and manual acceptance of the proxy/session behavior, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
 
 ## Conditional hardening
 

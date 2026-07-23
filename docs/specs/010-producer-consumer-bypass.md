@@ -2,6 +2,17 @@
 
 Roadmap items 14.34.1 and 14.34.2 moved manual and recurring calibration into session start and removed the temporary public baseline surface. Item 14.34.3 makes stop PostgreSQL-first and drains session-owned runs without hard cancellation.
 
+## Planned 14.54 sticky lifecycle and bounded recovery
+
+Status: planned as four standard slices; `docs/specs/008-scheduler.md` owns their acceptance scenarios and external-traffic allowances. Until each slice merges, the current global sticky template and first classified-failure fail-stop clauses in this spec remain authoritative.
+
+- `14.54.1` moves sticky username format and TTL to `proxy_profiles`, includes both in effective identity and expires prepared context at the earlier global-context/profile-sticky deadline. DataImpulse is backfilled as `{username};sessid.{session_id}` with a 25-minute local limit; monitor-session duration and the existing completed-run use budget remain independent.
+- `14.54.2` permits at most the current/initial attempt plus one fresh sticky on the selected profile before candidate acceptance. A forced sticky performs a non-cached proxied egress diagnostic and cannot call Vinted when it resolves to the known rejected IP. An exhausted profile receives one cooldown transition and this slice terminates the run; `429`, local dependency/configuration/identity failures and all post-candidate work remain outside replay.
+- `14.54.3` adds a serialized, capacity-checked PostgreSQL handoff from exhausted profile A to eligible profile B. The run's durable profile/generation binding becomes authoritative before B provider construction; the stale Redis payload remains initial-admission input only, and scheduler accounting deduplicates it by task ID. B is revalidated under its identity fence before traffic, with zero provider construction if capacity or identity changed.
+- `14.54.4` adds one explicit authenticated retry endpoint and PWA action for an inactive failed start. It targets exactly one selected cooling profile and one fresh sticky without clearing cooldown first or entering automatic fallback.
+
+No slice calls a vendor rotation API, persists full sticky IDs in public/event data, retries detail work, changes Redis delivery, or creates more than one terminal run per command. Architecture, interface and lifecycle clauses below are updated from planned to current only when their owning implementation merges.
+
 ## 14.49 proxy-only catalog egress
 
 Status: `done`. This standard prerequisite makes the proxy requirement an invariant of normal monitor execution; explicit development scripts may still construct a direct diagnostic client outside the PWA, monitor API and queue.
