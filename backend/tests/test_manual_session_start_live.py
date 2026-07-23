@@ -240,7 +240,9 @@ def _exercise_proxy_traffic_live_stack(
             contexts.locator("summary").click()
             expect(contexts.get_by_text(re.compile(r"Cada uso.*no una peticion HTTP", re.IGNORECASE))).to_be_visible()
             expect(contexts.get_by_text("El contexto ha expirado.", exact=True)).to_be_visible(timeout=12_000)
-            expect(contexts.locator("summary")).to_contain_text(re.compile(r"\d+/50 usos · caduco"))
+            expect(contexts.locator("summary")).to_contain_text(
+                re.compile(r"1 contexto no reutilizable · \d+/50 usos · caduco")
+            )
             _mark_proxy_traffic_partial(baseline["id"])
             page.set_viewport_size({"width": 390, "height": 844})
             page.reload(wait_until="domcontentloaded")
@@ -733,7 +735,7 @@ def _assert_compact_monitor_activity(page: Page, *, business_activity: bool) -> 
     expect(contexts).to_be_visible()
     expect(contexts).not_to_have_attribute("open", "")
     expect(contexts.locator("summary")).to_contain_text(
-        re.compile(r"1/1 reutilizable · \d+/50 usos · caduca")
+        re.compile(r"1 contexto listo · \d+/50 usos · caduca")
     )
     expect(logs).not_to_have_attribute("open", "")
     table = page.get_by_role("table", name="Comparativa de rendimiento del monitor")
