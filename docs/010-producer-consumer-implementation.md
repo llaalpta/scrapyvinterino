@@ -15,6 +15,37 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. Ordinary recoverable candidates survive outside the top-five window in Redis for three total attempts (`30s`, `120s`); an anti-bot challenge ends the task while preserving its claimed candidates for a future new task.
 - The PWA persists no image bytes: it renders every signed `images*.vinted.net` URL directly and exposes an accessible gallery plus public availability/price breakdown while purchase remains disabled.
 
+## Planned 14.54 sticky lifecycle and recovery
+
+This program is not current runtime behavior until its four ordered slices merge. It replaces only the global sticky lifetime and first-failure recovery clauses below; queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
+
+### 14.54.1 persisted provider contract
+
+- Alembic `0024` adds non-null `sticky_username_template` and `sticky_ttl_minutes` to `proxy_profiles`, backfilling the current preproduction profiles with `{username};sessid.{session_id}` and `25`. The global `PROXY_STICKY_USERNAME_TEMPLATE` setting, default and example are then removed rather than retained as a fallback.
+- Create/update/read schemas and the Settings PWA own both fields. The existing strict formatter validation remains, TTL accepts `1..120`, and the identity HMAC covers both values. An edit therefore advances the existing generation and invalidates affected prepared contexts before new traffic.
+- `vinted_sessions.expires_at` remains the canonical effective deadline and is written from `min(VINTED_SESSION_TTL_MINUTES, proxy_profile.sticky_ttl_minutes)`. `max_requests` remains the snapshot of completed context acquisitions/runs. No monitor-session deadline is derived from either limit.
+
+### 14.54.2 same-profile acquisition loop
+
+- The run keeps ownership and source single-flight while an internal attempt coordinator changes sticky on its selected profile. It gives that profile at most two attempts and revalidates it under the existing advisory identity fence before every provider construction.
+- Attempt one may be an already prepared context or a new preparation. A recoverable pre-candidate failure closes and invalidates it; attempt two always creates a new session ID and bypasses cached egress reuse. The neutral diagnostic must traverse that new proxy URL. If a previous rejected exit IP is known and the new observation matches it, no Vinted client is constructed for that attempt.
+- Recoverable before-candidate outcomes are Cloudflare/DataDome challenge, catalog `401/403`, unusable prepared context and proxy/egress transport failure. After both attempts, one existing-class penalty/cooldown is applied to that profile and this slice terminates with `profile_session_acquisition_exhausted`. `429`, source/Redis/configuration/identity failures and unexpected internal errors terminate without this loop.
+- Exactly one `run_succeeded` or `run_failed` event closes the command. Attempt events carry safe profile identity, ordinal/limit, reason and an `egress_changed` boolean. Transfer observations from both provider attempts are merged into the run total; successful run metadata identifies the retained context.
+- Candidate acceptance is the replay boundary. A challenge while fetching details retains the existing fail-stop/discard behavior; the run is not restarted and a later run must resolve a new eligible context.
+
+### 14.54.3 atomic profile reassignment
+
+- Cross-profile fallback begins only after profile A's penalty is committed and its transaction-scoped identity fence is released. It captures the remaining eligible profiles once in normal pool order and never revisits one. The generalized egress-admission advisory lock is shared by ordinary scheduler selection and fallback; under it, the transaction locks/reloads the running run and source, computes SQL plus pending-task capacity with the existing task-ID deduplication, excludes the run's current A assignment, and selects the next captured B.
+- That transaction locks and revalidates B, captures its identity generation and commits the running run's durable `proxy_profile_id`/generation binding to B before B provider construction. While the SQL run exists, this binding is authoritative: the original `MonitorTask` fields describe initial admission only, and scheduler counts the task once from SQL rather than adding stale A queue ownership.
+- In a new traffic transaction the consumer acquires B's shared identity fence and revalidates the captured generation, activity, country, cooldown and capacity before provider construction. A saturation or identity change at this barrier produces zero B provider calls; the coordinator may attempt the next captured candidate through the same admission path. An admitted profile receives the `14.54.2` two-attempt contract once; exhaustion finishes with `session_acquisition_exhausted`.
+- Redelivery by task ID reloads the durable run binding and must never reconstruct B authority from the original A payload. One run retains all safe attempt events and transfer observations; one terminal event and one task acknowledgement close the command.
+
+### 14.54.4 explicit retry
+
+- `POST /api/monitors/{monitor_id}/vinted-session/retry` accepts `{proxy_profile_id}` for an inactive monitor whose start failed. It ignores only the selected profile's current cooldown for one command and still enforces active profile, country, capacity, completeness, source single-flight and identity fencing.
+- The forced command creates one new sticky, performs the same non-cached egress/known-rejected-IP check, makes one baseline attempt and never falls through to another profile. Normal success clears the selected profile and activates the monitor; failure uses the normal penalty transition without clearing cooldown first.
+- The PWA derives eligible cooling profiles from the latest failed start plus current proxy state. It offers one named button or a compact selector, disables only while a command is in flight, and allows another user click after the prior terminal result.
+
 ## Decisions
 
 - Use `PROXY_STICKY_USERNAME_TEMPLATE` for provider-specific sticky formats. Default: `{username}-session-{session_id}`.

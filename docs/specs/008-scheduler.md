@@ -70,6 +70,54 @@ Verification passed Ruff, frontend lint/build, five focused traffic cases, eight
 
 The independent read-only audit found no A, B or C findings. It confirmed the context-use/request distinction, on-demand expiry and exhaustion behavior, visible no-retry failure path, honest partial traffic states and responsive containment against the final diff and live evidence.
 
+### Planned 14.54 provider-bound sticky lifecycle and bounded recovery
+
+Status: planned as a program on `plan/14.54-sticky-recovery`. The current 14.50 first-failure cooldown/no-retry contract and 14.53 global context lifetime remain authoritative until the corresponding slices below are implemented and merged. Each of the four slices is a standard task with its own confirmation, branch, real scenario, audit, PR and merge.
+
+DataImpulse on rotating HTTP port `823` accepts a `sessid` username parameter that asks the gateway to retain one exit IP for approximately 30 minutes. The product uses a 25-minute local safety limit and a new session ID rather than integrating the provider-specific rotation API. A monitor session is not capped by that lifetime: prepared HTTP context rotates when either its effective TTL or its completed-run use limit is reached.
+
+#### 14.54.1 per-profile sticky contract and lifetime
+
+Acceptance criteria:
+
+1. One migration moves the sticky username template and sticky TTL into `proxy_profiles`; existing profiles are backfilled with `{username};sessid.{session_id}` and `25` minutes, and the obsolete global template is removed from runtime configuration. Both values participate in effective proxy identity, so an edit fences new work and invalidates prior prepared contexts through the existing identity transition.
+2. API and PWA create/read/update both fields with a template containing exactly `{username}` and `{session_id}` and TTL `1..120`. Invalid input is rejected without changing the profile, identity generation or prepared context.
+3. A saved context expires at the earlier of the global anonymous-context TTL and the selected profile's sticky TTL. The existing maximum uses remain completed runs, not individual HTTP requests; expiry or exhaustion prepares a replacement on demand without stopping the monitor session.
+
+Representative integration: migrate a disposable PostgreSQL database, edit a proxy through the authenticated live PWA/API, save a controlled prepared context and advance owned time/use state until the next real run replaces it while the same monitor session remains open. The negative variation submits an invalid template/TTL and observes no database or provider mutation. One bounded provider conformance check may make at most four DataImpulse-proxied requests to the configured neutral egress diagnostic: two with one `sessid` and up to two with fresh IDs. It must never call Vinted or DataDome, expose credentials or require distinct physical IPs. Cleanup restores service ownership and removes all QA SQL/Redis state.
+
+#### 14.54.2 automatic same-profile pre-candidate recovery
+
+Acceptance criteria:
+
+1. One command still owns one run. Before candidates are accepted, Cloudflare/DataDome challenge, catalog `401/403`, unusable anonymous context or proxy/egress transport failure may consume at most two attempts on the selected profile: the current/initial attempt and one fresh sticky. A forced sticky always performs a real proxied egress diagnostic; a repeated observed IP is rejected before Vinted and consumes that second attempt.
+2. Only after both attempts fail is that profile penalized once and placed in cooldown. In this slice the run then terminates once with `profile_session_acquisition_exhausted`; it does not select another profile. A successful second attempt clears only that profile's failure state and retains its new context.
+3. `429`, Redis/source/identity/configuration failures and internal errors do not enter this loop. Once catalog candidates have been accepted, no work is replayed: a later challenge invalidates context and fails visibly, and a later run resolves a new context through normal pool eligibility.
+
+Attempt events retain safe profile ID/name, attempt/limit, rotation reason and `egress_changed`; they never expose credentials, full sticky IDs or an additional raw IP. All attempt traffic contributes to the single run's transfer totals, while terminal success identifies the profile whose context was retained.
+
+Representative integration: use the live API and PostgreSQL with a deterministic loopback upstream. The selected profile fails its initial bootstrap, obtains a different observed egress through one fresh sticky and succeeds while the command retains one run, seeds one baseline and opens one monitor session. The negative variation returns the known rejected IP for attempt two: no second Vinted request is made, the profile enters cooldown once and one failed run remains without baseline or active session. Focused cases cover both-attempt exhaustion, `429` without retry and the post-candidate no-replay boundary. Cleanup removes all QA SQL state and restores service ownership. External Vinted, proxy and vendor allowance is zero.
+
+#### 14.54.3 atomic cross-profile fallback
+
+Acceptance criteria:
+
+1. After `14.54.2` exhausts profile A, the same running run captures the remaining eligible profiles once in normal pool order and never revisits one. It may consider candidate B only through the serialized egress-admission lock shared by ordinary scheduler selection and fallback. The transaction excludes its own A assignment from accounting, locks and revalidates B, enforces B's capacity, captures B's identity generation and commits the run's durable runtime binding to B before any B provider is constructed. A's penalty is already committed and A's traffic fence is released before this handoff.
+2. Once a PostgreSQL run exists, its durable profile/generation binding is authoritative; the original Redis task payload identifies only initial admission and never authorizes traffic through B. Scheduler accounting deduplicates that task ID against the running SQL row and counts the run exactly once against its current binding. Redelivery must resume or close from the durable binding rather than reconstruct authority from stale profile A.
+3. Before B traffic, the consumer acquires B's shared identity fence and revalidates activity, country, cooldown, capacity and the captured generation. If B became saturated or changed identity, it constructs no B provider and may consider the next captured candidate through the same bounded admission path. An admitted profile receives the same two-attempt contract from `14.54.2`, once. Pool exhaustion produces one `session_acquisition_exhausted` terminal result; one run owns all safe attempt events and accumulated transfer observations.
+
+Representative integration: use the live scheduler/Redis reservation/consumer/PostgreSQL path with a deterministic loopback upstream. A queued task admitted on profile A exhausts both attempts; the admission handoff binds the same SQL run to B, B succeeds, exactly one baseline/session is created and the task is acknowledged once. The negative variation saturates B or advances its identity at a controlled barrier between binding and provider construction; zero B provider calls occur, capacity is not exceeded, and the run either tries the next preselected eligible candidate or terminates once. Focused tests cover stale-payload redelivery and SQL/task-ID capacity deduplication. Cleanup removes QA SQL/Redis state and restores the worker to its initial state. External Vinted, proxy and vendor allowance is zero.
+
+#### 14.54.4 explicit manual cooldown override
+
+Acceptance criteria:
+
+1. `POST /api/monitors/{id}/vinted-session/retry` accepts one `proxy_profile_id` and bypasses only that profile's current cooldown for one fresh-sticky attempt. It uses the same non-cached egress and known-rejected-IP gate as automatic recovery. Activity, country, capacity, complete configuration, identity fencing and monitor single-flight remain mandatory.
+2. The stopped monitor PWA exposes `Reintentar con <perfil>` for one cooling profile and a compact selector when several are eligible. Each completed click permits another explicit attempt, but no click starts an automatic fallback loop.
+3. Cooldown is not cleared before traffic. Success completes the normal baseline/activation and clears that profile through the existing success transition; failure preserves or extends its penalty. An inactive, deleted, incompatible or concurrently occupied profile is rejected before provider construction.
+
+Representative integration: against the authenticated live PWA/API/PostgreSQL path and deterministic loopback upstream, an initial failed baseline shows cooldown, the explicit button remains available, one selected retry uses a fresh sticky and a controlled success activates the monitor. The negative variation targets an invalid profile and observes `409/422`, unchanged cooldown and zero provider calls. Playwright checks visible state and API/database agreement. External Vinted, proxy and vendor allowance is zero.
+
 ## 14.19 Worker Redis availability
 
 Status: `done`. This is a contained fail-stop correction for the current local worker, not a general dependency-readiness platform.
