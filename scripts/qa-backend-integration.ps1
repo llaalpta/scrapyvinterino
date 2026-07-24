@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "proxy-cooldown", "proxy-sticky-contract", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "same-profile-recovery", "proxy-only-regression", "proxy-cooldown", "proxy-sticky-contract", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -55,6 +55,9 @@ $PwaBootstrapIsolationLiveTargets = @(
 $ProxyStickyContractLiveTargets = @(
     "tests/test_proxy_sticky_contract_live.py::test_live_proxy_sticky_contract_edit_invalidates_and_rotates_context"
 )
+$SameProfileRecoveryLiveTargets = @(
+    "tests/test_same_profile_recovery_live.py::test_live_pwa_same_profile_recovery_and_repeated_egress_rejection"
+)
 $MonitorSessionProxyTrafficFocusedTargets = @(
     "tests/test_monitor_proxy_traffic.py"
 )
@@ -72,8 +75,8 @@ $TestTargets = @{
     "identity" = @(
         "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
     )
-    "catalog-fail-stop" = @(
-        "tests/test_catalog_failstop_integration.py::test_catalog_terminal_response_fails_once_invalidates_session_and_acks",
+    "same-profile-recovery" = @(
+        "tests/test_catalog_failstop_integration.py",
         "tests/test_migrations.py::test_honest_found_metrics_migration_removes_historical_event_field",
         "tests/test_manual_runs.py::test_detail_failure_retries_once_in_run_then_closes_candidate",
         "tests/test_manual_runs.py::test_datadome_mid_batch_rolls_back_and_discards_claimed_work",
@@ -81,7 +84,7 @@ $TestTargets = @{
         "tests/test_manual_runs.py::test_gone_detail_is_terminal_without_retry",
         "tests/test_item_detail_state_audit.py::test_transient_release_failure_after_challenge_keeps_terminal_run_and_discards_work",
         "tests/test_item_detail_state_audit.py::test_release_failure_does_not_mask_primary_run_error"
-    )
+    ) + $SameProfileRecoveryLiveTargets
     "proxy-only-regression" = @(
         "tests/test_manual_runs.py"
     )
@@ -594,7 +597,7 @@ function Get-OperationalRedisDigest {
 }
 
 function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
-    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MONITOR_IDENTITY_QA_|PWA_MONITOR_COMMAND_QA_|PWA_BOOTSTRAP_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
+    $Pattern = '^(APP_|DATABASE_URL$|BACKEND_CORS_ORIGINS$|LOCAL_AUTH_|REDIS_URL$|SEEN_|VINTED_|WORKER_|CURL_|HUMAN_|DATADOME_|PROXY_|EGRESS_|SCHEDULER_|LOG_LEVEL$|ACTION_REQUESTS_|PYTHONPATH$|PYTEST_|ALEMBIC_|PREPARED_SESSION_QA_|MONITOR_IDENTITY_QA_|PWA_MONITOR_COMMAND_QA_|PWA_BOOTSTRAP_QA_|SAME_PROFILE_QA_|MANUAL_SESSION_QA_|RECURRING_SESSION_QA_|SESSION_STOP_QA_|SESSION_QA_|VITE_DEV_API_PROXY_TARGET$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)'
     $Saved = @{}
     $Entries = @(Get-ChildItem Env: | Where-Object { $_.Name -match $Pattern })
     foreach ($Entry in $Entries) {
@@ -656,6 +659,13 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["PROXY_STICKY_QA_PWA_URL"] = "http://127.0.0.1:5176"
             $Values["PROXY_STICKY_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
+        if ($Scenario -eq "same-profile-recovery") {
+            $Values["SAME_PROFILE_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["SAME_PROFILE_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["SAME_PROFILE_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+            $Values["EGRESS_DIAGNOSTIC_URL"] = "http://127.0.0.2:9/qa/egress"
         }
         if ($Scenario -eq "worker-redis-availability") {
             $Values["REDIS_URL"] = "redis://127.0.0.1:9/0"
@@ -728,6 +738,8 @@ function Exit-IsolatedEnvironment([hashtable]$Saved) {
         "MONITOR_IDENTITY_QA_BROWSER_CHANNEL",
         "PWA_BOOTSTRAP_QA_API_URL", "PWA_BOOTSTRAP_QA_PWA_URL",
         "PWA_BOOTSTRAP_QA_BROWSER_CHANNEL",
+        "SAME_PROFILE_QA_API_URL", "SAME_PROFILE_QA_PWA_URL",
+        "SAME_PROFILE_QA_BROWSER_CHANNEL", "SAME_PROFILE_QA_STATE",
         "MANUAL_SESSION_QA_API_URL", "MANUAL_SESSION_QA_PWA_URL",
         "MANUAL_SESSION_QA_BROWSER_CHANNEL", "MANUAL_SESSION_QA_PROVIDER_STATE",
         "RECURRING_SESSION_QA_API_URL", "RECURRING_SESSION_QA_PWA_URL",
@@ -909,7 +921,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "proxy-sticky-contract", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
+        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "proxy-sticky-contract", "same-profile-recovery", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             if ($Scenario -eq "monitor-session-proxy-traffic") {
@@ -935,6 +947,16 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $ApiArguments = @("-m", "uvicorn", $ApiApplication, "--host", "127.0.0.1", "--port", "8001")
             if ($Scenario -eq "proxy-sticky-contract") {
                 $ApiApplication = "proxy_sticky_contract_qa_app:app"
+                $ApiArguments = @(
+                    "-m", "uvicorn", $ApiApplication,
+                    "--app-dir", (Join-Path $BackendDir "tests"),
+                    "--host", "127.0.0.1", "--port", "8001"
+                )
+            } elseif ($Scenario -eq "same-profile-recovery") {
+                $SameProfileStateFile = Join-Path $QaStateDir "$Scenario-state-$Suffix.json"
+                $QaTemporaryFiles = @($SameProfileStateFile)
+                $env:SAME_PROFILE_QA_STATE = $SameProfileStateFile
+                $ApiApplication = "same_profile_recovery_qa_app:app"
                 $ApiArguments = @(
                     "-m", "uvicorn", $ApiApplication,
                     "--app-dir", (Join-Path $BackendDir "tests"),

@@ -89,7 +89,6 @@ def test_catalog_rejects_cross_origin_effective_response_before_parsing() -> Non
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=lambda **_: session,
-        request_retries=0,
         prepared_session=PreparedCatalogSession(
             cookies={},
             csrf_token=canary,
@@ -115,7 +114,6 @@ def test_bootstrap_rejects_cross_origin_response_before_refreshing_session_conte
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=lambda **_: _BootstrapSession(canary),
-        request_retries=0,
         require_complete_session_context=False,
         require_datadome_cookie=False,
     )
@@ -141,7 +139,6 @@ def test_bootstrap_rejects_unsafe_initial_url_before_cookie_bearing_transport(so
     provider = CurlCffiVintedCatalogProvider(
         settings=Settings(egress_diagnostic_url=None),
         session_factory=lambda **_: session,
-        request_retries=0,
         require_complete_session_context=False,
         require_datadome_cookie=False,
     )

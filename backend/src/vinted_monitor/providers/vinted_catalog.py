@@ -193,6 +193,29 @@ class VintedCatalogSessionContextError(VintedCatalogProviderError):
     pass
 
 
+class VintedCatalogTransportError(VintedCatalogProviderError):
+    pass
+
+
+class VintedEgressDiagnosticError(VintedCatalogProviderError):
+    def __init__(self, message: str, *, egress_ip: str | None = None) -> None:
+        super().__init__(message)
+        self.egress_ip = egress_ip
+
+
+class VintedEgressRotationError(VintedCatalogSessionContextError):
+    def __init__(self, message: str, *, egress_ip: str | None = None) -> None:
+        super().__init__(message)
+        self.egress_ip = egress_ip
+
+
+@dataclass(frozen=True)
+class ProxyEgressProbeResult:
+    context: EgressContext
+    validated_at: datetime | None
+    error: VintedEgressDiagnosticError | None = None
+
+
 class ProviderEventSink:
     def __call__(
         self,
@@ -207,6 +230,140 @@ class ProviderEventSink:
         details: dict[str, Any] | None = None,
     ) -> None:
         pass
+
+
+def probe_proxy_egress(
+    *,
+    settings: Settings,
+    profile: BrowserProfile,
+    proxy_url: str | None,
+    timeout_ms: int,
+    proxy_session_marker: dict[str, Any] | None,
+    expected_country_code: str | None,
+    event_sink: ProviderEventSink | None,
+    attempt: int,
+    session_factory: Callable[..., Any] | None = None,
+    http_session_marker: dict[str, Any] | None = None,
+    vinted_cookie_markers: list[dict[str, Any]] | None = None,
+) -> ProxyEgressProbeResult:
+    """Probe egress with an isolated cookie-free client and no Vinted session."""
+    if not settings.egress_diagnostic_url:
+        error = VintedEgressDiagnosticError("Proxy egress diagnostic is not configured")
+        return ProxyEgressProbeResult(context=EgressContext(), validated_at=None, error=error)
+
+    url = str(settings.egress_diagnostic_url)
+    proxy_dict = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+    diagnostic_session: Any | None = None
+    headers = {"accept": "application/json", "user-agent": profile.user_agent}
+    event_details = {
+        "attempt": attempt,
+        "diagnostic_session": "isolated",
+        "vinted_http_session": http_session_marker,
+        "proxy_configured": bool(proxy_url),
+        "proxy_session": proxy_session_marker,
+        "request_headers": safe_headers(headers),
+        "cookies_sent": False,
+        "default_headers": False,
+    }
+    if event_sink is not None:
+        event_sink(
+            phase="egress_diagnostic_start",
+            method="GET",
+            url=url,
+            details=event_details,
+        )
+
+    started_at = time.perf_counter()
+    response: Any | None = None
+    context = EgressContext()
+    validated_at: datetime | None = None
+    error: VintedEgressDiagnosticError | None = None
+    try:
+        factory = session_factory or Session
+        diagnostic_session = factory(
+            impersonate=profile.impersonate,
+            proxies=proxy_dict,
+        )
+        response = diagnostic_session.get(
+            url,
+            headers=headers,
+            timeout=timeout_ms / 1000,
+            default_headers=False,
+        )
+        payload = response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {}
+        context = _egress_context_from_payload(payload)
+        observed_country = _normalize_country_code(context.country_code)
+        expected_country = expected_country_code.strip().upper() if expected_country_code else None
+        if (
+            response.status_code < 400
+            and context.ip
+            and observed_country
+            and (expected_country is None or observed_country == expected_country)
+        ):
+            validated_at = datetime.now(UTC)
+        else:
+            error = VintedEgressDiagnosticError(
+                "Proxy egress diagnostic did not validate the expected country",
+                egress_ip=context.ip,
+            )
+        transfer_details = (
+            {PROXY_TRANSFER_DETAIL_KEY: transfer_observation_from_response(response, category="egress")}
+            if proxy_url
+            else {}
+        )
+        diagnostic_succeeded = error is None
+        if event_sink is not None:
+            event_sink(
+                phase="egress_diagnostic_success" if diagnostic_succeeded else "egress_diagnostic_error",
+                method="GET",
+                url=url,
+                status_code=response.status_code,
+                duration_ms=_elapsed_ms(started_at),
+                level=None if diagnostic_succeeded else "warning",
+                message=None if diagnostic_succeeded else "Proxy egress diagnostic validation failed",
+                details={
+                    **event_details,
+                    "egress": _egress_details_from_payload(payload),
+                    "response_headers": safe_headers(dict(response.headers)),
+                    "diagnostic_cookies_after": safe_cookie_markers(diagnostic_session.cookies),
+                    "vinted_cookies_after": vinted_cookie_markers or [],
+                    **transfer_details,
+                },
+            )
+    except Exception as exc:
+        error = VintedEgressDiagnosticError("Proxy egress diagnostic request failed")
+        transfer_details = (
+            {
+                PROXY_TRANSFER_DETAIL_KEY: (
+                    transfer_observation_from_response(response, category="egress")
+                    if response is not None
+                    else transfer_observation_from_exception(exc, category="egress")
+                )
+            }
+            if proxy_url
+            else {}
+        )
+        if event_sink is not None:
+            event_sink(
+                phase="egress_diagnostic_error",
+                method="GET",
+                url=url,
+                duration_ms=_elapsed_ms(started_at),
+                level="warning",
+                message=redact_sensitive_text(str(exc)),
+                details={
+                    **event_details,
+                    **transfer_details,
+                },
+            )
+    finally:
+        close = getattr(diagnostic_session, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    return ProxyEgressProbeResult(context=context, validated_at=validated_at, error=error)
 
 
 class CurlCffiVintedCatalogProvider:
@@ -224,7 +381,6 @@ class CurlCffiVintedCatalogProvider:
         proxy_url: str | None = None,
         timeout_ms: int | None = None,
         catalog_per_page: int | None = None,
-        request_retries: int = 1,
         event_sink: ProviderEventSink | None = None,
         human_delay_min: float = 1.2,
         human_delay_max: float = 3.8,
@@ -236,6 +392,7 @@ class CurlCffiVintedCatalogProvider:
         screen: str = "catalog",
         viewport_size: str = "1920x1080",
         prepared_session: PreparedCatalogSession | None = None,
+        prevalidated_egress: ProxyEgressProbeResult | None = None,
         require_complete_session_context: bool = True,
         require_datadome_cookie: bool = True,
     ) -> None:
@@ -244,7 +401,6 @@ class CurlCffiVintedCatalogProvider:
         self.proxy_url = proxy_url
         self.timeout_ms = timeout_ms or self.settings.vinted_request_timeout_ms
         self.catalog_per_page = catalog_per_page or self.settings.vinted_fast_catalog_per_page
-        self.request_retries = max(request_retries, 0)
         self.event_sink = event_sink
         self.human_delay_min = human_delay_min
         self.human_delay_max = human_delay_max
@@ -284,26 +440,24 @@ class CurlCffiVintedCatalogProvider:
                 country_code=_normalize_country_code(prepared_session.egress_country_code),
             )
             self._egress_validated_at = prepared_session.egress_validated_at
+        if prevalidated_egress is not None:
+            if prevalidated_egress.error is not None or prevalidated_egress.validated_at is None:
+                raise ValueError("prevalidated_egress must contain a successful diagnostic")
+            self._egress_context = prevalidated_egress.context
+            self._egress_validated_at = prevalidated_egress.validated_at
+            self._egress_diagnosed = True
+
+    @property
+    def egress_ip(self) -> str | None:
+        return self._egress_context.ip
 
     def search(self, source: Any, page: int | None = None) -> CatalogSearchResult:
-        last_error: VintedCatalogProviderError | None = None
-        for retry_index in range(self.request_retries + 1):
-            self._ensure_session()
-            self._diagnose_egress(attempt=retry_index + 1)
-            if not self._bootstrapped:
-                self._bootstrap_anonymous_session(source.url, attempt=retry_index + 1)
-
-            try:
-                response = self._request_catalog_api(source, page, attempt=retry_index + 1)
-                return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
-            except (VintedCatalogSessionContextError, VintedCatalogRateLimitError, VintedCatalogSessionError):
-                raise
-            except VintedCatalogProviderError as exc:
-                last_error = exc
-                if retry_index >= self.request_retries:
-                    raise
-
-        raise last_error or VintedCatalogProviderError("Vinted catalog API request failed")
+        self._ensure_session()
+        self._diagnose_egress(attempt=1)
+        if not self._bootstrapped:
+            self._bootstrap_anonymous_session(source.url, attempt=1)
+        response = self._request_catalog_api(source, page, attempt=1)
+        return parse_catalog_api_payload(response, base_url=str(self.settings.vinted_base_url))
 
     def bootstrap_for_session(self, source_url: str, *, collect_datadome: bool = False) -> dict[str, Any]:
         """Warm only the catalog document and return a safe context report."""
@@ -839,7 +993,6 @@ class CurlCffiVintedCatalogProvider:
             proxy_url=self.proxy_url,
             timeout_ms=self.timeout_ms,
             catalog_per_page=self.catalog_per_page,
-            request_retries=0,
             event_sink=lambda **event: events.append(event),
             human_delay_min=self.human_delay_min,
             human_delay_max=self.human_delay_max,
@@ -1254,7 +1407,7 @@ class CurlCffiVintedCatalogProvider:
                     **self._proxy_transfer_details(exc=exc, category="catalog"),
                 },
             )
-            raise VintedCatalogProviderError(f"Vinted catalog API request failed: {exc}") from exc
+            raise VintedCatalogTransportError(f"Vinted catalog API request failed: {exc}") from exc
 
         transfer_details = self._proxy_transfer_details(response=response, category="catalog")
         if is_cloudflare_challenge(response.status_code, dict(response.headers)):
@@ -1677,7 +1830,7 @@ class CurlCffiVintedCatalogProvider:
                     **self._proxy_transfer_details(exc=exc, category="session_setup"),
                 },
             )
-            raise VintedCatalogProviderError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
+            raise VintedCatalogTransportError(f"Vinted anonymous session bootstrap failed: {exc}") from exc
 
         transfer_details = self._proxy_transfer_details(response=response, category="session_setup")
         if is_cloudflare_challenge(response.status_code, dict(response.headers)):
@@ -2178,105 +2331,22 @@ class CurlCffiVintedCatalogProvider:
             )
             self._egress_diagnosed = True
             return
-        url = str(self.settings.egress_diagnostic_url)
-        proxy_dict = {"https": self.proxy_url, "http": self.proxy_url} if self.proxy_url else None
-        diagnostic_session = self.session_factory(
-            impersonate=self.profile.impersonate,
-            proxies=proxy_dict,
+        result = probe_proxy_egress(
+            settings=self.settings,
+            profile=self.profile,
+            proxy_url=self.proxy_url,
+            timeout_ms=self.timeout_ms,
+            proxy_session_marker=self.proxy_session_marker,
+            expected_country_code=self.expected_country_code,
+            event_sink=self._emit_event,
+            attempt=attempt,
+            session_factory=self.session_factory,
+            http_session_marker=self._session_marker(),
+            vinted_cookie_markers=self._cookie_markers(),
         )
-        headers = {"accept": "application/json", "user-agent": self.profile.user_agent}
-        self._emit_event(
-            phase="egress_diagnostic_start",
-            method="GET",
-            url=url,
-            details={
-                "attempt": attempt,
-                "diagnostic_session": "isolated",
-                "vinted_http_session": self._session_marker(),
-                "proxy_configured": bool(self.proxy_url),
-                "proxy_session": self.proxy_session_marker,
-                "request_headers": safe_headers(headers),
-                "cookies_sent": False,
-                "default_headers": False,
-            },
-        )
-        started_at = time.perf_counter()
-        response: Any | None = None
-        try:
-            response = diagnostic_session.get(
-                url,
-                headers=headers,
-                timeout=self.timeout_ms / 1000,
-                default_headers=False,
-            )
-            payload = response.json() if "json" in str(response.headers.get("content-type", "")).lower() else {}
-            self._egress_context = _egress_context_from_payload(payload)
-            observed_country = _normalize_country_code(self._egress_context.country_code)
-            if (
-                response.status_code < 400
-                and self._egress_context.ip
-                and observed_country
-                and (self.expected_country_code is None or observed_country == self.expected_country_code)
-            ):
-                self._egress_validated_at = datetime.now(UTC)
-            else:
-                self._egress_validated_at = None
-            details = {
-                "attempt": attempt,
-                "diagnostic_session": "isolated",
-                "vinted_http_session": self._session_marker(),
-                "proxy_configured": bool(self.proxy_url),
-                "proxy_session": self.proxy_session_marker,
-                "egress": _egress_details_from_payload(payload),
-                "response_headers": safe_headers(dict(response.headers)),
-                "diagnostic_cookies_after": safe_cookie_markers(diagnostic_session.cookies),
-                "vinted_cookies_after": self._cookie_markers(),
-                "cookies_sent": False,
-                "default_headers": False,
-                **self._proxy_transfer_details(response=response, category="egress"),
-            }
-            self._emit_event(
-                phase="egress_diagnostic_success" if response.status_code < 400 else "egress_diagnostic_error",
-                method="GET",
-                url=url,
-                status_code=response.status_code,
-                duration_ms=_elapsed_ms(started_at),
-                level=None if response.status_code < 400 else "warning",
-                message=None if response.status_code < 400 else f"HTTP {response.status_code}",
-                details=details,
-            )
-        except Exception as exc:
-            self._egress_validated_at = None
-            self._emit_event(
-                phase="egress_diagnostic_error",
-                method="GET",
-                url=url,
-                duration_ms=_elapsed_ms(started_at),
-                level="warning",
-                message=str(exc),
-                details={
-                    "attempt": attempt,
-                    "diagnostic_session": "isolated",
-                    "vinted_http_session": self._session_marker(),
-                    "proxy_configured": bool(self.proxy_url),
-                    "proxy_session": self.proxy_session_marker,
-                    "cookies_sent": False,
-                    "default_headers": False,
-                    **(
-                        self._proxy_transfer_details(response=response, category="egress")
-                        if response is not None
-                        else self._proxy_transfer_details(exc=exc, category="egress")
-                    ),
-                },
-            )
-        finally:
-            close = getattr(diagnostic_session, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-            self._egress_diagnosed = True
+        self._egress_context = result.context
+        self._egress_validated_at = result.validated_at
+        self._egress_diagnosed = True
 
     def _session_marker(self) -> dict[str, Any]:
         return safe_secret_marker("http_session_id", self.http_session_id, kind="http_session")

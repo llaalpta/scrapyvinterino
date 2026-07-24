@@ -72,7 +72,7 @@ The independent read-only audit found no A, B or C findings. It confirmed the co
 
 ### 14.54 provider-bound sticky lifecycle and bounded recovery
 
-Status: `14.54.1` is current. The `14.50` first-failure cooldown/no-retry contract remains authoritative until `14.54.2` merges; `14.54.2` through `14.54.4` remain ordered standard tasks. Each slice has its own confirmation, branch, real scenario, audit, PR and merge.
+Status: `14.54.1` and `14.54.2` are current. `14.54.3` and `14.54.4` remain ordered standard tasks. Each slice has its own confirmation, branch, real scenario, audit, PR and merge.
 
 DataImpulse on rotating HTTP port `823` accepts a `sessid` username parameter that asks the gateway to retain one exit IP for approximately 30 minutes. The product uses a 25-minute local safety limit and a new session ID rather than integrating the provider-specific rotation API. A monitor session is not capped by that lifetime: prepared HTTP context rotates when either its effective TTL or its completed-run use limit is reached.
 
@@ -94,6 +94,8 @@ The independent read-only audit returned positive with no A, B or C findings. It
 
 #### 14.54.2 automatic same-profile pre-candidate recovery
 
+Status: `done`.
+
 Acceptance criteria:
 
 1. One command still owns one run. Before candidates are accepted, Cloudflare/DataDome challenge, catalog `401/403`, unusable anonymous context or proxy/egress transport failure may consume at most two attempts on the selected profile: the current/initial attempt and one fresh sticky. A forced sticky always performs a real proxied egress diagnostic; a repeated observed IP is rejected before Vinted and consumes that second attempt.
@@ -103,6 +105,10 @@ Acceptance criteria:
 Attempt events retain safe profile ID/name, attempt/limit, rotation reason and `egress_changed`; they never expose credentials, full sticky IDs or an additional raw IP. All attempt traffic contributes to the single run's transfer totals, while terminal success identifies the profile whose context was retained.
 
 Representative integration: use the live API and PostgreSQL with a deterministic loopback upstream. The selected profile fails its initial bootstrap, obtains a different observed egress through one fresh sticky and succeeds while the command retains one run, seeds one baseline and opens one monitor session. The negative variation returns the known rejected IP for attempt two: no second Vinted request is made, the profile enters cooldown once and one failed run remains without baseline or active session. Focused cases cover both-attempt exhaustion, `429` without retry and the post-candidate no-replay boundary. Cleanup removes all QA SQL state and restores service ownership. External Vinted, proxy and vendor allowance is zero.
+
+Verification passed Ruff and the isolated `same-profile-recovery` gate (`14/14`) over a migrated PostgreSQL database, Redis, live API, strict Vite, authenticated Playwright and a real loopback HTTP proxy. The positive path failed its controlled initial bootstrap, observed a different egress through the forced proxy diagnostic and completed one baseline/session; the negative observed the known IP, constructed no second Vinted provider and left one failed run plus one cooldown. Focused cases also proved exhaustion, transport failure, `429` without retry and no catalog replay after candidate acceptance. The complete isolated backend gate passed `566` tests with 12 opt-in live skips, followed by all `5` loopback-guarded catalog cases. Cleanup preserved operational PostgreSQL/Redis fingerprints and made no Vinted, proxy or vendor request.
+
+The independent read-only audit returned positive with no A, B or C findings. It confirmed that the transaction-scoped identity fence remains held through the last provider request, the replacement diagnostic blocks a repeated known IP before Vinted, exhaustion produces one penalty/terminal/ACK, `429` and post-candidate work remain outside recovery, and attempt events expose no raw IP, sticky or credentials.
 
 #### 14.54.3 atomic cross-profile fallback
 

@@ -9,13 +9,22 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vinted_monitor.core.config import get_settings
 from vinted_monitor.core.redaction import redact_sensitive_text, safe_secret_marker
-from vinted_monitor.db.models import ErrorLog, Item, Opportunity, ProxyProfile, Run, SearchSource, VintedSession
+from vinted_monitor.db.models import (
+    ErrorLog,
+    Item,
+    Opportunity,
+    ProxyProfile,
+    Run,
+    RunEvent,
+    SearchSource,
+    VintedSession,
+)
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogItemCandidate, CatalogItemDetail, CatalogSearchResult, CatalogSource
 from vinted_monitor.providers.datadome import DataDomeChallengeError
@@ -28,15 +37,20 @@ from vinted_monitor.providers.vinted_catalog import (
     DETAIL_BATCH_TELEMETRY_ATTR,
     CurlCffiVintedCatalogProvider,
     DetailFetchOutcome,
+    ProxyEgressProbeResult,
     VintedCatalogChallengeError,
     VintedCatalogRateLimitError,
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
+    VintedCatalogTransportError,
     VintedDetailDeferred,
+    VintedEgressDiagnosticError,
+    VintedEgressRotationError,
     VintedItemEarlyDiscard,
     build_item_detail_navigation_url,
     extract_vinted_item_id,
     parse_catalog_api_payload,
+    probe_proxy_egress,
 )
 from vinted_monitor.services.filters import (
     evaluate_exclusion_filters,
@@ -163,6 +177,14 @@ class BaselineRequiredError(ValueError):
     pass
 
 
+class ProfileSessionAcquisitionExhaustedError(RuntimeError):
+    failure_kind = "profile_session_acquisition_exhausted"
+
+    def __init__(self, *, datadome_penalty: bool) -> None:
+        super().__init__("Selected proxy profile could not obtain a usable Vinted session after two attempts")
+        self.datadome_penalty = datadome_penalty
+
+
 def execute_manual_run(
     db: Session,
     source_id: int,
@@ -244,7 +266,6 @@ def execute_monitor_baseline(
     _require_proxy_egress(selected_egress)
     owned_provider = provider is None
     run_provider: ManualRunProvider | None = provider
-    prepared_catalog_result: CatalogSearchResult | None = None
 
     filter_snapshot = monitor_filter_snapshot(source.filter_definition)
     policy_hash = _policy_hash(source, filter_snapshot)
@@ -390,19 +411,28 @@ def execute_monitor_baseline(
         )
         try:
             if run_provider is None:
-                run_provider, provider_runtime_metadata, prepared_catalog_result = _provider_for_egress(
+                run_provider, result = _search_catalog_with_same_profile_recovery(
                     db,
+                    run,
                     source,
                     selected_egress,
                     runtime_config,
                     settings,
-                    run=run,
                     include_catalog_payload=True,
                 )
-                _merge_run_metadata(run, provider_runtime_metadata)
-                db.flush()
-            proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
-            _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+            else:
+                proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+                _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+                result = _search_catalog_once(
+                    db,
+                    run,
+                    source,
+                    run_provider,
+                    proxy_profile_id,
+                    settings,
+                    prepared_result=None,
+                    attempt=None,
+                )
         except (
             DataDomeChallengeError,
             VintedCatalogChallengeError,
@@ -427,33 +457,12 @@ def execute_monitor_baseline(
                 run,
                 source,
                 exc,
-                penalize_proxy=not isinstance(exc, SeenCacheUnavailableError | ProxyProfileEligibilityError),
+                penalize_proxy=False,
             )
             if run_provider is not None:
                 _close_owned_provider(run_provider, owned_provider=owned_provider)
             return failed_run
-        record_run_event(
-            db,
-            run_id=run.id,
-            source_id=source.id,
-            phase="catalog_search_start",
-            method="GET",
-            url=source.url,
-            proxy_profile_id=proxy_profile_id,
-            auth_mode="public_anonymous",
-        )
-        result = prepared_catalog_result or run_provider.search(source)
-        record_run_event(
-            db,
-            run_id=run.id,
-            source_id=source.id,
-            phase="catalog_search_success",
-            method="GET",
-            url=source.url,
-            proxy_profile_id=proxy_profile_id,
-            auth_mode="public_anonymous",
-            details={"provider": result.provider_metadata},
-        )
+        proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
         unique_candidates = _deduplicate_candidates(result.items)
         candidate_ids = [candidate.vinted_item_id for candidate in unique_candidates]
         record_run_event(
@@ -1304,56 +1313,28 @@ def execute_monitor_run(
 
     try:
         if run_provider is None:
-            run_provider, provider_runtime_metadata, _prepared_catalog_result = _provider_for_egress(
+            run_provider, result = _search_catalog_with_same_profile_recovery(
                 db,
+                run,
                 source,
                 selected_egress,
                 runtime_config,
                 settings,
-                run=run,
+                include_catalog_payload=False,
             )
-            _merge_run_metadata(run, provider_runtime_metadata)
-            db.flush()
-        proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
-        _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
-    except Exception as exc:
-        failed_run = _record_failed_run(
-            db,
-            run,
-            source,
-            exc,
-            penalize_proxy=not isinstance(exc, SeenCacheUnavailableError | ProxyProfileEligibilityError),
-        )
-        if run_provider is not None:
-            _close_owned_provider(run_provider, owned_provider=owned_provider)
-        return failed_run
-
-    record_run_event(
-        db,
-        run_id=run.id,
-        source_id=source.id,
-        phase="catalog_search_start",
-        method="GET",
-        url=source.url,
-        proxy_profile_id=proxy_profile_id,
-        user_agent=None,
-        auth_mode="public_anonymous",
-    )
-    try:
-        result = run_provider.search(source)
-        _persist_provider_session_refresh(db, run_provider, run, source, proxy_profile_id, settings)
-        record_run_event(
-            db,
-            run_id=run.id,
-            source_id=source.id,
-            phase="catalog_search_success",
-            method="GET",
-            url=source.url,
-            proxy_profile_id=proxy_profile_id,
-            user_agent=None,
-            auth_mode="public_anonymous",
-            details={"provider": result.provider_metadata},
-        )
+        else:
+            proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+            _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
+            result = _search_catalog_once(
+                db,
+                run,
+                source,
+                run_provider,
+                proxy_profile_id,
+                settings,
+                prepared_result=None,
+                attempt=None,
+            )
     except (
         DataDomeChallengeError,
         VintedCatalogChallengeError,
@@ -1372,10 +1353,12 @@ def execute_monitor_run(
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
     except Exception as exc:
-        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=True)
+        failed_run = _record_failed_run(db, run, source, exc, penalize_proxy=False)
         _close_owned_provider(run_provider, owned_provider=owned_provider)
         return failed_run
 
+    proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
+    acquisition_events = _snapshot_session_acquisition_events(db, run.id)
     claimed_ids: set[str] = set()
     claimed_work_items: list[DetailWorkItem] = []
     found_count = 0
@@ -1577,6 +1560,7 @@ def execute_monitor_run(
         source = db.get(SearchSource, source.id) or source
         if run is not None:
             _merge_run_metadata(run, observability_metadata)
+            _restore_session_acquisition_events(db, run, source, acquisition_events)
         if run is not None and run.status == FINALIZING:
             try:
                 _apply_pending_candidate_state_transition(db, run, source, cache, reconciled=True)
@@ -1643,6 +1627,7 @@ def execute_monitor_run(
             _close_owned_provider(run_provider, owned_provider=owned_provider)
             raise
         _merge_run_metadata(run, observability_metadata)
+        _restore_session_acquisition_events(db, run, source, acquisition_events)
         try:
             run.items_found = found_count
             failure_kind = _catalog_terminal_failure_kind(exc)
@@ -1685,6 +1670,7 @@ def execute_monitor_run(
         run = db.get(Run, run.id)
         if run is not None:
             _merge_run_metadata(run, observability_metadata)
+            _restore_session_acquisition_events(db, run, source, acquisition_events)
         if run is not None and run.status == FINALIZING:
             try:
                 _apply_pending_candidate_state_transition(db, run, source, cache, reconciled=True)
@@ -1721,6 +1707,299 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
     return list(db.scalars(statement))
 
 
+def _search_catalog_with_same_profile_recovery(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    egress: RunEgress,
+    runtime_config,
+    settings,
+    *,
+    include_catalog_payload: bool,
+) -> tuple[ManualRunProvider, CatalogSearchResult]:
+    previous_egress_ip: str | None = None
+    previous_reason: str | None = None
+    datadome_penalty = False
+    proxy_profile_id = egress.proxy_profile_id
+
+    for attempt in range(1, 3):
+        _record_session_acquisition_attempt_event(
+            db,
+            run,
+            source,
+            phase="session_acquisition_attempt_started",
+            attempt=attempt,
+            reason=previous_reason or "initial_context",
+            previous_egress_known=previous_egress_ip is not None,
+            egress_changed=False,
+        )
+        attempt_provider: ManualRunProvider | None = None
+        attempt_metadata: dict[str, Any] = {}
+        try:
+            attempt_provider, attempt_metadata, prepared_result = _provider_for_egress(
+                db,
+                source,
+                egress,
+                runtime_config,
+                settings,
+                run=run,
+                include_catalog_payload=include_catalog_payload,
+                force_new_session=attempt == 2,
+                rejected_egress_ip=previous_egress_ip,
+            )
+            _merge_run_metadata(run, attempt_metadata)
+            db.flush()
+            _attach_provider_event_sink(db, attempt_provider, run, source, proxy_profile_id)
+            result = _search_catalog_once(
+                db,
+                run,
+                source,
+                attempt_provider,
+                proxy_profile_id,
+                settings,
+                prepared_result=prepared_result,
+                attempt=attempt,
+            )
+            observed_egress_ip = _session_acquisition_egress_ip(
+                db,
+                attempt_provider,
+                attempt_metadata,
+                None,
+            )
+            egress_changed = bool(
+                attempt == 2
+                and previous_egress_ip
+                and observed_egress_ip
+                and observed_egress_ip != previous_egress_ip
+            )
+            _merge_run_metadata(
+                run,
+                {
+                    "session_acquisition_attempts": attempt,
+                    "session_acquisition_last_reason": "accepted",
+                    "session_acquisition_egress_changed": egress_changed,
+                },
+            )
+            _record_session_acquisition_attempt_event(
+                db,
+                run,
+                source,
+                phase="session_acquisition_attempt_succeeded",
+                attempt=attempt,
+                reason="fresh_sticky_accepted" if attempt == 2 else "initial_context_accepted",
+                previous_egress_known=previous_egress_ip is not None,
+                egress_changed=egress_changed,
+            )
+            return attempt_provider, result
+        except Exception as exc:
+            observed_egress_ip = _session_acquisition_egress_ip(
+                db,
+                attempt_provider,
+                attempt_metadata,
+                exc,
+            )
+            reason = _session_acquisition_failure_reason(exc)
+            previous_known = previous_egress_ip is not None
+            egress_changed = bool(
+                attempt == 2
+                and previous_egress_ip
+                and observed_egress_ip
+                and observed_egress_ip != previous_egress_ip
+            )
+            _record_session_acquisition_attempt_event(
+                db,
+                run,
+                source,
+                phase="session_acquisition_attempt_failed",
+                attempt=attempt,
+                reason=reason,
+                previous_egress_known=previous_known,
+                egress_changed=egress_changed,
+            )
+            _close_owned_provider(attempt_provider, owned_provider=True)
+            _merge_run_metadata(
+                run,
+                {
+                    "session_acquisition_attempts": attempt,
+                    "session_acquisition_last_reason": reason,
+                    "session_acquisition_egress_changed": egress_changed,
+                },
+            )
+            db.flush()
+            if not _is_recoverable_session_acquisition_error(exc):
+                raise
+
+            session_id = _session_acquisition_session_id(attempt_metadata, exc)
+            if session_id is not None:
+                mark_vinted_session_invalid(
+                    db,
+                    session_id,
+                    reason=f"Session acquisition attempt failed: {reason}",
+                    settings=settings,
+                )
+            datadome_penalty = datadome_penalty or isinstance(exc, DataDomeChallengeError)
+            if attempt == 1:
+                previous_egress_ip = observed_egress_ip
+                previous_reason = reason
+                continue
+            raise ProfileSessionAcquisitionExhaustedError(
+                datadome_penalty=datadome_penalty,
+            ) from exc
+
+    raise RuntimeError("Session acquisition attempt loop exited unexpectedly")
+
+
+def _search_catalog_once(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    provider: ManualRunProvider,
+    proxy_profile_id: int | None,
+    settings,
+    *,
+    prepared_result: CatalogSearchResult | None,
+    attempt: int | None,
+) -> CatalogSearchResult:
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="catalog_search_start",
+        method="GET",
+        url=source.url,
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={"session_acquisition_attempt": attempt} if attempt is not None else None,
+    )
+    result = prepared_result or provider.search(source)
+    _persist_provider_session_refresh(db, provider, run, source, proxy_profile_id, settings)
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="catalog_search_success",
+        method="GET",
+        url=source.url,
+        proxy_profile_id=proxy_profile_id,
+        auth_mode="public_anonymous",
+        details={
+            "provider": result.provider_metadata,
+            **({"session_acquisition_attempt": attempt} if attempt is not None else {}),
+        },
+    )
+    return result
+
+
+def _record_session_acquisition_attempt_event(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    *,
+    phase: str,
+    attempt: int,
+    reason: str,
+    previous_egress_known: bool,
+    egress_changed: bool,
+) -> None:
+    metadata = run.runtime_metadata or {}
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase=phase,
+        level="warning" if phase.endswith("_failed") else "info",
+        proxy_profile_id=metadata.get("proxy_profile_id"),
+        auth_mode="public_anonymous",
+        details={
+            "proxy_profile_id": metadata.get("proxy_profile_id"),
+            "proxy_name": metadata.get("proxy_name"),
+            "attempt": attempt,
+            "attempt_limit": 2,
+            "reason": reason,
+            "previous_egress_known": previous_egress_known,
+            "egress_changed": egress_changed,
+        },
+    )
+
+
+def _is_recoverable_session_acquisition_error(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            DataDomeChallengeError,
+            VintedCatalogChallengeError,
+            VintedCatalogSessionContextError,
+            VintedCatalogSessionError,
+            VintedCatalogTransportError,
+            VintedEgressDiagnosticError,
+            VintedSessionRequiredError,
+        ),
+    ) and not isinstance(exc, VintedCatalogRateLimitError)
+
+
+def _session_acquisition_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, VintedEgressRotationError):
+        return "egress_not_rotated"
+    if isinstance(exc, VintedEgressDiagnosticError):
+        return "egress_diagnostic_failed"
+    if isinstance(exc, DataDomeChallengeError):
+        return "datadome_challenge"
+    if isinstance(exc, VintedCatalogChallengeError):
+        return "cloudflare_challenge"
+    if isinstance(exc, VintedCatalogTransportError):
+        return "proxy_transport_error"
+    if isinstance(exc, VintedCatalogSessionContextError):
+        return "catalog_session_context_invalid"
+    if isinstance(exc, VintedCatalogSessionError):
+        return "catalog_session_rejected"
+    if isinstance(exc, VintedSessionRequiredError):
+        return "prepared_context_unusable"
+    if isinstance(exc, VintedCatalogRateLimitError):
+        return "catalog_rate_limited"
+    if isinstance(exc, ProxyProfileEligibilityError):
+        return "proxy_identity_or_eligibility_changed"
+    return "internal_error"
+
+
+def _session_acquisition_session_id(
+    metadata: Mapping[str, Any],
+    exc: Exception,
+) -> int | None:
+    candidate = getattr(exc, "vinted_session_id", None)
+    if not isinstance(candidate, int) or isinstance(candidate, bool):
+        candidate = metadata.get("vinted_session_id")
+    return candidate if isinstance(candidate, int) and not isinstance(candidate, bool) else None
+
+
+def _session_acquisition_egress_ip(
+    db: Session,
+    provider: ManualRunProvider | None,
+    metadata: Mapping[str, Any],
+    exc: Exception | None,
+) -> str | None:
+    candidates = [
+        getattr(exc, "egress_ip", None) if exc is not None else None,
+        getattr(provider, "egress_ip", None) if provider is not None else None,
+        getattr(getattr(provider, "prepared_session", None), "egress_ip", None)
+        if provider is not None
+        else None,
+    ]
+    session_id = (
+        _session_acquisition_session_id(metadata, exc)
+        if exc is not None
+        else metadata.get("vinted_session_id")
+    )
+    if not isinstance(session_id, int) or isinstance(session_id, bool):
+        session_id = None
+    if session_id is not None:
+        session = db.get(VintedSession, session_id)
+        candidates.append(session.egress_ip if session is not None else None)
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 def _provider_for_egress(
     db: Session,
     source: SearchSource,
@@ -1730,6 +2009,8 @@ def _provider_for_egress(
     *,
     run: Run | None = None,
     include_catalog_payload: bool = False,
+    force_new_session: bool = False,
+    rejected_egress_ip: str | None = None,
 ) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any], CatalogSearchResult | None]:
     _require_proxy_egress(egress)
     proxy_url = egress.proxy_url
@@ -1755,15 +2036,7 @@ def _provider_for_egress(
         egress.proxy_identity_generation,
         settings,
     )
-    try:
-        vinted_session, prepared_session = get_ready_vinted_session(
-            db,
-            source,
-            profile,
-            settings=settings,
-        )
-        session_action = "reused"
-    except VintedSessionRequiredError:
+    if force_new_session:
         vinted_session, prepared_session, prepared_metadata, prepared_catalog_result = _prepare_vinted_session_for_run(
             db,
             source,
@@ -1772,9 +2045,32 @@ def _provider_for_egress(
             settings,
             event_sink=event_sink,
             include_catalog_payload=include_catalog_payload,
+            force_egress_diagnostic=True,
+            rejected_egress_ip=rejected_egress_ip,
         )
         metadata.update(prepared_metadata)
         session_action = "prepared"
+    else:
+        try:
+            vinted_session, prepared_session = get_ready_vinted_session(
+                db,
+                source,
+                profile,
+                settings=settings,
+            )
+            session_action = "reused"
+        except VintedSessionRequiredError:
+            vinted_session, prepared_session, prepared_metadata, prepared_catalog_result = _prepare_vinted_session_for_run(
+                db,
+                source,
+                profile,
+                runtime_config,
+                settings,
+                event_sink=event_sink,
+                include_catalog_payload=include_catalog_payload,
+            )
+            metadata.update(prepared_metadata)
+            session_action = "prepared"
     proxy_session_id = vinted_session.proxy_session_id
     proxy_url = proxy_url_with_sticky_session(profile, proxy_session_id, settings)
     proxy_marker = safe_secret_marker("proxy_sticky_session_id", proxy_session_id, kind="proxy_session")
@@ -1822,7 +2118,6 @@ def _provider_for_egress(
         proxy_url=proxy_url,
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
-        request_retries=settings.vinted_request_retries,
         human_delay_min=settings.human_delay_min_seconds,
         human_delay_max=settings.human_delay_max_seconds,
         event_sink=event_sink,
@@ -1858,6 +2153,8 @@ def _prepare_vinted_session_for_run(
     *,
     event_sink,
     include_catalog_payload: bool = False,
+    force_egress_diagnostic: bool = False,
+    rejected_egress_ip: str | None = None,
 ) -> tuple[Any, Any, dict[str, Any], CatalogSearchResult | None]:
     browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
     proxy_session_id = generate_proxy_session_id()
@@ -1877,13 +2174,33 @@ def _prepare_vinted_session_for_run(
                 "source_url": source.url,
             },
         )
+    prevalidated_egress: ProxyEgressProbeResult | None = None
+    if force_egress_diagnostic:
+        prevalidated_egress = probe_proxy_egress(
+            settings=settings,
+            profile=browser_profile,
+            proxy_url=proxy_url,
+            timeout_ms=runtime_config.request_timeout_ms,
+            proxy_session_marker=proxy_marker,
+            expected_country_code=proxy_profile.country_code,
+            event_sink=event_sink,
+            attempt=2,
+        )
+        if prevalidated_egress.error is not None:
+            raise prevalidated_egress.error
+        observed_egress_ip = prevalidated_egress.context.ip
+        if rejected_egress_ip and observed_egress_ip == rejected_egress_ip:
+            raise VintedEgressRotationError(
+                "Fresh proxy sticky resolved to the previously rejected egress",
+                egress_ip=observed_egress_ip,
+            )
+
     provider = CurlCffiVintedCatalogProvider(
         settings=settings,
         profile=browser_profile,
         proxy_url=proxy_url,
         timeout_ms=runtime_config.request_timeout_ms,
         catalog_per_page=runtime_config.catalog_per_page,
-        request_retries=0,
         human_delay_min=settings.human_delay_min_seconds,
         human_delay_max=settings.human_delay_max_seconds,
         event_sink=event_sink,
@@ -1893,12 +2210,20 @@ def _prepare_vinted_session_for_run(
         accept_language=proxy_profile.accept_language,
         screen=proxy_profile.vinted_screen,
         viewport_size=proxy_profile.screen,
+        prevalidated_egress=prevalidated_egress,
         require_datadome_cookie=True,
     )
     try:
-        context_report = provider.bootstrap_for_session(source.url, collect_datadome=True)
-        probe = provider.probe_catalog_api(source.url, include_payload=include_catalog_payload)
-        prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
+        try:
+            context_report = provider.bootstrap_for_session(source.url, collect_datadome=True)
+            probe = provider.probe_catalog_api(source.url, include_payload=include_catalog_payload)
+            prepared = provider.export_prepared_session(proxy_session_id=proxy_session_id)
+        except Exception as exc:
+            if not getattr(exc, "egress_ip", None):
+                egress_ip = getattr(provider, "egress_ip", None)
+                if isinstance(egress_ip, str) and egress_ip:
+                    exc.egress_ip = egress_ip
+            raise
     finally:
         provider.close()
 
@@ -1973,11 +2298,20 @@ def _prepare_vinted_session_for_run(
             },
         )
     if not usable:
-        raise VintedSessionRequiredError(saved.last_error or "Prepared Vinted session is not usable")
+        error = VintedSessionRequiredError(saved.last_error or "Prepared Vinted session is not usable")
+        error.vinted_session_id = saved.id
+        error.egress_ip = prepared.egress_ip
+        raise error
     return saved, prepared, {
         "vinted_session_prepare_probe_outcome": probe_outcome,
         "vinted_session_prepare_probe_status_code": probe.get("status_code"),
         "vinted_session_prepare_probe_duration_ms": probe.get("duration_ms"),
+        "session_acquisition_egress_changed": bool(
+            force_egress_diagnostic
+            and rejected_egress_ip
+            and prepared.egress_ip
+            and prepared.egress_ip != rejected_egress_ip
+        ),
     }, catalog_result
 
 
@@ -2163,12 +2497,81 @@ _RUN_OBSERVABILITY_METADATA_KEYS = (
     "detail_fetch_attempts",
     "filter_duration_total_ms",
     "persistence_duration_total_ms",
+    "vinted_session_id",
+    "vinted_session_request_count",
+    "session_acquisition_attempts",
+    "session_acquisition_last_reason",
+    "session_acquisition_egress_changed",
 )
 
 
 def _run_observability_metadata(run: Run) -> dict[str, Any]:
     metadata = run.runtime_metadata or {}
     return {key: metadata[key] for key in _RUN_OBSERVABILITY_METADATA_KEYS if key in metadata}
+
+
+_SESSION_ACQUISITION_EVENT_PHASES = (
+    "session_acquisition_attempt_started",
+    "session_acquisition_attempt_failed",
+    "session_acquisition_attempt_succeeded",
+)
+
+
+def _snapshot_session_acquisition_events(
+    db: Session,
+    run_id: int,
+) -> list[dict[str, Any]]:
+    events = db.scalars(
+        select(RunEvent)
+        .where(
+            RunEvent.run_id == run_id,
+            RunEvent.phase.in_(_SESSION_ACQUISITION_EVENT_PHASES),
+        )
+        .order_by(RunEvent.id.asc())
+    )
+    return [
+        {
+            "phase": event.phase,
+            "level": event.level,
+            "proxy_profile_id": event.proxy_profile_id,
+            "auth_mode": event.auth_mode,
+            "message": event.message,
+            "details": dict(event.details or {}),
+        }
+        for event in events
+    ]
+
+
+def _restore_session_acquisition_events(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    snapshots: list[dict[str, Any]],
+) -> None:
+    if not snapshots:
+        return
+    existing = db.scalar(
+        select(func.count())
+        .select_from(RunEvent)
+        .where(
+            RunEvent.run_id == run.id,
+            RunEvent.phase.in_(_SESSION_ACQUISITION_EVENT_PHASES),
+        )
+    )
+    if existing:
+        return
+    for snapshot in snapshots:
+        record_run_event(
+            db,
+            run_id=run.id,
+            source_id=source.id,
+            phase=snapshot["phase"],
+            level=snapshot["level"],
+            proxy_profile_id=snapshot["proxy_profile_id"],
+            auth_mode=snapshot["auth_mode"],
+            message=snapshot["message"],
+            details=snapshot["details"],
+        )
 
 
 def _build_provider_event_sink(
@@ -2490,7 +2893,7 @@ def _record_failed_run(
     monitor_stop_reason: str = "failed",
 ) -> Run:
     message = redact_sensitive_text(str(exc))
-    failure_kind = kind or exc.__class__.__name__
+    failure_kind = kind or getattr(exc, "failure_kind", exc.__class__.__name__)
     _merge_run_metadata(run, {"failure_kind": failure_kind})
     session_failure = _classify_session_failure(exc, kind=kind)
     proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
@@ -2515,6 +2918,13 @@ def _record_failed_run(
             "recovery_action": session_failure["recovery_action"],
             "vinted_session_id": (run.runtime_metadata or {}).get("vinted_session_id"),
             "vinted_session_use_count": (run.runtime_metadata or {}).get("vinted_session_request_count"),
+            "session_acquisition_attempts": (run.runtime_metadata or {}).get("session_acquisition_attempts"),
+            "session_acquisition_last_reason": (run.runtime_metadata or {}).get(
+                "session_acquisition_last_reason"
+            ),
+            "session_acquisition_egress_changed": (run.runtime_metadata or {}).get(
+                "session_acquisition_egress_changed"
+            ),
         },
     )
     vinted_session_id = (run.runtime_metadata or {}).get("vinted_session_id")
@@ -2524,7 +2934,17 @@ def _record_failed_run(
     ):
         mark_vinted_session_invalid(db, vinted_session_id, reason=message)
     cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
-    if isinstance(exc, DataDomeChallengeError):
+    if isinstance(exc, ProfileSessionAcquisitionExhaustedError):
+        if exc.datadome_penalty:
+            mark_proxy_challenge_detected(
+                db,
+                proxy_profile_id,
+                penalty_multiplier=get_settings().datadome_challenge_penalty_multiplier,
+                cooldown_minutes=cooldown_minutes,
+            )
+        else:
+            mark_proxy_run_failure(db, proxy_profile_id, cooldown_minutes=cooldown_minutes)
+    elif isinstance(exc, DataDomeChallengeError):
         mark_proxy_challenge_detected(
             db,
             proxy_profile_id,
@@ -2685,6 +3105,11 @@ def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_sessio
 
 def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
     text = str(exc).lower()
+    if isinstance(exc, ProfileSessionAcquisitionExhaustedError):
+        return {
+            "session_end_reason": "profile_session_acquisition_exhausted",
+            "recovery_action": "wait_for_proxy_cooldown_or_retry_manually",
+        }
     if isinstance(exc, BaselineRequiredError):
         return {
             "session_end_reason": "baseline_required",
