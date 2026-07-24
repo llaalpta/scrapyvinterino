@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -27,6 +28,7 @@ from vinted_monitor.api.schemas import (
     ProxyProfileCreate,
     ProxyProfileRead,
     ProxyProfileUpdate,
+    ProxyProfileUpdateRequest,
     RunEventRead,
     RunRead,
     SchedulerStateRead,
@@ -50,8 +52,10 @@ from vinted_monitor.services.browse import (
 )
 from vinted_monitor.services.monitor_stats import MonitorStatsNotFoundError, MonitorStatsRangeError, get_monitor_stats
 from vinted_monitor.services.proxies import (
+    ActiveProxyProfileUpdateError,
     ProxyProfileNotFoundError,
     create_proxy_profile,
+    guard_proxy_profile_update,
     list_proxy_profiles,
     profile_to_public_fields,
     update_proxy_profile,
@@ -334,8 +338,53 @@ def post_proxy_profile(payload: ProxyProfileCreate, db: Session = Depends(get_db
     return _proxy_profile_read(profile)
 
 
+_PROXY_PROFILE_CONFIGURATION_UPDATE_FIELDS = frozenset(
+    {
+        "name",
+        "scheme",
+        "kind",
+        "host",
+        "port",
+        "username",
+        "password",
+        "clear_password",
+        "country_code",
+        "sticky_username_template",
+        "sticky_ttl_minutes",
+        "max_concurrent_runs",
+    }
+)
+
+
 @business_router.patch("/proxy-profiles/{profile_id}", response_model=ProxyProfileRead)
-def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Session = Depends(get_db)) -> ProxyProfileRead:
+def patch_proxy_profile(
+    profile_id: int,
+    request_payload: ProxyProfileUpdateRequest,
+    db: Session = Depends(get_db),
+) -> ProxyProfileRead:
+    raw_payload = request_payload.model_dump(exclude_unset=True)
+    requested_fields = request_payload.model_fields_set
+    configuration_update_requested = bool(
+        requested_fields & _PROXY_PROFILE_CONFIGURATION_UPDATE_FIELDS
+    )
+    try:
+        guard_proxy_profile_update(
+            db,
+            profile_id,
+            configuration_update_requested=configuration_update_requested,
+            requested_is_active=raw_payload.get("is_active"),
+        )
+    except ProxyProfileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ActiveProxyProfileUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        payload = ProxyProfileUpdate.model_validate(raw_payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(include_input=False),
+        ) from exc
     try:
         profile = update_proxy_profile(
             db,
@@ -357,6 +406,8 @@ def patch_proxy_profile(profile_id: int, payload: ProxyProfileUpdate, db: Sessio
         )
     except ProxyProfileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ActiveProxyProfileUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _proxy_profile_read(profile)

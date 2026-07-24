@@ -360,7 +360,7 @@ def test_proxy_profile_api_requires_complete_target_configuration() -> None:
     assert "target country ES" in wrong_country.json()["detail"]
 
 
-def test_proxy_profile_activation_and_active_password_clear_require_credentials() -> None:
+def test_proxy_profile_activation_requires_credentials_and_active_password_clear_is_blocked() -> None:
     client = authenticated_test_client()
     incomplete_name = unique_name("api inactive incomplete proxy")
     with SessionLocal() as db:
@@ -402,8 +402,8 @@ def test_proxy_profile_activation_and_active_password_clear_require_credentials(
 
         assert activation.status_code == 422
         assert activation.json()["detail"] == "Proxy username is required"
-        assert clear_password.status_code == 422
-        assert clear_password.json()["detail"] == "Proxy password is required"
+        assert clear_password.status_code == 409
+        assert clear_password.json()["detail"] == "Pausa el proxy antes de editar su configuracion"
         with SessionLocal() as db:
             incomplete = db.get(ProxyProfile, incomplete_id)
             complete = db.get(ProxyProfile, complete_id)
@@ -415,6 +415,142 @@ def test_proxy_profile_activation_and_active_password_clear_require_credentials(
                 profile = db.get(ProxyProfile, profile_id)
                 if profile is not None:
                     db.delete(profile)
+            db.commit()
+
+
+def test_proxy_profile_configuration_requires_prior_pause_and_separate_activation() -> None:
+    client = authenticated_test_client()
+    original_name = unique_name("api active edit guard")
+    created = client.post(
+        "/api/proxy-profiles",
+        json={
+            "name": original_name,
+            "scheme": "http",
+            "kind": "residential",
+            "host": "proxy.example",
+            "port": 7791,
+            "username": "customer",
+            "password": "test-password",
+            "country_code": "ES",
+        },
+    )
+    assert created.status_code == 201
+    original = created.json()
+    profile_id = original["id"]
+
+    try:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, profile_id)
+            assert profile is not None
+            original_durable_state = (
+                profile.name,
+                profile.host,
+                profile.is_active,
+                profile.identity_generation,
+                profile.identity_fingerprint,
+                profile.password_encrypted,
+            )
+
+        combined_pause_edit = client.patch(
+            f"/api/proxy-profiles/{profile_id}",
+            json={"is_active": False, "host": "paused-proxy.example"},
+        )
+
+        assert combined_pause_edit.status_code == 409
+        assert combined_pause_edit.json()["detail"] == "Pausa el proxy antes de editar su configuracion"
+        malformed_active_edit = client.patch(
+            f"/api/proxy-profiles/{profile_id}",
+            json={"is_active": False, "sticky_ttl_minutes": 0},
+        )
+        assert malformed_active_edit.status_code == 409
+        assert malformed_active_edit.json()["detail"] == "Pausa el proxy antes de editar su configuracion"
+        for clear_password in (None, False):
+            explicit_active_noop = client.patch(
+                f"/api/proxy-profiles/{profile_id}",
+                json={"clear_password": clear_password},
+            )
+            assert explicit_active_noop.status_code == 409
+            assert explicit_active_noop.json()["detail"] == (
+                "Pausa el proxy antes de editar su configuracion"
+            )
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, profile_id)
+            assert profile is not None
+            assert (
+                profile.name,
+                profile.host,
+                profile.is_active,
+                profile.identity_generation,
+                profile.identity_fingerprint,
+                profile.password_encrypted,
+            ) == original_durable_state
+
+        paused = client.patch(f"/api/proxy-profiles/{profile_id}", json={"is_active": False})
+        assert paused.status_code == 200
+        assert paused.json()["is_active"] is False
+
+        invalid_paused_clear = client.patch(
+            f"/api/proxy-profiles/{profile_id}",
+            json={"clear_password": None},
+        )
+        assert invalid_paused_clear.status_code == 422
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, profile_id)
+            assert profile is not None
+            assert profile.is_active is False
+            assert profile.password_encrypted == original_durable_state[-1]
+
+        replacement_name = unique_name("api paused full edit")
+        edited = client.patch(
+            f"/api/proxy-profiles/{profile_id}",
+            json={
+                "name": replacement_name,
+                "scheme": "https",
+                "kind": "datacenter",
+                "host": "paused-proxy.example",
+                "port": 7792,
+                "username": "edited-customer",
+                "password": "",
+                "country_code": "ES",
+                "sticky_username_template": "{username}-edited-{session_id}",
+                "sticky_ttl_minutes": 19,
+                "max_concurrent_runs": 2,
+            },
+        )
+
+        assert edited.status_code == 200, edited.text
+        edited_payload = edited.json()
+        assert edited_payload["is_active"] is False
+        assert edited_payload["name"] == replacement_name
+        assert edited_payload["scheme"] == "https"
+        assert edited_payload["kind"] == "datacenter"
+        assert edited_payload["host"] == "paused-proxy.example"
+        assert edited_payload["port"] == 7792
+        assert edited_payload["username"] == "edited-customer"
+        assert edited_payload["has_password"] is True
+        assert edited_payload["password_fingerprint"] == original["password_fingerprint"]
+        assert edited_payload["sticky_username_template"] == "{username}-edited-{session_id}"
+        assert edited_payload["sticky_ttl_minutes"] == 19
+        assert edited_payload["max_concurrent_runs"] == 2
+
+        mixed_activation = client.patch(
+            f"/api/proxy-profiles/{profile_id}",
+            json={"is_active": True, "name": "must-not-apply"},
+        )
+        assert mixed_activation.status_code == 409
+        assert mixed_activation.json()["detail"] == (
+            "Guarda la configuracion con el proxy pausado y activalo despues"
+        )
+
+        activated = client.patch(f"/api/proxy-profiles/{profile_id}", json={"is_active": True})
+        assert activated.status_code == 200, activated.text
+        assert activated.json()["is_active"] is True
+        assert activated.json()["name"] == replacement_name
+    finally:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, profile_id)
+            if profile is not None:
+                db.delete(profile)
             db.commit()
 
 

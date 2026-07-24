@@ -142,6 +142,26 @@ Verification passed Ruff, frontend lint/build and the final isolated `same-profi
 
 The independent read-only audit returned positive with no A, B or C findings. It confirmed strict origin/profile admission, the bounded recurrent cooldown exception, lock order, one fresh-sticky attempt without fallback, one success/penalty transition, PWA repeatability and HMAC-only rejected-egress metadata.
 
+### 14.55 paused proxy editing
+
+Status: `done` on `feat/14.55-paused-proxy-editing` after positive independent audit.
+
+The proxy `is_active` flag means eligibility for new work, but configuration changes are no longer live tuning. An active profile is read-only in the PWA and accepts only the explicit pause command. A profile must already be paused before any configuration field can change.
+
+Acceptance criteria:
+
+1. The PWA presents the complete active profile configuration as read-only and exposes only `Pausar`. The authenticated API rejects every configuration edit while the profile's locked current state is active, including a combined `{is_active: false, ...configuration}` request, without changing profile, identity generation or prepared context.
+2. A paused profile exposes one complete editor for name, type, protocol, host, port, country, local capacity, username, optional replacement password, sticky template and sticky TTL. A blank password preserves the current encrypted credential; a successful save leaves the profile paused, advances identity only when an identity-bearing value changed and invalidates prior prepared context through the existing fence.
+3. Reactivation remains a separate explicit command and validates the persisted complete configuration. Unsaved edits cannot be activated accidentally, and invalid input remains visible and mutation-free.
+
+Representative integration: use authenticated Playwright against the live PWA/API and a disposable PostgreSQL profile plus prepared context. The active row is read-only and a direct configuration PATCH returns `409`; after an explicit pause, the full editor saves changed values with an empty password field, PostgreSQL retains the credential, advances the identity and invalidates the old context, while the profile remains paused. Activation is then explicit. The negative variation submits a combined pause+edit against the active profile and proves every durable value unchanged. Cleanup removes the QA user/session/profile/context and restores the initial service state. External Vinted, proxy, DataDome and vendor allowance is zero; worker/watchdog are not required.
+
+Verification passed Ruff, frontend lint/build and the final isolated `proxy-sticky-contract` gate (`69/69`) over migrated PostgreSQL, Redis, authenticated API, strict Vite and Playwright. It covered all identity-fence races plus the complete active-read-only, `409`, pause, edit, credential-preservation, context-invalidation and separate-reactivation path. The single complete backend pass reached `539 passed, 12 skipped` before exposing `32` obsolete active-edit expectations, all confined to the identity-fence test module; after converting them to pause/edit/reactivate without weakening stale-generation or lock-order assertions, that whole affected module and the live path passed in the final gate. Operational PostgreSQL/Redis fingerprints stayed unchanged, QA state was removed, worker/watchdog were restored, and every browser/provider destination was loopback with zero Vinted, proxy, DataDome or vendor traffic.
+
+The independent audit first found that request-schema validation could return `422` before the locked active-profile guard. The route now accepts only the known PATCH shape, acquires advisory and row locks, rejects configuration fields by presence while active and only then performs strict value validation. Finding-specific checks passed `19/19`, including active invalid TTL and `clear_password` null/false returning `409` without mutation plus paused null returning redacted `422`; the second re-audit was positive with no A, B or C findings.
+
+No migration, credential read-model change, password clearing UI, automatic reactivation, monitor lifecycle change or provider call belongs to this task.
+
 ## 14.19 Worker Redis availability
 
 Status: `done`. This is a contained fail-stop correction for the current local worker, not a general dependency-readiness platform.

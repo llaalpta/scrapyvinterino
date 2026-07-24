@@ -8,7 +8,7 @@ import { formatProxyCooldownRemaining, proxyCooldownRemainingMs } from '../../ut
 export function SettingsView({
   onCreateProxy,
   onToggleProxy,
-  onUpdateProxyStickyContract,
+  onUpdateProxy,
   onUpdateSchedulerConfig,
   proxyDraft,
   proxyCollectionState,
@@ -20,12 +20,11 @@ export function SettingsView({
   setProxyDraft
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
-  onToggleProxy: (profile: ProxyProfile) => void;
-  onUpdateProxyStickyContract: (
+  onToggleProxy: (profile: ProxyProfile) => Promise<void>;
+  onUpdateProxy: (
     profile: ProxyProfile,
-    stickyUsernameTemplate: string,
-    stickyTtlMinutes: number
-  ) => void;
+    draft: ProxyDraft
+  ) => Promise<ProxyProfile | null>;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
   proxyDraft: ProxyDraft;
   proxyCollectionState: CollectionLoadState;
@@ -178,91 +177,12 @@ export function SettingsView({
             </div>
             <HelpTooltip text="Credenciales cifradas en reposo. La API no devuelve passwords ni se asignan proxys manualmente por monitor." />
           </div>
-          <div className="proxy-form-fields">
-            <label className="wide-field">
-              Nombre
-              <input value={proxyDraft.name} onChange={(event) => setProxyDraft({ ...proxyDraft, name: event.target.value })} required />
-            </label>
-            <label>
-              Tipo
-              <select value={proxyDraft.kind} onChange={(event) => setProxyDraft({ ...proxyDraft, kind: event.target.value as ProxyDraft['kind'] })}>
-                <option value="own">Own</option>
-                <option value="datacenter">Datacenter</option>
-                <option value="residential">Residential</option>
-              </select>
-            </label>
-            <label>
-              Protocolo
-              <select value={proxyDraft.scheme} onChange={(event) => setProxyDraft({ ...proxyDraft, scheme: event.target.value })}>
-                <option value="http">http</option>
-                <option value="https">https</option>
-                <option value="socks5">socks5</option>
-              </select>
-            </label>
-            <label className="wide-field">
-              Host
-              <input value={proxyDraft.host} onChange={(event) => setProxyDraft({ ...proxyDraft, host: event.target.value })} required />
-            </label>
-            <label>
-              Puerto
-              <input
-                value={proxyDraft.port}
-                type="number"
-                min="1"
-                max="65535"
-                onChange={(event) => setProxyDraft({ ...proxyDraft, port: event.target.value })}
-                required
-              />
-            </label>
-            <label>
-              Limite local
-              <input
-                value={proxyDraft.maxConcurrentRuns}
-                type="number"
-                min="1"
-                max="10"
-                onChange={(event) => setProxyDraft({ ...proxyDraft, maxConcurrentRuns: event.target.value })}
-                required
-              />
-            </label>
-            <label className="wide-field">
-              Plantilla sticky
-              <input
-                value={proxyDraft.stickyUsernameTemplate}
-                maxLength={255}
-                onChange={(event) => setProxyDraft({ ...proxyDraft, stickyUsernameTemplate: event.target.value })}
-                required
-              />
-            </label>
-            <label>
-              TTL sticky (min)
-              <input
-                value={proxyDraft.stickyTtlMinutes}
-                type="number"
-                min="1"
-                max="120"
-                onChange={(event) => setProxyDraft({ ...proxyDraft, stickyTtlMinutes: event.target.value })}
-                required
-              />
-            </label>
-            <label>
-              Pais
-              <input
-                value={proxyDraft.countryCode}
-                maxLength={2}
-                onChange={(event) => setProxyDraft({ ...proxyDraft, countryCode: event.target.value.toUpperCase() })}
-                required
-              />
-            </label>
-            <label>
-              Usuario
-              <input value={proxyDraft.username} onChange={(event) => setProxyDraft({ ...proxyDraft, username: event.target.value })} required />
-            </label>
-            <label>
-              Password
-              <input value={proxyDraft.password} type="password" onChange={(event) => setProxyDraft({ ...proxyDraft, password: event.target.value })} required />
-            </label>
-          </div>
+          <ProxyFormFields
+            disabled={savingProxy}
+            draft={proxyDraft}
+            passwordRequired
+            setDraft={setProxyDraft}
+          />
           <div className="proxy-form-actions">
             <button type="submit" disabled={savingProxy || proxyCollectionState !== 'ready'}>
               <Save size={16} />
@@ -284,34 +204,41 @@ export function SettingsView({
               const cooldownUntil = proxy.cooldown_until;
               const cooldownRemainingMs = proxyCooldownRemainingMs(proxy, proxyCooldownNowMs);
               return (
-                <article className="proxy-row" key={proxy.id}>
+                <article className={`proxy-row${proxy.is_active ? '' : ' proxy-row-editing'}`} key={proxy.id}>
                   <div>
                     <strong>{proxy.name}</strong>
-                    <span>
-                      {proxy.kind} | {proxy.scheme}://{proxy.username_masked ? `${proxy.username_masked}@` : ''}
-                      {proxy.host}:{proxy.port} | limite local {proxy.max_concurrent_runs}
-                    </span>
-                    <span>
-                      Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
-                    </span>
-                    <ProxyStickyContractEditor
-                      disabled={savingProxy}
-                      key={`${proxy.id}:${proxy.sticky_username_template}:${proxy.sticky_ttl_minutes}`}
-                      onSave={onUpdateProxyStickyContract}
-                      proxy={proxy}
-                    />
+                    {proxy.is_active ? (
+                      <>
+                        <ProxyProfileReadOnly proxy={proxy} />
+                        <span className="proxy-action-message">
+                          Pausa el proxy para editar su configuracion.
+                        </span>
+                      </>
+                    ) : (
+                      <ProxyProfileEditor
+                        disabled={savingProxy}
+                        key={proxyEditorKey(proxy)}
+                        onActivate={onToggleProxy}
+                        onSave={onUpdateProxy}
+                        proxy={proxy}
+                      />
+                    )}
                     {cooldownRemainingMs !== null && cooldownUntil ? (
                       <span className="proxy-action-message failed">
                         {proxy.failure_count} fallos | hasta {formatDate(cooldownUntil)} | restan {formatProxyCooldownRemaining(cooldownRemainingMs)}
                       </span>
                     ) : null}
                   </div>
-                  <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
-                  {cooldownRemainingMs !== null ? <span className="status failed">Cooldown activo</span> : null}
-                  <button type="button" onClick={() => onToggleProxy(proxy)}>
-                    {proxy.is_active ? <Pause size={16} /> : <Play size={16} />}
-                    {proxy.is_active ? 'Pausar' : 'Activar'}
-                  </button>
+                  <div className="proxy-row-state">
+                    <span className={proxy.is_active ? 'status active' : 'status'}>{proxy.is_active ? 'Activo' : 'Pausado'}</span>
+                    {cooldownRemainingMs !== null ? <span className="status failed">Cooldown activo</span> : null}
+                    {proxy.is_active ? (
+                      <button disabled={savingProxy} type="button" onClick={() => void onToggleProxy(proxy)}>
+                        <Pause size={16} />
+                        Pausar
+                      </button>
+                    ) : null}
+                  </div>
                 </article>
               );
             })}
@@ -477,60 +404,265 @@ export type ProxyDraft = {
   countryCode: string;
 };
 
-function ProxyStickyContractEditor({
+function ProxyProfileReadOnly({ proxy }: { proxy: ProxyProfile }) {
+  return (
+    <>
+      <span>
+        {proxy.kind} | {proxy.scheme}://{proxy.username_masked ? `${proxy.username_masked}@` : ''}
+        {proxy.host}:{proxy.port} | limite local {proxy.max_concurrent_runs}
+      </span>
+      <span>
+        Credenciales: {proxy.username_masked ?? 'sin usuario'} | password {proxy.has_password ? 'configurada' : 'ausente'}
+      </span>
+      <span>
+        Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
+      </span>
+      <span>
+        Sticky: {proxy.sticky_username_template} | TTL {proxy.sticky_ttl_minutes} min
+      </span>
+    </>
+  );
+}
+
+function ProxyProfileEditor({
   disabled,
+  onActivate,
   onSave,
   proxy
 }: {
   disabled: boolean;
+  onActivate: (profile: ProxyProfile) => Promise<void>;
   onSave: (
     profile: ProxyProfile,
-    stickyUsernameTemplate: string,
-    stickyTtlMinutes: number
-  ) => void;
+    draft: ProxyDraft
+  ) => Promise<ProxyProfile | null>;
   proxy: ProxyProfile;
 }) {
-  const [template, setTemplate] = useState(proxy.sticky_username_template);
-  const [ttlMinutes, setTtlMinutes] = useState(String(proxy.sticky_ttl_minutes));
+  const [draft, setDraft] = useState(() => proxyDraftFromProfile(proxy));
+  const changed = proxyDraftHasChanges(proxy, draft);
 
-  const parsedTtlMinutes = Number(ttlMinutes);
-  const changed = template !== proxy.sticky_username_template
-    || parsedTtlMinutes !== proxy.sticky_ttl_minutes;
+  const save = async () => {
+    const updated = await onSave(proxy, draft);
+    if (updated) {
+      setDraft(proxyDraftFromProfile(updated));
+    }
+  };
 
   return (
     <form
-      className="proxy-sticky-editor"
+      className="proxy-form proxy-edit-form"
       onSubmit={(event) => {
         event.preventDefault();
-        onSave(proxy, template, parsedTtlMinutes);
+        void save();
       }}
     >
-      <label>
-        Plantilla sticky
+      <ProxyFormFields
+        disabled={disabled}
+        draft={draft}
+        passwordRequired={false}
+        setDraft={setDraft}
+      />
+      <span className="proxy-action-message">
+        La password vacia conserva la actual. Guardar mantiene el proxy pausado.
+      </span>
+      <div className="proxy-form-actions proxy-edit-actions">
+        <button type="submit" disabled={disabled || !changed}>
+          <Save size={15} />
+          Guardar cambios
+        </button>
+        <button
+          type="button"
+          disabled={disabled || changed}
+          title={changed ? 'Guarda los cambios antes de activar el proxy' : 'Activar proxy'}
+          onClick={() => void onActivate(proxy)}
+        >
+          <Play size={16} />
+          Activar
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ProxyFormFields({
+  disabled,
+  draft,
+  passwordRequired,
+  setDraft
+}: {
+  disabled: boolean;
+  draft: ProxyDraft;
+  passwordRequired: boolean;
+  setDraft: (draft: ProxyDraft) => void;
+}) {
+  return (
+    <div className="proxy-form-fields">
+      <label className="wide-field">
+        Nombre
         <input
-          aria-label={`Plantilla sticky de ${proxy.name}`}
-          value={template}
-          maxLength={255}
-          onChange={(event) => setTemplate(event.target.value)}
+          disabled={disabled}
+          value={draft.name}
+          onChange={(event) => setDraft({ ...draft, name: event.target.value })}
           required
         />
       </label>
       <label>
-        TTL (min)
+        Tipo
+        <select
+          disabled={disabled}
+          value={draft.kind}
+          onChange={(event) => setDraft({ ...draft, kind: event.target.value as ProxyDraft['kind'] })}
+        >
+          <option value="own">Own</option>
+          <option value="datacenter">Datacenter</option>
+          <option value="residential">Residential</option>
+        </select>
+      </label>
+      <label>
+        Protocolo
+        <select
+          disabled={disabled}
+          value={draft.scheme}
+          onChange={(event) => setDraft({ ...draft, scheme: event.target.value })}
+        >
+          <option value="http">http</option>
+          <option value="https">https</option>
+          <option value="socks5">socks5</option>
+        </select>
+      </label>
+      <label className="wide-field">
+        Host
         <input
-          aria-label={`TTL sticky de ${proxy.name}`}
-          value={ttlMinutes}
+          disabled={disabled}
+          value={draft.host}
+          onChange={(event) => setDraft({ ...draft, host: event.target.value })}
+          required
+        />
+      </label>
+      <label>
+        Puerto
+        <input
+          disabled={disabled}
+          value={draft.port}
+          type="number"
+          min="1"
+          max="65535"
+          onChange={(event) => setDraft({ ...draft, port: event.target.value })}
+          required
+        />
+      </label>
+      <label>
+        Limite local
+        <input
+          disabled={disabled}
+          value={draft.maxConcurrentRuns}
+          type="number"
+          min="1"
+          max="10"
+          onChange={(event) => setDraft({ ...draft, maxConcurrentRuns: event.target.value })}
+          required
+        />
+      </label>
+      <label className="wide-field">
+        Plantilla sticky
+        <input
+          disabled={disabled}
+          value={draft.stickyUsernameTemplate}
+          maxLength={255}
+          onChange={(event) => setDraft({ ...draft, stickyUsernameTemplate: event.target.value })}
+          required
+        />
+      </label>
+      <label>
+        TTL sticky (min)
+        <input
+          disabled={disabled}
+          value={draft.stickyTtlMinutes}
           type="number"
           min="1"
           max="120"
-          onChange={(event) => setTtlMinutes(event.target.value)}
+          onChange={(event) => setDraft({ ...draft, stickyTtlMinutes: event.target.value })}
           required
         />
       </label>
-      <button type="submit" disabled={disabled || !changed}>
-        <Save size={15} />
-        Guardar sticky
-      </button>
-    </form>
+      <label>
+        Pais
+        <input
+          disabled={disabled}
+          value={draft.countryCode}
+          maxLength={2}
+          onChange={(event) => setDraft({ ...draft, countryCode: event.target.value.toUpperCase() })}
+          required
+        />
+      </label>
+      <label>
+        Usuario
+        <input
+          disabled={disabled}
+          value={draft.username}
+          onChange={(event) => setDraft({ ...draft, username: event.target.value })}
+          required
+        />
+      </label>
+      <label>
+        Password
+        <input
+          autoComplete="new-password"
+          disabled={disabled}
+          value={draft.password}
+          type="password"
+          placeholder={passwordRequired ? undefined : 'Vacia: conservar actual'}
+          onChange={(event) => setDraft({ ...draft, password: event.target.value })}
+          required={passwordRequired}
+        />
+      </label>
+    </div>
   );
+}
+
+function proxyDraftFromProfile(proxy: ProxyProfile): ProxyDraft {
+  return {
+    name: proxy.name,
+    scheme: proxy.scheme,
+    kind: proxy.kind,
+    host: proxy.host,
+    port: String(proxy.port),
+    maxConcurrentRuns: String(proxy.max_concurrent_runs),
+    stickyUsernameTemplate: proxy.sticky_username_template,
+    stickyTtlMinutes: String(proxy.sticky_ttl_minutes),
+    username: proxy.username ?? '',
+    password: '',
+    countryCode: proxy.country_code
+  };
+}
+
+function proxyDraftHasChanges(proxy: ProxyProfile, draft: ProxyDraft) {
+  return draft.name !== proxy.name
+    || draft.scheme !== proxy.scheme
+    || draft.kind !== proxy.kind
+    || draft.host !== proxy.host
+    || Number(draft.port) !== proxy.port
+    || Number(draft.maxConcurrentRuns) !== proxy.max_concurrent_runs
+    || draft.stickyUsernameTemplate !== proxy.sticky_username_template
+    || Number(draft.stickyTtlMinutes) !== proxy.sticky_ttl_minutes
+    || draft.username !== (proxy.username ?? '')
+    || draft.password.length > 0
+    || draft.countryCode !== proxy.country_code;
+}
+
+function proxyEditorKey(proxy: ProxyProfile) {
+  return JSON.stringify([
+    proxy.id,
+    proxy.name,
+    proxy.scheme,
+    proxy.kind,
+    proxy.host,
+    proxy.port,
+    proxy.username,
+    proxy.password_fingerprint,
+    proxy.country_code,
+    proxy.sticky_username_template,
+    proxy.sticky_ttl_minutes,
+    proxy.max_concurrent_runs
+  ]);
 }

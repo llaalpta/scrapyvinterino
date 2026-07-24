@@ -88,6 +88,22 @@ export type ProxyProfile = {
   last_used_at: string | null;
 };
 
+export type ProxyProfileUpdate = {
+  name?: string;
+  scheme?: string;
+  kind?: ProxyProfile['kind'];
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  clear_password?: boolean;
+  country_code?: string;
+  sticky_username_template?: string;
+  sticky_ttl_minutes?: number;
+  max_concurrent_runs?: number;
+  is_active?: boolean;
+};
+
 export type VintedSessionUnusableReason =
   | 'status_incomplete'
   | 'status_invalid'
@@ -501,10 +517,7 @@ export function createProxyProfile(payload: {
 
 export function updateProxyProfile(
   profileId: number,
-  payload: Partial<Pick<
-    ProxyProfile,
-    'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code' | 'sticky_username_template' | 'sticky_ttl_minutes'
-  >>
+  payload: ProxyProfileUpdate
 ): Promise<ProxyProfile> {
   return patchJson<ProxyProfile>(`/api/proxy-profiles/${profileId}`, payload);
 }

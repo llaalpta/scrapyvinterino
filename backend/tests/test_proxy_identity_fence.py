@@ -78,6 +78,18 @@ IDENTITY_MUTATIONS = (
     "preset",
 )
 IDENTITY_CHANGES = frozenset(IDENTITY_MUTATIONS) - {"inactive", "cooldown"}
+CONFIGURATION_MUTATIONS = frozenset(IDENTITY_MUTATIONS) - {"inactive", "cooldown", "preset"}
+REACTIVATABLE_IDENTITY_MUTATIONS = frozenset(
+    {
+        "scheme",
+        "host",
+        "port",
+        "username",
+        "password",
+        "sticky_template",
+        "sticky_ttl",
+    }
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -296,6 +308,8 @@ def _complete_context(proxy_session_id: str) -> PreparedCatalogSession:
 
 def _apply_mutation(case: str, client, proxy_id: int) -> str | None:
     secret_canary: str | None = None
+    if case in CONFIGURATION_MUTATIONS:
+        _set_proxy_active(client, proxy_id, False)
     if case == "scheme":
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"scheme": "https"})
     elif case == "host":
@@ -305,14 +319,14 @@ def _apply_mutation(case: str, client, proxy_id: int) -> str | None:
     elif case == "username":
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"username": f"qa-next-{uuid4().hex}"})
     elif case == "clear_username":
-        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"username": "", "is_active": False})
+        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"username": ""})
     elif case == "password":
         secret_canary = f"qa-next-password-{uuid4().hex}"
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"password": secret_canary})
     elif case == "clear_password":
-        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"clear_password": True, "is_active": False})
+        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"clear_password": True})
     elif case == "country":
-        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"country_code": "FR", "is_active": False})
+        response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"country_code": "FR"})
     elif case == "sticky_template":
         response = client.patch(
             f"/api/proxy-profiles/{proxy_id}",
@@ -344,7 +358,35 @@ def _apply_mutation(case: str, client, proxy_id: int) -> str | None:
     assert response.status_code == 200, response.text
     if secret_canary is not None:
         assert secret_canary not in response.text
+    if case in REACTIVATABLE_IDENTITY_MUTATIONS:
+        _set_proxy_active(client, proxy_id, True)
     return secret_canary
+
+
+def _set_proxy_active(client, proxy_id: int, is_active: bool):
+    response = client.patch(
+        f"/api/proxy-profiles/{proxy_id}",
+        json={"is_active": is_active},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["is_active"] is is_active
+    return response
+
+
+def _edit_proxy_through_paused_state(
+    client,
+    proxy_id: int,
+    payload: dict[str, object],
+    *,
+    reactivate: bool = True,
+):
+    _set_proxy_active(client, proxy_id, False)
+    response = client.patch(f"/api/proxy-profiles/{proxy_id}", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["is_active"] is False
+    if reactivate:
+        _set_proxy_active(client, proxy_id, True)
+    return response
 
 
 @pytest.mark.parametrize(
@@ -360,6 +402,7 @@ def test_invalid_sticky_contract_does_not_mutate_identity_or_prepared_context(
 ) -> None:
     client = authenticated_test_client()
     with _identity_graph() as graph:
+        _set_proxy_active(client, graph.proxy_id, False)
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, graph.proxy_id)
             session = db.get(VintedSession, graph.session_id)
@@ -663,8 +706,11 @@ def test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence
                 assert profile is not None
                 assert task.proxy_identity_generation == effective_proxy_identity_generation(profile)
 
-            mutation = mutation_client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.2"})
-            assert mutation.status_code == 200, mutation.text
+            _edit_proxy_through_paused_state(
+                mutation_client,
+                graph.proxy_id,
+                {"host": "127.0.0.2"},
+            )
 
             consumer = TaskConsumer(settings, consumer_id=0)
             real_consume = consumer._consume_reservation
@@ -776,26 +822,29 @@ def test_scheduler_proxy_selection_and_identity_edit_use_one_lock_order(
                 edit_future = pool.submit(
                     edit_client.patch,
                     f"/api/proxy-profiles/{graph.proxy_id}",
-                    json={"host": "127.0.0.2"},
+                    json={"is_active": False},
                 )
-                assert edit_has_exclusive_advisory.wait(timeout=10), "proxy edit did not acquire exclusive ownership"
+                assert edit_has_exclusive_advisory.wait(timeout=10), "proxy pause did not acquire exclusive ownership"
                 release_scheduler_choose.set()
                 release_edit.set()
-                edit_response = edit_future.result(timeout=15)
+                pause_response = edit_future.result(timeout=15)
                 first_submitted = scheduler_future.result(timeout=15)
 
-            assert edit_response.status_code == 200, edit_response.text
-            assert first_submitted == [graph.source_id]
+            assert pause_response.status_code == 200, pause_response.text
+            assert pause_response.json()["is_active"] is False
+            assert first_submitted == []
             queued = pending_tasks(
                 queue_client,
                 queue_key=queue_key,
                 processing_keys=(processing_queue_key(queue_key, 0),),
             )
-            assert len(queued) == 1
-            with SessionLocal() as db:
-                profile = db.get(ProxyProfile, graph.proxy_id)
-                assert profile is not None
-                assert queued[0].proxy_identity_generation == effective_proxy_identity_generation(profile)
+            assert queued == []
+            edit_response = edit_client.patch(
+                f"/api/proxy-profiles/{graph.proxy_id}",
+                json={"host": "127.0.0.2"},
+            )
+            assert edit_response.status_code == 200, edit_response.text
+            assert edit_response.json()["is_active"] is False
         finally:
             release_scheduler_choose.set()
             release_edit.set()
@@ -869,17 +918,24 @@ def test_explicit_retry_selection_precedes_source_lock_during_identity_edit(
                 edit_future = pool.submit(
                     mutation_client.patch,
                     f"/api/proxy-profiles/{graph.proxy_id}",
-                    json={"host": "127.0.0.2"},
+                    json={"is_active": False},
                 )
                 assert edit_has_exclusive_advisory.wait(timeout=10)
                 release_retry_choose.set()
                 release_edit.set()
-                edit_response = edit_future.result(timeout=15)
+                pause_response = edit_future.result(timeout=15)
                 retry_response = retry_future.result(timeout=15)
 
+            assert pause_response.status_code == 200, pause_response.text
+            assert pause_response.json()["is_active"] is False
+            assert retry_response.status_code == 409, retry_response.text
+            assert "inactive" in retry_response.json()["detail"]
+            edit_response = mutation_client.patch(
+                f"/api/proxy-profiles/{graph.proxy_id}",
+                json={"host": "127.0.0.2"},
+            )
             assert edit_response.status_code == 200, edit_response.text
-            assert retry_response.status_code == 201, retry_response.text
-            assert retry_response.json()["status"] == FAILED
+            assert edit_response.json()["is_active"] is False
         finally:
             release_retry_choose.set()
             release_edit.set()
@@ -1105,11 +1161,11 @@ def test_profile_sticky_change_rejects_task_captured_with_old_identity(
                 assert enqueue_task(queue_client, task, queue_key=queue_key) is True
                 db.commit()
 
-            mutation = authenticated_test_client().patch(
-                f"/api/proxy-profiles/{graph.proxy_id}",
-                json={"sticky_username_template": replacement_template},
+            _edit_proxy_through_paused_state(
+                authenticated_test_client(),
+                graph.proxy_id,
+                {"sticky_username_template": replacement_template},
             )
-            assert mutation.status_code == 200, mutation.text
             raw_payload = queue_client.lindex(queue_key, 0)
             assert isinstance(raw_payload, bytes)
             child_env = os.environ.copy()
@@ -1266,10 +1322,15 @@ def test_identity_generation_prevents_stale_task_reuse_after_aba_revert(
                 assert enqueue_task(queue_client, task, queue_key=queue_key) is True
                 db.commit()
 
-            first_edit = mutation_client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.2"})
+            _set_proxy_active(mutation_client, graph.proxy_id, False)
+            first_edit = mutation_client.patch(
+                f"/api/proxy-profiles/{graph.proxy_id}",
+                json={"host": "127.0.0.2"},
+            )
             revert = mutation_client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.1"})
             assert first_edit.status_code == 200, first_edit.text
             assert revert.status_code == 200, revert.text
+            _set_proxy_active(mutation_client, graph.proxy_id, True)
 
             reservation = reserve_task(queue_client, timeout=1, queue_key=queue_key, consumer_id=0)
             assert reservation is not None
@@ -1307,8 +1368,11 @@ def test_fresh_command_after_identity_change_prepares_only_current_generation(
     LocalAcceptedProvider.reset()
     client = authenticated_test_client()
     with _identity_graph(manual_active=True) as graph:
-        response = client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.2"})
-        assert response.status_code == 200, response.text
+        _edit_proxy_through_paused_state(
+            client,
+            graph.proxy_id,
+            {"host": "127.0.0.2"},
+        )
         monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", LocalAcceptedProvider)
 
         run_response = client.post(f"/api/monitors/{graph.source_id}/runs")
@@ -1342,7 +1406,11 @@ def test_already_invalid_stale_session_is_not_rewritten_by_later_selection() -> 
     settings = get_settings()
     client = authenticated_test_client()
     with _identity_graph() as graph:
-        response = client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.2"})
+        _set_proxy_active(client, graph.proxy_id, False)
+        response = client.patch(
+            f"/api/proxy-profiles/{graph.proxy_id}",
+            json={"host": "127.0.0.2"},
+        )
         assert response.status_code == 200, response.text
         with SessionLocal() as db:
             stale_session = db.get(VintedSession, graph.session_id)
@@ -1352,6 +1420,7 @@ def test_already_invalid_stale_session_is_not_rewritten_by_later_selection() -> 
 
         second_response = client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json={"host": "127.0.0.3"})
         assert second_response.status_code == 200, second_response.text
+        _set_proxy_active(client, graph.proxy_id, True)
         with SessionLocal() as db:
             stale_session = db.get(VintedSession, graph.session_id)
             source = db.get(SearchSource, graph.source_id)
@@ -1381,15 +1450,15 @@ def test_nonidentity_profile_edits_preserve_generation_and_ready_context() -> No
             original_generation = effective_proxy_identity_generation(profile)
             original_context_encrypted = session.context_encrypted
 
-        response = client.patch(
-            f"/api/proxy-profiles/{graph.proxy_id}",
-            json={
+        _edit_proxy_through_paused_state(
+            client,
+            graph.proxy_id,
+            {
                 "name": f"qa renamed proxy {uuid4().hex}",
                 "kind": "datacenter",
                 "max_concurrent_runs": 3,
             },
         )
-        assert response.status_code == 200, response.text
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, graph.proxy_id)
             session = db.get(VintedSession, graph.session_id)
@@ -1448,17 +1517,24 @@ def test_proxy_identity_shared_fences_allow_parallel_runs_and_block_edit(
             edit_future = pool.submit(
                 client.patch,
                 f"/api/proxy-profiles/{graph.proxy_id}",
-                json={"host": "127.0.0.3"},
+                json={"is_active": False},
             )
-            assert edit_lock_attempted.wait(timeout=3), "proxy edit did not attempt the exclusive fence"
+            assert edit_lock_attempted.wait(timeout=3), "proxy pause did not attempt the exclusive fence"
             _assert_advisory_lock_waiting(edit_backend_pid[-1])
-            assert not edit_future.done(), "proxy edit crossed an admitted shared run fence"
+            assert not edit_future.done(), "proxy pause crossed an admitted shared run fence"
             first_db.rollback()
-            assert not edit_future.done(), "proxy edit crossed the second admitted shared run fence"
+            assert not edit_future.done(), "proxy pause crossed the second admitted shared run fence"
             release_second.set()
             second_future.result(timeout=10)
-            edit_response = edit_future.result(timeout=10)
+            pause_response = edit_future.result(timeout=10)
+            assert pause_response.status_code == 200, pause_response.text
+            assert pause_response.json()["is_active"] is False
+            edit_response = client.patch(
+                f"/api/proxy-profiles/{graph.proxy_id}",
+                json={"host": "127.0.0.3"},
+            )
             assert edit_response.status_code == 200, edit_response.text
+            assert edit_response.json()["is_active"] is False
 
 
 def test_admitted_run_keeps_identity_fence_through_final_provider_io(
@@ -1501,19 +1577,26 @@ def test_admitted_run_keeps_identity_fence_through_final_provider_io(
                 edit_future = pool.submit(
                     edit_client.patch,
                     f"/api/proxy-profiles/{graph.proxy_id}",
-                    json={"host": "127.0.0.4"},
+                    json={"is_active": False},
                 )
-                assert edit_lock_attempted.wait(timeout=3), "proxy edit did not attempt the exclusive fence"
+                assert edit_lock_attempted.wait(timeout=3), "proxy pause did not attempt the exclusive fence"
                 _assert_advisory_lock_waiting(edit_backend_pid[-1])
-                assert not edit_future.done(), "proxy edit crossed the run's final provider fence"
+                assert not edit_future.done(), "proxy pause crossed the run's final provider fence"
                 release_search.set()
                 run_response = run_future.result(timeout=15)
-                edit_response = edit_future.result(timeout=15)
+                pause_response = edit_future.result(timeout=15)
 
-            assert run_response.status_code == 201, run_response.text
-            assert run_response.json()["status"] == SUCCESS
-            assert edit_response.status_code == 200, edit_response.text
-            assert LocalAcceptedProvider.search_calls == 1
+                assert run_response.status_code == 201, run_response.text
+                assert run_response.json()["status"] == SUCCESS
+                assert pause_response.status_code == 200, pause_response.text
+                assert pause_response.json()["is_active"] is False
+                edit_response = edit_client.patch(
+                    f"/api/proxy-profiles/{graph.proxy_id}",
+                    json={"host": "127.0.0.4"},
+                )
+                assert edit_response.status_code == 200, edit_response.text
+                assert edit_response.json()["is_active"] is False
+                assert LocalAcceptedProvider.search_calls == 1
             assert LocalAcceptedProvider.proxy_hosts == ["127.0.0.1"]
             with SessionLocal() as db:
                 profile = db.get(ProxyProfile, graph.proxy_id)

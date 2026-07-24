@@ -1,53 +1,53 @@
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
-from playwright.sync_api import BrowserContext, Route, expect, sync_playwright
-from sqlalchemy import delete, func, select
+from playwright.sync_api import BrowserContext, Page, Route, expect, sync_playwright
+from sqlalchemy import delete
 
 from vinted_monitor.core.config import get_settings
-from vinted_monitor.db.models import (
-    ErrorLog,
-    MonitorSession,
-    ProxyProfile,
-    Run,
-    RunEvent,
-    RunEventOutbox,
-    RunEventPublication,
-    SearchSource,
-    User,
-    UserSession,
-    VintedSession,
-)
+from vinted_monitor.db.models import ProxyProfile, SearchSource, User, UserSession, VintedSession
 from vinted_monitor.db.session import SessionLocal
+from vinted_monitor.providers.browser_profiles import profile_for_impersonate
+from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
 from vinted_monitor.services.local_auth import create_local_user
-from vinted_monitor.services.proxies import effective_proxy_identity_generation
+from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.search_sources import create_source
-from vinted_monitor.services.seen_cache import get_seen_cache
+from vinted_monitor.services.vinted_sessions import save_prepared_vinted_session
 
 pytestmark = [pytest.mark.real_auth, pytest.mark.live_stack]
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-PASSWORD = "proxy-sticky-contract-password"
+PASSWORD = "paused-proxy-editing-password"
 
 
 @dataclass(frozen=True)
 class Scenario:
     token: str
     email: str
+    user_id: int
+    proxy_id: int
     proxy_name: str
+    edited_proxy_name: str
     source_id: int
-    source_name: str
+    session_id: int
+    password_ciphertext: str
+    identity_generation: int
+    identity_fingerprint: str
+    context_ciphertext: str
 
 
-def test_live_proxy_sticky_contract_edit_invalidates_and_rotates_context() -> None:
+def test_live_paused_proxy_editing_contract() -> None:
     api_url = _loopback_origin("PROXY_STICKY_QA_API_URL")
     pwa_url = _loopback_origin("PROXY_STICKY_QA_PWA_URL")
     settings = get_settings()
     assert settings.scheduler_enabled is False
+    assert settings.vinted_datadome_collector_enabled is False
     for endpoint in (
         settings.vinted_base_url,
         settings.vinted_datadome_collector_url,
@@ -64,24 +64,79 @@ def test_live_proxy_sticky_contract_edit_invalidates_and_rotates_context() -> No
 
 def _seed() -> Scenario:
     token = uuid4().hex
-    email = f"qa-proxy-sticky-{token}@example.local"
-    source_name = f"qa proxy sticky monitor {token}"
+    settings = get_settings()
+    proxy_secret = f"qa-proxy-secret-{token}"
+    context_secret = f"qa-context-secret-{token}"
     with SessionLocal() as db:
-        create_local_user(db, email=email, password=PASSWORD)
+        user = create_local_user(
+            db,
+            email=f"qa-paused-proxy-{token}@example.local",
+            password=PASSWORD,
+        )
+        proxy = create_proxy_profile(
+            db,
+            name=f"qa paused proxy {token}",
+            scheme="http",
+            kind="residential",
+            host="127.0.0.1",
+            port=9,
+            username=f"qa-{token}",
+            password=proxy_secret,
+            country_code="ES",
+            sticky_username_template="{username};sessid.{session_id}",
+            sticky_ttl_minutes=25,
+            max_concurrent_runs=1,
+            is_active=True,
+            settings=settings,
+        )
         source = create_source(
             db,
-            source_name,
-            f"https://www.vinted.es/catalog?search_text=qa-sticky-{token}",
+            f"qa paused proxy source {token}",
+            f"https://www.vinted.es/catalog?search_text=qa-paused-proxy-{token}",
         )
-        source.monitor_mode = "manual"
-        source.scheduler_config = {}
+        browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
+        session = save_prepared_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id=f"qa-sticky-{token}",
+            profile=browser_profile,
+            context=PreparedCatalogSession(
+                proxy_session_id=f"qa-sticky-{token}",
+                cookies={
+                    name: context_secret
+                    for name in ("anon_id", "access_token_web", "datadome", "__cf_bm", "v_udt")
+                },
+                csrf_token=context_secret,
+                anon_id=context_secret,
+                access_token_web=context_secret,
+                datadome=context_secret,
+                cf_bm=context_secret,
+                v_udt=context_secret,
+                user_iso_locale=proxy.locale,
+                vinted_screen=proxy.vinted_screen,
+                egress_ip="127.0.0.1",
+                egress_country_code=proxy.country_code,
+                egress_validated_at=datetime.now(UTC),
+            ),
+            settings=settings,
+        )
         db.commit()
+        assert proxy.password_encrypted is not None
+        assert proxy.identity_fingerprint is not None
         return Scenario(
             token=token,
-            email=email,
-            proxy_name=f"qa proxy sticky {token}",
+            email=user.email,
+            user_id=user.id,
+            proxy_id=proxy.id,
+            proxy_name=proxy.name,
+            edited_proxy_name=f"qa edited proxy {token}",
             source_id=source.id,
-            source_name=source.name,
+            session_id=session.id,
+            password_ciphertext=proxy.password_encrypted,
+            identity_generation=proxy.identity_generation,
+            identity_fingerprint=proxy.identity_fingerprint,
+            context_ciphertext=session.context_encrypted,
         )
 
 
@@ -118,93 +173,99 @@ def _exercise_live_stack(
 
             page.route("**/*", guard)
             page.on("websocket", lambda socket: _assert_loopback(socket.url))
-            _login(page, scenario, pwa_url)
+            csrf_token = _login(page, scenario, pwa_url)
 
             page.get_by_role("button", name="Ajustes", exact=True).click()
-            create_path = "/api/proxy-profiles"
-            page.get_by_label("Nombre", exact=True).fill(scenario.proxy_name)
-            page.locator(".proxy-form select").first.select_option("residential")
-            page.get_by_label("Host", exact=True).fill("proxy.invalid")
-            page.get_by_label("Puerto", exact=True).fill("8080")
-            page.get_by_label("Usuario", exact=True).fill(f"qa-{scenario.token}")
-            page.get_by_label("Password", exact=True).fill("qa-proxy-password")
-            with page.expect_response(
-                lambda response: response.request.method == "POST"
-                and urlsplit(response.url).path == create_path
-            ) as create_info:
-                page.get_by_role("button", name="Guardar proxy", exact=True).click()
-            assert create_info.value.status == 201
-            proxy_payload = create_info.value.json()
-            assert proxy_payload["sticky_username_template"] == "{username};sessid.{session_id}"
-            assert proxy_payload["sticky_ttl_minutes"] == 25
-            proxy_id = proxy_payload["id"]
-            expect(page.get_by_text(scenario.proxy_name, exact=True)).to_be_visible()
+            active_row = _proxy_row(page, scenario.proxy_name)
+            expect(active_row.get_by_text("Activo", exact=True)).to_be_visible()
+            expect(active_row.get_by_text("Pausa el proxy para editar su configuracion.")).to_be_visible()
+            expect(active_row.get_by_role("button", name="Pausar", exact=True)).to_be_enabled()
+            assert active_row.locator("input, select").count() == 0
+            assert active_row.get_by_role("button", name="Guardar cambios", exact=True).count() == 0
+            assert active_row.get_by_role("button", name="Activar", exact=True).count() == 0
 
-            page.get_by_role("button", name="Monitores", exact=True).click()
-            _select_monitor(page, scenario.source_name, active=False)
-            first_run = _post_monitor_action(
-                page,
-                path=f"/api/monitors/{scenario.source_id}/start",
-                button_name="Iniciar sesion",
+            rejected = context.request.patch(
+                f"{api_url}/api/proxy-profiles/{scenario.proxy_id}",
+                headers={"Origin": pwa_url, "X-CSRF-Token": csrf_token},
+                data={"is_active": False, "host": "127.0.0.2"},
             )
-            assert first_run["status"] == "success"
-            original = _assert_first_context(scenario, proxy_id)
+            assert rejected.status == 409
+            assert rejected.json()["detail"] == "Pausa el proxy antes de editar su configuracion"
+            _assert_rejected_update_did_not_mutate(scenario)
 
-            page.get_by_role("button", name="Ajustes", exact=True).click()
-            proxy_row = page.locator("article.proxy-row").filter(has_text=scenario.proxy_name)
-            proxy_row.get_by_label(f"Plantilla sticky de {scenario.proxy_name}", exact=True).fill(
+            with page.expect_response(
+                lambda response: response.request.method == "PATCH"
+                and urlsplit(response.url).path == f"/api/proxy-profiles/{scenario.proxy_id}"
+            ) as pause_info:
+                active_row.get_by_role("button", name="Pausar", exact=True).click()
+            assert pause_info.value.status == 200
+            assert pause_info.value.json()["is_active"] is False
+
+            paused_row = _proxy_row(page, scenario.proxy_name)
+            expect(paused_row.get_by_text("Pausado", exact=True)).to_be_visible()
+            expect(paused_row.get_by_role("button", name="Guardar cambios", exact=True)).to_be_visible()
+            expect(paused_row.get_by_role("button", name="Activar", exact=True)).to_be_enabled()
+            assert paused_row.locator("input, select").count() == 11
+
+            paused_row.get_by_label("Nombre", exact=True).fill(scenario.edited_proxy_name)
+            paused_row.locator("select").nth(0).select_option("datacenter")
+            paused_row.locator("select").nth(1).select_option("https")
+            paused_row.get_by_label("Host", exact=True).fill("127.0.0.2")
+            paused_row.get_by_label("Puerto", exact=True).fill("18080")
+            paused_row.get_by_label("Limite local", exact=True).fill("3")
+            paused_row.get_by_label("Plantilla sticky", exact=True).fill(
                 "{username}-qa-{session_id}"
             )
-            proxy_row.get_by_label(f"TTL sticky de {scenario.proxy_name}", exact=True).fill("7")
+            paused_row.get_by_label("TTL sticky (min)", exact=True).fill("7")
+            paused_row.get_by_label("Pais", exact=True).fill("ES")
+            paused_row.get_by_label("Usuario", exact=True).fill(f"qa-edited-{scenario.token}")
+            expect(paused_row.get_by_label("Password", exact=True)).to_have_value("")
+            expect(paused_row.get_by_role("button", name="Activar", exact=True)).to_be_disabled()
+
             with page.expect_response(
                 lambda response: response.request.method == "PATCH"
-                and urlsplit(response.url).path == f"/api/proxy-profiles/{proxy_id}"
+                and urlsplit(response.url).path == f"/api/proxy-profiles/{scenario.proxy_id}"
             ) as edit_info:
-                proxy_row.get_by_role("button", name="Guardar sticky", exact=True).click()
+                paused_row.get_by_role("button", name="Guardar cambios", exact=True).click()
             assert edit_info.value.status == 200
             edited = edit_info.value.json()
+            assert edited["name"] == scenario.edited_proxy_name
+            assert edited["kind"] == "datacenter"
+            assert edited["scheme"] == "https"
+            assert edited["host"] == "127.0.0.2"
+            assert edited["port"] == 18080
+            assert edited["max_concurrent_runs"] == 3
             assert edited["sticky_username_template"] == "{username}-qa-{session_id}"
             assert edited["sticky_ttl_minutes"] == 7
-            _assert_context_invalidated(scenario, proxy_id, original)
+            assert edited["country_code"] == "ES"
+            assert edited["username"] == f"qa-edited-{scenario.token}"
+            assert edited["has_password"] is True
+            assert edited["is_active"] is False
+            assert "password" not in edited
+            _assert_paused_edit_persisted(scenario)
 
-            page.get_by_role("button", name="Monitores", exact=True).click()
-            _select_monitor(page, scenario.source_name, active=True)
-            second_run = _post_monitor_action(
-                page,
-                path=f"/api/monitors/{scenario.source_id}/runs",
-                button_name="Ejecutar ahora",
-            )
-            assert second_run["status"] == "success"
-            _assert_replacement_context(scenario, proxy_id, original, second_run["id"])
-
-            before_rejection = _sticky_state(scenario, proxy_id)
-            page.get_by_role("button", name="Ajustes", exact=True).click()
-            proxy_row = page.locator("article.proxy-row").filter(has_text=scenario.proxy_name)
-            proxy_row.get_by_label(f"Plantilla sticky de {scenario.proxy_name}", exact=True).fill(
-                "{username}"
-            )
+            edited_row = _proxy_row(page, scenario.edited_proxy_name)
+            expect(edited_row.get_by_label("Password", exact=True)).to_have_value("")
+            expect(edited_row.get_by_role("button", name="Activar", exact=True)).to_be_enabled()
             with page.expect_response(
                 lambda response: response.request.method == "PATCH"
-                and urlsplit(response.url).path == f"/api/proxy-profiles/{proxy_id}"
-            ) as rejection_info:
-                proxy_row.get_by_role("button", name="Guardar sticky", exact=True).click()
-            assert rejection_info.value.status == 422
-            expect(page.locator(".notice")).to_contain_text("must contain exactly")
-            assert _sticky_state(scenario, proxy_id) == before_rejection
+                and urlsplit(response.url).path == f"/api/proxy-profiles/{scenario.proxy_id}"
+            ) as activation_info:
+                edited_row.get_by_role("button", name="Activar", exact=True).click()
+            assert activation_info.value.status == 200
+            assert activation_info.value.json()["is_active"] is True
 
-            page.get_by_role("button", name="Monitores", exact=True).click()
-            _select_monitor(page, scenario.source_name, active=True)
-            stopped = _post_monitor_action(
-                page,
-                path=f"/api/monitors/{scenario.source_id}/stop",
-                button_name="Detener sesion",
-            )
-            assert stopped["is_active"] is False
+            final_row = _proxy_row(page, scenario.edited_proxy_name)
+            expect(final_row.get_by_text("Activo", exact=True)).to_be_visible()
+            expect(final_row.get_by_role("button", name="Pausar", exact=True)).to_be_enabled()
+            assert final_row.locator("input, select").count() == 0
+            _assert_separate_activation_persisted(scenario)
 
             proxies = _get_json(context, f"{api_url}/api/proxy-profiles", pwa_url)
-            current = next(profile for profile in proxies if profile["id"] == proxy_id)
-            assert current["sticky_username_template"] == "{username}-qa-{session_id}"
-            assert current["sticky_ttl_minutes"] == 7
+            current = next(profile for profile in proxies if profile["id"] == scenario.proxy_id)
+            assert current["name"] == scenario.edited_proxy_name
+            assert current["is_active"] is True
+            assert current["has_password"] is True
             assert "password" not in current
         finally:
             context.close()
@@ -214,138 +275,74 @@ def _exercise_live_stack(
     assert all(_local_or_non_network(url) for url in seen_urls)
 
 
-def _assert_first_context(
-    scenario: Scenario,
-    proxy_id: int,
-) -> tuple[int, int, str, int]:
+def _assert_rejected_update_did_not_mutate(scenario: Scenario) -> None:
     with SessionLocal() as db:
-        profile = db.get(ProxyProfile, proxy_id)
-        source = db.get(SearchSource, scenario.source_id)
-        session = db.scalar(
-            select(VintedSession).where(
-                VintedSession.source_id == scenario.source_id,
-                VintedSession.proxy_profile_id == proxy_id,
-            )
-        )
-        monitor_session = db.scalar(
-            select(MonitorSession).where(
-                MonitorSession.source_id == scenario.source_id,
-                MonitorSession.stopped_at.is_(None),
-            )
-        )
-        assert profile is not None and source is not None
-        assert session is not None and monitor_session is not None
-        assert source.is_active is True and session.status == "ready"
-        assert session.expires_at is not None
-        assert (session.expires_at - session.prepared_at).total_seconds() == pytest.approx(
-            25 * 60,
-            abs=1,
-        )
-        return (
-            session.id,
-            profile.identity_generation,
-            effective_proxy_identity_generation(profile),
-            monitor_session.id,
-        )
-
-
-def _assert_context_invalidated(
-    scenario: Scenario,
-    proxy_id: int,
-    original: tuple[int, int, str, int],
-) -> None:
-    session_id, generation, identity, monitor_session_id = original
-    with SessionLocal() as db:
-        profile = db.get(ProxyProfile, proxy_id)
-        session = db.get(VintedSession, session_id)
-        monitor_session = db.get(MonitorSession, monitor_session_id)
-        source = db.get(SearchSource, scenario.source_id)
+        profile = db.get(ProxyProfile, scenario.proxy_id)
+        session = db.get(VintedSession, scenario.session_id)
         assert profile is not None and session is not None
-        assert profile.identity_generation == generation + 1
-        assert effective_proxy_identity_generation(profile) != identity
+        assert profile.is_active is True
+        assert profile.host == "127.0.0.1"
+        assert profile.identity_generation == scenario.identity_generation
+        assert profile.identity_fingerprint == scenario.identity_fingerprint
+        assert hmac.compare_digest(profile.password_encrypted or "", scenario.password_ciphertext)
+        assert session.status == "ready"
+        assert session.invalidated_at is None
+        assert session.context_encrypted == scenario.context_ciphertext
+
+
+def _assert_paused_edit_persisted(scenario: Scenario) -> None:
+    with SessionLocal() as db:
+        profile = db.get(ProxyProfile, scenario.proxy_id)
+        session = db.get(VintedSession, scenario.session_id)
+        assert profile is not None and session is not None
+        assert profile.name == scenario.edited_proxy_name
+        assert profile.kind == "datacenter"
+        assert profile.scheme == "https"
+        assert profile.host == "127.0.0.2"
+        assert profile.port == 18080
+        assert profile.max_concurrent_runs == 3
         assert profile.sticky_username_template == "{username}-qa-{session_id}"
         assert profile.sticky_ttl_minutes == 7
-        assert session.status == "invalid" and session.invalidated_at is not None
-        assert monitor_session is not None and monitor_session.stopped_at is None
-        assert source is not None and source.is_active is True
+        assert profile.country_code == "ES"
+        assert profile.username == f"qa-edited-{scenario.token}"
+        assert profile.is_active is False
+        assert hmac.compare_digest(profile.password_encrypted or "", scenario.password_ciphertext)
+        assert profile.identity_generation == scenario.identity_generation + 1
+        assert profile.identity_fingerprint != scenario.identity_fingerprint
+        assert session.status == "invalid"
+        assert session.invalidated_at is not None
+        assert session.context_encrypted != scenario.context_ciphertext
 
 
-def _assert_replacement_context(
-    scenario: Scenario,
-    proxy_id: int,
-    original: tuple[int, int, str, int],
-    run_id: int,
-) -> None:
-    original_session_id, _generation, _identity, monitor_session_id = original
+def _assert_separate_activation_persisted(scenario: Scenario) -> None:
     with SessionLocal() as db:
-        sessions = list(
-            db.scalars(
-                select(VintedSession)
-                .where(
-                    VintedSession.source_id == scenario.source_id,
-                    VintedSession.proxy_profile_id == proxy_id,
-                )
-                .order_by(VintedSession.id.asc())
-            )
-        )
-        run = db.get(Run, run_id)
-        monitor_session = db.get(MonitorSession, monitor_session_id)
-        assert len(sessions) == 2
-        assert sessions[0].id == original_session_id and sessions[0].status == "invalid"
-        assert sessions[1].status == "ready" and sessions[1].request_count == 1
-        assert sessions[1].expires_at is not None
-        assert (sessions[1].expires_at - sessions[1].prepared_at).total_seconds() == pytest.approx(
-            7 * 60,
-            abs=1,
-        )
-        assert run is not None and run.monitor_session_id == monitor_session_id
-        assert run.runtime_metadata["vinted_session_action"] == "prepared"
-        assert monitor_session is not None and monitor_session.stopped_at is None
+        profile = db.get(ProxyProfile, scenario.proxy_id)
+        session = db.get(VintedSession, scenario.session_id)
+        assert profile is not None and session is not None
+        assert profile.is_active is True
+        assert profile.identity_generation == scenario.identity_generation + 1
+        assert session.status == "invalid"
 
 
-def _sticky_state(scenario: Scenario, proxy_id: int) -> tuple[object, ...]:
-    with SessionLocal() as db:
-        profile = db.get(ProxyProfile, proxy_id)
-        assert profile is not None
-        return (
-            profile.sticky_username_template,
-            profile.sticky_ttl_minutes,
-            profile.identity_generation,
-            profile.identity_fingerprint,
-            db.scalar(
-                select(func.count())
-                .select_from(VintedSession)
-                .where(VintedSession.source_id == scenario.source_id)
-            ),
-            db.scalar(
-                select(func.count()).select_from(Run).where(Run.source_id == scenario.source_id)
-            ),
-        )
-
-
-def _login(page, scenario: Scenario, pwa_url: str) -> None:
+def _login(page: Page, scenario: Scenario, pwa_url: str) -> str:
     page.goto(pwa_url, wait_until="domcontentloaded")
     expect(page.get_by_role("heading", name="Acceso a Vinted Monitor")).to_be_visible()
     page.get_by_label("Email").fill(scenario.email)
     page.get_by_label("Password").fill(PASSWORD)
-    page.get_by_role("button", name="Entrar").click()
-    expect(page.get_by_role("button", name="Monitores", exact=True)).to_be_visible()
-
-
-def _select_monitor(page, name: str, *, active: bool) -> None:
-    status = "activo" if active else "inactivo"
-    page.get_by_role("button", name=f"{name}, {status}", exact=True).click()
-    expect(page.locator(".monitor-detail-content").get_by_role("heading", name=name, exact=True)).to_be_visible()
-
-
-def _post_monitor_action(page, *, path: str, button_name: str) -> dict:
     with page.expect_response(
-        lambda response: response.request.method == "POST"
-        and urlsplit(response.url).path == path
+        lambda response: urlsplit(response.url).path == "/api/auth/login"
     ) as info:
-        page.get_by_role("button", name=button_name, exact=True).click()
-    assert info.value.ok, f"POST {path} returned HTTP {info.value.status}"
-    return info.value.json()
+        page.get_by_role("button", name="Entrar").click()
+    payload = info.value.json()
+    expect(page.get_by_role("button", name="Monitores", exact=True)).to_be_visible()
+    return str(payload["csrf_token"])
+
+
+def _proxy_row(page: Page, name: str):
+    row = page.locator("article.proxy-row")
+    expect(row).to_have_count(1)
+    expect(row.get_by_text(name, exact=True)).to_be_visible()
+    return row
 
 
 def _get_json(context: BrowserContext, url: str, origin: str):
@@ -356,44 +353,12 @@ def _get_json(context: BrowserContext, url: str, origin: str):
 
 
 def _cleanup(scenario: Scenario) -> None:
-    cache = get_seen_cache()
-    keys = list(cache.client.scan_iter(match=f"*monitor:{scenario.source_id}:*"))
-    if keys:
-        cache.client.delete(*keys)
-
     with SessionLocal() as db:
-        run_ids = list(
-            db.scalars(select(Run.id).where(Run.source_id == scenario.source_id))
-        )
-        event_ids = list(
-            db.scalars(select(RunEvent.id).where(RunEvent.source_id == scenario.source_id))
-        )
-        if event_ids:
-            db.execute(
-                delete(RunEventPublication).where(
-                    RunEventPublication.event_id.in_(event_ids)
-                )
-            )
-            db.execute(
-                delete(RunEventOutbox).where(RunEventOutbox.event_id.in_(event_ids))
-            )
-            db.execute(delete(RunEvent).where(RunEvent.id.in_(event_ids)))
-        if run_ids:
-            db.execute(delete(ErrorLog).where(ErrorLog.run_id.in_(run_ids)))
-        db.execute(delete(ErrorLog).where(ErrorLog.source_id == scenario.source_id))
-        db.execute(delete(Run).where(Run.source_id == scenario.source_id))
-        db.execute(
-            delete(VintedSession).where(VintedSession.source_id == scenario.source_id)
-        )
-        db.execute(
-            delete(MonitorSession).where(MonitorSession.source_id == scenario.source_id)
-        )
+        db.execute(delete(VintedSession).where(VintedSession.source_id == scenario.source_id))
         db.execute(delete(SearchSource).where(SearchSource.id == scenario.source_id))
-        db.execute(delete(ProxyProfile).where(ProxyProfile.name == scenario.proxy_name))
-        user_id = db.scalar(select(User.id).where(User.email == scenario.email))
-        if user_id is not None:
-            db.execute(delete(UserSession).where(UserSession.user_id == user_id))
-            db.execute(delete(User).where(User.id == user_id))
+        db.execute(delete(ProxyProfile).where(ProxyProfile.id == scenario.proxy_id))
+        db.execute(delete(UserSession).where(UserSession.user_id == scenario.user_id))
+        db.execute(delete(User).where(User.id == scenario.user_id))
         db.commit()
 
 
