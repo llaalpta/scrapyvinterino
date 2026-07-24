@@ -53,7 +53,7 @@ $PwaBootstrapIsolationLiveTargets = @(
     "tests/test_pwa_bootstrap_isolation_live.py::test_live_pwa_bootstrap_failures_do_not_hide_monitors"
 )
 $ProxyStickyContractLiveTargets = @(
-    "tests/test_proxy_sticky_contract_live.py::test_live_proxy_sticky_contract_edit_invalidates_and_rotates_context"
+    "tests/test_proxy_sticky_contract_live.py::test_live_paused_proxy_editing_contract"
 )
 $SameProfileRecoveryLiveTargets = @(
     "tests/test_same_profile_recovery_live.py::test_live_pwa_same_profile_recovery_and_repeated_egress_rejection"
@@ -105,7 +105,7 @@ $TestTargets = @{
         "tests/test_proxies.py",
         "tests/test_migrations.py::test_proxy_sticky_contract_migration_backfills_non_null_profile_fields",
         "tests/test_manual_runs.py::test_prepared_context_save_and_refresh_use_earlier_global_or_profile_ttl",
-        "tests/test_proxy_identity_fence.py::test_invalid_sticky_contract_does_not_mutate_identity_or_prepared_context"
+        "tests/test_proxy_identity_fence.py"
     ) + $ProxyStickyContractLiveTargets
     "prepared-session-read-model" = @(
         "tests/test_prepared_session_read_model.py",

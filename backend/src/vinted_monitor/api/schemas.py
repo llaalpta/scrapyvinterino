@@ -247,6 +247,26 @@ class ProxyProfileUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class ProxyProfileUpdateRequest(BaseModel):
+    """Unvalidated PATCH shape used to enforce the locked active-profile guard first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Any | None = None
+    scheme: Any | None = None
+    kind: Any | None = None
+    host: Any | None = None
+    port: Any | None = None
+    username: Any | None = None
+    password: Any | None = None
+    clear_password: Any = False
+    country_code: Any | None = None
+    sticky_username_template: Any | None = None
+    sticky_ttl_minutes: Any | None = None
+    max_concurrent_runs: Any | None = None
+    is_active: Any | None = None
+
+
 class ProxyProfileRead(BaseModel):
     id: int
     name: str

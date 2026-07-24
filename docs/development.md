@@ -90,13 +90,14 @@ El escenario cerrado `pwa-bootstrap-isolation` usa API, Vite, autenticacion y Po
 La tarea 14.18 acepta un runner focalizado con estos criterios:
 
 - ejecuta el escenario seleccionado desde `backend/`, donde no existe `.env`, con configuracion de test explicita, un rol y una base PostgreSQL nuevos y el indice Redis 15 reservado;
-- exige worker y watchdog detenidos y solo admite escenarios locales cerrados: identidad recorre scheduler/cola/consumer con una trampa de proveedor; same-profile-recovery combina worker/cola enfocados con API/Vite/Playwright y un proxy HTTP loopback real; prepared-session, monitor-identity-edit, session-start y session-stop levantan API `8001` y Vite `5176` propios para Playwright; session-stop usa ademas scheduler/cola/consumer reales dentro del test; worker-redis conecta un worker y Redis desechables por una red Docker interna, prueba su restart y usa la misma API/Vite; full recorre la suite en la misma base aislada y separa el modulo que exige destinos loopback;
+- exige worker y watchdog detenidos y solo admite escenarios locales cerrados: identidad recorre scheduler/cola/consumer con una trampa de proveedor; proxy-sticky-contract incluye todos esos fences y una PWA/API/PostgreSQL viva para pausa, edicion completa y reactivacion; same-profile-recovery combina worker/cola enfocados con API/Vite/Playwright y un proxy HTTP loopback real; prepared-session, monitor-identity-edit, session-start y session-stop levantan API `8001` y Vite `5176` propios para Playwright; session-stop usa ademas scheduler/cola/consumer reales dentro del test; worker-redis conecta un worker y Redis desechables por una red Docker interna, prueba su restart y usa la misma API/Vite; full recorre la suite en la misma base aislada y separa el modulo que exige destinos loopback;
 - dos ciclos consecutivos terminan sin la base ni el rol temporales y con Redis 15 vacio; si ese indice ya contiene datos, el runner se niega a ejecutar y no los elimina.
 
 Con PostgreSQL y Redis ya levantados y los ejecutores detenidos:
 
 ```powershell
 .\scripts\qa-backend-integration.ps1
+.\scripts\qa-backend-integration.ps1 -Scenario proxy-sticky-contract -Repeat 1
 .\scripts\qa-backend-integration.ps1 -Scenario same-profile-recovery -Repeat 1
 .\scripts\qa-backend-integration.ps1 -Scenario prepared-session-read-model -Repeat 1
 .\scripts\qa-backend-integration.ps1 -Scenario pwa-monitor-command-state -Repeat 1

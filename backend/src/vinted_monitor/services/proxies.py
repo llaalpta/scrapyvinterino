@@ -35,6 +35,10 @@ class ProxyProfileEligibilityError(ValueError):
     pass
 
 
+class ActiveProxyProfileUpdateError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProxyPublicFields:
     id: int
@@ -182,6 +186,28 @@ def update_proxy_profile(
     settings: Settings | None = None,
 ) -> ProxyProfile:
     settings = settings or get_settings()
+    configuration_update_requested = any(
+        value is not None
+        for value in (
+            name,
+            scheme,
+            kind,
+            host,
+            port,
+            username,
+            password,
+            country_code,
+            sticky_username_template,
+            sticky_ttl_minutes,
+            max_concurrent_runs,
+        )
+    ) or clear_password
+    profile = _lock_and_validate_proxy_profile_update(
+        db,
+        profile_id,
+        configuration_update_requested=configuration_update_requested,
+        requested_is_active=is_active,
+    )
     validated_sticky_username_template = (
         _validate_sticky_username_template(sticky_username_template)
         if sticky_username_template is not None
@@ -192,10 +218,6 @@ def update_proxy_profile(
         if sticky_ttl_minutes is not None
         else None
     )
-    _acquire_proxy_identity_lock(db, profile_id, exclusive=True)
-    profile = _lock_proxy_profile(db, profile_id)
-    if profile is None:
-        raise ProxyProfileNotFoundError(f"Proxy profile {profile_id} does not exist")
     synchronize_proxy_identity(db, profile, settings)
     if name is not None:
         profile.name = _validate_name(name)
@@ -233,6 +255,45 @@ def update_proxy_profile(
     synchronize_proxy_identity(db, profile, settings)
     db.commit()
     db.refresh(profile)
+    return profile
+
+
+def guard_proxy_profile_update(
+    db: Session,
+    profile_id: int,
+    *,
+    configuration_update_requested: bool,
+    requested_is_active: object,
+) -> None:
+    """Hold update ownership and enforce active/activation rules before field parsing."""
+
+    _lock_and_validate_proxy_profile_update(
+        db,
+        profile_id,
+        configuration_update_requested=configuration_update_requested,
+        requested_is_active=requested_is_active,
+    )
+
+
+def _lock_and_validate_proxy_profile_update(
+    db: Session,
+    profile_id: int,
+    *,
+    configuration_update_requested: bool,
+    requested_is_active: object,
+) -> ProxyProfile:
+    _acquire_proxy_identity_lock(db, profile_id, exclusive=True)
+    profile = _lock_proxy_profile(db, profile_id)
+    if profile is None:
+        raise ProxyProfileNotFoundError(f"Proxy profile {profile_id} does not exist")
+    if profile.is_active and configuration_update_requested:
+        raise ActiveProxyProfileUpdateError(
+            "Pausa el proxy antes de editar su configuracion"
+        )
+    if configuration_update_requested and requested_is_active is True:
+        raise ActiveProxyProfileUpdateError(
+            "Guarda la configuracion con el proxy pausado y activalo despues"
+        )
     return profile
 
 

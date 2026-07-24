@@ -90,9 +90,8 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
       {dashboard.activeSection === 'settings' ? (
         <SettingsView
           onCreateProxy={dashboard.onCreateProxy}
-          onToggleProxy={(profile) => void dashboard.onToggleProxy(profile)}
-          onUpdateProxyStickyContract={(profile, template, ttl) =>
-            void dashboard.onUpdateProxyStickyContract(profile, template, ttl)}
+          onToggleProxy={dashboard.onToggleProxy}
+          onUpdateProxy={dashboard.onUpdateProxy}
           onUpdateSchedulerConfig={(payload) => void dashboard.onUpdateSchedulerConfig(payload)}
           proxyDraft={dashboard.proxyDraft}
           proxyCollectionState={dashboard.proxyCollectionState}

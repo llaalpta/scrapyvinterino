@@ -12,7 +12,7 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 ## Now
 
-Program `14.54` is complete. Its four standard tasks were implemented, verified and independently audited one at a time.
+Program `14.54` and the contained proxy-settings outcome `14.55` are complete, verified and independently audited. Starting the next outcome still requires explicit user authorization.
 
 | Item | Status | Outcome | Dependency |
 | --- | --- | --- | --- |
@@ -20,10 +20,11 @@ Program `14.54` is complete. Its four standard tasks were implemented, verified 
 | 14.54.2 | done | Before candidates are accepted, give the selected profile at most its current/initial attempt plus one fresh sticky, verify forced egress rotation and cool it once if both attempts fail. | 14.54.1 merged |
 | 14.54.3 | done | Reassign an exhausted run to the next eligible proxy profile through one capacity-checked PostgreSQL handoff that makes the durable run binding authoritative over its stale queue payload. | 14.54.2 merged |
 | 14.54.4 | done | Let an explicit PWA retry target one cooling profile for one fresh-sticky attempt without clearing cooldown in advance. | 14.54.3 merged |
+| 14.55 | done | Make proxy configuration fully editable only after the profile has been paused; active profiles remain read-only except for the pause command. | None |
 
 ## Next
 
-Telegram opportunity alerts (`15.1`) follow `14.54` and manual acceptance of the proxy/session behavior, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
+Telegram opportunity alerts (`15.1`) follow `14.55` and manual acceptance of the proxy/session behavior, subject to a new explicit product decision and bounded plan. Production hardening remains deferred for the current personal operating model.
 
 ## Conditional hardening
 
