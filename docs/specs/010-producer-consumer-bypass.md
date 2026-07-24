@@ -4,7 +4,7 @@ Roadmap items 14.34.1 and 14.34.2 moved manual and recurring calibration into se
 
 ## 14.54 sticky lifecycle and bounded recovery
 
-Status: `14.54.1`, `14.54.2` and `14.54.3` are current; `14.54.4` remains a separate planned standard task requiring confirmation. `docs/specs/008-scheduler.md` owns their acceptance scenarios and external-traffic allowances.
+Status: `14.54.1` through `14.54.4` are current. `docs/specs/008-scheduler.md` owns their acceptance scenarios and external-traffic allowances.
 
 - `14.54.1` moves sticky username format and TTL to `proxy_profiles`, includes both in effective identity and expires prepared context at the earlier global-context/profile-sticky deadline. DataImpulse is backfilled as `{username};sessid.{session_id}` with a 25-minute local limit; monitor-session duration and the existing completed-run use budget remain independent.
 - `14.54.2` permits at most the current/initial attempt plus one fresh sticky on the selected profile before candidate acceptance. A forced sticky performs a non-cached proxied egress diagnostic and cannot call Vinted when it resolves to the known rejected IP. An exhausted profile receives one cooldown transition and this slice terminates the run; `429`, local dependency/configuration/identity failures and all post-candidate work remain outside replay.

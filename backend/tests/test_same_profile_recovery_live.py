@@ -34,6 +34,7 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.local_auth import create_local_user
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.runs import monitor_policy_hash
+from vinted_monitor.services.scheduler_liveness import touch_scheduler_worker_heartbeat
 from vinted_monitor.services.search_sources import create_source
 from vinted_monitor.services.seen_cache import get_seen_cache
 
@@ -48,6 +49,8 @@ class Scenario:
     user_id: int
     proxy_id: int
     proxy_name: str
+    fallback_proxy_id: int
+    fallback_proxy_name: str
     success_source_id: int
     success_source_name: str
     repeated_source_id: int
@@ -59,7 +62,7 @@ def test_live_pwa_same_profile_recovery_and_repeated_egress_rejection() -> None:
     pwa_url = _loopback_origin("SAME_PROFILE_QA_PWA_URL")
     state_path = _state_path()
     settings = get_settings()
-    assert settings.scheduler_enabled is False
+    assert settings.scheduler_enabled is True
     assert settings.vinted_datadome_collector_enabled is False
     assert settings.vinted_auth_enabled is False
     assert settings.action_requests_enabled is False
@@ -104,6 +107,18 @@ def _seed(proxy_port: int) -> Scenario:
             country_code="ES",
             settings=settings,
         )
+        fallback_proxy = create_proxy_profile(
+            db,
+            name=f"qa same-profile fallback {token}",
+            scheme="http",
+            kind="residential",
+            host="127.0.0.1",
+            port=proxy_port,
+            username=f"qa-fallback-user-{token}",
+            password=f"qa-fallback-password-{token}",
+            country_code="ES",
+            settings=settings,
+        )
         success_source = create_source(
             db,
             f"qa same-profile success {token}",
@@ -116,8 +131,13 @@ def _seed(proxy_port: int) -> Scenario:
             f"qa same-profile repeated {token}",
             f"https://www.vinted.es/catalog?search_text=qa-repeated-{token}&order=newest_first",
         )
-        repeated_source.monitor_mode = "manual"
-        repeated_source.scheduler_config = {}
+        repeated_source.monitor_mode = "continuous"
+        repeated_source.scheduler_config = {
+            "interval_seconds": 60,
+            "jitter_percent": 0,
+            "allowed_windows": [],
+        }
+        touch_scheduler_worker_heartbeat(db)
         db.commit()
         return Scenario(
             token=token,
@@ -125,6 +145,8 @@ def _seed(proxy_port: int) -> Scenario:
             user_id=user.id,
             proxy_id=proxy.id,
             proxy_name=proxy.name,
+            fallback_proxy_id=fallback_proxy.id,
+            fallback_proxy_name=fallback_proxy.name,
             success_source_id=success_source.id,
             success_source_name=success_source.name,
             repeated_source_id=repeated_source.id,
@@ -203,6 +225,15 @@ def _exercise_live_stack(
             )
             expect(page.get_by_text("Cooldown de proxy activo.", exact=False)).to_be_visible()
             _assert_repeated_egress_state(scenario, state_path)
+            retry_selector = page.get_by_label("Perfil proxy para el reintento")
+            expect(retry_selector).to_be_visible()
+            expect(retry_selector.locator("option")).to_have_count(2)
+            expect(page.get_by_role("button", name="Iniciar sesion", exact=True)).to_be_disabled()
+            scheduler_response = context.request.get(f"{api_url}/api/scheduler")
+            assert scheduler_response.ok
+            assert scheduler_response.json()["runtime_enabled"] is True
+            assert scheduler_response.json()["worker_available"] is True
+            assert scheduler_response.json()["effective_enabled"] is False
 
             profiles_response = context.request.get(
                 f"{api_url}/api/proxy-profiles",
@@ -215,6 +246,49 @@ def _exercise_live_stack(
             assert profile["failure_count"] == 1
             assert profile["cooldown_until"] is not None
             assert "password" not in profile
+            fallback_profile = next(
+                row for row in profiles_response.json() if row["id"] == scenario.fallback_proxy_id
+            )
+            assert fallback_profile["failure_count"] == 1
+            assert fallback_profile["cooldown_until"] is not None
+
+            state_before_rejection = _read_state(state_path)
+            auth_session = context.request.get(
+                f"{api_url}/api/auth/session",
+                headers={"Origin": pwa_url},
+            )
+            assert auth_session.ok
+            malformed_retry = context.request.post(
+                f"{api_url}/api/monitors/{scenario.repeated_source_id}/vinted-session/retry",
+                data={"proxy_profile_id": True},
+                headers={
+                    "Origin": pwa_url,
+                    "X-CSRF-Token": auth_session.json()["csrf_token"],
+                },
+            )
+            assert malformed_retry.status == 422
+            invalid_retry = context.request.post(
+                f"{api_url}/api/monitors/{scenario.repeated_source_id}/vinted-session/retry",
+                data={"proxy_profile_id": 999_999_999},
+                headers={
+                    "Origin": pwa_url,
+                    "X-CSRF-Token": auth_session.json()["csrf_token"],
+                },
+            )
+            assert invalid_retry.status == 409
+            assert _read_state(state_path) == state_before_rejection
+            _assert_invalid_retry_unchanged(scenario)
+
+            _reset_state(state_path, mode="different_ip", item_id=9900000103)
+            retry_selector.select_option(str(scenario.proxy_id))
+            retried = _post_monitor_action(
+                page,
+                path=f"/api/monitors/{scenario.repeated_source_id}/vinted-session/retry",
+                button_name="Reintentar sesion",
+            )
+            assert retried["status"] == "success"
+            expect(page.locator(".monitor-detail-content").get_by_text("Activo", exact=True)).to_be_visible()
+            _assert_explicit_retry_success_state(scenario, failed, retried, state_path)
         finally:
             context.close()
             browser.close()
@@ -286,16 +360,17 @@ def _assert_success_state(scenario: Scenario, state_path: Path) -> None:
 
 def _assert_repeated_egress_state(scenario: Scenario, state_path: Path) -> None:
     state = _read_state(state_path)
-    assert state["egress_probe_calls"] == 1
+    assert state["egress_probe_calls"] == 2
     assert state["proxy_errors"] == []
-    assert state["constructions"] == ["initial_preparation"]
-    assert state["bootstrap_calls"] == 1
+    assert state["constructions"] == ["initial_preparation", "initial_preparation"]
+    assert state["bootstrap_calls"] == 2
     assert state["catalog_probe_calls"] == 0
 
     with SessionLocal() as db:
         source = db.get(SearchSource, scenario.repeated_source_id)
         runs = list(db.scalars(select(Run).where(Run.source_id == scenario.repeated_source_id)))
         profile = db.get(ProxyProfile, scenario.proxy_id)
+        fallback_profile = db.get(ProxyProfile, scenario.fallback_proxy_id)
         assert source is not None and source.is_active is False
         assert len(runs) == 1 and runs[0].status == "failed"
         metadata = runs[0].runtime_metadata or {}
@@ -303,8 +378,18 @@ def _assert_repeated_egress_state(scenario: Scenario, state_path: Path) -> None:
         assert metadata["session_acquisition_attempts"] == 2
         assert metadata["session_acquisition_last_reason"] == "egress_not_rotated"
         assert metadata["session_acquisition_egress_changed"] is False
-        assert profile is not None
+        assert set(metadata["session_acquisition_profile_ids"]) == {
+            scenario.proxy_id,
+            scenario.fallback_proxy_id,
+        }
+        assert set(metadata["session_acquisition_rejected_egress_fingerprints"]) == {
+            str(scenario.proxy_id),
+            str(scenario.fallback_proxy_id),
+        }
+        assert "192.0.2." not in json.dumps(metadata)
+        assert profile is not None and fallback_profile is not None
         assert profile.failure_count == 1 and profile.cooldown_until is not None
+        assert fallback_profile.failure_count == 1 and fallback_profile.cooldown_until is not None
         assert (
             db.scalar(
                 select(func.count())
@@ -332,8 +417,9 @@ def _assert_repeated_egress_state(scenario: Scenario, state_path: Path) -> None:
         phases = list(
             db.scalars(select(RunEvent.phase).where(RunEvent.run_id == runs[0].id))
         )
-        assert phases.count("session_acquisition_attempt_started") == 2
-        assert phases.count("session_acquisition_attempt_failed") == 2
+        assert phases.count("session_acquisition_attempt_started") == 4
+        assert phases.count("session_acquisition_attempt_failed") == 4
+        assert phases.count("proxy_profile_handoff_committed") == 1
         assert phases.count("run_failed") == 1
         assert "catalog_search_start" not in phases
 
@@ -343,6 +429,88 @@ def _assert_repeated_egress_state(scenario: Scenario, state_path: Path) -> None:
         assert source is not None
         policy_hash = monitor_policy_hash(source)
     assert cache.has_baseline(scenario.repeated_source_id, policy_hash) is False
+
+
+def _assert_invalid_retry_unchanged(scenario: Scenario) -> None:
+    with SessionLocal() as db:
+        runs = list(db.scalars(select(Run).where(Run.source_id == scenario.repeated_source_id)))
+        profiles = {
+            profile.id: profile
+            for profile in db.scalars(
+                select(ProxyProfile).where(
+                    ProxyProfile.id.in_((scenario.proxy_id, scenario.fallback_proxy_id))
+                )
+            )
+        }
+        assert len(runs) == 1
+        assert all(profile.failure_count == 1 for profile in profiles.values())
+        assert all(profile.cooldown_until is not None for profile in profiles.values())
+
+
+def _assert_explicit_retry_success_state(
+    scenario: Scenario,
+    failed_run: dict[str, Any],
+    retried_run: dict[str, Any],
+    state_path: Path,
+) -> None:
+    state = _read_state(state_path)
+    assert state["egress_probe_calls"] == 1
+    assert state["proxy_errors"] == []
+    assert state["constructions"] == ["forced_preparation", "execution"]
+    assert state["bootstrap_calls"] == 1
+    assert state["catalog_probe_calls"] == 1
+    assert state["closes"] == 2
+
+    with SessionLocal() as db:
+        source = db.get(SearchSource, scenario.repeated_source_id)
+        retry = db.get(Run, retried_run["id"])
+        selected_profile = db.get(ProxyProfile, scenario.proxy_id)
+        fallback_profile = db.get(ProxyProfile, scenario.fallback_proxy_id)
+        sessions = list(
+            db.scalars(
+                select(VintedSession).where(
+                    VintedSession.source_id == scenario.repeated_source_id
+                )
+            )
+        )
+        monitor_sessions = list(
+            db.scalars(
+                select(MonitorSession).where(
+                    MonitorSession.source_id == scenario.repeated_source_id
+                )
+            )
+        )
+        assert source is not None and source.is_active is True
+        assert source.monitor_mode == "continuous"
+        assert source.next_run_at is not None
+        assert retry is not None and retry.status == "success"
+        metadata = retry.runtime_metadata or {}
+        assert metadata["explicit_cooldown_retry"] is True
+        assert metadata["explicit_retry_origin_run_id"] == failed_run["id"]
+        assert metadata["proxy_profile_id"] == scenario.proxy_id
+        assert metadata["session_acquisition_attempts"] == 1
+        assert metadata["session_acquisition_egress_changed"] is True
+        assert metadata["session_acquisition_profile_ids"] == [scenario.proxy_id]
+        assert "192.0.2." not in json.dumps(metadata)
+        assert selected_profile is not None
+        assert selected_profile.failure_count == 0 and selected_profile.cooldown_until is None
+        assert fallback_profile is not None
+        assert fallback_profile.failure_count == 1 and fallback_profile.cooldown_until is not None
+        assert len(sessions) == 1
+        assert sessions[0].proxy_profile_id == scenario.proxy_id
+        assert sessions[0].status == "ready"
+        assert len(monitor_sessions) == 1 and monitor_sessions[0].stopped_at is None
+        phases = list(
+            db.scalars(select(RunEvent.phase).where(RunEvent.run_id == retry.id))
+        )
+        assert phases.count("session_acquisition_attempt_started") == 1
+        assert phases.count("session_acquisition_attempt_succeeded") == 1
+        assert phases.count("session_acquisition_attempt_failed") == 0
+        assert phases.count("egress_diagnostic_success") == 1
+        assert phases.count("run_succeeded") == 1
+        policy_hash = monitor_policy_hash(source)
+
+    assert get_seen_cache().has_baseline(scenario.repeated_source_id, policy_hash) is True
 
 
 @contextmanager
@@ -460,7 +628,9 @@ def _post_monitor_action(page, *, path: str, button_name: str) -> dict[str, Any]
         timeout=15_000,
     ) as info:
         page.get_by_role("button", name=button_name, exact=True).click()
-    assert info.value.ok, f"POST {path} returned HTTP {info.value.status}"
+    assert info.value.ok, (
+        f"POST {path} returned HTTP {info.value.status}: {info.value.text()}"
+    )
     return info.value.json()
 
 
@@ -494,7 +664,11 @@ def _cleanup(scenario: Scenario) -> None:
         db.execute(delete(VintedSession).where(VintedSession.source_id.in_(source_ids)))
         db.execute(delete(MonitorSession).where(MonitorSession.source_id.in_(source_ids)))
         db.execute(delete(SearchSource).where(SearchSource.id.in_(source_ids)))
-        db.execute(delete(ProxyProfile).where(ProxyProfile.id == scenario.proxy_id))
+        db.execute(
+            delete(ProxyProfile).where(
+                ProxyProfile.id.in_((scenario.proxy_id, scenario.fallback_proxy_id))
+            )
+        )
         db.execute(delete(UserSession).where(UserSession.user_id == scenario.user_id))
         db.execute(delete(User).where(User.id == scenario.user_id))
         db.commit()

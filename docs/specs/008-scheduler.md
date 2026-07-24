@@ -72,7 +72,7 @@ The independent read-only audit found no A, B or C findings. It confirmed the co
 
 ### 14.54 provider-bound sticky lifecycle and bounded recovery
 
-Status: `14.54.1`, `14.54.2` and `14.54.3` are current. `14.54.4` remains a separate planned standard task requiring confirmation.
+Status: `14.54.1` through `14.54.4` are current. Each slice was implemented, verified and independently audited as a separate standard task.
 
 DataImpulse on rotating HTTP port `823` accepts a `sessid` username parameter that asks the gateway to retain one exit IP for approximately 30 minutes. The product uses a 25-minute local safety limit and a new session ID rather than integrating the provider-specific rotation API. A monitor session is not capped by that lifetime: prepared HTTP context rotates when either its effective TTL or its completed-run use limit is reached.
 
@@ -128,6 +128,8 @@ The independent read-only audit returned positive with no A, B or C findings.
 
 #### 14.54.4 explicit manual cooldown override
 
+Status: `done`.
+
 Acceptance criteria:
 
 1. `POST /api/monitors/{id}/vinted-session/retry` accepts one `proxy_profile_id` and bypasses only that profile's current cooldown for one fresh-sticky attempt. It uses the same non-cached egress and known-rejected-IP gate as automatic recovery. Activity, country, capacity, complete configuration, identity fencing and monitor single-flight remain mandatory.
@@ -135,6 +137,10 @@ Acceptance criteria:
 3. Cooldown is not cleared before traffic. Success completes the normal baseline/activation and clears that profile through the existing success transition; failure preserves or extends its penalty. An inactive, deleted, incompatible or concurrently occupied profile is rejected before provider construction.
 
 Representative integration: against the authenticated live PWA/API/PostgreSQL path and deterministic loopback upstream, an initial failed baseline shows cooldown, the explicit button remains available, one selected retry uses a fresh sticky and a controlled success activates the monitor. The negative variation targets an invalid profile and observes `409/422`, unchanged cooldown and zero provider calls. Playwright checks visible state and API/database agreement. External Vinted, proxy and vendor allowance is zero.
+
+Verification passed Ruff, frontend lint/build and the final isolated `same-profile-recovery` gate (`20/20`) over migrated PostgreSQL, Redis, live authenticated API, strict Vite, Playwright and a deterministic loopback proxy. The recurrent failed start exhausted two profiles, exposed the selector and disabled ordinary start while `effective_enabled=false` only because all active profiles cooled; with deployment and heartbeat still valid, the selected retry used one forced preparation/egress diagnostic before activating one baseline/session and clearing only that profile. An unknown profile returned `409` and a boolean ID `422`, both without a run, provider call or cooldown mutation. The same-profile failure case made one diagnostic, zero Vinted provider constructions and extended one existing penalty without fallback; a real PostgreSQL race also proved proxy admission precedes the source lock while identity editing. The single complete backend pass reached `557 passed, 12 skipped` and exposed `11` failures caused by passing a new argument through the existing injected-cache seam; after restoring that contract, all `78` affected manual/start cases passed. Disposable state was removed, operational PostgreSQL/Redis fingerprints stayed unchanged and every HTTP destination was loopback.
+
+The independent read-only audit returned positive with no A, B or C findings. It confirmed strict origin/profile admission, the bounded recurrent cooldown exception, lock order, one fresh-sticky attempt without fallback, one success/penalty transition, PWA repeatability and HMAC-only rejected-egress metadata.
 
 ## 14.19 Worker Redis availability
 

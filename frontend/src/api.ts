@@ -513,6 +513,12 @@ export function startMonitor(sourceId: number): Promise<Run> {
   return postJson<Run>(`/api/monitors/${sourceId}/start`);
 }
 
+export function retryMonitorSession(sourceId: number, proxyProfileId: number): Promise<Run> {
+  return postJson<Run>(`/api/monitors/${sourceId}/vinted-session/retry`, {
+    proxy_profile_id: proxyProfileId
+  });
+}
+
 export function stopMonitor(sourceId: number): Promise<SearchSource> {
   return postJson<SearchSource>(`/api/monitors/${sourceId}/stop`);
 }

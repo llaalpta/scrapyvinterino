@@ -423,8 +423,26 @@ def lock_proxy_profile_for_selection(
     settings: Settings | None = None,
     *,
     now: datetime | None = None,
+    bypass_cooldown: bool = False,
 ) -> ProxyProfile:
     """Lock, synchronize and revalidate one profile selected for new work."""
+    return _lock_proxy_profile_for_execution(
+        db,
+        profile_id,
+        settings,
+        now=now,
+        bypass_cooldown=bypass_cooldown,
+    )
+
+
+def _lock_proxy_profile_for_execution(
+    db: Session,
+    profile_id: int,
+    settings: Settings | None,
+    *,
+    now: datetime | None,
+    bypass_cooldown: bool,
+) -> ProxyProfile:
     settings = settings or get_settings()
     profile = _load_proxy_profile(db, profile_id)
     if profile is None:
@@ -457,7 +475,12 @@ def lock_proxy_profile_for_selection(
         if profile is None:
             raise ProxyProfileEligibilityError(f"Proxy profile {profile_id} no longer exists")
         synchronize_proxy_identity(db, profile, settings)
-    _validate_proxy_profile_eligibility(profile, settings, now=now)
+    _validate_proxy_profile_eligibility(
+        profile,
+        settings,
+        now=now,
+        bypass_cooldown=bypass_cooldown,
+    )
     return profile
 
 
@@ -468,9 +491,16 @@ def lock_and_revalidate_proxy_selection(
     settings: Settings | None = None,
     *,
     now: datetime | None = None,
+    bypass_cooldown: bool = False,
 ) -> ProxyProfile:
     """Fence captured work against the current locked profile immediately pre-provider."""
-    profile = lock_proxy_profile_for_selection(db, profile_id, settings, now=now)
+    profile = lock_proxy_profile_for_selection(
+        db,
+        profile_id,
+        settings,
+        now=now,
+        bypass_cooldown=bypass_cooldown,
+    )
     current_generation = effective_proxy_identity_generation(profile)
     if not isinstance(captured_identity_generation, str) or not hmac.compare_digest(
         captured_identity_generation,
@@ -513,12 +543,13 @@ def _validate_proxy_profile_eligibility(
     settings: Settings,
     *,
     now: datetime | None = None,
+    bypass_cooldown: bool = False,
 ) -> None:
     current_time = now or datetime.now(UTC)
     _validate_complete_proxy_configuration(profile, settings)
     if not profile.is_active:
         raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} is inactive")
-    if profile.cooldown_until is not None and profile.cooldown_until > current_time:
+    if not bypass_cooldown and profile.cooldown_until is not None and profile.cooldown_until > current_time:
         raise ProxyProfileEligibilityError(f"Proxy profile {profile.id} is cooling down")
     target_country_code = settings.vinted_target_country_code.strip().upper()
     if profile.country_code != target_country_code:

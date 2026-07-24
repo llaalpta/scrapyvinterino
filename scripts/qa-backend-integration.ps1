@@ -83,6 +83,8 @@ $TestTargets = @{
         "tests/test_manual_runs.py::test_datadome_mid_batch_rolls_back_and_discards_claimed_work",
         "tests/test_manual_runs.py::test_detail_session_context_failure_is_fail_stop_without_retry",
         "tests/test_manual_runs.py::test_gone_detail_is_terminal_without_retry",
+        "tests/test_scheduler.py::test_scheduler_activation_can_count_selected_cooling_profile",
+        "tests/test_proxy_identity_fence.py::test_explicit_retry_selection_precedes_source_lock_during_identity_edit",
         "tests/test_item_detail_state_audit.py::test_transient_release_failure_after_challenge_keeps_terminal_run_and_discards_work",
         "tests/test_item_detail_state_audit.py::test_release_failure_does_not_mask_primary_run_error"
     ) + $SameProfileRecoveryLiveTargets
@@ -667,6 +669,8 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["SAME_PROFILE_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
             $Values["EGRESS_DIAGNOSTIC_URL"] = "http://127.0.0.2:9/qa/egress"
+            $Values["SCHEDULER_ENABLED"] = "true"
+            $Values["SCHEDULER_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = "600"
         }
         if ($Scenario -eq "worker-redis-availability") {
             $Values["REDIS_URL"] = "redis://127.0.0.1:9/0"
