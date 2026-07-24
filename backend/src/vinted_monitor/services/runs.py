@@ -73,10 +73,14 @@ from vinted_monitor.services.monitor_sessions import (
 )
 from vinted_monitor.services.proxies import (
     ProxyProfileEligibilityError,
+    effective_proxy_identity_generation,
+    list_available_proxy_profiles,
     lock_and_revalidate_proxy_selection,
+    lock_proxy_profile_for_selection,
     mark_proxy_challenge_detected,
     mark_proxy_run_failure,
     mark_proxy_run_success,
+    mark_proxy_used,
     proxy_url_with_sticky_session,
 )
 from vinted_monitor.services.run_events import record_run_event
@@ -85,9 +89,11 @@ from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
     SchedulerUnavailableError,
     acquire_initial_run_admission_lock,
+    acquire_run_egress_admission_lock,
     choose_run_egress,
     ensure_scheduler_can_activate,
     get_scheduler_runtime_config,
+    run_egress_admission_snapshot,
 )
 from vinted_monitor.services.search_sources import (
     SearchSourceConfigError,
@@ -103,6 +109,7 @@ from vinted_monitor.services.seen_cache import (
     get_seen_cache,
     serialize_candidate_state_update,
 )
+from vinted_monitor.services.task_queue import pending_tasks
 from vinted_monitor.services.vinted_sessions import (
     INCOMPLETE,
     READY,
@@ -183,6 +190,14 @@ class ProfileSessionAcquisitionExhaustedError(RuntimeError):
     def __init__(self, *, datadome_penalty: bool) -> None:
         super().__init__("Selected proxy profile could not obtain a usable Vinted session after two attempts")
         self.datadome_penalty = datadome_penalty
+
+
+class SessionAcquisitionExhaustedError(RuntimeError):
+    failure_kind = "session_acquisition_exhausted"
+
+    def __init__(self, exhausted_profile_count: int) -> None:
+        super().__init__("No eligible proxy profile could obtain a usable Vinted session")
+        self.exhausted_profile_count = exhausted_profile_count
 
 
 def execute_manual_run(
@@ -411,13 +426,15 @@ def execute_monitor_baseline(
         )
         try:
             if run_provider is None:
-                run_provider, result = _search_catalog_with_same_profile_recovery(
+                run_provider, result = _search_catalog_with_profile_pool_recovery(
                     db,
                     run,
                     source,
                     selected_egress,
                     runtime_config,
                     settings,
+                    cache,
+                    queue_key=settings.worker_task_queue_key,
                     include_catalog_payload=True,
                 )
             else:
@@ -1057,6 +1074,7 @@ def execute_monitor_run(
     close_session_on_finish: bool = False,
     egress: RunEgress | None = None,
     runtime_metadata_extra: dict[str, Any] | None = None,
+    task_queue_key: str | None = None,
 ) -> Run:
     source = _lock_source_for_run_transition(db, source_id)
     if source is None or source.archived_at is not None:
@@ -1313,13 +1331,15 @@ def execute_monitor_run(
 
     try:
         if run_provider is None:
-            run_provider, result = _search_catalog_with_same_profile_recovery(
+            run_provider, result = _search_catalog_with_profile_pool_recovery(
                 db,
                 run,
                 source,
                 selected_egress,
                 runtime_config,
                 settings,
+                cache,
+                queue_key=task_queue_key or settings.worker_task_queue_key,
                 include_catalog_payload=False,
             )
         else:
@@ -1705,6 +1725,351 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
         statement = statement.where(Run.source_id == source_id)
     statement = statement.order_by(Run.started_at.desc(), Run.id.desc()).limit(limit)
     return list(db.scalars(statement))
+
+
+def _search_catalog_with_profile_pool_recovery(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    egress: RunEgress,
+    runtime_config,
+    settings,
+    seen_cache: SeenCache,
+    *,
+    queue_key: str,
+    include_catalog_payload: bool,
+) -> tuple[ManualRunProvider, CatalogSearchResult]:
+    current_egress = egress
+    exhausted_profile_ids: set[int] = set()
+    remaining_profile_ids: list[int] | None = None
+    fallback_binding = False
+
+    while True:
+        if fallback_binding:
+            try:
+                _lock_and_revalidate_fallback_egress_capacity(
+                    db,
+                    run,
+                    current_egress,
+                    settings,
+                    seen_cache,
+                    queue_key=queue_key,
+                )
+            except (ProxyProfileEligibilityError, SchedulerCapacityError) as exc:
+                candidate_profile_id = current_egress.proxy_profile_id
+                db.rollback()
+                _record_profile_handoff_rejection(
+                    db,
+                    run,
+                    source,
+                    candidate_profile_id,
+                    exc,
+                    stage="pre_provider",
+                )
+                current_egress = _bind_next_profile_for_run(
+                    db,
+                    run,
+                    source,
+                    remaining_profile_ids or [],
+                    settings,
+                    seen_cache,
+                    queue_key=queue_key,
+                )
+                if current_egress is None:
+                    raise SessionAcquisitionExhaustedError(len(exhausted_profile_ids)) from exc
+                continue
+
+        try:
+            return _search_catalog_with_same_profile_recovery(
+                db,
+                run,
+                source,
+                current_egress,
+                runtime_config,
+                settings,
+                include_catalog_payload=include_catalog_payload,
+            )
+        except ProfileSessionAcquisitionExhaustedError as exc:
+            exhausted_profile_id = current_egress.proxy_profile_id
+            if not isinstance(exhausted_profile_id, int):
+                raise
+            _commit_exhausted_profile_penalty(
+                db,
+                run,
+                source,
+                exhausted_profile_id,
+                exc,
+                settings,
+            )
+            exhausted_profile_ids.add(exhausted_profile_id)
+            if remaining_profile_ids is None:
+                target_country_code = settings.vinted_target_country_code.strip().upper()
+                remaining_profile_ids = [
+                    profile.id
+                    for profile in list_available_proxy_profiles(
+                        db,
+                        country_code=target_country_code,
+                    )
+                    if profile.id not in exhausted_profile_ids
+                ]
+            current_egress = _bind_next_profile_for_run(
+                db,
+                run,
+                source,
+                remaining_profile_ids,
+                settings,
+                seen_cache,
+                queue_key=queue_key,
+            )
+            if current_egress is None:
+                raise SessionAcquisitionExhaustedError(len(exhausted_profile_ids)) from exc
+            fallback_binding = True
+
+
+def _bind_next_profile_for_run(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    remaining_profile_ids: list[int],
+    settings,
+    seen_cache: SeenCache,
+    *,
+    queue_key: str,
+) -> RunEgress | None:
+    while remaining_profile_ids:
+        candidate_profile_id = remaining_profile_ids.pop(0)
+        try:
+            return _bind_run_to_fallback_profile(
+                db,
+                run,
+                source,
+                candidate_profile_id,
+                settings,
+                seen_cache,
+                queue_key=queue_key,
+            )
+        except (ProxyProfileEligibilityError, SchedulerCapacityError) as exc:
+            db.rollback()
+            _record_profile_handoff_rejection(
+                db,
+                run,
+                source,
+                candidate_profile_id,
+                exc,
+                stage="admission",
+            )
+    return None
+
+
+def _bind_run_to_fallback_profile(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    candidate_profile_id: int,
+    settings,
+    seen_cache: SeenCache,
+    *,
+    queue_key: str,
+) -> RunEgress:
+    acquire_run_egress_admission_lock(db)
+    queued_tasks = _pending_tasks_for_admission(seen_cache, settings, queue_key=queue_key)
+    admission_counts, _ = run_egress_admission_snapshot(
+        db,
+        queued_tasks,
+        exclude_run_id=run.id,
+    )
+    profile = lock_proxy_profile_for_selection(db, candidate_profile_id, settings)
+    if admission_counts.get(profile.id, 0) >= max(profile.max_concurrent_runs, 1):
+        raise SchedulerCapacityError(f"Proxy profile {profile.id} has no handoff capacity")
+
+    current_source = _lock_source_for_run_transition(db, source.id)
+    if current_source is None:
+        raise SearchSourceNotFoundError(f"Search source {source.id} does not exist")
+    current_run = db.scalar(
+        select(Run)
+        .where(
+            Run.id == run.id,
+            Run.source_id == source.id,
+            Run.status == RUNNING,
+            Run.finished_at.is_(None),
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if current_run is None:
+        raise RuntimeError(f"Run {run.id} is no longer available for proxy handoff")
+
+    previous_profile_id = (current_run.runtime_metadata or {}).get("proxy_profile_id")
+    generation = effective_proxy_identity_generation(profile)
+    metadata = dict(current_run.runtime_metadata or {})
+    for key in tuple(metadata):
+        if key.startswith("vinted_session_") or key in _PROFILE_SESSION_BINDING_METADATA_KEYS:
+            metadata.pop(key, None)
+    handoff_count = int(metadata.get("proxy_handoff_count") or 0) + 1
+    metadata.update(
+        {
+            "proxy_profile_id": profile.id,
+            "proxy_identity_generation": generation,
+            "proxy_name": profile.name,
+            "proxy_kind": profile.kind,
+            "proxy_country_code": profile.country_code,
+            "locale": profile.locale,
+            "accept_language": profile.accept_language,
+            "screen": profile.screen,
+            "vinted_screen": profile.vinted_screen,
+            "proxy_handoff_count": handoff_count,
+        }
+    )
+    current_run.runtime_metadata = metadata
+    mark_proxy_used(db, profile.id)
+    record_run_event(
+        db,
+        run_id=current_run.id,
+        source_id=current_source.id,
+        phase="proxy_profile_handoff_committed",
+        level="warning",
+        proxy_profile_id=profile.id,
+        auth_mode="public_anonymous",
+        message="Run reassigned to another eligible proxy profile",
+        details={
+            "from_proxy_profile_id": previous_profile_id,
+            "to_proxy_profile_id": profile.id,
+            "handoff_count": handoff_count,
+        },
+    )
+    db.commit()
+    return RunEgress(
+        mode="proxy",
+        proxy_profile_id=profile.id,
+        proxy_identity_generation=generation,
+    )
+
+
+def _lock_and_revalidate_fallback_egress_capacity(
+    db: Session,
+    run: Run,
+    egress: RunEgress,
+    settings,
+    seen_cache: SeenCache,
+    *,
+    queue_key: str,
+) -> None:
+    _require_proxy_egress(egress)
+    profile = lock_and_revalidate_proxy_selection(
+        db,
+        egress.proxy_profile_id,
+        egress.proxy_identity_generation,
+        settings,
+    )
+    current_run = db.get(Run, run.id)
+    metadata = current_run.runtime_metadata if current_run is not None else {}
+    if (
+        current_run is None
+        or current_run.status != RUNNING
+        or current_run.finished_at is not None
+        or metadata.get("proxy_profile_id") != profile.id
+        or metadata.get("proxy_identity_generation") != egress.proxy_identity_generation
+    ):
+        raise ProxyProfileEligibilityError("Durable run egress binding changed before provider construction")
+    queued_tasks = _pending_tasks_for_admission(seen_cache, settings, queue_key=queue_key)
+    admission_counts, _ = run_egress_admission_snapshot(db, queued_tasks)
+    if admission_counts.get(profile.id, 0) > max(profile.max_concurrent_runs, 1):
+        raise SchedulerCapacityError(f"Proxy profile {profile.id} became saturated before provider construction")
+
+
+def _pending_tasks_for_admission(
+    seen_cache: SeenCache,
+    settings,
+    *,
+    queue_key: str,
+) -> list[Any]:
+    queue_client = getattr(seen_cache, "client", None)
+    queue_client = queue_client or get_seen_cache(settings).client
+    return pending_tasks(queue_client, queue_key=queue_key)
+
+
+def _commit_exhausted_profile_penalty(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    proxy_profile_id: int,
+    exc: ProfileSessionAcquisitionExhaustedError,
+    settings,
+) -> None:
+    cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
+    if exc.datadome_penalty:
+        mark_proxy_challenge_detected(
+            db,
+            proxy_profile_id,
+            penalty_multiplier=settings.datadome_challenge_penalty_multiplier,
+            cooldown_minutes=cooldown_minutes,
+        )
+    else:
+        mark_proxy_run_failure(
+            db,
+            proxy_profile_id,
+            cooldown_minutes=cooldown_minutes,
+        )
+    exhausted_count = int(
+        (run.runtime_metadata or {}).get("session_acquisition_exhausted_profile_count") or 0
+    ) + 1
+    _merge_run_metadata(
+        run,
+        {"session_acquisition_exhausted_profile_count": exhausted_count},
+    )
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="proxy_profile_session_exhausted",
+        level="warning",
+        proxy_profile_id=proxy_profile_id,
+        details={
+            "exhausted_profile_count": exhausted_count,
+            "datadome_penalty": exc.datadome_penalty,
+        },
+    )
+    db.commit()
+
+
+def _record_profile_handoff_rejection(
+    db: Session,
+    run: Run,
+    source: SearchSource,
+    candidate_profile_id: int,
+    exc: Exception,
+    *,
+    stage: str,
+) -> None:
+    event_profile_id = db.scalar(
+        select(ProxyProfile.id).where(ProxyProfile.id == candidate_profile_id)
+    )
+    reason = "capacity_changed" if isinstance(exc, SchedulerCapacityError) else "identity_or_eligibility_changed"
+    record_run_event(
+        db,
+        run_id=run.id,
+        source_id=source.id,
+        phase="proxy_profile_handoff_rejected",
+        level="warning",
+        proxy_profile_id=event_profile_id,
+        auth_mode="public_anonymous",
+        message="Proxy profile handoff rejected before provider construction",
+        details={
+            "candidate_proxy_profile_id": candidate_profile_id,
+            "stage": stage,
+            "reason": reason,
+        },
+    )
+    db.commit()
+
+
+_PROFILE_SESSION_BINDING_METADATA_KEYS = (
+    "proxy_session_id_prefix",
+    "proxy_sticky_session",
+    "session_acquisition_attempts",
+    "session_acquisition_last_reason",
+    "session_acquisition_egress_changed",
+)
 
 
 def _search_catalog_with_same_profile_recovery(
@@ -2464,6 +2829,7 @@ def _run_runtime_metadata(source: SearchSource, egress: RunEgress, runtime_confi
         "filter_count": filter_term_count(source.filter_definition),
         "egress_mode": egress.mode,
         "proxy_profile_id": egress.proxy_profile_id,
+        "proxy_identity_generation": egress.proxy_identity_generation,
         "proxy_name": egress.proxy_name,
         "proxy_kind": egress.proxy_kind,
         "auth_mode": "public_anonymous",
@@ -3105,6 +3471,11 @@ def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_sessio
 
 def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
     text = str(exc).lower()
+    if isinstance(exc, SessionAcquisitionExhaustedError):
+        return {
+            "session_end_reason": "session_acquisition_exhausted",
+            "recovery_action": "wait_for_eligible_proxy_or_retry_manually",
+        }
     if isinstance(exc, ProfileSessionAcquisitionExhaustedError):
         return {
             "session_end_reason": "profile_session_acquisition_exhausted",

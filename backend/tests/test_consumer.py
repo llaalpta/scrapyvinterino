@@ -11,7 +11,7 @@ from vinted_monitor.providers.vinted_catalog import (
     VintedCatalogSessionContextError,
     VintedCatalogSessionError,
 )
-from vinted_monitor.services.runs import FAILED, FINALIZING
+from vinted_monitor.services.runs import FAILED, FINALIZING, SUCCESS
 from vinted_monitor.services.task_queue import InvalidTaskPayloadError, MonitorTask, TaskReservation
 from vinted_monitor.services.vinted_sessions import VintedSessionRequiredError
 from vinted_monitor.worker import consumer as consumer_module
@@ -232,3 +232,57 @@ def test_consumer_acks_terminal_challenge_run_without_resume_or_requeue(monkeypa
     assert resumed_attempts == []
     assert acknowledged == [reservation]
     assert requeued == []
+
+
+def test_redelivery_uses_durable_profile_binding_instead_of_stale_task_payload(monkeypatch) -> None:
+    task = MonitorTask(
+        source_id=1,
+        source_url="https://www.vinted.es/catalog?search_text=nike",
+        monitor_mode="window",
+        trigger="scheduler",
+        proxy_profile_id=PROXY_ID,
+        proxy_identity_generation=PROXY_IDENTITY,
+    )
+    reservation = TaskReservation(task=task, raw_payload="handoff-payload")
+    durable_generation = "v1:2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    previous_run = SimpleNamespace(
+        id=99,
+        status=FAILED,
+        runtime_metadata={
+            "failure_kind": "worker_task_delivery_interrupted",
+            "attempt": 1,
+            "proxy_profile_id": 456,
+            "proxy_identity_generation": durable_generation,
+        },
+    )
+    executions: list[tuple[int, int, int, str]] = []
+    acknowledged: list[TaskReservation] = []
+    monkeypatch.setattr(consumer_module, "SessionLocal", NullSession)
+    monkeypatch.setattr(
+        consumer_module,
+        "recover_task_run_before_delivery",
+        lambda *args, **kwargs: previous_run,
+    )
+    monkeypatch.setattr(
+        consumer_module,
+        "ack_task",
+        lambda client, value, queue_key: acknowledged.append(value) or True,
+    )
+    consumer = TaskConsumer(Settings(_env_file=None, worker_max_retry_attempts=3), consumer_id=0)
+
+    def execute(value, attempt, *, authoritative_egress):
+        executions.append(
+            (
+                value.proxy_profile_id,
+                attempt,
+                authoritative_egress.proxy_profile_id,
+                authoritative_egress.proxy_identity_generation,
+            )
+        )
+        return SimpleNamespace(id=100, status=SUCCESS, items_found=0)
+
+    monkeypatch.setattr(consumer, "_execute_run", execute)
+    consumer._consume_reservation(SimpleNamespace(client=object()), reservation)
+
+    assert executions == [(PROXY_ID, 2, 456, durable_generation)]
+    assert acknowledged == [reservation]

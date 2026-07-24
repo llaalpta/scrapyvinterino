@@ -13,6 +13,7 @@ from vinted_monitor.db.models import Run, SearchSource
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.scheduler import (
     SchedulerCapacityError,
+    acquire_run_egress_admission_lock,
     active_run_egress_counts,
     choose_run_egress,
     get_scheduler_state,
@@ -20,6 +21,7 @@ from vinted_monitor.services.scheduler import (
     is_within_allowed_windows,
     list_schedulable_sources,
     next_run_after,
+    run_egress_admission_snapshot,
     source_config,
 )
 from vinted_monitor.services.scheduler_liveness import touch_scheduler_worker_heartbeat
@@ -174,10 +176,22 @@ class SchedulerRunner:
                 # and deadlock a concurrent identity edit.
                 db.commit()
                 try:
+                    acquire_run_egress_admission_lock(db)
+                    current_queued_tasks = pending_tasks(
+                        cache.client,
+                        queue_key=queue_key,
+                        processing_keys=consumer_processing_keys,
+                    )
+                    admission_counts, admission_total = run_egress_admission_snapshot(
+                        db, current_queued_tasks
+                    )
+                    if admission_total >= state.max_concurrent_runs:
+                        db.rollback()
+                        break
                     egress = choose_run_egress(
                         db,
                         self.settings,
-                        active_proxy_counts=active_proxy_counts,
+                        active_proxy_counts=admission_counts,
                     )
                 except SchedulerCapacityError:
                     db.rollback()

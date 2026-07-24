@@ -73,7 +73,8 @@ $MonitorSessionProxyTrafficLiveTargets = @(
 )
 $TestTargets = @{
     "identity" = @(
-        "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence"
+        "tests/test_proxy_identity_fence.py::test_real_scheduler_producer_and_consumer_loop_preserve_stale_identity_fence",
+        "tests/test_proxy_identity_fence.py::test_serialized_saturated_proxy_selection_does_not_acquire_identity_fences"
     )
     "same-profile-recovery" = @(
         "tests/test_catalog_failstop_integration.py",
