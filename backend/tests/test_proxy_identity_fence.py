@@ -27,7 +27,7 @@ from vinted_monitor.db.models import AppSetting, ErrorLog, MonitorSession, Proxy
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.providers.browser_profiles import profile_for_impersonate
 from vinted_monitor.providers.catalog import CatalogSearchResult
-from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession
+from vinted_monitor.providers.vinted_catalog import PreparedCatalogSession, VintedEgressDiagnosticError
 from vinted_monitor.services.proxies import (
     create_proxy_profile,
     effective_proxy_identity_generation,
@@ -800,6 +800,89 @@ def test_scheduler_proxy_selection_and_identity_edit_use_one_lock_order(
             release_scheduler_choose.set()
             release_edit.set()
             _delete_queue_keys(queue_client, queue_key)
+
+
+def test_explicit_retry_selection_precedes_source_lock_during_identity_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vinted_monitor.services.proxies as proxies_module
+    import vinted_monitor.services.runs as runs_module
+
+    retry_before_choose = Event()
+    release_retry_choose = Event()
+    edit_has_exclusive_advisory = Event()
+    release_edit = Event()
+    real_choose = runs_module._choose_explicit_retry_egress
+    real_identity_lock = proxies_module._acquire_proxy_identity_lock
+
+    def blocked_choose(db, *args, **kwargs):
+        db.execute(text("SET LOCAL lock_timeout = '2s'"))
+        retry_before_choose.set()
+        assert release_retry_choose.wait(timeout=10)
+        return real_choose(db, *args, **kwargs)
+
+    def observed_identity_lock(db, profile_id: int, *, exclusive: bool):
+        real_identity_lock(db, profile_id, exclusive=exclusive)
+        if exclusive:
+            edit_has_exclusive_advisory.set()
+            assert release_edit.wait(timeout=10)
+
+    def fail_before_provider(*_args, **_kwargs):
+        raise VintedEgressDiagnosticError("QA stopped before provider construction")
+
+    monkeypatch.setattr(runs_module, "_choose_explicit_retry_egress", blocked_choose)
+    monkeypatch.setattr(runs_module, "_provider_for_egress", fail_before_provider)
+    monkeypatch.setattr(proxies_module, "_acquire_proxy_identity_lock", observed_identity_lock)
+
+    command_client = authenticated_test_client()
+    mutation_client = authenticated_test_client()
+    with _identity_graph() as graph:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, graph.proxy_id)
+            assert profile is not None
+            profile.failure_count = 1
+            profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=10)
+            now = datetime.now(UTC)
+            db.add(
+                Run(
+                    source_id=graph.source_id,
+                    status=FAILED,
+                    trigger="baseline",
+                    started_at=now,
+                    finished_at=now,
+                    runtime_metadata={
+                        "proxy_profile_id": graph.proxy_id,
+                        "session_acquisition_profile_ids": [graph.proxy_id],
+                    },
+                )
+            )
+            db.commit()
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                retry_future = pool.submit(
+                    command_client.post,
+                    f"/api/monitors/{graph.source_id}/vinted-session/retry",
+                    json={"proxy_profile_id": graph.proxy_id},
+                )
+                assert retry_before_choose.wait(timeout=10)
+                edit_future = pool.submit(
+                    mutation_client.patch,
+                    f"/api/proxy-profiles/{graph.proxy_id}",
+                    json={"host": "127.0.0.2"},
+                )
+                assert edit_has_exclusive_advisory.wait(timeout=10)
+                release_retry_choose.set()
+                release_edit.set()
+                edit_response = edit_future.result(timeout=15)
+                retry_response = retry_future.result(timeout=15)
+
+            assert edit_response.status_code == 200, edit_response.text
+            assert retry_response.status_code == 201, retry_response.text
+            assert retry_response.json()["status"] == FAILED
+        finally:
+            release_retry_choose.set()
+            release_edit.set()
 
 
 def test_serialized_saturated_proxy_selection_does_not_acquire_identity_fences(

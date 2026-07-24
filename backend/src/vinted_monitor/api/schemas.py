@@ -352,6 +352,12 @@ class ItemDetailProbeCreate(BaseModel):
     item_ref: str = Field(min_length=1, max_length=500)
 
 
+class MonitorSessionRetryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proxy_profile_id: int = Field(gt=0, strict=True)
+
+
 class ItemDetailProbeRead(BaseModel):
     run: RunRead
     result: dict[str, Any]

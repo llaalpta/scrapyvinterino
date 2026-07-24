@@ -16,8 +16,10 @@ from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.proxies import create_proxy_profile
 from vinted_monitor.services.scheduler import (
     SCHEDULER_SETTING_KEY,
+    SchedulerCapacityError,
     SchedulerConfigError,
     SourceSchedulerConfig,
+    ensure_scheduler_can_activate,
     get_scheduler_state,
     is_within_allowed_windows,
     list_schedulable_sources,
@@ -135,6 +137,54 @@ def test_scheduler_state_uses_deployment_gate_and_runtime_dependencies(scheduler
 
         assert state.worker_available is True
         assert state.effective_enabled is True
+
+
+def test_scheduler_activation_can_count_selected_cooling_profile(
+    scheduler_proxy_id: int,
+) -> None:
+    settings = Settings(scheduler_enabled=True)
+    other_active_proxy_ids: list[int] = []
+    with SessionLocal() as db:
+        other_active_proxy_ids = list(
+            db.scalars(
+                select(ProxyProfile.id).where(
+                    ProxyProfile.is_active.is_(True),
+                    ProxyProfile.id != scheduler_proxy_id,
+                )
+            )
+        )
+        if other_active_proxy_ids:
+            db.query(ProxyProfile).filter(
+                ProxyProfile.id.in_(other_active_proxy_ids)
+            ).update({ProxyProfile.is_active: False}, synchronize_session=False)
+        profile = db.get(ProxyProfile, scheduler_proxy_id)
+        assert profile is not None
+        profile.cooldown_until = datetime.now(UTC) + timedelta(minutes=10)
+        touch_scheduler_worker_heartbeat(db)
+        db.commit()
+
+    try:
+        with SessionLocal() as db:
+            state = get_scheduler_state(db, settings)
+            assert state.worker_available is True
+            assert state.effective_capacity == 0
+            with pytest.raises(SchedulerCapacityError, match="No scheduler egress capacity"):
+                ensure_scheduler_can_activate(db, settings)
+            ensure_scheduler_can_activate(
+                db,
+                settings,
+                cooldown_bypass_profile_id=scheduler_proxy_id,
+            )
+    finally:
+        with SessionLocal() as db:
+            if other_active_proxy_ids:
+                db.query(ProxyProfile).filter(
+                    ProxyProfile.id.in_(other_active_proxy_ids)
+                ).update({ProxyProfile.is_active: True}, synchronize_session=False)
+            profile = db.get(ProxyProfile, scheduler_proxy_id)
+            if profile is not None:
+                profile.cooldown_until = None
+            db.commit()
 
 
 def test_scheduler_api_does_not_expose_removed_runtime_fields() -> None:

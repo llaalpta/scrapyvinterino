@@ -20,6 +20,7 @@ from vinted_monitor.api.schemas import (
     ItemDetailProbeCreate,
     ItemDetailProbeRead,
     ItemRead,
+    MonitorSessionRetryCreate,
     MonitorStatsRead,
     OpportunityResultPageRead,
     OpportunityResultRead,
@@ -59,6 +60,7 @@ from vinted_monitor.services.run_event_stream import monitor_event_stream, resol
 from vinted_monitor.services.run_events import list_run_events
 from vinted_monitor.services.runs import (
     BaselineRequiredError,
+    ExplicitSessionRetryUnavailableError,
     ManualRunProvider,
     RunAlreadyActiveError,
     SearchSourceInactiveError,
@@ -67,6 +69,7 @@ from vinted_monitor.services.runs import (
     execute_monitor_baseline,
     execute_monitor_item_detail_probe,
     execute_monitor_session_prepare,
+    execute_monitor_session_retry,
     list_runs,
 )
 from vinted_monitor.services.scheduler import (
@@ -256,6 +259,34 @@ def post_monitor_stop(monitor_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SearchSourceRunActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@business_router.post(
+    "/monitors/{monitor_id}/vinted-session/retry",
+    response_model=RunRead,
+    status_code=201,
+)
+def post_monitor_vinted_session_retry(
+    monitor_id: int,
+    payload: MonitorSessionRetryCreate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return execute_monitor_session_retry(
+            db,
+            monitor_id,
+            proxy_profile_id=payload.proxy_profile_id,
+        )
+    except SearchSourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (RunAlreadyActiveError, ExplicitSessionRetryUnavailableError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SchedulerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (SchedulerCapacityError, SeenCacheUnavailableError, VintedSessionRequiredError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SearchSourceConfigError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @business_router.get("/scheduler", response_model=SchedulerStateRead)

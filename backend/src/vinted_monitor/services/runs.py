@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 import time
@@ -81,6 +82,7 @@ from vinted_monitor.services.proxies import (
     mark_proxy_run_failure,
     mark_proxy_run_success,
     mark_proxy_used,
+    proxy_url_for_profile,
     proxy_url_with_sticky_session,
 )
 from vinted_monitor.services.run_events import record_run_event
@@ -109,7 +111,7 @@ from vinted_monitor.services.seen_cache import (
     get_seen_cache,
     serialize_candidate_state_update,
 )
-from vinted_monitor.services.task_queue import pending_tasks
+from vinted_monitor.services.task_queue import TaskQueueError, pending_tasks
 from vinted_monitor.services.vinted_sessions import (
     INCOMPLETE,
     READY,
@@ -200,6 +202,14 @@ class SessionAcquisitionExhaustedError(RuntimeError):
         self.exhausted_profile_count = exhausted_profile_count
 
 
+class ExplicitSessionRetryError(RuntimeError):
+    failure_kind = "explicit_session_retry_failed"
+
+
+class ExplicitSessionRetryUnavailableError(ValueError):
+    pass
+
+
 def execute_manual_run(
     db: Session,
     source_id: int,
@@ -238,6 +248,49 @@ def monitor_policy_hash(source: SearchSource) -> str:
     return _policy_hash(source, monitor_filter_snapshot(source.filter_definition))
 
 
+def execute_monitor_session_retry(
+    db: Session,
+    source_id: int,
+    *,
+    proxy_profile_id: int,
+) -> Run:
+    source = db.get(SearchSource, source_id)
+    if source is None or source.archived_at is not None:
+        raise SearchSourceNotFoundError(f"Search source {source_id} does not exist")
+    if source.is_active:
+        raise RunAlreadyActiveError("Deten la sesion antes de iniciar una nueva")
+    settings = get_settings()
+    if source.monitor_mode != "manual":
+        acquire_initial_run_admission_lock(db)
+        ensure_scheduler_can_activate(
+            db,
+            settings,
+            source_id=source.id,
+            cooldown_bypass_profile_id=proxy_profile_id,
+        )
+    _validated_catalog_filter_compatibility(source)
+    runtime_config = get_scheduler_runtime_config(db, settings)
+    cache = get_seen_cache()
+    _resolve_explicit_retry_origin(db, source, proxy_profile_id)
+    # Proxy/admission ownership must precede the source row lock acquired by
+    # execute_monitor_baseline; identity edits use that same lock order.
+    egress = _choose_explicit_retry_egress(
+        db,
+        proxy_profile_id,
+        runtime_config,
+        settings,
+        cache,
+    )
+    return execute_monitor_baseline(
+        db,
+        source_id,
+        seen_cache=cache,
+        egress=egress,
+        activate_session=True,
+        explicit_retry_profile_id=proxy_profile_id,
+    )
+
+
 def _validated_catalog_filter_compatibility(source: SearchSource) -> dict[str, Any]:
     try:
         validate_vinted_catalog_url(source.url)
@@ -260,6 +313,7 @@ def execute_monitor_baseline(
     seen_cache: SeenCache | None = None,
     egress: RunEgress | None = None,
     activate_session: bool = False,
+    explicit_retry_profile_id: int | None = None,
 ) -> Run:
     source = db.scalar(
         select(SearchSource)
@@ -277,7 +331,25 @@ def execute_monitor_baseline(
 
     settings = get_settings()
     runtime_config = get_scheduler_runtime_config(db, settings)
-    selected_egress = egress or choose_run_egress(db, settings)
+    cache = seen_cache or get_seen_cache()
+    explicit_retry_origin_run_id: int | None = None
+    rejected_egress_fingerprint: str | None = None
+    if explicit_retry_profile_id is not None:
+        if (
+            provider is not None
+            or egress is None
+            or egress.proxy_profile_id != explicit_retry_profile_id
+            or not activate_session
+        ):
+            raise ValueError("Explicit session retry requires its admitted egress and activation")
+        explicit_retry_origin_run_id, rejected_egress_fingerprint = _resolve_explicit_retry_origin(
+            db,
+            source,
+            explicit_retry_profile_id,
+        )
+        selected_egress = egress
+    else:
+        selected_egress = egress or choose_run_egress(db, settings)
     _require_proxy_egress(selected_egress)
     owned_provider = provider is None
     run_provider: ManualRunProvider | None = provider
@@ -300,6 +372,20 @@ def execute_monitor_baseline(
             "policy_hash": policy_hash,
             "baseline_run": True,
             "baseline_reason": baseline_reason,
+            "explicit_cooldown_retry": explicit_retry_profile_id is not None,
+            **(
+                {
+                    "explicit_retry_origin_run_id": explicit_retry_origin_run_id,
+                    "session_acquisition_profile_ids": [explicit_retry_profile_id],
+                    "session_acquisition_rejected_egress_fingerprints": {
+                        str(explicit_retry_profile_id): rejected_egress_fingerprint
+                    }
+                    if rejected_egress_fingerprint
+                    else {},
+                }
+                if explicit_retry_profile_id is not None
+                else {}
+            ),
         },
     )
     db.add(run)
@@ -315,12 +401,21 @@ def execute_monitor_baseline(
 
     if run_provider is None and selected_egress.proxy_profile_id is not None:
         try:
-            lock_and_revalidate_proxy_selection(
-                db,
-                selected_egress.proxy_profile_id,
-                selected_egress.proxy_identity_generation,
-                settings,
-            )
+            if explicit_retry_profile_id is not None:
+                lock_and_revalidate_proxy_selection(
+                    db,
+                    selected_egress.proxy_profile_id,
+                    selected_egress.proxy_identity_generation,
+                    settings,
+                    bypass_cooldown=True,
+                )
+            else:
+                lock_and_revalidate_proxy_selection(
+                    db,
+                    selected_egress.proxy_profile_id,
+                    selected_egress.proxy_identity_generation,
+                    settings,
+                )
         except Exception as exc:
             return _record_failed_run(
                 db,
@@ -354,6 +449,7 @@ def execute_monitor_baseline(
             "proxy_sticky_session": (run.runtime_metadata or {}).get("proxy_sticky_session"),
             "baseline_run": True,
             "baseline_reason": baseline_reason,
+            "explicit_retry_origin_run_id": explicit_retry_origin_run_id,
         },
     )
     record_run_event(
@@ -403,7 +499,6 @@ def execute_monitor_baseline(
         },
     )
 
-    cache = seen_cache or get_seen_cache()
     try:
         record_run_event(
             db,
@@ -426,17 +521,30 @@ def execute_monitor_baseline(
         )
         try:
             if run_provider is None:
-                run_provider, result = _search_catalog_with_profile_pool_recovery(
-                    db,
-                    run,
-                    source,
-                    selected_egress,
-                    runtime_config,
-                    settings,
-                    cache,
-                    queue_key=settings.worker_task_queue_key,
-                    include_catalog_payload=True,
-                )
+                if explicit_retry_profile_id is not None:
+                    run_provider, result = _search_catalog_with_same_profile_recovery(
+                        db,
+                        run,
+                        source,
+                        selected_egress,
+                        runtime_config,
+                        settings,
+                        include_catalog_payload=True,
+                        explicit_retry=True,
+                        rejected_egress_fingerprint=rejected_egress_fingerprint,
+                    )
+                else:
+                    run_provider, result = _search_catalog_with_profile_pool_recovery(
+                        db,
+                        run,
+                        source,
+                        selected_egress,
+                        runtime_config,
+                        settings,
+                        cache,
+                        queue_key=settings.worker_task_queue_key,
+                        include_catalog_payload=True,
+                    )
             else:
                 proxy_profile_id = (run.runtime_metadata or {}).get("proxy_profile_id")
                 _attach_provider_event_sink(db, run_provider, run, source, proxy_profile_id)
@@ -511,6 +619,7 @@ def execute_monitor_baseline(
         run.error_message = None
         source.last_run_at = run.finished_at
         mark_proxy_run_success(db, proxy_profile_id)
+        db.flush()
         activation_error: SchedulerCapacityError | SchedulerUnavailableError | None = None
         if activate_session:
             if source.monitor_mode != "manual":
@@ -1727,6 +1836,91 @@ def list_runs(db: Session, limit: int = 50, source_id: int | None = None) -> lis
     return list(db.scalars(statement))
 
 
+def _resolve_explicit_retry_origin(
+    db: Session,
+    source: SearchSource,
+    proxy_profile_id: int,
+) -> tuple[int, str | None]:
+    latest_run = db.scalar(
+        select(Run)
+        .where(Run.source_id == source.id)
+        .order_by(Run.started_at.desc(), Run.id.desc())
+        .limit(1)
+    )
+    if latest_run is None or latest_run.trigger != BASELINE_TRIGGER or latest_run.status != FAILED:
+        raise ExplicitSessionRetryUnavailableError(
+            "El reintento explicito solo esta disponible tras el ultimo inicio de sesion fallido"
+        )
+    metadata = latest_run.runtime_metadata or {}
+    attempted_profile_ids = metadata.get("session_acquisition_profile_ids")
+    if (
+        not isinstance(attempted_profile_ids, list)
+        or proxy_profile_id not in attempted_profile_ids
+    ):
+        raise ExplicitSessionRetryUnavailableError(
+            "El perfil seleccionado no participo en el ultimo inicio de sesion fallido"
+        )
+    fingerprints = metadata.get("session_acquisition_rejected_egress_fingerprints")
+    rejected_fingerprint = (
+        fingerprints.get(str(proxy_profile_id))
+        if isinstance(fingerprints, dict)
+        else None
+    )
+    if not isinstance(rejected_fingerprint, str) or not re.fullmatch(
+        r"v1:[0-9a-f]{64}",
+        rejected_fingerprint,
+    ):
+        rejected_fingerprint = None
+    return latest_run.id, rejected_fingerprint
+
+
+def _choose_explicit_retry_egress(
+    db: Session,
+    proxy_profile_id: int,
+    runtime_config,
+    settings,
+    seen_cache: SeenCache,
+) -> RunEgress:
+    acquire_run_egress_admission_lock(db)
+    try:
+        seen_cache.require_available()
+        queued_tasks = _pending_tasks_for_admission(
+            seen_cache,
+            settings,
+            queue_key=settings.worker_task_queue_key,
+        )
+    except (SeenCacheUnavailableError, TaskQueueError) as exc:
+        raise SeenCacheUnavailableError("Redis is unavailable for explicit retry admission") from exc
+    admission_counts, total_count = run_egress_admission_snapshot(db, queued_tasks)
+    if total_count >= runtime_config.max_concurrent_runs:
+        raise SchedulerCapacityError("Global run capacity is unavailable for explicit retry")
+    try:
+        profile = lock_proxy_profile_for_selection(
+            db,
+            proxy_profile_id,
+            settings,
+            bypass_cooldown=True,
+        )
+    except ProxyProfileEligibilityError as exc:
+        raise ExplicitSessionRetryUnavailableError(str(exc)) from exc
+    if profile.cooldown_until is None or profile.cooldown_until <= datetime.now(UTC):
+        raise ExplicitSessionRetryUnavailableError(
+            f"Proxy profile {profile.id} is not cooling down"
+        )
+    if admission_counts.get(profile.id, 0) >= max(profile.max_concurrent_runs, 1):
+        raise SchedulerCapacityError(f"Proxy profile {profile.id} has no explicit retry capacity")
+    mark_proxy_used(db, profile.id)
+    db.flush()
+    return RunEgress(
+        mode="proxy",
+        proxy_profile_id=profile.id,
+        proxy_name=profile.name,
+        proxy_kind=profile.kind,
+        proxy_url=proxy_url_for_profile(profile, settings),
+        proxy_identity_generation=effective_proxy_identity_generation(profile),
+    )
+
+
 def _search_catalog_with_profile_pool_recovery(
     db: Session,
     run: Run,
@@ -2081,21 +2275,28 @@ def _search_catalog_with_same_profile_recovery(
     settings,
     *,
     include_catalog_payload: bool,
+    explicit_retry: bool = False,
+    rejected_egress_fingerprint: str | None = None,
 ) -> tuple[ManualRunProvider, CatalogSearchResult]:
     previous_egress_ip: str | None = None
-    previous_reason: str | None = None
+    previous_reason = "explicit_cooldown_retry" if explicit_retry else None
     datadome_penalty = False
     proxy_profile_id = egress.proxy_profile_id
+    attempt_limit = 1 if explicit_retry else 2
 
-    for attempt in range(1, 3):
+    for attempt in range(1, attempt_limit + 1):
+        previous_egress_known = bool(
+            rejected_egress_fingerprint if explicit_retry else previous_egress_ip
+        )
         _record_session_acquisition_attempt_event(
             db,
             run,
             source,
             phase="session_acquisition_attempt_started",
             attempt=attempt,
+            attempt_limit=attempt_limit,
             reason=previous_reason or "initial_context",
-            previous_egress_known=previous_egress_ip is not None,
+            previous_egress_known=previous_egress_known,
             egress_changed=False,
         )
         attempt_provider: ManualRunProvider | None = None
@@ -2109,8 +2310,10 @@ def _search_catalog_with_same_profile_recovery(
                 settings,
                 run=run,
                 include_catalog_payload=include_catalog_payload,
-                force_new_session=attempt == 2,
+                force_new_session=explicit_retry or attempt == 2,
                 rejected_egress_ip=previous_egress_ip,
+                rejected_egress_fingerprint=rejected_egress_fingerprint,
+                bypass_cooldown=explicit_retry,
             )
             _merge_run_metadata(run, attempt_metadata)
             db.flush()
@@ -2131,11 +2334,11 @@ def _search_catalog_with_same_profile_recovery(
                 attempt_metadata,
                 None,
             )
-            egress_changed = bool(
-                attempt == 2
-                and previous_egress_ip
-                and observed_egress_ip
-                and observed_egress_ip != previous_egress_ip
+            egress_changed = _session_acquisition_egress_changed(
+                observed_egress_ip,
+                settings,
+                previous_egress_ip=previous_egress_ip,
+                rejected_egress_fingerprint=rejected_egress_fingerprint,
             )
             _merge_run_metadata(
                 run,
@@ -2151,8 +2354,15 @@ def _search_catalog_with_same_profile_recovery(
                 source,
                 phase="session_acquisition_attempt_succeeded",
                 attempt=attempt,
-                reason="fresh_sticky_accepted" if attempt == 2 else "initial_context_accepted",
-                previous_egress_known=previous_egress_ip is not None,
+                attempt_limit=attempt_limit,
+                reason=(
+                    "explicit_fresh_sticky_accepted"
+                    if explicit_retry
+                    else "fresh_sticky_accepted"
+                    if attempt == 2
+                    else "initial_context_accepted"
+                ),
+                previous_egress_known=previous_egress_known,
                 egress_changed=egress_changed,
             )
             return attempt_provider, result
@@ -2164,12 +2374,17 @@ def _search_catalog_with_same_profile_recovery(
                 exc,
             )
             reason = _session_acquisition_failure_reason(exc)
-            previous_known = previous_egress_ip is not None
-            egress_changed = bool(
-                attempt == 2
-                and previous_egress_ip
-                and observed_egress_ip
-                and observed_egress_ip != previous_egress_ip
+            _remember_rejected_egress(
+                run,
+                proxy_profile_id,
+                observed_egress_ip,
+                settings,
+            )
+            egress_changed = _session_acquisition_egress_changed(
+                observed_egress_ip,
+                settings,
+                previous_egress_ip=previous_egress_ip,
+                rejected_egress_fingerprint=rejected_egress_fingerprint,
             )
             _record_session_acquisition_attempt_event(
                 db,
@@ -2177,8 +2392,9 @@ def _search_catalog_with_same_profile_recovery(
                 source,
                 phase="session_acquisition_attempt_failed",
                 attempt=attempt,
+                attempt_limit=attempt_limit,
                 reason=reason,
-                previous_egress_known=previous_known,
+                previous_egress_known=previous_egress_known,
                 egress_changed=egress_changed,
             )
             _close_owned_provider(attempt_provider, owned_provider=True)
@@ -2203,15 +2419,58 @@ def _search_catalog_with_same_profile_recovery(
                     settings=settings,
                 )
             datadome_penalty = datadome_penalty or isinstance(exc, DataDomeChallengeError)
-            if attempt == 1:
+            if attempt < attempt_limit:
                 previous_egress_ip = observed_egress_ip
                 previous_reason = reason
                 continue
+            if explicit_retry:
+                cooldown_minutes = int((run.runtime_metadata or {}).get("proxy_cooldown_minutes", 10))
+                if datadome_penalty:
+                    mark_proxy_challenge_detected(
+                        db,
+                        proxy_profile_id,
+                        penalty_multiplier=settings.datadome_challenge_penalty_multiplier,
+                        cooldown_minutes=cooldown_minutes,
+                    )
+                else:
+                    mark_proxy_run_failure(
+                        db,
+                        proxy_profile_id,
+                        cooldown_minutes=cooldown_minutes,
+                    )
+                record_run_event(
+                    db,
+                    run_id=run.id,
+                    source_id=source.id,
+                    phase="explicit_session_retry_failed",
+                    level="warning",
+                    proxy_profile_id=proxy_profile_id,
+                    auth_mode="public_anonymous",
+                    details={"reason": reason, "attempt_limit": 1},
+                )
+                raise ExplicitSessionRetryError(str(exc)) from exc
             raise ProfileSessionAcquisitionExhaustedError(
                 datadome_penalty=datadome_penalty,
             ) from exc
 
     raise RuntimeError("Session acquisition attempt loop exited unexpectedly")
+
+
+def _session_acquisition_egress_changed(
+    observed_egress_ip: str | None,
+    settings,
+    *,
+    previous_egress_ip: str | None,
+    rejected_egress_fingerprint: str | None,
+) -> bool:
+    if not observed_egress_ip:
+        return False
+    if rejected_egress_fingerprint:
+        return not hmac.compare_digest(
+            rejected_egress_fingerprint,
+            _egress_identity_fingerprint(observed_egress_ip, settings),
+        )
+    return bool(previous_egress_ip and observed_egress_ip != previous_egress_ip)
 
 
 def _search_catalog_once(
@@ -2262,11 +2521,22 @@ def _record_session_acquisition_attempt_event(
     *,
     phase: str,
     attempt: int,
+    attempt_limit: int = 2,
     reason: str,
     previous_egress_known: bool,
     egress_changed: bool,
 ) -> None:
     metadata = run.runtime_metadata or {}
+    profile_id = metadata.get("proxy_profile_id")
+    attempted_profile_ids = [
+        value
+        for value in metadata.get("session_acquisition_profile_ids", [])
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    if isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id not in attempted_profile_ids:
+        attempted_profile_ids.append(profile_id)
+        _merge_run_metadata(run, {"session_acquisition_profile_ids": attempted_profile_ids})
+        metadata = run.runtime_metadata or {}
     record_run_event(
         db,
         run_id=run.id,
@@ -2279,12 +2549,43 @@ def _record_session_acquisition_attempt_event(
             "proxy_profile_id": metadata.get("proxy_profile_id"),
             "proxy_name": metadata.get("proxy_name"),
             "attempt": attempt,
-            "attempt_limit": 2,
+            "attempt_limit": attempt_limit,
             "reason": reason,
             "previous_egress_known": previous_egress_known,
             "egress_changed": egress_changed,
         },
     )
+
+
+def _remember_rejected_egress(
+    run: Run,
+    proxy_profile_id: int | None,
+    egress_ip: str | None,
+    settings,
+) -> None:
+    if (
+        not isinstance(proxy_profile_id, int)
+        or isinstance(proxy_profile_id, bool)
+        or not isinstance(egress_ip, str)
+        or not egress_ip.strip()
+    ):
+        return
+    current = (run.runtime_metadata or {}).get("session_acquisition_rejected_egress_fingerprints")
+    fingerprints = dict(current) if isinstance(current, dict) else {}
+    fingerprints[str(proxy_profile_id)] = _egress_identity_fingerprint(egress_ip, settings)
+    _merge_run_metadata(
+        run,
+        {"session_acquisition_rejected_egress_fingerprints": fingerprints},
+    )
+
+
+def _egress_identity_fingerprint(egress_ip: str, settings) -> str:
+    digest = hmac.new(
+        settings.app_secret_key.encode("utf-8"),
+        egress_ip.strip().encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"v1:{digest}"
 
 
 def _is_recoverable_session_acquisition_error(exc: Exception) -> bool:
@@ -2376,6 +2677,8 @@ def _provider_for_egress(
     include_catalog_payload: bool = False,
     force_new_session: bool = False,
     rejected_egress_ip: str | None = None,
+    rejected_egress_fingerprint: str | None = None,
+    bypass_cooldown: bool = False,
 ) -> tuple[CurlCffiVintedCatalogProvider, dict[str, Any], CatalogSearchResult | None]:
     _require_proxy_egress(egress)
     proxy_url = egress.proxy_url
@@ -2395,11 +2698,21 @@ def _provider_for_egress(
     prepared_catalog_result: CatalogSearchResult | None = None
     proxy_marker: dict[str, Any] | None = None
     event_sink = _build_provider_event_sink(db, run, source, egress.proxy_profile_id) if run is not None else None
-    profile = lock_and_revalidate_proxy_selection(
-        db,
-        egress.proxy_profile_id,
-        egress.proxy_identity_generation,
-        settings,
+    profile = (
+        lock_and_revalidate_proxy_selection(
+            db,
+            egress.proxy_profile_id,
+            egress.proxy_identity_generation,
+            settings,
+            bypass_cooldown=True,
+        )
+        if bypass_cooldown
+        else lock_and_revalidate_proxy_selection(
+            db,
+            egress.proxy_profile_id,
+            egress.proxy_identity_generation,
+            settings,
+        )
     )
     if force_new_session:
         vinted_session, prepared_session, prepared_metadata, prepared_catalog_result = _prepare_vinted_session_for_run(
@@ -2412,6 +2725,8 @@ def _provider_for_egress(
             include_catalog_payload=include_catalog_payload,
             force_egress_diagnostic=True,
             rejected_egress_ip=rejected_egress_ip,
+            rejected_egress_fingerprint=rejected_egress_fingerprint,
+            egress_diagnostic_attempt=1 if bypass_cooldown else 2,
         )
         metadata.update(prepared_metadata)
         session_action = "prepared"
@@ -2520,6 +2835,8 @@ def _prepare_vinted_session_for_run(
     include_catalog_payload: bool = False,
     force_egress_diagnostic: bool = False,
     rejected_egress_ip: str | None = None,
+    rejected_egress_fingerprint: str | None = None,
+    egress_diagnostic_attempt: int = 2,
 ) -> tuple[Any, Any, dict[str, Any], CatalogSearchResult | None]:
     browser_profile = profile_for_impersonate(settings.curl_impersonate_browser)
     proxy_session_id = generate_proxy_session_id()
@@ -2549,12 +2866,22 @@ def _prepare_vinted_session_for_run(
             proxy_session_marker=proxy_marker,
             expected_country_code=proxy_profile.country_code,
             event_sink=event_sink,
-            attempt=2,
+            attempt=egress_diagnostic_attempt,
         )
         if prevalidated_egress.error is not None:
             raise prevalidated_egress.error
         observed_egress_ip = prevalidated_egress.context.ip
-        if rejected_egress_ip and observed_egress_ip == rejected_egress_ip:
+        rejected_egress_matches = bool(
+            rejected_egress_ip
+            and observed_egress_ip == rejected_egress_ip
+        ) or bool(
+            rejected_egress_fingerprint
+            and hmac.compare_digest(
+                rejected_egress_fingerprint,
+                _egress_identity_fingerprint(observed_egress_ip, settings),
+            )
+        )
+        if rejected_egress_matches:
             raise VintedEgressRotationError(
                 "Fresh proxy sticky resolved to the previously rejected egress",
                 egress_ip=observed_egress_ip,
@@ -2673,9 +3000,18 @@ def _prepare_vinted_session_for_run(
         "vinted_session_prepare_probe_duration_ms": probe.get("duration_ms"),
         "session_acquisition_egress_changed": bool(
             force_egress_diagnostic
-            and rejected_egress_ip
+            and (rejected_egress_ip or rejected_egress_fingerprint)
             and prepared.egress_ip
-            and prepared.egress_ip != rejected_egress_ip
+            and not (
+                prepared.egress_ip == rejected_egress_ip
+                or (
+                    rejected_egress_fingerprint
+                    and hmac.compare_digest(
+                        rejected_egress_fingerprint,
+                        _egress_identity_fingerprint(prepared.egress_ip, settings),
+                    )
+                )
+            )
         ),
     }, catalog_result
 
@@ -2868,6 +3204,8 @@ _RUN_OBSERVABILITY_METADATA_KEYS = (
     "session_acquisition_attempts",
     "session_acquisition_last_reason",
     "session_acquisition_egress_changed",
+    "session_acquisition_profile_ids",
+    "session_acquisition_rejected_egress_fingerprints",
 )
 
 
@@ -3471,6 +3809,11 @@ def _completed_run_count_for_vinted_session(db: Session, run: Run, vinted_sessio
 
 def _classify_session_failure(exc: Exception, *, kind: str | None = None) -> dict[str, str]:
     text = str(exc).lower()
+    if isinstance(exc, ExplicitSessionRetryError):
+        return {
+            "session_end_reason": "explicit_session_retry_failed",
+            "recovery_action": "retry_manually_or_wait_for_cooldown",
+        }
     if isinstance(exc, SessionAcquisitionExhaustedError):
         return {
             "session_end_reason": "session_acquisition_exhausted",

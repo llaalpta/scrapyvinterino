@@ -12,14 +12,14 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 ## Now
 
-Program `14.54` is implemented one standard task at a time. `14.54.3` is complete; `14.54.4` is the next planned task and requires separate user confirmation.
+Program `14.54` is complete. Its four standard tasks were implemented, verified and independently audited one at a time.
 
 | Item | Status | Outcome | Dependency |
 | --- | --- | --- | --- |
 | 14.54.1 | done | Move sticky username format and maximum lifetime to each proxy profile; DataImpulse uses `sessid` with a 25-minute local limit, while the monitor session remains independent. | None |
 | 14.54.2 | done | Before candidates are accepted, give the selected profile at most its current/initial attempt plus one fresh sticky, verify forced egress rotation and cool it once if both attempts fail. | 14.54.1 merged |
 | 14.54.3 | done | Reassign an exhausted run to the next eligible proxy profile through one capacity-checked PostgreSQL handoff that makes the durable run binding authoritative over its stale queue payload. | 14.54.2 merged |
-| 14.54.4 | planned | Let an explicit PWA retry target one cooling profile for one fresh-sticky attempt without clearing cooldown in advance. | 14.54.3 merged |
+| 14.54.4 | done | Let an explicit PWA retry target one cooling profile for one fresh-sticky attempt without clearing cooldown in advance. | 14.54.3 merged |
 
 ## Next
 
@@ -101,6 +101,8 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.53 | done | Prepared-context uses and expiry are now distinct from observed proxy requests; performance separates bytes and request counts and uses smaller chart labels. Five traffic cases, eight activation/rotation cases and one live PWA flow passed after a positive independent audit, with zero external traffic and no operational-state drift. |
 | 14.54.1 | done | Migration 0024 moved the strict sticky username template and `1..120` minute TTL to each proxy profile, included both in the identity fence and made prepared-context expiry use the earlier global/profile deadline. The isolated authenticated PWA/API/PostgreSQL/Redis scenario passed `25/25`, including runtime username construction, context invalidation/replacement in the same monitor session and rejection without mutation; the full isolated backend gate passed `564` normal plus `3` loopback-only tests, with 11 opt-in skips, zero external traffic and unchanged operational fingerprints. The independent read-only audit returned positive with no A/B/C findings. |
 | 14.54.2 | done | The selected profile now receives at most one replacement sticky for recoverable pre-candidate failure. Its forced diagnostic traverses the proxy and blocks a repeated known IP before Vinted; exhaustion applies one cooldown and one terminal without profile fallback, while `429` and post-candidate work remain fail-stop. The isolated API/Vite/Playwright/proxy-loopback gate passed `14/14`; the complete backend gate passed `566` with 12 opt-in skips plus `5` loopback catalog cases. Operational PostgreSQL/Redis fingerprints were unchanged, no external traffic occurred and the independent audit returned positive with no A/B/C findings. |
+| 14.54.3 | done | An exhausted profile can hand the same run to the next captured eligible profile through serialized SQL+Redis capacity admission and a durable profile/generation binding that overrides stale queue input. Focused consumer/task checks passed `35`, the isolated scheduler/Redis/consumer/PostgreSQL/PWA gate passed `16`, the affected identity race recheck passed `2`, and the independent audit returned positive with no A/B/C findings. |
+| 14.54.4 | done | An inactive failed start now offers one explicit authenticated retry against one selected cooling profile. Admission validates the latest attempted-profile evidence, activity, country, configuration, capacity and identity before one fresh sticky; cooldown remains until success or the next penalty and no profile fallback occurs. The final isolated API/PostgreSQL/Redis/Vite/Playwright loopback gate passed `20/20`, including a recurrent start with effective capacity hidden only by cooldown and a real PostgreSQL identity-edit lock race; the `78` affected manual/start regressions also passed after the single full-suite run exposed and prompted correction of an injected-cache call contract. External traffic and operational-state drift remained zero; the independent audit returned positive with no A/B/C findings. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

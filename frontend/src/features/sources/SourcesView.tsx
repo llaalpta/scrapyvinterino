@@ -43,6 +43,7 @@ export function SourcesView({
   onLoadMonitorStats,
   onKeepSourceEditing,
   onRunNow,
+  onRetrySession,
   onSelectMonitor,
   onSaveSourceSchedule,
   onStartSession,
@@ -86,6 +87,7 @@ export function SourcesView({
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onKeepSourceEditing: () => void;
   onRunNow: (source: SearchSource) => void;
+  onRetrySession: (source: SearchSource, proxyProfileId: number) => void;
   onSelectMonitor: (sourceId: number) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
@@ -258,6 +260,7 @@ export function SourcesView({
           onDeleteSource={onDeleteSource}
           onLoadMonitorStats={onLoadMonitorStats}
           onRunNow={onRunNow}
+          onRetrySession={onRetrySession}
           onSaveSourceSchedule={onSaveSourceSchedule}
           onStartSession={onStartSession}
           onStopMonitor={onStopMonitor}
@@ -845,6 +848,7 @@ function MonitorDetail({
   onDeleteSource,
   onLoadMonitorStats,
   onRunNow,
+  onRetrySession,
   onSaveSourceSchedule,
   onStartSession,
   onStopMonitor,
@@ -874,6 +878,7 @@ function MonitorDetail({
   onDeleteSource: (source: SearchSource) => void;
   onLoadMonitorStats: (sourceId: number, range: MonitorStatsRange) => void;
   onRunNow: (source: SearchSource) => void;
+  onRetrySession: (source: SearchSource, proxyProfileId: number) => void;
   onSaveSourceSchedule: (source: SearchSource) => void;
   onStartSession: (source: SearchSource) => void;
   onStopMonitor: (sourceId: number) => void;
@@ -888,7 +893,26 @@ function MonitorDetail({
   updateSourceDraft: (sourceId: number, field: keyof SourceDraft, value: string) => void;
 }) {
   const [archiveSource, setArchiveSource] = useState<SearchSource | null>(null);
+  const [selectedRetryProfileId, setSelectedRetryProfileId] = useState<number | null>(null);
   const archiveDialogRef = useRef<HTMLDivElement | null>(null);
+  const eligibleRetryProfiles = useMemo(() => {
+    const latestRun = monitorRuns[0];
+    const attemptedIds = latestRun?.trigger === 'baseline' && latestRun.status === 'failed'
+      ? latestRun.runtime_metadata.session_acquisition_profile_ids
+      : null;
+    if (!source || source.is_active || !Array.isArray(attemptedIds)) {
+      return [];
+    }
+    const attemptedProfileIds = new Set(
+      attemptedIds.filter((value): value is number => typeof value === 'number' && Number.isInteger(value))
+    );
+    return coolingProxyProfiles.filter((profile) => attemptedProfileIds.has(profile.id));
+  }, [coolingProxyProfiles, monitorRuns, source]);
+  const effectiveRetryProfileId = eligibleRetryProfiles.some(
+    (profile) => profile.id === selectedRetryProfileId
+  )
+    ? selectedRetryProfileId
+    : (eligibleRetryProfiles[0]?.id ?? null);
 
   useEffect(() => {
     if (!archiveSource) {
@@ -918,7 +942,6 @@ function MonitorDetail({
   const isRunStateUnknown = !source.is_active && !monitorRunStateKnown;
   const hasCommandInFlight = monitorCommandPending || hasNonTerminalRun || isRunStateUnknown;
   const isEditing = editingSourceId === source.id && !source.is_active && !isDraining;
-  const retryingFailedBaseline = monitorRuns[0]?.trigger === 'baseline' && monitorRuns[0]?.status === 'failed';
 
   return (
     <div className={`monitor-detail-content${source.is_active || isDraining ? ' active-monitor-detail' : ' inactive-monitor-detail'}`}>
@@ -996,6 +1019,47 @@ function MonitorDetail({
           </button>
         ) : (
           <>
+            {eligibleRetryProfiles.length > 0 ? (
+              <>
+                {eligibleRetryProfiles.length > 1 ? (
+                  <label className="source-schedule">
+                    <span className="sr-only">Perfil proxy para el reintento</span>
+                    <select
+                      aria-label="Perfil proxy para el reintento"
+                      disabled={hasCommandInFlight}
+                      value={effectiveRetryProfileId ?? ''}
+                      onChange={(event) => setSelectedRetryProfileId(Number(event.target.value))}
+                    >
+                      {eligibleRetryProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={
+                    hasCommandInFlight
+                    || savingSourceId === source.id
+                    || launchBlockedByFilters
+                    || effectiveRetryProfileId === null
+                  }
+                  title="Omitir una vez el cooldown del perfil seleccionado y probar un sticky nuevo"
+                  onClick={() => {
+                    if (effectiveRetryProfileId !== null) {
+                      onRetrySession(source, effectiveRetryProfileId);
+                    }
+                  }}
+                >
+                  <RefreshCw size={17} />
+                  {runningSessionId === source.id
+                    ? 'Reintentando...'
+                    : eligibleRetryProfiles.length === 1
+                      ? `Reintentar con ${eligibleRetryProfiles[0].name}`
+                      : 'Reintentar sesion'}
+                </button>
+              </>
+            ) : null}
             <button
               type="button"
               disabled={hasCommandInFlight || savingSourceId === source.id || launchBlockedByFilters || allKnownActiveProxiesCooling}
@@ -1013,9 +1077,7 @@ function MonitorDetail({
               <Play size={17} />
               {runningSessionId === source.id
                 ? 'Iniciando...'
-                : retryingFailedBaseline
-                  ? 'Reintentar sesion'
-                  : 'Iniciar sesion'}
+                : 'Iniciar sesion'}
             </button>
             <button type="button" disabled={hasCommandInFlight} onClick={() => onBeginSourceEdit(source)}>
               <Pencil size={16} />

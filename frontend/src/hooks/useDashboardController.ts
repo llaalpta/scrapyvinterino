@@ -13,6 +13,7 @@ import {
   fetchSources,
   monitorEventsStreamUrl,
   revalidateLocalAuthentication,
+  retryMonitorSession,
   runMonitor,
   startMonitor,
   stopMonitor,
@@ -67,7 +68,7 @@ const START_MONITOR_STATE_REFRESH_ERROR = 'La sesion se inicio, pero no se pudo 
 const RUN_MONITOR_STATE_REFRESH_ERROR = 'La ejecucion termino, pero no se pudo actualizar por completo su estado; recarga Monitores';
 const ARCHIVE_MONITOR_STATE_REFRESH_ERROR = 'El monitor se archivo, pero no se pudieron actualizar por completo los datos derivados; recarga la PWA';
 
-type MonitorCommandKind = 'create' | 'save' | 'start' | 'run' | 'stop' | 'archive';
+type MonitorCommandKind = 'create' | 'save' | 'start' | 'retry' | 'run' | 'stop' | 'archive';
 
 type MonitorCommand = {
   kind: MonitorCommandKind;
@@ -156,7 +157,11 @@ export function useDashboardController() {
     opportunitiesPageSize
   };
   const monitorCommandPending = monitorCommand !== null;
-  const runningSessionId = monitorCommand && (monitorCommand.kind === 'start' || monitorCommand.kind === 'run')
+  const runningSessionId = monitorCommand && (
+    monitorCommand.kind === 'start'
+    || monitorCommand.kind === 'retry'
+    || monitorCommand.kind === 'run'
+  )
     ? monitorCommand.sourceId
     : null;
   const savingSourceId = monitorCommand?.sourceId ?? null;
@@ -828,16 +833,21 @@ export function useDashboardController() {
     }
   }
 
-  async function onStartSession(source: SearchSource) {
+  async function launchSession(
+    source: SearchSource,
+    kind: 'start' | 'retry',
+    request: () => Promise<Run>
+  ) {
     const draft = sourceDrafts[source.id] ?? buildSourceDraft(source);
-    const command = beginMonitorCommand('start', source.id);
+    const retrying = kind === 'retry';
+    const command = beginMonitorCommand(kind, source.id);
     if (!command) {
       return;
     }
     setError(null);
     try {
       if (sourceDraftHasChanges(source, draft)) {
-        setError('Guarda los cambios antes de lanzar la sesion');
+        setError(`Guarda los cambios antes de ${retrying ? 'reintentar' : 'lanzar'} la sesion`);
         return;
       }
       if (source.catalog_filter_compatibility && !source.catalog_filter_compatibility.compatible) {
@@ -857,18 +867,22 @@ export function useDashboardController() {
         setScheduler(schedulerData);
         setSchedulerAvailabilityError(null);
         if (!schedulerData.worker_available) {
-          setError('El worker del scheduler no esta disponible. Inicia el worker antes de lanzar una sesion periodica.');
+          setError(
+            `El worker del scheduler no esta disponible. Inicia el worker antes de ${
+              retrying ? 'reintentar' : 'lanzar'
+            } una sesion periodica.`
+          );
           return;
         }
-        if (!schedulerData.effective_enabled) {
+        if (!schedulerData.runtime_enabled || (!retrying && !schedulerData.effective_enabled)) {
           setError('El scheduler no esta operativo. Revisa el despliegue y la capacidad.');
           return;
         }
       }
-      const run = await startMonitor(source.id);
+      const run = await request();
       const refreshComplete = await refreshMonitorCommandResult(source.id, run);
       if (run.status !== 'success') {
-        setError(run.error_message || 'No se pudo iniciar la sesion');
+        setError(run.error_message || `No se pudo ${retrying ? 'reintentar' : 'iniciar'} la sesion`);
       } else if (!refreshComplete) {
         setError(START_MONITOR_STATE_REFRESH_ERROR);
       }
@@ -877,10 +891,22 @@ export function useDashboardController() {
         setScheduler(null);
         setSchedulerAvailabilityError('La disponibilidad del scheduler debe volver a comprobarse.');
       }
-      setError(caught instanceof Error ? caught.message : 'No se pudo lanzar el monitor');
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : `No se pudo ${retrying ? 'reintentar la sesion' : 'lanzar el monitor'}`
+      );
     } finally {
       finishMonitorCommand(command);
     }
+  }
+
+  async function onStartSession(source: SearchSource) {
+    await launchSession(source, 'start', () => startMonitor(source.id));
+  }
+
+  async function onRetrySession(source: SearchSource, proxyProfileId: number) {
+    await launchSession(source, 'retry', () => retryMonitorSession(source.id, proxyProfileId));
   }
 
   async function onRunNow(source: SearchSource) {
@@ -1318,6 +1344,7 @@ export function useDashboardController() {
     onSelectMonitor: requestMonitorSelection,
     onSaveSourceSchedule,
     onRunNow,
+    onRetrySession,
     onStartSession,
     onStopMonitor,
     onToggleProxy,

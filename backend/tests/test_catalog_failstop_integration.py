@@ -529,6 +529,178 @@ def test_both_catalog_attempts_fail_with_one_profile_penalty_and_one_terminal(
         _assert_queue_acked(settings, queue_client, graph, reservation)
 
 
+def test_explicit_retry_uses_one_fresh_sticky_and_extends_existing_penalty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    LocalSameProfileRecoveryProvider.reset()
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
+        LocalSameProfileRecoveryProvider,
+    )
+    probe_calls: list[str] = []
+
+    def probe(**_kwargs: Any) -> ProxyEgressProbeResult:
+        probe_calls.append("explicit")
+        return _probe_result("192.0.2.10")
+
+    monkeypatch.setattr(runs_module, "probe_proxy_egress", probe)
+
+    with _failstop_graph(with_fallback_profile=True) as graph:
+        assert graph.fallback_proxy_id is not None
+        settings = get_settings()
+        failure_started_at = datetime.now(UTC)
+        with SessionLocal() as db:
+            source = db.get(SearchSource, graph.source_id)
+            profile = db.get(ProxyProfile, graph.proxy_id)
+            assert source is not None and profile is not None
+            source.is_active = False
+            source.monitor_mode = "manual"
+            db.execute(delete(MonitorSession).where(MonitorSession.source_id == source.id))
+            profile.failure_count = 1
+            profile.cooldown_until = failure_started_at + timedelta(minutes=10)
+            origin = Run(
+                source_id=source.id,
+                status=FAILED,
+                trigger="baseline",
+                started_at=failure_started_at,
+                finished_at=failure_started_at,
+                runtime_metadata={
+                    "proxy_profile_id": profile.id,
+                    "session_acquisition_profile_ids": [profile.id],
+                    "session_acquisition_rejected_egress_fingerprints": {
+                        str(profile.id): runs_module._egress_identity_fingerprint(
+                            "192.0.2.10",
+                            settings,
+                        )
+                    },
+                },
+            )
+            db.add(origin)
+            db.commit()
+            origin_id = origin.id
+
+        with SessionLocal() as db:
+            retry = runs_module.execute_monitor_session_retry(
+                db,
+                graph.source_id,
+                proxy_profile_id=graph.proxy_id,
+            )
+
+        assert probe_calls == ["explicit"]
+        assert LocalSameProfileRecoveryProvider.constructed == 0
+        assert LocalSameProfileRecoveryProvider.searches == 0
+        with SessionLocal() as db:
+            persisted = db.get(Run, retry.id)
+            profile = db.get(ProxyProfile, graph.proxy_id)
+            fallback = db.get(ProxyProfile, graph.fallback_proxy_id)
+            assert persisted is not None and persisted.status == FAILED
+            metadata = persisted.runtime_metadata or {}
+            assert metadata["failure_kind"] == "explicit_session_retry_failed"
+            assert metadata["explicit_retry_origin_run_id"] == origin_id
+            assert metadata["session_acquisition_attempts"] == 1
+            assert metadata["session_acquisition_last_reason"] == "egress_not_rotated"
+            assert metadata["session_acquisition_profile_ids"] == [graph.proxy_id]
+            assert profile is not None and profile.failure_count == 2
+            assert profile.cooldown_until is not None
+            assert failure_started_at + timedelta(minutes=20) <= profile.cooldown_until
+            assert fallback is not None
+            assert fallback.failure_count == 0 and fallback.cooldown_until is None
+            phases = list(
+                db.scalars(select(RunEvent.phase).where(RunEvent.run_id == persisted.id))
+            )
+            assert phases.count("session_acquisition_attempt_started") == 1
+            assert phases.count("session_acquisition_attempt_failed") == 1
+            assert phases.count("explicit_session_retry_failed") == 1
+            assert phases.count("run_failed") == 1
+            assert "proxy_profile_handoff_committed" not in phases
+
+
+def test_explicit_retry_rejects_saturated_profile_before_run_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    LocalSameProfileRecoveryProvider.reset()
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
+        LocalSameProfileRecoveryProvider,
+    )
+
+    blocker_ids: tuple[int, int] | None = None
+    with _failstop_graph(with_fallback_profile=True) as graph:
+        cooldown_until = datetime.now(UTC) + timedelta(minutes=10)
+        with SessionLocal() as db:
+            source = db.get(SearchSource, graph.source_id)
+            profile = db.get(ProxyProfile, graph.proxy_id)
+            assert source is not None and profile is not None
+            source.is_active = False
+            source.monitor_mode = "manual"
+            db.execute(delete(MonitorSession).where(MonitorSession.source_id == source.id))
+            profile.failure_count = 1
+            profile.cooldown_until = cooldown_until
+            db.add(
+                Run(
+                    source_id=source.id,
+                    status=FAILED,
+                    trigger="baseline",
+                    started_at=datetime.now(UTC),
+                    finished_at=datetime.now(UTC),
+                    runtime_metadata={
+                        "proxy_profile_id": profile.id,
+                        "session_acquisition_profile_ids": [profile.id],
+                    },
+                )
+            )
+            blocker_source = SearchSource(
+                name=f"qa explicit retry blocker {uuid4().hex}",
+                url="https://www.vinted.es/catalog?order=newest_first",
+                normalized_query={"order": ["newest_first"]},
+                is_active=False,
+                monitor_mode="manual",
+                scheduler_config={},
+            )
+            db.add(blocker_source)
+            db.flush()
+            blocker = Run(
+                source_id=blocker_source.id,
+                task_id=f"qa-explicit-blocker-{uuid4().hex}",
+                status="running",
+                trigger="scheduler",
+                runtime_metadata={
+                    "proxy_profile_id": profile.id,
+                    "proxy_identity_generation": effective_proxy_identity_generation(profile),
+                },
+            )
+            db.add(blocker)
+            db.commit()
+            blocker_ids = (blocker.id, blocker_source.id)
+
+        try:
+            with SessionLocal() as db:
+                with pytest.raises(runs_module.SchedulerCapacityError):
+                    runs_module.execute_monitor_session_retry(
+                        db,
+                        graph.source_id,
+                        proxy_profile_id=graph.proxy_id,
+                    )
+                db.rollback()
+
+            assert LocalSameProfileRecoveryProvider.constructed == 0
+            with SessionLocal() as db:
+                source_runs = list(
+                    db.scalars(select(Run).where(Run.source_id == graph.source_id))
+                )
+                profile = db.get(ProxyProfile, graph.proxy_id)
+                assert len(source_runs) == 1
+                assert profile is not None
+                assert profile.failure_count == 1
+                assert profile.cooldown_until == cooldown_until
+        finally:
+            if blocker_ids is not None:
+                with SessionLocal() as db:
+                    db.execute(delete(Run).where(Run.id == blocker_ids[0]))
+                    db.execute(delete(SearchSource).where(SearchSource.id == blocker_ids[1]))
+                    db.commit()
+
+
 def test_scheduler_consumer_hands_exhausted_run_to_next_profile_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

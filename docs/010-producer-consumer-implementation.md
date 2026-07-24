@@ -17,7 +17,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 
 ## 14.54 sticky lifecycle and recovery
 
-`14.54.1` and `14.54.2` are current runtime behavior. The two later ordered slices remain planned; queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
+`14.54.1` through `14.54.4` are current runtime behavior. Queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
 
 ### 14.54.1 persisted provider contract
 
@@ -50,9 +50,15 @@ The independent read-only audit returned positive with no A, B or C findings.
 
 ### 14.54.4 explicit retry
 
+Status: complete on `feat/14.54.4-explicit-cooldown-retry`.
+
 - `POST /api/monitors/{monitor_id}/vinted-session/retry` accepts `{proxy_profile_id}` for an inactive monitor whose start failed. It ignores only the selected profile's current cooldown for one command and still enforces active profile, country, capacity, completeness, source single-flight and identity fencing.
 - The forced command creates one new sticky, performs the same non-cached egress/known-rejected-IP check, makes one baseline attempt and never falls through to another profile. Normal success clears the selected profile and activates the monitor; failure uses the normal penalty transition without clearing cooldown first.
-- The PWA derives eligible cooling profiles from the latest failed start plus current proxy state. It offers one named button or a compact selector, disables only while a command is in flight, and allows another user click after the prior terminal result.
+- The PWA derives eligible cooling profiles from the latest failed start plus current proxy state. It offers one named button or a compact selector, retains the existing command/draft/filter guards and allows another user click after the prior terminal result. A recurrent retry still requires the deployment gate and live worker heartbeat, but counts its selected cooling profile for activation instead of rejecting the very cooldown it is authorized to bypass.
+
+Verification passed Ruff, frontend lint/build, the final isolated authenticated API/PostgreSQL/Redis/Vite/Playwright loopback gate (`20/20`) and all `78` affected manual/start regressions. The recurrent PWA case crossed `effective_enabled=false` caused only by cooldown, while the PostgreSQL race proved proxy/identity admission precedes the source row lock. The one permitted complete backend run first reached `557 passed, 12 skipped, 11 failed` and found a branch regression in the existing zero-argument injected-cache seam; restoring that call contract made both affected gates green. Cleanup removed disposable state, operational fingerprints were unchanged and no external destination was allowed.
+
+The independent read-only audit returned positive with no A, B or C findings.
 
 ## Decisions
 

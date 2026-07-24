@@ -195,20 +195,41 @@ def update_scheduler_config(db: Session, payload: dict[str, Any], settings: Sett
     return get_scheduler_state(db, settings or get_settings())
 
 
-def ensure_scheduler_can_activate(db: Session, settings: Settings, *, source_id: int | None = None) -> None:
+def ensure_scheduler_can_activate(
+    db: Session,
+    settings: Settings,
+    *,
+    source_id: int | None = None,
+    cooldown_bypass_profile_id: int | None = None,
+) -> None:
     state = get_scheduler_state(db, settings)
     if not state.runtime_enabled:
         raise SchedulerCapacityError("Scheduler runtime is disabled")
     if not state.worker_available:
         raise SchedulerUnavailableError("Scheduler worker is unavailable")
-    if state.effective_capacity <= 0:
+    effective_capacity = state.effective_capacity
+    if cooldown_bypass_profile_id is not None:
+        profile = db.get(ProxyProfile, cooldown_bypass_profile_id)
+        target_country = settings.vinted_target_country_code.strip().upper()
+        if (
+            profile is not None
+            and profile.is_active
+            and profile.country_code == target_country
+            and profile.cooldown_until is not None
+            and profile.cooldown_until > datetime.now(UTC)
+        ):
+            effective_capacity = min(
+                state.max_concurrent_runs,
+                state.proxy_capacity + max(profile.max_concurrent_runs, 1),
+            )
+    if effective_capacity <= 0:
         raise SchedulerCapacityError("No scheduler egress capacity is available")
     active_count = state.active_periodic_monitors
     if source_id is not None:
         source = db.get(SearchSource, source_id)
         if source is not None and source.is_active and source.monitor_mode != "manual":
             active_count -= 1
-    if active_count >= state.effective_capacity:
+    if active_count >= effective_capacity:
         raise SchedulerCapacityError("Scheduler capacity limit reached")
 
 

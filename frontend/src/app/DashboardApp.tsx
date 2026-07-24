@@ -63,6 +63,7 @@ export function DashboardApp({ onLogout, user }: { onLogout: () => void; user: L
           onLoadMonitorRuns={dashboard.loadMonitorRuns}
           onKeepSourceEditing={dashboard.onKeepSourceEditing}
           onRunNow={(source) => void dashboard.onRunNow(source)}
+          onRetrySession={(source, proxyProfileId) => void dashboard.onRetrySession(source, proxyProfileId)}
           onSelectMonitor={dashboard.onSelectMonitor}
           onSaveSourceSchedule={(source) => void dashboard.onSaveSourceSchedule(source)}
           onStartSession={(source) => void dashboard.onStartSession(source)}
