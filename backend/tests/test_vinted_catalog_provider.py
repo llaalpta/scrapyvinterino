@@ -799,6 +799,35 @@ def test_curl_provider_diagnoses_egress_with_isolated_session_and_safe_markers()
     assert "csrf-secret-value" not in json.dumps(events)
 
 
+def test_proxy_egress_probe_classifies_and_redacts_session_constructor_failure() -> None:
+    events: list[dict] = []
+
+    def failing_factory(**_kwargs):
+        raise RuntimeError("proxy http://qa-user:qa-password@proxy.invalid:8080 failed")
+
+    result = catalog_provider.probe_proxy_egress(
+        settings=Settings(egress_diagnostic_url="https://diagnostic.example/ip"),
+        profile=profile_for_impersonate("chrome146"),
+        proxy_url="http://proxy.invalid:8080",
+        timeout_ms=1000,
+        proxy_session_marker=None,
+        expected_country_code="ES",
+        event_sink=lambda **event: events.append(event),
+        attempt=2,
+        session_factory=failing_factory,
+    )
+
+    assert result.validated_at is None
+    assert result.error is not None
+    assert [event["phase"] for event in events] == [
+        "egress_diagnostic_start",
+        "egress_diagnostic_error",
+    ]
+    serialized = json.dumps(events)
+    assert "qa-user" not in serialized
+    assert "qa-password" not in serialized
+
+
 def test_curl_provider_blocks_catalog_api_when_session_context_is_incomplete() -> None:
     calls: list[dict] = []
     events: list[dict] = []
@@ -1769,7 +1798,7 @@ def test_curl_provider_does_not_use_catalog_html_fallback_after_api_failure() ->
     with pytest.raises(VintedCatalogProviderError):
         provider.search(source())
 
-    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items", "/api/v2/catalog/items"]
+    assert [path(call) for call in calls] == ["/catalog", "/api/v2/catalog/items"]
 
 
 def test_curl_provider_raises_datadome_challenge_before_parsing_catalog() -> None:

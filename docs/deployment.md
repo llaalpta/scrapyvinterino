@@ -34,13 +34,15 @@ La configuracion no debe tener dos fuentes de verdad activas:
 
 | Dueño | Uso |
 | --- | --- |
-| `.env` | Infraestructura, secretos, auth local, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS exacto, `APP_SECRET_KEY`, TTL absoluto de pre-auth/auth y contexto anonimo, `SCHEDULER_ENABLED`, heartbeat del productor, intervalo/gracia del watchdog, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `VINTED_REQUEST_RETRIES`, `CURL_IMPERSONATE_BROWSER`, delays humanos y penalizacion DataDome. |
+| `.env` | Infraestructura, secretos, auth local, kill-switches, workers, runtime cache y evasion anti-bot: DB/Redis, CORS exacto, `APP_SECRET_KEY`, TTL absoluto de pre-auth/auth y contexto anonimo, `SCHEDULER_ENABLED`, heartbeat del productor, intervalo/gracia del watchdog, `SEEN_CACHE_TTL_SECONDS`, `SEEN_PROCESSING_TTL_SECONDS`, `SEEN_CACHE_MAX_PER_MONITOR`, `WORKER_CONSUMER_COUNT`, `WORKER_MAX_RETRY_ATTEMPTS`, `CURL_IMPERSONATE_BROWSER`, delays humanos y penalizacion DataDome. |
 | PWA | Operacion diaria: iniciar/detener sesiones por monitor, runs simultaneos, limites por run, timeout HTTP, pausa de proxy tras fallo, parada de monitor tras fallos, y alta/pausa/contrato sticky de proxys. No arranca contenedores ni mantiene un gate global del scheduler. |
 | Backend | Limites duros de validacion y defaults seguros cuando no hay override operativo. |
 
 Algunos valores `.env` tambien sirven como defaults cuando aun no existe override operativo en `app_settings.scheduler`; por ejemplo `VINTED_REQUEST_TIMEOUT_MS`. Una vez guardado desde la PWA, el valor persistido en DB es la fuente de verdad operativa.
 
 La plantilla y el TTL sticky no tienen fallback en `.env`: pertenecen a cada `proxy_profiles`. La plantilla exige exactamente `{username}` y `{session_id}`, y `sticky_ttl_minutes` acepta `1..120`; el contexto preparado usa el menor plazo entre ese valor y `VINTED_SESSION_TTL_MINUTES`.
+
+El catalogo no tiene un contador de retries configurable ni reintentos HTTP internos. Antes de aceptar candidatos, runtime puede usar el intento inicial y un unico sticky nuevo sobre el perfil ya seleccionado. El reemplazo exige el diagnostico proxificado configurado y no llama a Vinted si observa la IP ya rechazada. Si ambos intentos fallan, ese perfil entra una vez en cooldown y el run termina; 14.54.2 no cambia de perfil automaticamente. Para el MVP local, el operador espera la expiracion visible o vuelve a iniciar manualmente despues de revisar el proxy.
 
 `SCHEDULER_ENABLED` es el unico kill-switch global. El worker contiene tanto el productor scheduler como los consumidores y debe estar levantado por Compose; la PWA solo muestra su heartbeat/capacidad y controla cada sesion recurrente. La migracion 0021 elimina el antiguo `app_settings.scheduler.enabled`, y el API ya no lo expone ni acepta.
 

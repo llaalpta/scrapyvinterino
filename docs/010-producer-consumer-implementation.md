@@ -12,12 +12,12 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Stop is PostgreSQL-first. Consumer/run-factory admission, stop and terminal serialize with `FOR NO KEY UPDATE` on the same `search_sources` row; the manual wrapper keeps its stronger pre-existing `FOR UPDATE` gate only until the run commit. Writers remain mutually exclusive while run-event FK `KEY SHARE` locks do not delay stop through provider I/O. Confirmed session runs drain normally; a stop confirmed before reserved-task admission makes it ACK without a run/provider while the source remains inactive. Redis ready cleanup is only best-effort after the inactive commit.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 - Item enrichment uses the public item document, structural Next/React Flight records and JSON-LD fallback. The production flow and visible detail probe no longer call the direct `/api/v2/items/{id}/details` matrix.
-- Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. An ordinary detail failure retries once after two seconds inside the same run; no candidate payload survives into another run. An anti-bot challenge ends the task and the claimed batch follows the current fail-stop/discard contract.
+- Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. An ordinary detail failure retries once after two seconds inside the same run; no candidate payload survives into another run. Candidate acceptance closes the session-acquisition loop: an anti-bot challenge during detail ends the task and the claimed batch follows the fail-stop/discard contract.
 - The PWA persists no image bytes: it renders every signed `images*.vinted.net` URL directly and exposes an accessible gallery plus public availability/price breakdown while purchase remains disabled.
 
 ## 14.54 sticky lifecycle and recovery
 
-`14.54.1` is current runtime behavior. The three later ordered slices remain planned and will replace only first-failure recovery behavior; queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
+`14.54.1` and `14.54.2` are current runtime behavior. The two later ordered slices remain planned; queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
 
 ### 14.54.1 persisted provider contract
 
@@ -32,6 +32,8 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Recoverable before-candidate outcomes are Cloudflare/DataDome challenge, catalog `401/403`, unusable prepared context and proxy/egress transport failure. After both attempts, one existing-class penalty/cooldown is applied to that profile and this slice terminates with `profile_session_acquisition_exhausted`. `429`, source/Redis/configuration/identity failures and unexpected internal errors terminate without this loop.
 - Exactly one `run_succeeded` or `run_failed` event closes the command. Attempt events carry safe profile identity, ordinal/limit, reason and an `egress_changed` boolean. Transfer observations from both provider attempts are merged into the run total; successful run metadata identifies the retained context.
 - Candidate acceptance is the replay boundary. A challenge while fetching details retains the existing fail-stop/discard behavior; the run is not restarted and a later run must resolve a new eligible context.
+
+Verification passed the isolated real-boundary gate (`14/14`) with live API/Vite/Playwright, PostgreSQL, Redis and a loopback HTTP proxy, then the complete backend gate (`566` passed, 12 opt-in skips) plus `5` loopback-only catalog cases. Operational fingerprints were unchanged and no external request occurred. The independent read-only audit returned positive with no A/B/C findings.
 
 ### 14.54.3 atomic profile reassignment
 
@@ -60,7 +62,7 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Every active manual or recurring run admission requires its open `monitor_sessions` row under the locked source decision. Terminal and orphan-recovery paths reacquire that source row; after an explicit stop, normal outcomes preserve every run result and only the last terminal closes the matching session with reason `stopped`. Strong fail-stop paths keep their diagnostic reason.
 - Development Redis uses a persisted AOF volume. The recovery contract assumes one worker service instance with multiple in-process consumers; horizontally scaled workers require distributed reservation ownership before deployment.
 - Classify DataDome and `cf-mitigated: challenge` explicitly; plain catalog `429` remains rate limiting rather than a challenge, but is equally terminal for the task. Detail `404/410` remains terminal for its candidate.
-- `TaskConsumer` never escalates a classified challenge, session rejection, contradictory context or catalog `429`. The run service records the terminal result, invalidates/purges the acquired context and returns `failed`; the consumer ACKs without another provider call or requeue. Bounded worker attempts remain only for unexpected worker failures.
+- `TaskConsumer` never escalates a classified challenge, session rejection, contradictory context or catalog `429`. Before candidates, the run service itself may close one recoverable attempt and use one fresh sticky on the same profile; the consumer still sees one run and ACKs only its single terminal result. A `429`, post-candidate challenge or exhausted profile returns `failed` without worker requeue. Bounded worker attempts remain only for unexpected worker failures.
 
 ## Pre-Integration Impersonation Plan
 
