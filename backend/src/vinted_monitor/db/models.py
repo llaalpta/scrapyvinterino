@@ -154,6 +154,11 @@ class ProxyProfile(Base):
     accept_language: Mapped[str] = mapped_column(String(120), default="en-GB,en;q=0.9")
     screen: Mapped[str] = mapped_column(String(40), default="1920x1080")
     vinted_screen: Mapped[str] = mapped_column(String(40), default="catalog")
+    sticky_username_template: Mapped[str] = mapped_column(
+        String(255),
+        default="{username};sessid.{session_id}",
+    )
+    sticky_ttl_minutes: Mapped[int] = mapped_column(Integer, default=25)
     max_concurrent_runs: Mapped[int] = mapped_column(Integer, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

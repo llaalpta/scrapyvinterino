@@ -12,11 +12,11 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 ## Now
 
-Program `14.54` is planned and must be completed in order. This planning merge does not authorize an implementation task; starting `14.54.1` requires a separate explicit confirmation.
+Program `14.54` is implemented one standard task at a time. `14.54.1` is complete; starting `14.54.2` requires a separate explicit confirmation.
 
 | Item | Status | Outcome | Dependency |
 | --- | --- | --- | --- |
-| 14.54.1 | planned | Move sticky username format and maximum lifetime to each proxy profile; DataImpulse uses `sessid` with a 25-minute local limit, while the monitor session remains independent. | None |
+| 14.54.1 | done | Move sticky username format and maximum lifetime to each proxy profile; DataImpulse uses `sessid` with a 25-minute local limit, while the monitor session remains independent. | None |
 | 14.54.2 | planned | Before candidates are accepted, give the selected profile at most its current/initial attempt plus one fresh sticky, verify forced egress rotation and cool it once if both attempts fail. | 14.54.1 merged |
 | 14.54.3 | planned | Reassign an exhausted run to the next eligible proxy profile through one capacity-checked PostgreSQL handoff that makes the durable run binding authoritative over its stale queue payload. | 14.54.2 merged |
 | 14.54.4 | planned | Let an explicit PWA retry target one cooling profile for one fresh-sticky attempt without clearing cooldown in advance. | 14.54.3 merged |
@@ -99,6 +99,7 @@ Do not schedule these merely because the risk exists. Promote one only when its 
 | 14.51 | done | Monitor stats now aggregate typed proxy-traffic estimates across all runs and the active/latest session, with exact calibration linkage and honest missing/partial states; the compact PWA replaces the five-run panel. Five aggregation cases, five activation/linkage cases and one live API/PostgreSQL/PWA flow passed, followed by a positive independent audit, with no external traffic or operational-state drift. |
 | 14.52 | done | Monitor detail now orders compact filters and HTTP readiness before a single accumulated/session performance table, uses a 170 px chart only for real business activity and keeps logs collapsed. Five aggregation plus five linkage cases and one live desktop/mobile API/PostgreSQL/PWA flow passed; the audit fix proved partial traffic and URL blockers remain visible at 390 px, with no external traffic or operational-state drift. |
 | 14.53 | done | Prepared-context uses and expiry are now distinct from observed proxy requests; performance separates bytes and request counts and uses smaller chart labels. Five traffic cases, eight activation/rotation cases and one live PWA flow passed after a positive independent audit, with zero external traffic and no operational-state drift. |
+| 14.54.1 | done | Migration 0024 moved the strict sticky username template and `1..120` minute TTL to each proxy profile, included both in the identity fence and made prepared-context expiry use the earlier global/profile deadline. The isolated authenticated PWA/API/PostgreSQL/Redis scenario passed `25/25`, including runtime username construction, context invalidation/replacement in the same monitor session and rejection without mutation; the full isolated backend gate passed `564` normal plus `3` loopback-only tests, with 11 opt-in skips, zero external traffic and unchanged operational fingerprints. The independent read-only audit returned positive with no A/B/C findings. |
 
 Detailed historical verification remains in the owning specs, `docs/010-producer-consumer-implementation.md`, ADRs and Git history.
 

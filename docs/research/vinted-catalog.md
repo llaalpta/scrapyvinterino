@@ -201,7 +201,7 @@ Observacion documental: 2026-07-24. Fuentes oficiales: [Session ID](https://docs
 - La documentacion de `sessttl` usa conexiones sticky por puerto, con ejemplos en `10000`. No documenta que `sessttl` y `sessid` puedan combinarse sobre `823`, por lo que runtime no debe asumir esa compatibilidad.
 - `GET /api/rotate_ip` resetea una asignacion sticky por puerto o `sessid` y exige al menos 30 segundos entre resets de la misma sesion. No promete que el siguiente peer fisico sea distinto. Un ID nuevo mas una observacion neutral de egress es un contrato mas simple y verificable para el producto actual.
 - `GET /api/list` devuelve conexiones formateadas y admite cantidad, tipo y TTL. Varias lineas del gateway/cuenta no equivalen a varios proveedores independientes; el fallback de la app requiere perfiles configurados de forma explicita.
-- El programa planificado 14.54 fija 25 minutos como margen local para el perfil DataImpulse, conserva el monitor mas alla de ese TTL, evita integrar `rotate_ip` y rechaza una rotacion observada hacia la misma IP antes de volver a Vinted.
+- `14.54.1` fija 25 minutos como margen local inicial para los perfiles DataImpulse y conserva el monitor mas alla de ese TTL. Las tareas posteriores de 14.54 evitan integrar `rotate_ip` y deben rechazar una rotacion observada hacia la misma IP antes de volver a Vinted.
 
 ### Bypass implementado
 
@@ -212,7 +212,7 @@ El ciclo de vida mantenido y su contrato vigente estan en `docs/architecture.md`
 - Delay humano con distribucion Beta entre bootstrap y catalogo.
 - Deteccion de challenge: si la respuesta contiene cabeceras `x-datadome*`, cookie `datadome` no vacia en una respuesta de error, `server` DataDome o marcadores HTML (`geo.captcha-delivery.com`, `dd.js`, `t.datadome.co`), se descarta la sesion/proxy segun la politica de run. Una cookie `datadome` en `200` de bootstrap puede ser contexto valido y no basta por si sola para declarar challenge.
 - Un `429` sin firmas DataDome se considera rate limit de catalogo, no challenge; se registra `Retry-After` de forma saneada y se termina la ejecucion sin backoff ni reintento.
-- Proxies residenciales con UUID sticky nuevo por preparacion y reutilizado por runs elegibles del mismo monitor/perfil. El formato del username depende del proveedor y se configura con `PROXY_STICKY_USERNAME_TEMPLATE`; por defecto usa `{username}-session-{session_id}`. El binding efectivo combina un contador monotono con un HMAC versionado de transporte, credenciales, preset y template. El run lo revalida bajo advisory ownership compartido antes de construir proveedor; una edicion usa ownership exclusivo, avanza el contador e invalida el contexto anterior sin exponer el preimage.
+- Proxies residenciales con UUID sticky nuevo por preparacion y reutilizado por runs elegibles del mismo monitor/perfil. El formato del username y su TTL maximo se persisten en cada perfil; nuevos y migrados usan `{username};sessid.{session_id}` y `25` minutos. El binding efectivo combina un contador monotono con un HMAC versionado de transporte, credenciales, preset, template y TTL. El run lo revalida bajo advisory ownership compartido antes de construir proveedor; una edicion usa ownership exclusivo, avanza el contador e invalida el contexto anterior sin exponer el preimage.
 - No existe una escalada generica a otro perfil. El primer challenge es terminal, el consumer hace ACK sin otra llamada al provider y cualquier retry, nueva IP/perfil o delay como fallback requiere una decision de producto separada.
 
 ### Scripts de verificacion

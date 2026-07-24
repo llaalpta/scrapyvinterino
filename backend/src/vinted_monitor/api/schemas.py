@@ -219,6 +219,12 @@ class ProxyProfileCreate(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
     country_code: str = Field(min_length=2, max_length=2)
+    sticky_username_template: str = Field(
+        default="{username};sessid.{session_id}",
+        min_length=1,
+        max_length=255,
+    )
+    sticky_ttl_minutes: int = Field(default=25, ge=1, le=120, strict=True)
     max_concurrent_runs: int = Field(default=1, ge=1, le=10)
     is_active: bool = True
 
@@ -235,6 +241,8 @@ class ProxyProfileUpdate(BaseModel):
     password: str | None = None
     clear_password: bool = False
     country_code: str | None = None
+    sticky_username_template: str | None = Field(default=None, min_length=1, max_length=255)
+    sticky_ttl_minutes: int | None = Field(default=None, ge=1, le=120, strict=True)
     max_concurrent_runs: int | None = Field(default=None, ge=1, le=10)
     is_active: bool | None = None
 
@@ -255,6 +263,8 @@ class ProxyProfileRead(BaseModel):
     accept_language: str
     screen: str
     vinted_screen: str
+    sticky_username_template: str
+    sticky_ttl_minutes: int
     is_active: bool
     max_concurrent_runs: int
     cooldown_until: datetime | None

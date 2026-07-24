@@ -6,13 +6,14 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from string import Formatter
 from urllib.parse import quote
 
 from cryptography.fernet import InvalidToken
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vinted_monitor.core.config import Settings, get_settings, validate_proxy_sticky_username_template
+from vinted_monitor.core.config import Settings, get_settings
 from vinted_monitor.core.crypto import decrypt_text, encrypt_text, fingerprint_text, mask_text
 from vinted_monitor.db.models import ProxyProfile
 
@@ -21,6 +22,9 @@ DEFAULT_PROXY_COUNTRY_CODE = "ES"
 PROXY_IDENTITY_FINGERPRINT_VERSION = "v1"
 PROXY_IDENTITY_LOCK_NAMESPACE = 814_208_010
 SCREEN_PATTERN = re.compile(r"^\d{3,5}x\d{3,5}$")
+DEFAULT_STICKY_USERNAME_TEMPLATE = "{username};sessid.{session_id}"
+DEFAULT_STICKY_TTL_MINUTES = 25
+MAX_STICKY_USERNAME_TEMPLATE_LENGTH = 255
 
 
 class ProxyProfileNotFoundError(ValueError):
@@ -48,6 +52,8 @@ class ProxyPublicFields:
     accept_language: str
     screen: str
     vinted_screen: str
+    sticky_username_template: str
+    sticky_ttl_minutes: int
     is_active: bool
     max_concurrent_runs: int
     cooldown_until: datetime | None
@@ -121,6 +127,8 @@ def create_proxy_profile(
     username: str | None,
     password: str | None,
     country_code: str = DEFAULT_PROXY_COUNTRY_CODE,
+    sticky_username_template: str = DEFAULT_STICKY_USERNAME_TEMPLATE,
+    sticky_ttl_minutes: int = DEFAULT_STICKY_TTL_MINUTES,
     max_concurrent_runs: int = 1,
     is_active: bool = True,
     settings: Settings | None = None,
@@ -140,6 +148,8 @@ def create_proxy_profile(
         accept_language=context.accept_language,
         screen=context.screen,
         vinted_screen=context.vinted_screen,
+        sticky_username_template=_validate_sticky_username_template(sticky_username_template),
+        sticky_ttl_minutes=_validate_sticky_ttl_minutes(sticky_ttl_minutes),
         max_concurrent_runs=_validate_max_concurrent_runs(max_concurrent_runs),
         is_active=is_active,
         identity_generation=1,
@@ -165,11 +175,23 @@ def update_proxy_profile(
     password: str | None = None,
     clear_password: bool = False,
     country_code: str | None = None,
+    sticky_username_template: str | None = None,
+    sticky_ttl_minutes: int | None = None,
     max_concurrent_runs: int | None = None,
     is_active: bool | None = None,
     settings: Settings | None = None,
 ) -> ProxyProfile:
     settings = settings or get_settings()
+    validated_sticky_username_template = (
+        _validate_sticky_username_template(sticky_username_template)
+        if sticky_username_template is not None
+        else None
+    )
+    validated_sticky_ttl_minutes = (
+        _validate_sticky_ttl_minutes(sticky_ttl_minutes)
+        if sticky_ttl_minutes is not None
+        else None
+    )
     _acquire_proxy_identity_lock(db, profile_id, exclusive=True)
     profile = _lock_proxy_profile(db, profile_id)
     if profile is None:
@@ -198,6 +220,10 @@ def update_proxy_profile(
         profile.accept_language = context.accept_language
         profile.screen = context.screen
         profile.vinted_screen = context.vinted_screen
+    if validated_sticky_username_template is not None:
+        profile.sticky_username_template = validated_sticky_username_template
+    if validated_sticky_ttl_minutes is not None:
+        profile.sticky_ttl_minutes = validated_sticky_ttl_minutes
     if max_concurrent_runs is not None:
         profile.max_concurrent_runs = _validate_max_concurrent_runs(max_concurrent_runs)
     if is_active is not None:
@@ -271,6 +297,8 @@ def profile_to_public_fields(profile: ProxyProfile, settings: Settings | None = 
         accept_language=profile.accept_language,
         screen=profile.screen,
         vinted_screen=profile.vinted_screen,
+        sticky_username_template=profile.sticky_username_template,
+        sticky_ttl_minutes=profile.sticky_ttl_minutes,
         is_active=profile.is_active,
         max_concurrent_runs=profile.max_concurrent_runs,
         cooldown_until=profile.cooldown_until,
@@ -294,14 +322,12 @@ def proxy_url_with_sticky_session(
     profile: ProxyProfile | None,
     session_id: str,
     settings: Settings | None = None,
-    username_template: str | None = None,
 ) -> str | None:
     """Build a proxy URL with a dynamic sticky session UUID.
 
     Injects the session_id into the username for residential proxy gateways
-    that support session persistence. The default template is
-    ``{username}-session-{session_id}``; providers such as Oxylabs can use
-    ``{username}-sessid-{session_id}``.
+    that support session persistence. The format is owned by the selected
+    proxy profile rather than process configuration.
     """
     if profile is None:
         return None
@@ -309,7 +335,7 @@ def proxy_url_with_sticky_session(
     if not profile.username:
         return proxy_url_for_profile(profile, settings)
     password = _decrypt_password(profile, settings) if profile.password_encrypted else ""
-    template = validate_proxy_sticky_username_template(username_template or settings.proxy_sticky_username_template)
+    template = _validate_sticky_username_template(profile.sticky_username_template)
     try:
         sticky_username = template.format(username=profile.username, session_id=session_id)
     except KeyError as exc:
@@ -323,7 +349,8 @@ def proxy_url_with_sticky_session(
 def effective_proxy_identity_fingerprint(profile: ProxyProfile, settings: Settings | None = None) -> str:
     """Return a keyed, versioned digest of the effective proxy transport identity."""
     settings = settings or get_settings()
-    sticky_username_template = validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
+    sticky_username_template = _validate_sticky_username_template(profile.sticky_username_template)
+    sticky_ttl_minutes = _validate_sticky_ttl_minutes(profile.sticky_ttl_minutes)
     canonical_identity = json.dumps(
         {
             "accept_language": profile.accept_language,
@@ -335,6 +362,7 @@ def effective_proxy_identity_fingerprint(profile: ProxyProfile, settings: Settin
             "scheme": profile.scheme,
             "screen": profile.screen,
             "sticky_username_template": sticky_username_template,
+            "sticky_ttl_minutes": sticky_ttl_minutes,
             "username": profile.username or "",
             "vinted_screen": profile.vinted_screen,
         },
@@ -398,13 +426,14 @@ def lock_proxy_profile_for_selection(
 ) -> ProxyProfile:
     """Lock, synchronize and revalidate one profile selected for new work."""
     settings = settings or get_settings()
-    try:
-        validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
-    except ValueError as exc:
-        raise ProxyProfileEligibilityError("Proxy sticky username template is invalid") from exc
     profile = _load_proxy_profile(db, profile_id)
     if profile is None:
         raise ProxyProfileEligibilityError(f"Proxy profile {profile_id} no longer exists")
+    try:
+        _validate_sticky_username_template(profile.sticky_username_template)
+        _validate_sticky_ttl_minutes(profile.sticky_ttl_minutes)
+    except ValueError as exc:
+        raise ProxyProfileEligibilityError("Proxy sticky contract is invalid") from exc
     current_fingerprint = effective_proxy_identity_fingerprint(profile, settings)
     stored_fingerprint = profile.identity_fingerprint
     fingerprint_matches = bool(
@@ -522,9 +551,10 @@ def _validate_complete_proxy_configuration(profile: ProxyProfile, settings: Sett
     except ValueError as exc:
         raise ProxyProfileEligibilityError("Proxy transport configuration is invalid") from exc
     try:
-        validate_proxy_sticky_username_template(settings.proxy_sticky_username_template)
+        _validate_sticky_username_template(profile.sticky_username_template)
+        _validate_sticky_ttl_minutes(profile.sticky_ttl_minutes)
     except ValueError as exc:
-        raise ProxyProfileEligibilityError("Proxy sticky username template is invalid") from exc
+        raise ProxyProfileEligibilityError("Proxy sticky contract is invalid") from exc
     if not profile.username or not profile.username.strip():
         raise ProxyProfileEligibilityError("Proxy username is required")
     if not profile.password_encrypted:
@@ -642,4 +672,29 @@ def _validate_port(port: int) -> int:
 def _validate_max_concurrent_runs(value: int) -> int:
     if value < 1 or value > 10:
         raise ValueError("Proxy max_concurrent_runs must be between 1 and 10")
+    return value
+
+
+def _validate_sticky_username_template(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > MAX_STICKY_USERNAME_TEMPLATE_LENGTH:
+        raise ValueError("Proxy sticky username template must contain between 1 and 255 characters")
+    try:
+        parsed = list(Formatter().parse(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Proxy sticky username template must be a valid format string") from exc
+    fields = [field_name for _literal, field_name, _format_spec, _conversion in parsed if field_name is not None]
+    has_unsupported_formatting = any(
+        field_name is not None and (format_spec or conversion)
+        for _literal, field_name, format_spec, conversion in parsed
+    )
+    if len(fields) != 2 or set(fields) != {"username", "session_id"} or has_unsupported_formatting:
+        raise ValueError(
+            "Proxy sticky username template must contain exactly plain {username} and {session_id} fields"
+        )
+    return value
+
+
+def _validate_sticky_ttl_minutes(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 120:
+        raise ValueError("Proxy sticky TTL must be between 1 and 120 minutes")
     return value

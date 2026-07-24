@@ -13,7 +13,7 @@ from textwrap import dedent
 from threading import Barrier, Event, Lock
 from time import monotonic, sleep
 from types import SimpleNamespace
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import pytest
@@ -71,6 +71,8 @@ IDENTITY_MUTATIONS = (
     "password",
     "clear_password",
     "country",
+    "sticky_template",
+    "sticky_ttl",
     "inactive",
     "cooldown",
     "preset",
@@ -122,7 +124,7 @@ class LocalAcceptedProvider:
     search_calls = 0
     close_calls = 0
     proxy_hosts: list[str | None] = []
-    sticky_templates: list[str] = []
+    sticky_usernames: list[str] = []
 
     @classmethod
     def reset(cls) -> None:
@@ -132,13 +134,16 @@ class LocalAcceptedProvider:
         cls.search_calls = 0
         cls.close_calls = 0
         cls.proxy_hosts = []
-        cls.sticky_templates = []
+        cls.sticky_usernames = []
 
     def __init__(self, **kwargs) -> None:
         type(self).constructed += 1
         proxy_url = kwargs.get("proxy_url")
-        type(self).proxy_hosts.append(urlparse(proxy_url).hostname if isinstance(proxy_url, str) else None)
-        type(self).sticky_templates.append(kwargs["settings"].proxy_sticky_username_template)
+        parsed_proxy_url = urlparse(proxy_url) if isinstance(proxy_url, str) else None
+        type(self).proxy_hosts.append(parsed_proxy_url.hostname if parsed_proxy_url else None)
+        type(self).sticky_usernames.append(
+            unquote(parsed_proxy_url.username) if parsed_proxy_url and parsed_proxy_url.username else ""
+        )
         self.settings = kwargs["settings"]
         self.event_sink = kwargs.get("event_sink")
         self.prepared_session = kwargs.get("prepared_session")
@@ -308,6 +313,16 @@ def _apply_mutation(case: str, client, proxy_id: int) -> str | None:
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"clear_password": True, "is_active": False})
     elif case == "country":
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"country_code": "FR", "is_active": False})
+    elif case == "sticky_template":
+        response = client.patch(
+            f"/api/proxy-profiles/{proxy_id}",
+            json={"sticky_username_template": "{username}-identity-{session_id}"},
+        )
+    elif case == "sticky_ttl":
+        response = client.patch(
+            f"/api/proxy-profiles/{proxy_id}",
+            json={"sticky_ttl_minutes": 17},
+        )
     elif case == "inactive":
         response = client.patch(f"/api/proxy-profiles/{proxy_id}", json={"is_active": False})
     elif case == "cooldown":
@@ -330,6 +345,53 @@ def _apply_mutation(case: str, client, proxy_id: int) -> str | None:
     if secret_canary is not None:
         assert secret_canary not in response.text
     return secret_canary
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"sticky_username_template": "{username}"},
+        {"sticky_ttl_minutes": 0},
+        {"sticky_ttl_minutes": True},
+    ),
+)
+def test_invalid_sticky_contract_does_not_mutate_identity_or_prepared_context(
+    payload: dict[str, object],
+) -> None:
+    client = authenticated_test_client()
+    with _identity_graph() as graph:
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, graph.proxy_id)
+            session = db.get(VintedSession, graph.session_id)
+            assert profile is not None and session is not None
+            original_contract = (
+                profile.sticky_username_template,
+                profile.sticky_ttl_minutes,
+                effective_proxy_identity_generation(profile),
+            )
+            original_session = (
+                session.status,
+                session.context_encrypted,
+                session.invalidated_at,
+            )
+
+        response = client.patch(f"/api/proxy-profiles/{graph.proxy_id}", json=payload)
+
+        assert response.status_code == 422
+        with SessionLocal() as db:
+            profile = db.get(ProxyProfile, graph.proxy_id)
+            session = db.get(VintedSession, graph.session_id)
+            assert profile is not None and session is not None
+            assert (
+                profile.sticky_username_template,
+                profile.sticky_ttl_minutes,
+                effective_proxy_identity_generation(profile),
+            ) == original_contract
+            assert (
+                session.status,
+                session.context_encrypted,
+                session.invalidated_at,
+            ) == original_session
 
 
 def _install_fence_barrier(
@@ -745,18 +807,7 @@ def test_saturated_proxy_selection_does_not_accumulate_identity_fences(
 ) -> None:
     import vinted_monitor.services.proxies as proxies_module
 
-    base_settings = get_settings()
-    replacement_template = (
-        "{username}-identity-{session_id}"
-        if base_settings.proxy_sticky_username_template != "{username}-identity-{session_id}"
-        else "{username}-session-{session_id}"
-    )
-    settings = base_settings.model_copy(
-        update={
-            "scheduler_enabled": True,
-            "proxy_sticky_username_template": replacement_template,
-        }
-    )
+    settings = get_settings().model_copy(update={"scheduler_enabled": True})
     selector_barrier = Barrier(2)
     selector_index = 0
     selector_index_lock = Lock()
@@ -946,25 +997,20 @@ def test_redis_consumer_missing_proxy_is_terminal_without_constructing_provider(
             _delete_queue_keys(queue_client, queue_key)
 
 
-def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
+def test_profile_sticky_change_rejects_task_captured_with_old_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ProviderConstructionTrap.constructed = 0
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", ProviderConstructionTrap)
-    old_settings = get_settings()
-    replacement_template = (
-        "{username}-identity-{session_id}"
-        if old_settings.proxy_sticky_username_template != "{username}-identity-{session_id}"
-        else "{username}-session-{session_id}"
-    )
-    new_settings = old_settings.model_copy(update={"proxy_sticky_username_template": replacement_template})
+    settings = get_settings()
+    replacement_template = "{username}-identity-{session_id}"
     queue_key = f"qa:identity:{uuid4().hex}"
-    queue_client = redis_client_from_url(old_settings.redis_url, decode_responses=False, socket_timeout=3)
+    queue_client = redis_client_from_url(settings.redis_url, decode_responses=False, socket_timeout=3)
 
     with _identity_graph(active=True) as graph:
         try:
             with SessionLocal() as db:
-                egress = choose_run_egress(db, old_settings)
+                egress = choose_run_egress(db, settings)
                 assert egress.proxy_profile_id == graph.proxy_id
                 task = MonitorTask(
                     source_id=graph.source_id,
@@ -978,12 +1024,16 @@ def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
                 assert enqueue_task(queue_client, task, queue_key=queue_key) is True
                 db.commit()
 
+            mutation = authenticated_test_client().patch(
+                f"/api/proxy-profiles/{graph.proxy_id}",
+                json={"sticky_username_template": replacement_template},
+            )
+            assert mutation.status_code == 200, mutation.text
             raw_payload = queue_client.lindex(queue_key, 0)
             assert isinstance(raw_payload, bytes)
             child_env = os.environ.copy()
             child_env.update(
                 {
-                    "PROXY_STICKY_USERNAME_TEMPLATE": replacement_template,
                     "WORKER_TASK_QUEUE_KEY": queue_key,
                     "WORKER_MAX_RETRY_ATTEMPTS": "3",
                     "WORKER_RESERVE_TIMEOUT_SECONDS": "1",
@@ -1012,9 +1062,6 @@ def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
 
                         runs_module.CurlCffiVintedCatalogProvider = ProviderConstructionTrap
                         settings = get_settings()
-                        assert settings.proxy_sticky_username_template == os.environ[
-                            "PROXY_STICKY_USERNAME_TEMPLATE"
-                        ]
                         queue_client = redis_client_from_url(
                             settings.redis_url,
                             decode_responses=False,
@@ -1054,13 +1101,13 @@ def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
                 assert profile is not None
                 assert effective_proxy_identity_generation(profile) != egress.proxy_identity_generation
                 assert session is not None and session.status == "invalid"
-                assert not any(prepared_context_flags(prepared_context_from_session(session, new_settings)).values())
+                assert not any(prepared_context_flags(prepared_context_from_session(session, settings)).values())
 
-            monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: new_settings)
+            monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: settings)
             LocalAcceptedProvider.reset()
             monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", LocalAcceptedProvider)
             with SessionLocal() as db:
-                fresh_egress = choose_run_egress(db, new_settings)
+                fresh_egress = choose_run_egress(db, settings)
                 assert fresh_egress.proxy_profile_id == graph.proxy_id
                 assert fresh_egress.proxy_identity_generation != egress.proxy_identity_generation
                 fresh_task = MonitorTask(
@@ -1077,7 +1124,7 @@ def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
             fresh_reservation = reserve_task(queue_client, timeout=1, queue_key=queue_key, consumer_id=0)
             assert fresh_reservation is not None
             consumer = TaskConsumer(
-                new_settings.model_copy(
+                settings.model_copy(
                     update={
                         "worker_task_queue_key": queue_key,
                         "worker_max_retry_attempts": 3,
@@ -1093,7 +1140,8 @@ def test_worker_config_change_rejects_task_captured_with_old_sticky_template(
             assert LocalAcceptedProvider.probe_calls == 1
             assert LocalAcceptedProvider.search_calls == 1
             assert LocalAcceptedProvider.close_calls == 2
-            assert LocalAcceptedProvider.sticky_templates == [replacement_template, replacement_template]
+            assert len(LocalAcceptedProvider.sticky_usernames) == 2
+            assert all("-identity-" in username for username in LocalAcceptedProvider.sticky_usernames)
             with SessionLocal() as db:
                 fresh_run = db.scalar(select(Run).where(Run.task_id == fresh_task.task_id))
                 assert fresh_run is not None and fresh_run.status == SUCCESS
@@ -1192,10 +1240,8 @@ def test_fresh_command_after_identity_change_prepares_only_current_generation(
         assert LocalAcceptedProvider.search_calls == 1
         assert LocalAcceptedProvider.close_calls == 2
         assert LocalAcceptedProvider.proxy_hosts == ["127.0.0.2", "127.0.0.2"]
-        assert LocalAcceptedProvider.sticky_templates == [
-            get_settings().proxy_sticky_username_template,
-            get_settings().proxy_sticky_username_template,
-        ]
+        assert len(LocalAcceptedProvider.sticky_usernames) == 2
+        assert all(";sessid." in username for username in LocalAcceptedProvider.sticky_usernames)
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, graph.proxy_id)
             assert profile is not None

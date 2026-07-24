@@ -70,13 +70,15 @@ Verification passed Ruff, frontend lint/build, five focused traffic cases, eight
 
 The independent read-only audit found no A, B or C findings. It confirmed the context-use/request distinction, on-demand expiry and exhaustion behavior, visible no-retry failure path, honest partial traffic states and responsive containment against the final diff and live evidence.
 
-### Planned 14.54 provider-bound sticky lifecycle and bounded recovery
+### 14.54 provider-bound sticky lifecycle and bounded recovery
 
-Status: planned as a program on `plan/14.54-sticky-recovery`. The current 14.50 first-failure cooldown/no-retry contract and 14.53 global context lifetime remain authoritative until the corresponding slices below are implemented and merged. Each of the four slices is a standard task with its own confirmation, branch, real scenario, audit, PR and merge.
+Status: `14.54.1` is current. The `14.50` first-failure cooldown/no-retry contract remains authoritative until `14.54.2` merges; `14.54.2` through `14.54.4` remain ordered standard tasks. Each slice has its own confirmation, branch, real scenario, audit, PR and merge.
 
 DataImpulse on rotating HTTP port `823` accepts a `sessid` username parameter that asks the gateway to retain one exit IP for approximately 30 minutes. The product uses a 25-minute local safety limit and a new session ID rather than integrating the provider-specific rotation API. A monitor session is not capped by that lifetime: prepared HTTP context rotates when either its effective TTL or its completed-run use limit is reached.
 
 #### 14.54.1 per-profile sticky contract and lifetime
+
+Status: `done`.
 
 Acceptance criteria:
 
@@ -85,6 +87,10 @@ Acceptance criteria:
 3. A saved context expires at the earlier of the global anonymous-context TTL and the selected profile's sticky TTL. The existing maximum uses remain completed runs, not individual HTTP requests; expiry or exhaustion prepares a replacement on demand without stopping the monitor session.
 
 Representative integration: migrate a disposable PostgreSQL database, edit a proxy through the authenticated live PWA/API, save a controlled prepared context and advance owned time/use state until the next real run replaces it while the same monitor session remains open. The negative variation submits an invalid template/TTL and observes no database or provider mutation. One bounded provider conformance check may make at most four DataImpulse-proxied requests to the configured neutral egress diagnostic: two with one `sessid` and up to two with fresh IDs. It must never call Vinted or DataDome, expose credentials or require distinct physical IPs. Cleanup restores service ownership and removes all QA SQL/Redis state.
+
+Verification passed migration `0024`, Ruff, frontend lint/build, the focused identity/TTL cases and one isolated authenticated Playwright flow over the live PWA/API/PostgreSQL/Redis path (`25/25`). The flow created the default DataImpulse contract, exercised its constructed proxy username, changed template and TTL, invalidated and replaced prepared context while preserving the open monitor session, and rejected malformed, out-of-range and non-integer edits without profile/session/run mutation. The complete isolated backend gate passed `564` normal plus `3` loopback-only tests, with 11 opt-in skips. Cleanup preserved operational PostgreSQL/Redis fingerprints; no Vinted, DataDome, proxy or vendor request was made, so the optional conformance allowance remained unused.
+
+The independent read-only audit returned positive with no A, B or C findings. It confirmed migration/backfill, removal of the global fallback, identity fencing and context invalidation, effective TTL calculation, strict API/PWA mutation behavior, loopback-only live evidence and absence of secrets or QA residue in the final diff.
 
 #### 14.54.2 automatic same-profile pre-candidate recovery
 
@@ -468,9 +474,9 @@ For manual opportunity-pipeline diagnosis, preserve the run id and the events fo
 - If Redis is unavailable, the affected run fails and the monitor is stopped/blocked until retried.
 - Anonymous public cookies/tokens are encrypted at rest only in prepared Vinted sessions and are isolated per monitor plus proxy sticky identity.
 - Proxy settings are global; monitor-level proxy selection is not exposed or accepted.
-- Proxy profile creation/editing accepts proxy connection data and country only; `locale`, `Accept-Language`, viewport and Vinted `x-screen` are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
+- Proxy profile creation/editing accepts proxy connection data, country, strict sticky username template and sticky TTL. `locale`, `Accept-Language`, viewport and Vinted `x-screen` are not user-editable API/PWA inputs and are recalculated from internal presets when the country changes.
 - Explicit development diagnostics may construct a direct transport outside the PWA, monitor API and queue; they are not monitor runs and cannot be selected as fallback.
-- Worker retry attempts, browser impersonation, human delay ranges, DataDome challenge penalty, and sticky proxy username template are deployment settings and are not editable from the PWA.
+- Worker retry attempts, browser impersonation, human delay ranges and DataDome challenge penalty are deployment settings and are not editable from the PWA. Sticky username format and maximum sticky lifetime are persisted per proxy profile and editable from Settings.
 - Proxy passwords stored through the UI are encrypted at rest. The username remains in plaintext and is returned raw by the current API even though the PWA renders its mask; 14.12.8 closes that credential-contract gap.
 - Proxy pool entries can be `own`, `datacenter`, or `residential`; target-specific/special proxy classes are not exposed for Vinted.
 - If a proxy request fails, only the affected run/source is failed and logged with redacted details.

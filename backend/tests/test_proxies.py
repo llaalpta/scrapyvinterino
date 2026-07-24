@@ -7,7 +7,6 @@ from vinted_monitor.core.config import Settings
 from vinted_monitor.db.models import ProxyProfile, VintedSession
 from vinted_monitor.db.session import SessionLocal
 from vinted_monitor.services.proxies import (
-    ProxyProfileEligibilityError,
     create_proxy_profile,
     proxy_url_with_sticky_session,
     resolve_proxy_context,
@@ -24,6 +23,8 @@ def proxy_profile(username: str | None = "customer-user") -> ProxyProfile:
         port=7777,
         username=username,
         password_encrypted=None,
+        sticky_username_template="{username};sessid.{session_id}",
+        sticky_ttl_minutes=25,
         max_concurrent_runs=1,
         is_active=True,
     )
@@ -34,23 +35,29 @@ def unique_name(label: str) -> str:
 
 
 def test_proxy_url_with_sticky_session_uses_configured_username_template() -> None:
+    profile = proxy_profile()
+    profile.sticky_username_template = "{username}-sessid-{session_id}"
     url = proxy_url_with_sticky_session(
-        proxy_profile(),
+        profile,
         "session-123",
-        Settings(proxy_sticky_username_template="{username}-sessid-{session_id}"),
+        Settings(),
     )
 
     assert url == "http://customer-user-sessid-session-123:@proxy.example:7777"
 
 
 def test_proxy_url_with_sticky_session_rejects_template_without_session_id() -> None:
+    profile = proxy_profile()
+    profile.sticky_username_template = "{username}"
     with pytest.raises(ValueError, match="must contain exactly"):
-        Settings(proxy_sticky_username_template="{username}")
+        proxy_url_with_sticky_session(profile, "session-123", Settings())
 
 
 def test_proxy_url_with_sticky_session_rejects_duplicate_template_fields() -> None:
+    profile = proxy_profile()
+    profile.sticky_username_template = "{username}-{username}-{session_id}"
     with pytest.raises(ValueError, match="must contain exactly"):
-        Settings(proxy_sticky_username_template="{username}-{username}-{session_id}")
+        proxy_url_with_sticky_session(profile, "session-123", Settings())
 
 
 def test_proxy_url_with_sticky_session_keeps_plain_proxy_without_username() -> None:
@@ -233,6 +240,8 @@ def test_proxy_profile_api_resolves_context_from_target_country() -> None:
         assert payload["accept_language"] == "en-GB,en;q=0.9"
         assert payload["screen"] == "1920x1080"
         assert payload["vinted_screen"] == "catalog"
+        assert payload["sticky_username_template"] == "{username};sessid.{session_id}"
+        assert payload["sticky_ttl_minutes"] == 25
     finally:
         with SessionLocal() as db:
             profile = db.get(ProxyProfile, payload["id"])
@@ -410,9 +419,8 @@ def test_proxy_profile_activation_and_active_password_clear_require_credentials(
 
 
 def test_create_proxy_profile_rejects_invalid_sticky_template() -> None:
-    invalid_settings = Settings().model_copy(update={"proxy_sticky_username_template": "{username}"})
     with SessionLocal() as db:
-        with pytest.raises(ProxyProfileEligibilityError, match="sticky username template is invalid"):
+        with pytest.raises(ValueError, match="must contain exactly"):
             create_proxy_profile(
                 db,
                 name=unique_name("invalid sticky proxy"),
@@ -423,7 +431,7 @@ def test_create_proxy_profile_rejects_invalid_sticky_template() -> None:
                 username="customer",
                 password="test-password",
                 country_code="ES",
-                settings=invalid_settings,
+                sticky_username_template="{username}",
             )
 
 

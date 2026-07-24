@@ -12,12 +12,12 @@ This note records implementation-specific decisions for `docs/specs/010-producer
 - Stop is PostgreSQL-first. Consumer/run-factory admission, stop and terminal serialize with `FOR NO KEY UPDATE` on the same `search_sources` row; the manual wrapper keeps its stronger pre-existing `FOR UPDATE` gate only until the run commit. Writers remain mutually exclusive while run-event FK `KEY SHARE` locks do not delay stop through provider I/O. Confirmed session runs drain normally; a stop confirmed before reserved-task admission makes it ACK without a run/provider while the source remains inactive. Redis ready cleanup is only best-effort after the inactive commit.
 - Root-level `audit_010_producer_consumer.md` was removed to avoid duplicate planning docs.
 - Item enrichment uses the public item document, structural Next/React Flight records and JSON-LD fallback. The production flow and visible detail probe no longer call the direct `/api/v2/items/{id}/details` matrix.
-- Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. Ordinary recoverable candidates survive outside the top-five window in Redis for three total attempts (`30s`, `120s`); an anti-bot challenge ends the task while preserving its claimed candidates for a future new task.
+- Detail work is serial by default per prepared session. An explicit canary can schedule two isolated persistent lanes, but promotion requires measured speedup plus a valid final cookie context. An ordinary detail failure retries once after two seconds inside the same run; no candidate payload survives into another run. An anti-bot challenge ends the task and the claimed batch follows the current fail-stop/discard contract.
 - The PWA persists no image bytes: it renders every signed `images*.vinted.net` URL directly and exposes an accessible gallery plus public availability/price breakdown while purchase remains disabled.
 
-## Planned 14.54 sticky lifecycle and recovery
+## 14.54 sticky lifecycle and recovery
 
-This program is not current runtime behavior until its four ordered slices merge. It replaces only the global sticky lifetime and first-failure recovery clauses below; queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
+`14.54.1` is current runtime behavior. The three later ordered slices remain planned and will replace only first-failure recovery behavior; queue delivery, candidate ownership, detail retry, redaction and monitor-session semantics remain unchanged.
 
 ### 14.54.1 persisted provider contract
 
@@ -48,9 +48,8 @@ This program is not current runtime behavior until its four ordered slices merge
 
 ## Decisions
 
-- Use `PROXY_STICKY_USERNAME_TEMPLATE` for provider-specific sticky formats. Default: `{username}-session-{session_id}`.
-- For providers that require `sessid`, configure `{username}-sessid-{session_id}`.
-- Residential proxy sticky IDs are stored with prepared Vinted sessions for a monitor, not with one-off task attempts. A monotonic generation plus keyed identity digest binds each row to transport, credentials, country preset and sticky template. Profile-field edits invalidate old context in their own transaction; global template drift is reconciled and invalidated transactionally by the first fenced selector after restart.
+- Provider-specific sticky format and maximum sticky lifetime belong to each proxy profile. New and migrated profiles use `{username};sessid.{session_id}` and `25` minutes; the Settings PWA can update both under strict validation.
+- Residential proxy sticky IDs are stored with prepared Vinted sessions for a monitor, not with one-off task attempts. A monotonic generation plus keyed identity digest binds each row to transport, credentials, country preset, sticky template and sticky TTL. Profile-field edits invalidate old context in their own transaction.
 - Do not call the Asocks refresh API from runtime scraping code; an authorized new preparation/rotation creates a new session UUID, which normal runs then reuse while eligible.
 - The pre-integration HTTP fingerprint gate uses Chrome 120 exactly: `curl_cffi.requests.Session(impersonate="chrome120")` plus matching Chrome 120 `User-Agent` and `sec-ch-ua` headers.
 - Runtime catalog providers select the configured browser profile; default runtime impersonation is `chrome146`. Business runs always require a proxy-owned binding; only explicit development clients outside the PWA, monitor API and queue may construct a direct diagnostic transport.

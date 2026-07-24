@@ -79,6 +79,8 @@ export type ProxyProfile = {
   accept_language: string;
   screen: string;
   vinted_screen: string;
+  sticky_username_template: string;
+  sticky_ttl_minutes: number;
   is_active: boolean;
   max_concurrent_runs: number;
   cooldown_until: string | null;
@@ -489,6 +491,8 @@ export function createProxyProfile(payload: {
   username?: string;
   password?: string;
   country_code?: string;
+  sticky_username_template?: string;
+  sticky_ttl_minutes?: number;
   max_concurrent_runs?: number;
   is_active?: boolean;
 }): Promise<ProxyProfile> {
@@ -497,7 +501,10 @@ export function createProxyProfile(payload: {
 
 export function updateProxyProfile(
   profileId: number,
-  payload: Partial<Pick<ProxyProfile, 'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code'>>
+  payload: Partial<Pick<
+    ProxyProfile,
+    'is_active' | 'max_concurrent_runs' | 'kind' | 'country_code' | 'sticky_username_template' | 'sticky_ttl_minutes'
+  >>
 ): Promise<ProxyProfile> {
   return patchJson<ProxyProfile>(`/api/proxy-profiles/${profileId}`, payload);
 }
