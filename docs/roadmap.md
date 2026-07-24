@@ -12,13 +12,13 @@ This roadmap is a short priority queue, not an exhaustive risk register. Work on
 
 ## Now
 
-Program `14.54` is implemented one standard task at a time. `14.54.2` is complete; `14.54.3` is the next planned task and still requires separate user confirmation.
+Program `14.54` is implemented one standard task at a time. `14.54.3` is complete; `14.54.4` is the next planned task and requires separate user confirmation.
 
 | Item | Status | Outcome | Dependency |
 | --- | --- | --- | --- |
 | 14.54.1 | done | Move sticky username format and maximum lifetime to each proxy profile; DataImpulse uses `sessid` with a 25-minute local limit, while the monitor session remains independent. | None |
 | 14.54.2 | done | Before candidates are accepted, give the selected profile at most its current/initial attempt plus one fresh sticky, verify forced egress rotation and cool it once if both attempts fail. | 14.54.1 merged |
-| 14.54.3 | planned | Reassign an exhausted run to the next eligible proxy profile through one capacity-checked PostgreSQL handoff that makes the durable run binding authoritative over its stale queue payload. | 14.54.2 merged |
+| 14.54.3 | done | Reassign an exhausted run to the next eligible proxy profile through one capacity-checked PostgreSQL handoff that makes the durable run binding authoritative over its stale queue payload. | 14.54.2 merged |
 | 14.54.4 | planned | Let an explicit PWA retry target one cooling profile for one fresh-sticky attempt without clearing cooldown in advance. | 14.54.3 merged |
 
 ## Next

@@ -196,10 +196,10 @@ def _exercise_live_stack(
             )
             assert failed["status"] == "failed"
             assert (failed["runtime_metadata"] or {})["failure_kind"] == (
-                "profile_session_acquisition_exhausted"
+                "session_acquisition_exhausted"
             )
             expect(page.locator(".notice")).to_contain_text(
-                "Selected proxy profile could not obtain a usable Vinted session"
+                "No eligible proxy profile could obtain a usable Vinted session"
             )
             expect(page.get_by_text("Cooldown de proxy activo.", exact=False)).to_be_visible()
             _assert_repeated_egress_state(scenario, state_path)
@@ -299,7 +299,7 @@ def _assert_repeated_egress_state(scenario: Scenario, state_path: Path) -> None:
         assert source is not None and source.is_active is False
         assert len(runs) == 1 and runs[0].status == "failed"
         metadata = runs[0].runtime_metadata or {}
-        assert metadata["failure_kind"] == "profile_session_acquisition_exhausted"
+        assert metadata["failure_kind"] == "session_acquisition_exhausted"
         assert metadata["session_acquisition_attempts"] == 2
         assert metadata["session_acquisition_last_reason"] == "egress_not_rotated"
         assert metadata["session_acquisition_egress_changed"] is False

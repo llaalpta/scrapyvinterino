@@ -40,6 +40,7 @@ from vinted_monitor.providers.vinted_catalog import (
 )
 from vinted_monitor.services.proxies import create_proxy_profile, effective_proxy_identity_generation
 from vinted_monitor.services.runs import FAILED, SUCCESS, monitor_policy_hash
+from vinted_monitor.services.scheduler import update_scheduler_config
 from vinted_monitor.services.seen_cache import get_seen_cache
 from vinted_monitor.services.task_queue import (
     MonitorTask,
@@ -52,6 +53,7 @@ from vinted_monitor.services.task_queue import (
 )
 from vinted_monitor.services.vinted_sessions import save_prepared_vinted_session
 from vinted_monitor.worker.consumer import TaskConsumer
+from vinted_monitor.worker.scheduler import SchedulerRunner
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -90,6 +92,7 @@ class FailStopGraph:
     session_id: int
     proxy_identity_generation: str
     policy_hash: str
+    fallback_proxy_id: int | None = None
 
 
 class LocalSameProfileRecoveryProvider:
@@ -132,7 +135,7 @@ class LocalSameProfileRecoveryProvider:
             if self.prepared_session is not None
             else self.prevalidated_egress.context.ip
             if self.prevalidated_egress is not None
-            else None
+            else "192.0.2.30"
         )
         if self.prepared_session is None:
             type(self).preparations += 1
@@ -170,7 +173,6 @@ class LocalSameProfileRecoveryProvider:
 
     def bootstrap_for_session(self, _source_url: str, *, collect_datadome: bool = False) -> dict[str, Any]:
         assert collect_datadome is True
-        assert self.prevalidated_egress is not None
         return {"bootstrap": "ok", "datadome_cookie": True, "cf_bm_cookie": True}
 
     def probe_catalog_api(self, _source_url: str, *, include_payload: bool = False) -> dict[str, Any]:
@@ -192,7 +194,7 @@ class LocalSameProfileRecoveryProvider:
 
 
 @contextmanager
-def _failstop_graph():
+def _failstop_graph(*, with_fallback_profile: bool = False):
     settings = get_settings()
     suffix = uuid4().hex
     with SessionLocal() as db:
@@ -207,6 +209,22 @@ def _failstop_graph():
             password=f"qa-password-{suffix}",
             country_code="ES",
             settings=settings,
+        )
+        fallback_proxy = (
+            create_proxy_profile(
+                db,
+                name=f"qa fallback proxy {suffix}",
+                scheme="http",
+                kind="residential",
+                host="127.0.0.1",
+                port=18081,
+                username=f"qa-fallback-user-{suffix}",
+                password=f"qa-fallback-password-{suffix}",
+                country_code="ES",
+                settings=settings,
+            )
+            if with_fallback_profile
+            else None
         )
         source = SearchSource(
             name=f"qa failstop monitor {suffix}",
@@ -234,6 +252,7 @@ def _failstop_graph():
             session_id=session.id,
             proxy_identity_generation=effective_proxy_identity_generation(proxy),
             policy_hash=monitor_policy_hash(source),
+            fallback_proxy_id=fallback_proxy.id if fallback_proxy is not None else None,
         )
         db.commit()
 
@@ -256,7 +275,10 @@ def _failstop_graph():
             db.execute(delete(VintedSession).where(VintedSession.source_id == graph.source_id))
             db.execute(delete(MonitorSession).where(MonitorSession.source_id == graph.source_id))
             db.execute(delete(SearchSource).where(SearchSource.id == graph.source_id))
-            db.execute(delete(ProxyProfile).where(ProxyProfile.id == graph.proxy_id))
+            proxy_ids = [graph.proxy_id]
+            if graph.fallback_proxy_id is not None:
+                proxy_ids.append(graph.fallback_proxy_id)
+            db.execute(delete(ProxyProfile).where(ProxyProfile.id.in_(proxy_ids)))
             db.commit()
 
 
@@ -331,6 +353,35 @@ def _consume_one(
         queue_client=queue_client,
     )
     return task, reservation
+
+
+def _schedule_and_consume_one(
+    graph: FailStopGraph,
+    settings,
+    queue_client,
+) -> tuple[MonitorTask, Any]:
+    scheduler_settings = settings.model_copy(update={"scheduler_enabled": True})
+    now = datetime.now(UTC)
+    with SessionLocal() as db:
+        source = db.get(SearchSource, graph.source_id)
+        assert source is not None
+        source.next_run_at = now
+        update_scheduler_config(db, {"max_concurrent_runs": 2}, scheduler_settings)
+    assert SchedulerRunner(scheduler_settings).run_once(now) == [graph.source_id]
+    reservation = reserve_task(
+        queue_client,
+        timeout=1,
+        queue_key=settings.worker_task_queue_key,
+        consumer_id=0,
+    )
+    assert reservation is not None
+    assert reservation.task.proxy_profile_id == graph.proxy_id
+    TaskConsumer(settings, consumer_id=0)._consume_reservation(
+        get_seen_cache(settings),
+        reservation,
+        queue_client=queue_client,
+    )
+    return reservation.task, reservation
 
 
 def _assert_queue_acked(settings, queue_client, graph: FailStopGraph, reservation: Any) -> None:
@@ -449,7 +500,7 @@ def test_both_catalog_attempts_fail_with_one_profile_penalty_and_one_terminal(
             assert len(runs) == 1
             run = runs[0]
             assert run.status == FAILED
-            assert (run.runtime_metadata or {}).get("failure_kind") == "profile_session_acquisition_exhausted"
+            assert (run.runtime_metadata or {}).get("failure_kind") == "session_acquisition_exhausted"
             assert (run.runtime_metadata or {}).get("session_acquisition_attempts") == 2
             assert (run.runtime_metadata or {}).get("session_acquisition_last_reason") == "cloudflare_challenge"
             failed_events = list(
@@ -462,7 +513,7 @@ def test_both_catalog_attempts_fail_with_one_profile_penalty_and_one_terminal(
             )
             assert len(failed_events) == 1
             assert (failed_events[0].details or {}).get("recovery_action") == (
-                "wait_for_proxy_cooldown_or_retry_manually"
+                "wait_for_eligible_proxy_or_retry_manually"
             )
             profile = db.get(ProxyProfile, graph.proxy_id)
             assert profile is not None
@@ -476,6 +527,181 @@ def test_both_catalog_attempts_fail_with_one_profile_penalty_and_one_terminal(
             assert all(decrypt_text(session.context_encrypted, settings.app_secret_key) == "{}" for session in sessions)
 
         _assert_queue_acked(settings, queue_client, graph, reservation)
+
+
+def test_scheduler_consumer_hands_exhausted_run_to_next_profile_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    LocalSameProfileRecoveryProvider.reset(
+        VintedCatalogChallengeError("local profile A initial challenge"),
+        VintedCatalogChallengeError("local profile A replacement challenge"),
+        None,
+    )
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
+        LocalSameProfileRecoveryProvider,
+    )
+    probe_ips = iter(("192.0.2.20", "192.0.2.30"))
+    monkeypatch.setattr(
+        runs_module,
+        "probe_proxy_egress",
+        lambda **_kwargs: _probe_result(next(probe_ips)),
+    )
+
+    with (
+        _failstop_graph(with_fallback_profile=True) as graph,
+        _isolated_queue() as (settings, queue_client),
+    ):
+        assert graph.fallback_proxy_id is not None
+        task, reservation = _schedule_and_consume_one(graph, settings, queue_client)
+
+        assert LocalSameProfileRecoveryProvider.constructed == 5
+        assert LocalSameProfileRecoveryProvider.searches == 3
+        assert LocalSameProfileRecoveryProvider.search_outcomes == []
+        with SessionLocal() as db:
+            runs = list(db.scalars(select(Run).where(Run.task_id == task.task_id)))
+            assert len(runs) == 1
+            run = runs[0]
+            metadata = run.runtime_metadata or {}
+            assert run.status == SUCCESS
+            assert metadata["proxy_profile_id"] == graph.fallback_proxy_id
+            assert metadata["proxy_handoff_count"] == 1
+            assert metadata["session_acquisition_exhausted_profile_count"] == 1
+            fallback = db.get(ProxyProfile, graph.fallback_proxy_id)
+            initial = db.get(ProxyProfile, graph.proxy_id)
+            assert fallback is not None and initial is not None
+            assert metadata["proxy_identity_generation"] == effective_proxy_identity_generation(fallback)
+            assert initial.failure_count == 1 and initial.cooldown_until is not None
+            assert fallback.failure_count == 0 and fallback.cooldown_until is None
+            sessions = list(
+                db.scalars(
+                    select(VintedSession)
+                    .where(VintedSession.source_id == graph.source_id)
+                    .order_by(VintedSession.id.asc())
+                )
+            )
+            assert [session.proxy_profile_id for session in sessions].count(graph.proxy_id) == 2
+            assert [session.proxy_profile_id for session in sessions].count(graph.fallback_proxy_id) == 1
+            assert all(
+                session.status == "invalid"
+                for session in sessions
+                if session.proxy_profile_id == graph.proxy_id
+            )
+            assert next(
+                session for session in sessions if session.proxy_profile_id == graph.fallback_proxy_id
+            ).status == "ready"
+            phases = list(db.scalars(select(RunEvent.phase).where(RunEvent.run_id == run.id)))
+            assert phases.count("proxy_profile_session_exhausted") == 1
+            assert phases.count("proxy_profile_handoff_committed") == 1
+            assert phases.count("run_succeeded") == 1
+            assert "run_failed" not in phases
+
+        _assert_queue_acked(settings, queue_client, graph, reservation)
+
+
+def test_fallback_capacity_change_before_provider_skips_b_without_penalty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    LocalSameProfileRecoveryProvider.reset(
+        VintedCatalogChallengeError("local profile A initial challenge"),
+        VintedCatalogChallengeError("local profile A replacement challenge"),
+    )
+    monkeypatch.setattr(
+        "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
+        LocalSameProfileRecoveryProvider,
+    )
+    monkeypatch.setattr(
+        runs_module,
+        "probe_proxy_egress",
+        lambda **_kwargs: _probe_result("192.0.2.20"),
+    )
+    real_bind = runs_module._bind_run_to_fallback_profile
+    blocker_ids: list[int] = []
+
+    def bind_then_saturate(*args, **kwargs):
+        egress = real_bind(*args, **kwargs)
+        with SessionLocal() as db:
+            blocker_source = SearchSource(
+                name=f"qa handoff blocker {uuid4().hex}",
+                url="https://www.vinted.es/catalog?order=newest_first",
+                normalized_query={"order": ["newest_first"]},
+                is_active=False,
+                monitor_mode="manual",
+                scheduler_config={},
+            )
+            db.add(blocker_source)
+            db.flush()
+            blocker = Run(
+                source_id=blocker_source.id,
+                task_id=f"qa-blocker-{uuid4().hex}",
+                status="running",
+                trigger="scheduler",
+                runtime_metadata={
+                    "proxy_profile_id": egress.proxy_profile_id,
+                    "proxy_identity_generation": egress.proxy_identity_generation,
+                },
+            )
+            db.add(blocker)
+            db.commit()
+            blocker_ids.extend((blocker.id, blocker_source.id))
+        return egress
+
+    monkeypatch.setattr(runs_module, "_bind_run_to_fallback_profile", bind_then_saturate)
+
+    with (
+        _failstop_graph(with_fallback_profile=True) as graph,
+        _isolated_queue() as (settings, queue_client),
+    ):
+        assert graph.fallback_proxy_id is not None
+        try:
+            task, reservation = _schedule_and_consume_one(graph, settings, queue_client)
+
+            assert LocalSameProfileRecoveryProvider.constructed == 3
+            assert LocalSameProfileRecoveryProvider.searches == 2
+            with SessionLocal() as db:
+                run = db.scalar(select(Run).where(Run.task_id == task.task_id))
+                assert run is not None and run.status == FAILED
+                assert (run.runtime_metadata or {})["failure_kind"] == "session_acquisition_exhausted"
+                initial = db.get(ProxyProfile, graph.proxy_id)
+                fallback = db.get(ProxyProfile, graph.fallback_proxy_id)
+                assert initial is not None and fallback is not None
+                assert initial.failure_count == 1 and initial.cooldown_until is not None
+                assert fallback.failure_count == 0 and fallback.cooldown_until is None
+                assert (
+                    db.scalar(
+                        select(VintedSession.id).where(
+                            VintedSession.source_id == graph.source_id,
+                            VintedSession.proxy_profile_id == graph.fallback_proxy_id,
+                        )
+                    )
+                    is None
+                )
+                rejected = db.scalar(
+                    select(RunEvent).where(
+                        RunEvent.run_id == run.id,
+                        RunEvent.phase == "proxy_profile_handoff_rejected",
+                    )
+                )
+                assert rejected is not None
+                assert (rejected.details or {})["stage"] == "pre_provider"
+                assert (rejected.details or {})["reason"] == "capacity_changed"
+                assert (
+                    db.scalar(
+                        select(RunEvent.id).where(
+                            RunEvent.run_id == run.id,
+                            RunEvent.phase == "vinted_session_selected",
+                            RunEvent.proxy_profile_id == graph.fallback_proxy_id,
+                        )
+                    )
+                    is None
+                )
+            _assert_queue_acked(settings, queue_client, graph, reservation)
+        finally:
+            if blocker_ids:
+                with SessionLocal() as db:
+                    db.execute(delete(Run).where(Run.id == blocker_ids[0]))
+                    db.execute(delete(SearchSource).where(SearchSource.id == blocker_ids[1]))
+                    db.commit()
 
 
 def test_catalog_rate_limit_does_not_retry_or_penalize_profile(
@@ -559,7 +785,7 @@ def test_transport_then_egress_diagnostic_failure_exhausts_before_second_provide
             run = runs[0]
             assert run.status == FAILED
             metadata = run.runtime_metadata or {}
-            assert metadata["failure_kind"] == "profile_session_acquisition_exhausted"
+            assert metadata["failure_kind"] == "session_acquisition_exhausted"
             assert metadata["session_acquisition_attempts"] == 2
             assert metadata["session_acquisition_last_reason"] == "egress_diagnostic_failed"
             profile = db.get(ProxyProfile, graph.proxy_id)

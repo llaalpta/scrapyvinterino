@@ -38,6 +38,7 @@ RUNTIME_CONFIG_KEYS = {
     "proxy_cooldown_minutes",
 }
 INITIAL_RUN_ADMISSION_LOCK_ID = 814_208_009
+RUN_EGRESS_ADMISSION_LOCK_ID = 814_208_010
 
 
 class SchedulerConfigError(ValueError):
@@ -216,6 +217,52 @@ def acquire_initial_run_admission_lock(db: Session) -> None:
     db.execute(select(func.pg_advisory_xact_lock(INITIAL_RUN_ADMISSION_LOCK_ID)))
 
 
+def acquire_run_egress_admission_lock(db: Session) -> None:
+    """Serialize every new or reassigned proxy-capacity reservation."""
+    db.execute(select(func.pg_advisory_xact_lock(RUN_EGRESS_ADMISSION_LOCK_ID)))
+
+
+def run_egress_admission_snapshot(
+    db: Session,
+    queued_tasks: list[Any],
+    *,
+    exclude_run_id: int | None = None,
+) -> tuple[dict[int, int], int]:
+    """Count durable runs and unrepresented queue work exactly once by task ID."""
+    proxy_counts: dict[int, int] = {}
+    active_task_ids: set[str] = set()
+    total_count = 0
+    active_runs = db.execute(
+        select(Run.id, Run.task_id, Run.runtime_metadata).where(
+            Run.status == "running",
+            Run.finished_at.is_(None),
+        )
+    )
+    for run_id, task_id, metadata in active_runs:
+        if isinstance(task_id, str) and task_id:
+            active_task_ids.add(task_id)
+        if run_id == exclude_run_id:
+            continue
+        total_count += 1
+        if not isinstance(metadata, dict):
+            continue
+        proxy_profile_id = metadata.get("proxy_profile_id")
+        if isinstance(proxy_profile_id, int) and not isinstance(proxy_profile_id, bool):
+            proxy_counts[proxy_profile_id] = proxy_counts.get(proxy_profile_id, 0) + 1
+
+    for task in queued_tasks:
+        task_id = getattr(task, "task_id", None)
+        if isinstance(task_id, str) and task_id in active_task_ids:
+            continue
+        proxy_profile_id = getattr(task, "proxy_profile_id", None)
+        if not isinstance(proxy_profile_id, int) or isinstance(proxy_profile_id, bool):
+            continue
+        proxy_counts[proxy_profile_id] = proxy_counts.get(proxy_profile_id, 0) + 1
+        total_count += 1
+
+    return proxy_counts, total_count
+
+
 def choose_run_egress(
     db: Session,
     settings: Settings,
@@ -231,6 +278,7 @@ def choose_run_egress(
         proxy_url_for_profile,
     )
 
+    acquire_run_egress_admission_lock(db)
     proxy_counts = active_proxy_counts if active_proxy_counts is not None else _active_run_egress_counts(db)
     target_country_code = settings.vinted_target_country_code.strip().upper()
     available_proxies = [

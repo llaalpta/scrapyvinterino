@@ -72,7 +72,7 @@ The independent read-only audit found no A, B or C findings. It confirmed the co
 
 ### 14.54 provider-bound sticky lifecycle and bounded recovery
 
-Status: `14.54.1` and `14.54.2` are current. `14.54.3` and `14.54.4` remain ordered standard tasks. Each slice has its own confirmation, branch, real scenario, audit, PR and merge.
+Status: `14.54.1`, `14.54.2` and `14.54.3` are current. `14.54.4` remains a separate planned standard task requiring confirmation.
 
 DataImpulse on rotating HTTP port `823` accepts a `sessid` username parameter that asks the gateway to retain one exit IP for approximately 30 minutes. The product uses a 25-minute local safety limit and a new session ID rather than integrating the provider-specific rotation API. A monitor session is not capped by that lifetime: prepared HTTP context rotates when either its effective TTL or its completed-run use limit is reached.
 
@@ -112,6 +112,8 @@ The independent read-only audit returned positive with no A, B or C findings. It
 
 #### 14.54.3 atomic cross-profile fallback
 
+Status: complete on `feat/14.54.3-cross-profile-handoff`.
+
 Acceptance criteria:
 
 1. After `14.54.2` exhausts profile A, the same running run captures the remaining eligible profiles once in normal pool order and never revisits one. It may consider candidate B only through the serialized egress-admission lock shared by ordinary scheduler selection and fallback. The transaction excludes its own A assignment from accounting, locks and revalidates B, enforces B's capacity, captures B's identity generation and commits the run's durable runtime binding to B before any B provider is constructed. A's penalty is already committed and A's traffic fence is released before this handoff.
@@ -119,6 +121,10 @@ Acceptance criteria:
 3. Before B traffic, the consumer acquires B's shared identity fence and revalidates activity, country, cooldown, capacity and the captured generation. If B became saturated or changed identity, it constructs no B provider and may consider the next captured candidate through the same bounded admission path. An admitted profile receives the same two-attempt contract from `14.54.2`, once. Pool exhaustion produces one `session_acquisition_exhausted` terminal result; one run owns all safe attempt events and accumulated transfer observations.
 
 Representative integration: use the live scheduler/Redis reservation/consumer/PostgreSQL path with a deterministic loopback upstream. A queued task admitted on profile A exhausts both attempts; the admission handoff binds the same SQL run to B, B succeeds, exactly one baseline/session is created and the task is acknowledged once. The negative variation saturates B or advances its identity at a controlled barrier between binding and provider construction; zero B provider calls occur, capacity is not exceeded, and the run either tries the next preselected eligible candidate or terminates once. Focused tests cover stale-payload redelivery and SQL/task-ID capacity deduplication. Cleanup removes QA SQL/Redis state and restores the worker to its initial state. External Vinted, proxy and vendor allowance is zero.
+
+Local evidence passed the focused consumer/task tests (`35`), the isolated scheduler→Redis→consumer→PostgreSQL and live PWA gate (`16`), plus the finding-specific serialized identity recheck (`2`). The complete backend run reached `567 passed, 12 skipped` before exposing one obsolete concurrent-barrier expectation; only that expectation changed and its affected gate then passed. Ruff is green, disposable state was removed, operational fingerprints were preserved and all HTTP destinations were loopback.
+
+The independent read-only audit returned positive with no A, B or C findings.
 
 #### 14.54.4 explicit manual cooldown override
 

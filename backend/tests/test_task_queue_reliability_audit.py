@@ -29,6 +29,7 @@ from vinted_monitor.services.runs import (
     SUCCESS,
     recover_task_run_before_delivery,
 )
+from vinted_monitor.services.scheduler import run_egress_admission_snapshot
 from vinted_monitor.services.seen_cache import (
     DetailCandidateStateUpdate,
     serialize_candidate_state_update,
@@ -813,7 +814,12 @@ def test_redelivered_running_task_closes_orphan_before_retry(audit_session_facto
             items_discarded_by_filters=0,
             items_filter_pending=0,
             opportunities_created=0,
-            runtime_metadata={"task_id": task.task_id, "attempt": 2},
+            runtime_metadata={
+                "task_id": task.task_id,
+                "attempt": 2,
+                "proxy_profile_id": task.proxy_profile_id,
+                "proxy_identity_generation": task.proxy_identity_generation,
+            },
         )
         db.add(orphan)
         db.commit()
@@ -838,6 +844,52 @@ def test_redelivered_running_task_closes_orphan_before_retry(audit_session_facto
         assert persisted.status == FAILED
         assert persisted.finished_at is not None
         assert "interrupted" in (persisted.error_message or "").lower()
+
+
+def test_admission_snapshot_prefers_durable_binding_over_stale_queue_profile(
+    audit_session_factory,
+) -> None:
+    stale_task = _task(task_id="handoff-task")
+    queued_on_b = _task(task_id="other-task")
+    queued_on_b.proxy_profile_id = 22
+    with audit_session_factory() as db:
+        source = SearchSource(
+            name="queue audit handoff",
+            url=stale_task.source_url,
+            normalized_query={"order": ["newest_first"]},
+            is_active=True,
+            monitor_mode="window",
+            scheduler_config={},
+        )
+        db.add(source)
+        db.flush()
+        stale_task.source_id = source.id
+        queued_on_b.source_id = source.id + 1
+        run = Run(
+            source_id=source.id,
+            task_id=stale_task.task_id,
+            status=RUNNING,
+            trigger="scheduler",
+            runtime_metadata={
+                "proxy_profile_id": 22,
+                "proxy_identity_generation": queued_on_b.proxy_identity_generation,
+            },
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+
+        counts, total = run_egress_admission_snapshot(db, [stale_task, queued_on_b])
+        excluded_counts, excluded_total = run_egress_admission_snapshot(
+            db,
+            [stale_task, queued_on_b],
+            exclude_run_id=run.id,
+        )
+
+    assert counts == {22: 2}
+    assert total == 2
+    assert excluded_counts == {22: 1}
+    assert excluded_total == 1
 
 
 def test_interrupted_delivery_at_retry_limit_is_not_run_again() -> None:

@@ -139,7 +139,11 @@ class TaskConsumer:
                     status=previous_run.status,
                 )
             elif next_attempt is not None:
-                self._process_with_escalation(task, first_attempt=next_attempt)
+                self._process_with_escalation(
+                    task,
+                    first_attempt=next_attempt,
+                    authoritative_egress=_durable_run_egress(previous_run),
+                )
             else:
                 self._process_with_escalation(task)
         except Exception as exc:
@@ -248,10 +252,17 @@ class TaskConsumer:
                 )
                 time.sleep(1)
 
-    def _process_with_escalation(self, task: MonitorTask, *, first_attempt: int = 1) -> None:
+    def _process_with_escalation(
+        self,
+        task: MonitorTask,
+        *,
+        first_attempt: int = 1,
+        authoritative_egress: RunEgress | None = None,
+    ) -> None:
         """Process a task; only unexpected worker failures may use another attempt."""
         max_attempts = self.settings.worker_max_retry_attempts
         last_unexpected_error: Exception | None = None
+        delivery_egress = authoritative_egress or _task_payload_egress(task)
 
         for attempt in range(first_attempt, max_attempts + 1):
             self.logger.info(
@@ -259,11 +270,18 @@ class TaskConsumer:
                 source_id=task.source_id,
                 task_id=task.task_id,
                 attempt=attempt,
-                proxy_profile_id=task.proxy_profile_id,
+                proxy_profile_id=delivery_egress.proxy_profile_id,
             )
 
             try:
-                run = self._execute_run(task, attempt)
+                if authoritative_egress is None:
+                    run = self._execute_run(task, attempt)
+                else:
+                    run = self._execute_run(
+                        task,
+                        attempt,
+                        authoritative_egress=authoritative_egress,
+                    )
                 if run.status == FINALIZING:
                     raise TaskRunNotTerminalError(f"Run {run.id} is still finalizing")
                 if run.status not in {SUCCESS, FAILED}:
@@ -324,7 +342,10 @@ class TaskConsumer:
                     error=str(exc),
                 )
                 with SessionLocal() as db:
-                    mark_proxy_run_failure(db, task.proxy_profile_id)
+                    mark_proxy_run_failure(
+                        db,
+                        delivery_egress.proxy_profile_id,
+                    )
                     db.commit()
         # All attempts exhausted
         self.logger.error(
@@ -344,6 +365,8 @@ class TaskConsumer:
             "worker_task_delivery_interrupted",
         }:
             return None
+        if _durable_run_egress(previous_run) is None:
+            return None
         previous_attempt = metadata.get("attempt")
         if not isinstance(previous_attempt, int) or isinstance(previous_attempt, bool):
             return None
@@ -354,14 +377,11 @@ class TaskConsumer:
         self,
         task: MonitorTask,
         attempt: int,
+        *,
+        authoritative_egress: RunEgress | None = None,
     ) -> Run:
         """Execute the monitor run using the pre-configured provider."""
-        egress = RunEgress(
-            mode="proxy",
-            proxy_profile_id=task.proxy_profile_id,
-            proxy_identity_generation=task.proxy_identity_generation,
-            proxy_url=None,
-        )
+        egress = authoritative_egress or _task_payload_egress(task)
 
         trigger = task.trigger or SCHEDULER_TRIGGER
 
@@ -376,6 +396,7 @@ class TaskConsumer:
                     "consumer_id": self.consumer_id,
                     "attempt": attempt,
                 },
+                task_queue_key=self.settings.worker_task_queue_key,
             )
             self.logger.info(
                 "consumer_run_finished",
@@ -387,6 +408,35 @@ class TaskConsumer:
                 attempt=attempt,
             )
             return run
+
+
+def _task_payload_egress(task: MonitorTask) -> RunEgress:
+    return RunEgress(
+        mode="proxy",
+        proxy_profile_id=task.proxy_profile_id,
+        proxy_identity_generation=task.proxy_identity_generation,
+    )
+
+
+def _durable_run_egress(run: Run) -> RunEgress | None:
+    metadata = run.runtime_metadata or {}
+    proxy_profile_id = metadata.get("proxy_profile_id")
+    generation = metadata.get("proxy_identity_generation")
+    if (
+        not isinstance(proxy_profile_id, int)
+        or isinstance(proxy_profile_id, bool)
+        or proxy_profile_id <= 0
+        or not isinstance(generation, str)
+        or not generation
+    ):
+        return None
+    return RunEgress(
+        mode="proxy",
+        proxy_profile_id=proxy_profile_id,
+        proxy_identity_generation=generation,
+        proxy_name=metadata.get("proxy_name"),
+        proxy_kind=metadata.get("proxy_kind"),
+    )
 
 
 class TaskRunNotTerminalError(RuntimeError):

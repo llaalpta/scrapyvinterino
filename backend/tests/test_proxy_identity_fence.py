@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from textwrap import dedent
-from threading import Barrier, Event, Lock
+from threading import Event, Lock
 from time import monotonic, sleep
 from types import SimpleNamespace
 from urllib.parse import unquote, urlparse
@@ -802,13 +802,12 @@ def test_scheduler_proxy_selection_and_identity_edit_use_one_lock_order(
             _delete_queue_keys(queue_client, queue_key)
 
 
-def test_saturated_proxy_selection_does_not_accumulate_identity_fences(
+def test_serialized_saturated_proxy_selection_does_not_acquire_identity_fences(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vinted_monitor.services.proxies as proxies_module
 
     settings = get_settings().model_copy(update={"scheduler_enabled": True})
-    selector_barrier = Barrier(2)
     selector_index = 0
     selector_index_lock = Lock()
     identity_lock_calls = 0
@@ -828,7 +827,6 @@ def test_saturated_proxy_selection_does_not_accumulate_identity_fences(
             with selector_index_lock:
                 current_index = selector_index
                 selector_index += 1
-            assert selector_barrier.wait(timeout=5) in (0, 1)
             ordered_ids = profile_ids if current_index == 0 else tuple(reversed(profile_ids))
             profiles = [db.get(ProxyProfile, profile_id) for profile_id in ordered_ids]
             assert all(profile is not None for profile in profiles)
