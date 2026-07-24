@@ -45,3 +45,15 @@ def test_proxy_test_telemetry_migration_drops_obsolete_columns() -> None:
     assert 'op.drop_column("proxy_profiles", "last_test_status")' in migration
     assert 'op.drop_column("proxy_profiles", "last_test_ip")' in migration
     assert 'op.drop_column("proxy_profiles", "last_test_error")' in migration
+
+
+def test_proxy_sticky_contract_migration_backfills_non_null_profile_fields() -> None:
+    migration = (BACKEND_ROOT / "alembic/versions/0024_proxy_sticky_contract.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'STICKY_USERNAME_TEMPLATE = "{username};sessid.{session_id}"' in migration
+    assert "STICKY_TTL_MINUTES = 25" in migration
+    assert 'op.alter_column("proxy_profiles", "sticky_username_template", nullable=False)' in migration
+    assert 'op.alter_column("proxy_profiles", "sticky_ttl_minutes", nullable=False)' in migration
+    assert "sticky_ttl_minutes BETWEEN 1 AND 120" in migration

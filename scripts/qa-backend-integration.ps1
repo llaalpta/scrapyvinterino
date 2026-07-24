@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "proxy-cooldown", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain", "full")]
+    [ValidateSet("identity", "catalog-fail-stop", "proxy-only-regression", "proxy-cooldown", "proxy-sticky-contract", "prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain", "full")]
     [string]$Scenario = "identity",
 
     [ValidateRange(1, 3)]
@@ -52,6 +52,9 @@ $PwaMonitorCommandLiveTargets = @(
 $PwaBootstrapIsolationLiveTargets = @(
     "tests/test_pwa_bootstrap_isolation_live.py::test_live_pwa_bootstrap_failures_do_not_hide_monitors"
 )
+$ProxyStickyContractLiveTargets = @(
+    "tests/test_proxy_sticky_contract_live.py::test_live_proxy_sticky_contract_edit_invalidates_and_rotates_context"
+)
 $MonitorSessionProxyTrafficFocusedTargets = @(
     "tests/test_monitor_proxy_traffic.py"
 )
@@ -92,6 +95,12 @@ $TestTargets = @{
         "tests/test_scheduler.py::test_scheduler_runner_respects_proxy_capacity_for_due_batch",
         "tests/test_scheduler.py::test_archive_cancels_scheduler_task_that_is_still_ready"
     )
+    "proxy-sticky-contract" = @(
+        "tests/test_proxies.py",
+        "tests/test_migrations.py::test_proxy_sticky_contract_migration_backfills_non_null_profile_fields",
+        "tests/test_manual_runs.py::test_prepared_context_save_and_refresh_use_earlier_global_or_profile_ttl",
+        "tests/test_proxy_identity_fence.py::test_invalid_sticky_contract_does_not_mutate_identity_or_prepared_context"
+    ) + $ProxyStickyContractLiveTargets
     "prepared-session-read-model" = @(
         "tests/test_prepared_session_read_model.py",
         "tests/test_prepared_session_live_contract.py::test_live_prepared_session_read_model_matches_runtime_and_pwa"
@@ -474,13 +483,15 @@ SELECT (
         WHERE name = 'qa migration proxy cooldown'
           AND failure_count = 2
           AND is_active = false
+          AND sticky_username_template = '{username};sessid.{session_id}'
+          AND sticky_ttl_minutes = 25
     )
 )::text;
 DELETE FROM proxy_profiles WHERE name = 'qa migration proxy cooldown';
 "@
     $Output = @(Invoke-PostgresAdmin $Sql | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     if ($Output.Count -ne 1 -or $Output[0] -ne "true") {
-        throw "Migration 0023 did not remove only the obsolete proxy test fields."
+        throw "Migrations 0023/0024 did not preserve and backfill the proxy profile contract."
     }
 }
 
@@ -638,6 +649,12 @@ function Enter-IsolatedEnvironment([string]$DatabaseUrl) {
             $Values["PWA_BOOTSTRAP_QA_API_URL"] = "http://127.0.0.1:8001"
             $Values["PWA_BOOTSTRAP_QA_PWA_URL"] = "http://127.0.0.1:5176"
             $Values["PWA_BOOTSTRAP_QA_BROWSER_CHANNEL"] = "chrome"
+            $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
+        }
+        if ($Scenario -eq "proxy-sticky-contract") {
+            $Values["PROXY_STICKY_QA_API_URL"] = "http://127.0.0.1:8001"
+            $Values["PROXY_STICKY_QA_PWA_URL"] = "http://127.0.0.1:5176"
+            $Values["PROXY_STICKY_QA_BROWSER_CHANNEL"] = "chrome"
             $Values["VITE_DEV_API_PROXY_TARGET"] = "http://127.0.0.1:8001"
         }
         if ($Scenario -eq "worker-redis-availability") {
@@ -892,7 +909,7 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
             $env:WORKER_REDIS_QA_OWNER_TOKEN = $QaOwnerToken
         }
 
-        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
+        if ($Scenario -in @("prepared-session-read-model", "monitor-identity-edit", "pwa-monitor-command-state", "pwa-bootstrap-isolation", "proxy-sticky-contract", "worker-redis-availability", "manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
             Assert-TcpPortAvailable 8001
             Assert-TcpPortAvailable 5176
             if ($Scenario -eq "monitor-session-proxy-traffic") {
@@ -916,7 +933,14 @@ function Invoke-IsolatedTestCycle([int]$Cycle) {
 
             $ApiApplication = "vinted_monitor.api.main:app"
             $ApiArguments = @("-m", "uvicorn", $ApiApplication, "--host", "127.0.0.1", "--port", "8001")
-            if ($Scenario -in @("manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
+            if ($Scenario -eq "proxy-sticky-contract") {
+                $ApiApplication = "proxy_sticky_contract_qa_app:app"
+                $ApiArguments = @(
+                    "-m", "uvicorn", $ApiApplication,
+                    "--app-dir", (Join-Path $BackendDir "tests"),
+                    "--host", "127.0.0.1", "--port", "8001"
+                )
+            } elseif ($Scenario -in @("manual-session-start-baseline", "monitor-session-proxy-traffic", "recurring-session-start-baseline", "session-stop-drain")) {
                 $ProviderStateFile = Join-Path $QaStateDir "$Scenario-provider-$Suffix.json"
                 $QaTemporaryFiles = @($ProviderStateFile)
                 $env:SESSION_QA_PROVIDER_STATE = $ProviderStateFile

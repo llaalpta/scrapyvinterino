@@ -17,8 +17,8 @@ Migrar todo el trafico HTTP a `curl_cffi` con `impersonate` para falsificar la h
 Adicionalmente:
 - Cada sesion usa un perfil de navegador coherente (impersonate + User-Agent + Sec-Ch-Ua alineados).
 - Se implementa deteccion de challenges de DataDome para descartar IPs comprometidas.
-- Los proxies residenciales usan un UUID sticky nuevo por preparacion de sesion y lo reutilizan entre runs mientras esa sesion siga elegible; el username se compone mediante `PROXY_STICKY_USERNAME_TEMPLATE`.
-- La identidad efectiva se representa mediante contador monotono y HMAC-SHA256 keyed por `APP_SECRET_KEY` sobre scheme, host, port, username, password, preset geografico persistido y template sticky. Sesion y tarea conservan solo el token opaco `v1:<contador>:<digest>`. Runs admitidos toman un advisory lock transaccional compartido; edicion/reconciliacion toma el exclusivo y `FOR NO KEY UPDATE`. Un cambio avanza el contador e invalida/vacia las sesiones anteriores bajo locks ordenados de monitor y sesion.
+- Los proxies residenciales usan un UUID sticky nuevo por preparacion de sesion y lo reutilizan entre runs mientras esa sesion siga elegible; formato de username y TTL maximo pertenecen a cada perfil.
+- La identidad efectiva se representa mediante contador monotono y HMAC-SHA256 keyed por `APP_SECRET_KEY` sobre scheme, host, port, username, password, preset geografico persistido, template sticky y TTL sticky. Sesion y tarea conservan solo el token opaco `v1:<contador>:<digest>`. Runs admitidos toman un advisory lock transaccional compartido; edicion/reconciliacion toma el exclusivo y `FOR NO KEY UPDATE`. Un cambio avanza el contador e invalida/vacia las sesiones anteriores bajo locks ordenados de monitor y sesion.
 - Se aplica timing humano entre requests para evitar deteccion por cadencia.
 
 ## Consequences

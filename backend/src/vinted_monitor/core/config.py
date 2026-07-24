@@ -1,5 +1,4 @@
 from functools import lru_cache
-from string import Formatter
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -15,24 +14,6 @@ INSECURE_APP_SECRET_KEYS = frozenset(
         "replace-with-a-unique-random-secret-of-at-least-32-characters",
     }
 )
-
-
-def validate_proxy_sticky_username_template(value: str) -> str:
-    try:
-        parsed = list(Formatter().parse(value))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("PROXY_STICKY_USERNAME_TEMPLATE must be a valid format string") from exc
-    fields = [field_name for _literal, field_name, _format_spec, _conversion in parsed if field_name is not None]
-    has_unsupported_formatting = any(
-        field_name is not None and (format_spec or conversion)
-        for _literal, field_name, format_spec, conversion in parsed
-    )
-    if len(fields) != 2 or set(fields) != {"username", "session_id"} or has_unsupported_formatting:
-        raise ValueError(
-            "PROXY_STICKY_USERNAME_TEMPLATE must contain exactly plain {username} and {session_id} fields"
-        )
-    return value
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -84,7 +65,6 @@ class Settings(BaseSettings):
     human_delay_min_seconds: float = 1.2
     human_delay_max_seconds: float = 3.8
     datadome_challenge_penalty_multiplier: int = 2
-    proxy_sticky_username_template: str = "{username}-session-{session_id}"
     egress_diagnostic_url: str | None = "https://ipwho.is/"
     egress_diagnostic_reuse_ttl_seconds: int = Field(default=300, ge=0, le=3600)
 
@@ -103,11 +83,6 @@ class Settings(BaseSettings):
     vinted_auth_cookie: str | None = Field(default=None, repr=False)
     vinted_auth_csrf_token: str | None = Field(default=None, repr=False)
     action_requests_enabled: bool = False
-
-    @model_validator(mode="after")
-    def validate_proxy_sticky_template(self) -> "Settings":
-        validate_proxy_sticky_username_template(self.proxy_sticky_username_template)
-        return self
 
     @model_validator(mode="after")
     def validate_local_development_user(self) -> "Settings":

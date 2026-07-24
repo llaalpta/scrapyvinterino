@@ -50,6 +50,8 @@ const emptyProxyDraft: ProxyDraft = {
   host: '',
   port: '',
   maxConcurrentRuns: '1',
+  stickyUsernameTemplate: '{username};sessid.{session_id}',
+  stickyTtlMinutes: '25',
   username: '',
   password: '',
   countryCode: 'ES'
@@ -779,6 +781,8 @@ export function useDashboardController() {
         port: Number(proxyDraft.port),
         max_concurrent_runs: Number(proxyDraft.maxConcurrentRuns),
         country_code: proxyDraft.countryCode,
+        sticky_username_template: proxyDraft.stickyUsernameTemplate,
+        sticky_ttl_minutes: Number(proxyDraft.stickyTtlMinutes),
         username: proxyDraft.username || undefined,
         password: proxyDraft.password || undefined
       });
@@ -801,6 +805,26 @@ export function useDashboardController() {
       setScheduler(null);
       setSchedulerAvailabilityError('No se pudo consultar la disponibilidad del scheduler.');
       setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el proxy');
+    }
+  }
+
+  async function onUpdateProxyStickyContract(
+    profile: ProxyProfile,
+    stickyUsernameTemplate: string,
+    stickyTtlMinutes: number
+  ) {
+    setError(null);
+    setSavingProxy(true);
+    try {
+      const updated = await updateProxyProfile(profile.id, {
+        sticky_username_template: stickyUsernameTemplate,
+        sticky_ttl_minutes: stickyTtlMinutes
+      });
+      setProxyProfiles((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No se pudo actualizar el contrato sticky');
+    } finally {
+      setSavingProxy(false);
     }
   }
 
@@ -1297,6 +1321,7 @@ export function useDashboardController() {
     onStartSession,
     onStopMonitor,
     onToggleProxy,
+    onUpdateProxyStickyContract,
     onUpdateSchedulerConfig,
     monitorStatsBySource,
     monitorStatsRangeBySource,

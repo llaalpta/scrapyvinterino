@@ -302,7 +302,6 @@ def save_prepared_vinted_session(
     status: str = READY,
     settings: Settings | None = None,
     max_requests: int | None = None,
-    ttl_minutes: int | None = None,
     last_error: str | None = None,
     require_datadome: bool = True,
 ) -> VintedSession:
@@ -339,7 +338,9 @@ def save_prepared_vinted_session(
         max_requests=max_requests or settings.vinted_session_max_requests,
         failure_count=0,
         prepared_at=now,
-        expires_at=now + timedelta(minutes=ttl_minutes or settings.vinted_session_ttl_minutes),
+        expires_at=now + timedelta(
+            minutes=_effective_vinted_session_ttl_minutes(settings, proxy_profile)
+        ),
         last_error=redact_sensitive_text(resolved_error) if resolved_error else None,
     )
     db.add(session)
@@ -453,6 +454,11 @@ def update_vinted_session_context(
     session = db.get(VintedSession, session_id)
     if session is None:
         return None
+    proxy_profile = db.get(ProxyProfile, session.proxy_profile_id)
+    if proxy_profile is None:
+        raise VintedSessionRequiredError(
+            f"Prepared Vinted session {session.id} references a missing proxy profile"
+        )
     _lock_live_source_for_session_write(db, session.source_id)
     settings = settings or get_settings()
     now = datetime.now(UTC)
@@ -466,7 +472,9 @@ def update_vinted_session_context(
     session.egress_validated_at = context.egress_validated_at
     session.status = READY if not missing else INCOMPLETE
     session.prepared_at = now
-    session.expires_at = now + timedelta(minutes=settings.vinted_session_ttl_minutes)
+    session.expires_at = now + timedelta(
+        minutes=_effective_vinted_session_ttl_minutes(settings, proxy_profile)
+    )
     session.invalidated_at = None if not missing else session.invalidated_at
     if missing:
         session.last_error = redact_sensitive_text(f"Prepared Vinted session missing context: {', '.join(missing)}")
@@ -476,6 +484,22 @@ def update_vinted_session_context(
         session.last_error = None
     db.flush()
     return session
+
+
+def _effective_vinted_session_ttl_minutes(
+    settings: Settings,
+    proxy_profile: ProxyProfile,
+) -> int:
+    sticky_ttl_minutes = proxy_profile.sticky_ttl_minutes
+    if (
+        isinstance(sticky_ttl_minutes, bool)
+        or not isinstance(sticky_ttl_minutes, int)
+        or not 1 <= sticky_ttl_minutes <= 120
+    ):
+        raise ProxyProfileEligibilityError(
+            f"Proxy profile {proxy_profile.id} has an invalid sticky TTL"
+        )
+    return min(settings.vinted_session_ttl_minutes, sticky_ttl_minutes)
 
 
 def _lock_live_source_for_session_write(db: Session, source_id: int) -> SearchSource:

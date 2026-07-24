@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event
 from types import SimpleNamespace
+from urllib.parse import unquote, urlparse
 
 import pytest
 from api_client import authenticated_test_client
@@ -754,6 +755,63 @@ def cleanup_source(source_id: int | None) -> None:
         db.commit()
 
 
+@pytest.mark.parametrize(
+    ("global_ttl_minutes", "sticky_ttl_minutes", "expected_ttl_minutes"),
+    (
+        (120, 25, 25),
+        (10, 25, 10),
+    ),
+)
+def test_prepared_context_save_and_refresh_use_earlier_global_or_profile_ttl(
+    source_id: int,
+    global_ttl_minutes: int,
+    sticky_ttl_minutes: int,
+    expected_ttl_minutes: int,
+) -> None:
+    settings = Settings(vinted_session_ttl_minutes=global_ttl_minutes)
+    with SessionLocal() as db:
+        source = db.get(SearchSource, source_id)
+        assert source is not None
+        proxy = create_proxy_profile(
+            db,
+            name=f"pytest sticky ttl {global_ttl_minutes}",
+            scheme="http",
+            kind="residential",
+            host="proxy.example",
+            port=8040 + global_ttl_minutes,
+            username="customer",
+            password="test-password",
+            sticky_ttl_minutes=sticky_ttl_minutes,
+            settings=settings,
+        )
+        session = _create_ready_vinted_session(
+            db,
+            source,
+            proxy,
+            proxy_session_id=f"sticky-ttl-{global_ttl_minutes}",
+            settings=settings,
+        )
+        assert session.expires_at is not None
+        assert (session.expires_at - session.prepared_at).total_seconds() == pytest.approx(
+            expected_ttl_minutes * 60,
+            abs=1,
+        )
+
+        prepared = prepared_context_from_session(session, settings)
+        updated = update_vinted_session_context(
+            db,
+            session.id,
+            context=prepared,
+            settings=settings,
+        )
+
+        assert updated is not None and updated.expires_at is not None
+        assert (updated.expires_at - updated.prepared_at).total_seconds() == pytest.approx(
+            expected_ttl_minutes * 60,
+            abs=1,
+        )
+
+
 def test_monitor_run_creates_opportunities_and_persists_only_opportunity_items(source_id: int) -> None:
     cache = FakeSeenCache()
     provider = FakeSuccessProvider(item_count=2)
@@ -944,7 +1002,7 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
             self.closed = True
 
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeOwnedProvider)
-    runtime_settings = Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}")
+    runtime_settings = Settings(_env_file=None)
     monkeypatch.setattr(
         "vinted_monitor.services.runs.get_settings",
         lambda: runtime_settings,
@@ -987,7 +1045,9 @@ def test_monitor_run_owned_provider_uses_sticky_proxy_and_closes(
         assert run.status == SUCCESS
         assert len(created_providers) == 1
         assert created_providers[0].closed is True
-        assert created_providers[0].kwargs["proxy_url"].startswith("http://customer-sessid-stickytest01")
+        assert unquote(urlparse(created_providers[0].kwargs["proxy_url"]).username or "") == (
+            "customer;sessid.stickytest01"
+        )
         assert created_providers[0].kwargs["proxy_url"].endswith(":test-password@proxy.example:8000")
         assert run.runtime_metadata["proxy_profile_id"] == proxy.id
         assert run.runtime_metadata["proxy_session_id_prefix"] == "stickyte"
@@ -1007,7 +1067,7 @@ def test_monitor_run_replaces_unusable_context_and_keeps_monitor_session_active(
     unusable_state: str,
 ) -> None:
     FakeSessionPreparingProvider.created = []
-    runtime_settings = Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}")
+    runtime_settings = Settings(_env_file=None)
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeRotatingSessionProvider)
     monkeypatch.setattr("vinted_monitor.services.runs.get_settings", lambda: runtime_settings)
 
@@ -1091,7 +1151,7 @@ def test_monitor_run_surfaces_expired_context_replacement_failure_without_hidden
     source_id: int,
 ) -> None:
     FakeSessionPreparingProvider.created = []
-    runtime_settings = Settings(_env_file=None, proxy_sticky_username_template="{username}-sessid-{session_id}")
+    runtime_settings = Settings(_env_file=None)
     monkeypatch.setattr(
         "vinted_monitor.services.runs.CurlCffiVintedCatalogProvider",
         FakeFailingSessionPreparationProvider,
@@ -1166,7 +1226,6 @@ def test_monitor_session_prepare_api_creates_ready_session_without_business_effe
         "vinted_monitor.services.runs.get_settings",
         lambda: Settings(
             scheduler_enabled=True,
-            proxy_sticky_username_template="{username}-sessid-{session_id}",
             vinted_prepared_session_required=True,
         ),
     )
@@ -1245,7 +1304,6 @@ def test_monitor_session_prepare_api_rejects_session_without_datadome(monkeypatc
         "vinted_monitor.services.runs.get_settings",
         lambda: Settings(
             scheduler_enabled=True,
-            proxy_sticky_username_template="{username}-sessid-{session_id}",
             vinted_prepared_session_required=True,
         ),
     )
@@ -1308,7 +1366,6 @@ def test_monitor_item_detail_probe_api_uses_prepared_session_without_business_ef
         "vinted_monitor.services.runs.get_settings",
         lambda: Settings(
             scheduler_enabled=True,
-            proxy_sticky_username_template="{username}-sessid-{session_id}",
             vinted_prepared_session_required=True,
         ),
     )
@@ -1391,7 +1448,6 @@ def test_monitor_item_detail_probe_invalidates_session_on_datadome_challenge(mon
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeDataDomeDetailProvider)
     runtime_settings = Settings(
         scheduler_enabled=True,
-        proxy_sticky_username_template="{username}-sessid-{session_id}",
         vinted_prepared_session_required=True,
     )
     monkeypatch.setattr(
@@ -1985,7 +2041,6 @@ def test_internal_baseline_reuses_prepare_probe_payload(monkeypatch: pytest.Monk
     monkeypatch.setattr("vinted_monitor.services.runs.CurlCffiVintedCatalogProvider", FakeSessionPreparingProvider)
     runtime_settings = Settings(
         scheduler_enabled=True,
-        proxy_sticky_username_template="{username}-sessid-{session_id}",
         vinted_prepared_session_required=True,
     )
     monkeypatch.setattr(

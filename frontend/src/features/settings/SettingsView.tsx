@@ -1,5 +1,5 @@
 import { Info, Pause, Play, Save } from 'lucide-react';
-import type { FormEvent } from 'react';
+import { type FormEvent, useState } from 'react';
 import type { ProxyProfile, SchedulerState, SchedulerUpdate } from '../../api';
 import type { CollectionLoadState } from '../../app/collectionLoadState';
 import { formatDate } from '../../utils/format';
@@ -8,6 +8,7 @@ import { formatProxyCooldownRemaining, proxyCooldownRemainingMs } from '../../ut
 export function SettingsView({
   onCreateProxy,
   onToggleProxy,
+  onUpdateProxyStickyContract,
   onUpdateSchedulerConfig,
   proxyDraft,
   proxyCollectionState,
@@ -20,6 +21,11 @@ export function SettingsView({
 }: {
   onCreateProxy: (event: FormEvent<HTMLFormElement>) => void;
   onToggleProxy: (profile: ProxyProfile) => void;
+  onUpdateProxyStickyContract: (
+    profile: ProxyProfile,
+    stickyUsernameTemplate: string,
+    stickyTtlMinutes: number
+  ) => void;
   onUpdateSchedulerConfig: (payload: SchedulerUpdate) => void;
   proxyDraft: ProxyDraft;
   proxyCollectionState: CollectionLoadState;
@@ -219,6 +225,26 @@ export function SettingsView({
                 required
               />
             </label>
+            <label className="wide-field">
+              Plantilla sticky
+              <input
+                value={proxyDraft.stickyUsernameTemplate}
+                maxLength={255}
+                onChange={(event) => setProxyDraft({ ...proxyDraft, stickyUsernameTemplate: event.target.value })}
+                required
+              />
+            </label>
+            <label>
+              TTL sticky (min)
+              <input
+                value={proxyDraft.stickyTtlMinutes}
+                type="number"
+                min="1"
+                max="120"
+                onChange={(event) => setProxyDraft({ ...proxyDraft, stickyTtlMinutes: event.target.value })}
+                required
+              />
+            </label>
             <label>
               Pais
               <input
@@ -268,6 +294,12 @@ export function SettingsView({
                     <span>
                       Contexto resuelto: {proxy.country_code} | {proxy.locale} | viewport {proxy.screen} | x-screen {proxy.vinted_screen}
                     </span>
+                    <ProxyStickyContractEditor
+                      disabled={savingProxy}
+                      key={`${proxy.id}:${proxy.sticky_username_template}:${proxy.sticky_ttl_minutes}`}
+                      onSave={onUpdateProxyStickyContract}
+                      proxy={proxy}
+                    />
                     {cooldownRemainingMs !== null && cooldownUntil ? (
                       <span className="proxy-action-message failed">
                         {proxy.failure_count} fallos | hasta {formatDate(cooldownUntil)} | restan {formatProxyCooldownRemaining(cooldownRemainingMs)}
@@ -438,7 +470,67 @@ export type ProxyDraft = {
   host: string;
   port: string;
   maxConcurrentRuns: string;
+  stickyUsernameTemplate: string;
+  stickyTtlMinutes: string;
   username: string;
   password: string;
   countryCode: string;
 };
+
+function ProxyStickyContractEditor({
+  disabled,
+  onSave,
+  proxy
+}: {
+  disabled: boolean;
+  onSave: (
+    profile: ProxyProfile,
+    stickyUsernameTemplate: string,
+    stickyTtlMinutes: number
+  ) => void;
+  proxy: ProxyProfile;
+}) {
+  const [template, setTemplate] = useState(proxy.sticky_username_template);
+  const [ttlMinutes, setTtlMinutes] = useState(String(proxy.sticky_ttl_minutes));
+
+  const parsedTtlMinutes = Number(ttlMinutes);
+  const changed = template !== proxy.sticky_username_template
+    || parsedTtlMinutes !== proxy.sticky_ttl_minutes;
+
+  return (
+    <form
+      className="proxy-sticky-editor"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(proxy, template, parsedTtlMinutes);
+      }}
+    >
+      <label>
+        Plantilla sticky
+        <input
+          aria-label={`Plantilla sticky de ${proxy.name}`}
+          value={template}
+          maxLength={255}
+          onChange={(event) => setTemplate(event.target.value)}
+          required
+        />
+      </label>
+      <label>
+        TTL (min)
+        <input
+          aria-label={`TTL sticky de ${proxy.name}`}
+          value={ttlMinutes}
+          type="number"
+          min="1"
+          max="120"
+          onChange={(event) => setTtlMinutes(event.target.value)}
+          required
+        />
+      </label>
+      <button type="submit" disabled={disabled || !changed}>
+        <Save size={15} />
+        Guardar sticky
+      </button>
+    </form>
+  );
+}

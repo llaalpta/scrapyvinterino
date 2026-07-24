@@ -255,6 +255,10 @@
     flex-direction: column;
   }
 
+  .proxy-sticky-editor {
+    grid-template-columns: 1fr;
+  }
+
   .source-actions button,
   .monitor-config-actions button,
   .confirm-dialog-actions button,
